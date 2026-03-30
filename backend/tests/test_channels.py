@@ -498,10 +498,11 @@ class TestChannelManager:
 
             mock_client.runs.wait.assert_called_once()
             call_args = mock_client.runs.wait.call_args
-            assert call_args[0][1] == "mobile_agent"
+            assert call_args[0][1] == "lead_agent"
             assert call_args[1]["config"]["recursion_limit"] == 55
             assert call_args[1]["context"]["thinking_enabled"] is False
             assert call_args[1]["context"]["subagent_enabled"] is True
+            assert call_args[1]["context"]["agent_name"] == "mobile-agent"
 
         _run(go())
 
@@ -525,7 +526,7 @@ class TestChannelManager:
                         },
                         "users": {
                             "vip-user": {
-                                "assistant_id": "vip_agent",
+                                "assistant_id": " VIP_AGENT ",
                                 "config": {"recursion_limit": 77},
                                 "context": {
                                     "thinking_enabled": True,
@@ -556,11 +557,53 @@ class TestChannelManager:
 
             mock_client.runs.wait.assert_called_once()
             call_args = mock_client.runs.wait.call_args
-            assert call_args[0][1] == "vip_agent"
+            assert call_args[0][1] == "lead_agent"
             assert call_args[1]["config"]["recursion_limit"] == 77
             assert call_args[1]["context"]["thinking_enabled"] is True
             assert call_args[1]["context"]["subagent_enabled"] is True
+            assert call_args[1]["context"]["agent_name"] == "vip-agent"
             assert call_args[1]["context"]["is_plan_mode"] is True
+
+        _run(go())
+
+    def test_handle_chat_rejects_invalid_custom_agent_name(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                channel_sessions={
+                    "telegram": {
+                        "assistant_id": "bad agent!",
+                    }
+                },
+            )
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi")
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_not_called()
+            assert outbound_received[0].text == (
+                "Invalid channel session assistant_id 'bad agent!'. "
+                "Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens."
+            )
 
         _run(go())
 
@@ -1680,6 +1723,33 @@ class TestChannelService:
         assert service.manager._default_session["context"]["thinking_enabled"] is False
         assert service.manager._channel_sessions["telegram"]["assistant_id"] == "mobile_agent"
         assert service.manager._channel_sessions["telegram"]["users"]["vip"]["assistant_id"] == "vip_agent"
+
+    def test_service_urls_fall_back_to_env(self, monkeypatch):
+        from app.channels.service import ChannelService
+
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://langgraph:2024")
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_GATEWAY_URL", "http://gateway:8001")
+
+        service = ChannelService(channels_config={})
+
+        assert service.manager._langgraph_url == "http://langgraph:2024"
+        assert service.manager._gateway_url == "http://gateway:8001"
+
+    def test_config_service_urls_override_env(self, monkeypatch):
+        from app.channels.service import ChannelService
+
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://langgraph:2024")
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_GATEWAY_URL", "http://gateway:8001")
+
+        service = ChannelService(
+            channels_config={
+                "langgraph_url": "http://custom-langgraph:2024",
+                "gateway_url": "http://custom-gateway:8001",
+            }
+        )
+
+        assert service.manager._langgraph_url == "http://custom-langgraph:2024"
+        assert service.manager._gateway_url == "http://custom-gateway:8001"
 
 
 # ---------------------------------------------------------------------------

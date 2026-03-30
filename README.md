@@ -48,6 +48,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Official Website](#official-website)
   - [InfoQuest](#infoquest)
   - [Table of Contents](#table-of-contents)
+  - [One-Line Agent Setup](#one-line-agent-setup)
   - [Quick Start](#quick-start)
     - [Configuration](#configuration)
     - [Running the Application](#running-the-application)
@@ -57,6 +58,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
       - [IM Channels](#im-channels)
+      - [LangSmith Tracing](#langsmith-tracing)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
@@ -68,11 +70,22 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
   - [Documentation](#documentation)
+  - [⚠️ Security Notice](#️-security-notice)
   - [Contributing](#contributing)
   - [License](#license)
   - [Acknowledgments](#acknowledgments)
     - [Key Contributors](#key-contributors)
   - [Star History](#star-history)
+
+## One-Line Agent Setup
+
+If you use Claude Code, Codex, Cursor, Windsurf, or another coding agent, you can hand it the setup instructions in one sentence:
+
+```text
+Help me clone DeerFlow if needed, then bootstrap it for local development by following https://raw.githubusercontent.com/bytedance/deer-flow/main/Install.md
+```
+
+That prompt is intended for coding agents. It tells the agent to clone the repo if needed, choose Docker when available, and stop with the exact next command plus any missing config the user still needs to provide.
 
 ## Quick Start
 
@@ -292,7 +305,7 @@ channels:
 
   # Optional: global session defaults for all mobile channels
   session:
-    assistant_id: lead_agent
+    assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
     config:
       recursion_limit: 100
     context:
@@ -318,12 +331,12 @@ channels:
 
     # Optional: per-channel / per-user session settings
     session:
-      assistant_id: mobile_agent
+      assistant_id: mobile-agent  # custom agent names are also supported here
       context:
         thinking_enabled: false
       users:
         "123456789":
-          assistant_id: vip_agent
+          assistant_id: vip-agent
           config:
             recursion_limit: 150
           context:
@@ -336,7 +349,9 @@ channels:
     bot_secret: $WECOM_BOT_SECRET
     ws_url: "wss://openws.work.weixin.qq.com"  # optional, defaults to this
 ```
-
+Notes:
+- `assistant_id: lead_agent` calls the default LangGraph assistant directly.
+- If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
 Set the corresponding API keys in your `.env` file:
 
 ```bash
@@ -395,6 +410,21 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 | `/help` | Show help |
 
 > Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
+
+#### LangSmith Tracing
+
+DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.
+
+Add the following to your `.env` file:
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in your `.env` to enable it.
 
 ## From Deep Research to Super Agent Harness
 
@@ -545,6 +575,24 @@ All dict-returning methods are validated against Gateway Pydantic response model
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
+
+## ⚠️ Security Notice
+
+### Improper Deployment May Introduce Security Risks
+
+DeerFlow has key high-privilege capabilities including **system command execution, resource operations, and business logic invocation**, and is designed by default to be **deployed in a local trusted environment (accessible only via the 127.0.0.1 loopback interface)**. If you deploy the agent in untrusted environments — such as LAN networks, public cloud servers, or other multi-endpoint accessible environments — without strict security measures, it may introduce security risks, including:
+
+- **Unauthorized illegal invocation**: Agent functionality could be discovered by unauthorized third parties or malicious internet scanners, triggering bulk unauthorized requests that execute high-risk operations such as system commands and file read/write, potentially causing serious security consequences.
+- **Compliance and legal risks**: If the agent is illegally invoked to conduct cyberattacks, data theft, or other illegal activities, it may result in legal liability and compliance risks.
+
+### Security Recommendations
+
+**Note: We strongly recommend deploying DeerFlow in a local trusted network environment.** If you need cross-device or cross-network deployment, you must implement strict security measures, such as:
+
+- **IP allowlist**: Use `iptables`, or deploy hardware firewalls / switches with Access Control Lists (ACL), to **configure IP allowlist rules** and deny access from all other IP addresses.
+- **Authentication gateway**: Configure a reverse proxy (e.g., nginx) and **enable strong pre-authentication**, blocking any unauthenticated access.
+- **Network isolation**: Where possible, place the agent and trusted devices in the **same dedicated VLAN**, isolated from other network devices.
+- **Stay updated**: Continue to follow DeerFlow's security feature updates.
 
 ## Contributing
 

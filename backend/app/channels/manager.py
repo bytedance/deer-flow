@@ -26,6 +26,7 @@ P = ParamSpec("P")
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
+CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
@@ -113,6 +114,16 @@ def _merge_dicts(*layers: Any) -> dict[str, Any]:
         if isinstance(layer, Mapping):
             merged.update(layer)
     return merged
+
+
+def _normalize_custom_agent_name(raw_value: str) -> str:
+    """Normalize legacy channel assistant IDs into valid custom agent names."""
+    normalized = raw_value.strip().lower().replace("_", "-")
+    if not normalized:
+        raise InvalidChannelSessionConfigError("Channel session assistant_id is empty. Use 'lead_agent' or a valid custom agent name.")
+    if not CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
+        raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
+    return normalized
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -445,6 +456,13 @@ class ChannelManager:
             {"thread_id": thread_id},
         )
 
+        # Custom agents are implemented as lead_agent + agent_name context.
+        # Keep backward compatibility for channel configs that set
+        # assistant_id: <custom-agent-name> by routing through lead_agent.
+        if assistant_id != DEFAULT_ASSISTANT_ID:
+            run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id))
+            assistant_id = DEFAULT_ASSISTANT_ID
+
         return assistant_id, run_config, run_context
 
     # -- LangGraph SDK client (lazy) ----------------------------------------
@@ -582,9 +600,9 @@ class ChannelManager:
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
-        
+
         current_thread_id = thread_id
-        
+
         async def _run_with_thread_recreation() -> Any:
             nonlocal current_thread_id
             try:
@@ -602,7 +620,7 @@ class ChannelManager:
                     current_thread_id = await self._create_thread(client, msg)
                     logger.info("[Manager] Retrying request with new thread %s", current_thread_id)
                 raise
-        
+
         result = await retry_async(_run_with_thread_recreation)
         thread_id = current_thread_id
 
@@ -646,11 +664,11 @@ class ChannelManager:
         run_context: dict[str, Any],
     ) -> None:
         logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
-        
+
         current_thread_id = thread_id
         last_values: dict[str, Any] | list | None = None
         latest_text = ""
-        
+
         async def _stream_with_thread_recreation() -> tuple[dict[str, Any] | list | None, str]:
             nonlocal current_thread_id, last_values, latest_text
             last_values = None
@@ -659,7 +677,7 @@ class ChannelManager:
             current_message_id: str | None = None
             last_published_text = ""
             last_publish_at = 0.0
-            
+
             try:
                 async for chunk in client.runs.stream(
                     current_thread_id,
@@ -709,7 +727,7 @@ class ChannelManager:
                     current_thread_id = await self._create_thread(client, msg)
                     logger.info("[Manager] Retrying streaming with new thread %s", current_thread_id)
                 raise
-        
+
         last_values, latest_text = await retry_async(_stream_with_thread_recreation)
         thread_id = current_thread_id
 
