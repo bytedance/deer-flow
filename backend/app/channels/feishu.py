@@ -92,12 +92,14 @@ class FeishuChannel(Channel):
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
+        domain = self.config.get("domain", "https://open.feishu.cn")
 
         if not app_id or not app_secret:
             logger.error("Feishu channel requires app_id and app_secret")
             return
 
-        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
+        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
+        logger.info("[Feishu] using domain: %s", domain)
         self._main_loop = asyncio.get_event_loop()
 
         self._running = True
@@ -109,13 +111,13 @@ class FeishuChannel(Channel):
         # which conflicts with an already-running uvloop.
         self._thread = threading.Thread(
             target=self._run_ws,
-            args=(app_id, app_secret),
+            args=(app_id, app_secret, domain),
             daemon=True,
         )
         self._thread.start()
         logger.info("Feishu channel started")
 
-    def _run_ws(self, app_id: str, app_secret: str) -> None:
+    def _run_ws(self, app_id: str, app_secret: str, domain: str) -> None:
         """Construct and run the lark WS client in a thread with a fresh event loop.
 
         The lark-oapi SDK captures a module-level event loop at import time
@@ -145,6 +147,7 @@ class FeishuChannel(Channel):
                 app_secret=app_secret,
                 event_handler=event_handler,
                 log_level=lark.LogLevel.INFO,
+                domain=domain,
             )
             ws_client.start()
         except Exception:
