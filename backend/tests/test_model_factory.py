@@ -653,3 +653,88 @@ def test_header_like_extra_keys_are_folded_into_default_headers(monkeypatch):
 
     assert "User-Agent" not in captured
     assert captured.get("default_headers") == {"User-Agent": "claude-code/1.0"}
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for _normalize_default_headers
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_default_headers_no_header_keys_unchanged():
+    from deerflow.models.factory import _normalize_default_headers
+
+    settings = {"model": "gpt-4o", "temperature": 0.7}
+    result = _normalize_default_headers(settings)
+    assert result == {"model": "gpt-4o", "temperature": 0.7}
+
+
+def test_normalize_default_headers_merges_with_existing_headers():
+    from deerflow.models.factory import _normalize_default_headers
+
+    settings = {
+        "model": "my-model",
+        "default_headers": {"X-Existing-Header": "existing-value"},
+        "X-New-Header": "new-value",
+    }
+    result = _normalize_default_headers(settings)
+    assert result["default_headers"] == {
+        "X-Existing-Header": "existing-value",
+        "X-New-Header": "new-value",
+    }
+    assert "X-New-Header" not in result
+
+
+def test_normalize_default_headers_does_not_overwrite_existing_header():
+    """setdefault semantics: existing header value must not be overwritten."""
+    from deerflow.models.factory import _normalize_default_headers
+
+    settings = {
+        "default_headers": {"User-Agent": "original"},
+        "User-Agent": "override-attempt",
+    }
+    result = _normalize_default_headers(settings)
+    assert result["default_headers"]["User-Agent"] == "original"
+
+
+def test_normalize_default_headers_empty_settings():
+    from deerflow.models.factory import _normalize_default_headers
+
+    result = _normalize_default_headers({})
+    assert result == {}
+
+
+def test_normalize_default_headers_multiple_header_keys():
+    from deerflow.models.factory import _normalize_default_headers
+
+    settings = {
+        "model": "my-model",
+        "X-Api-Version": "2025-01",
+        "X-Request-Source": "deerflow",
+    }
+    result = _normalize_default_headers(settings)
+    assert "X-Api-Version" not in result
+    assert "X-Request-Source" not in result
+    assert result["default_headers"] == {
+        "X-Api-Version": "2025-01",
+        "X-Request-Source": "deerflow",
+    }
+
+
+def test_normalize_default_headers_single_word_key_not_treated_as_header():
+    """Keys without hyphens (e.g. 'model', 'temperature') must stay as-is."""
+    from deerflow.models.factory import _normalize_default_headers
+
+    settings = {"model": "gpt-4o", "temperature": "0.5"}
+    result = _normalize_default_headers(settings)
+    assert "default_headers" not in result
+    assert result["model"] == "gpt-4o"
+
+
+def test_normalize_default_headers_non_string_values_not_moved():
+    """Only string values should be treated as potential header values."""
+    from deerflow.models.factory import _normalize_default_headers
+
+    settings = {"X-Retry-Count": 3}  # integer value, not a string
+    result = _normalize_default_headers(settings)
+    assert "default_headers" not in result
+    assert result["X-Retry-Count"] == 3
