@@ -11,6 +11,7 @@ export interface Translations {
     home: string;
     settings: string;
     delete: string;
+    edit: string;
     rename: string;
     share: string;
     openInNewWindow: string;
@@ -248,6 +249,11 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
+      addFact: string;
+      addFactTitle: string;
+      editFactTitle: string;
+      addFactSuccess: string;
+      editFactSuccess: string;
       clearAll: string;
       clearAllConfirmTitle: string;
       clearAllConfirmDescription: string;
@@ -255,6 +261,16 @@ export interface Translations {
       factDeleteConfirmTitle: string;
       factDeleteConfirmDescription: string;
       factDeleteSuccess: string;
+      factContentLabel: string;
+      factCategoryLabel: string;
+      factConfidenceLabel: string;
+      factContentPlaceholder: string;
+      factCategoryPlaceholder: string;
+      factConfidenceHint: string;
+      factSave: string;
+      factValidationContent: string;
+      factValidationConfidence: string;
+      manualFactSource: string;
       noFacts: string;
       summaryReadOnly: string;
       memoryFullyEmpty: string;

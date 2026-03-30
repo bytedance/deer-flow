@@ -50,10 +50,7 @@ You have access to the `write_todos` tool to help you manage and track complex m
 </todo_list_system>
 """
 
-_TODO_TOOL_DESCRIPTION = (
-    "Use this tool to create and manage a structured task list for complex work sessions.  "
-    "Only use for complex tasks (3+ steps)."
-)
+_TODO_TOOL_DESCRIPTION = "Use this tool to create and manage a structured task list for complex work sessions.  Only use for complex tasks (3+ steps)."
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +124,10 @@ def create_deerflow_agent(
     else:
         feat = features or RuntimeFeatures()
         effective_middleware, extra_tools = _assemble_from_features(
-            feat, name=name, plan_mode=plan_mode, extra_middleware=extra_middleware or [],
+            feat,
+            name=name,
+            plan_mode=plan_mode,
+            extra_middleware=extra_middleware or [],
         )
         # Deduplicate by tool name — user-provided tools take priority.
         existing_names = {t.name for t in effective_tools}
@@ -321,30 +321,16 @@ def _insert_extra(chain: list[AgentMiddleware], extras: list[AgentMiddleware]) -
 
         if next_anchor:
             if next_anchor in next_targets:
-                raise ValueError(
-                    f"Conflict: {type(mw).__name__} and {next_targets[next_anchor].__name__} "
-                    f"both @Next({next_anchor.__name__})"
-                )
+                raise ValueError(f"Conflict: {type(mw).__name__} and {next_targets[next_anchor].__name__} both @Next({next_anchor.__name__})")
             if next_anchor in prev_targets:
-                raise ValueError(
-                    f"Conflict: {type(mw).__name__} @Next({next_anchor.__name__}) and "
-                    f"{prev_targets[next_anchor].__name__} @Prev({next_anchor.__name__}) "
-                    f"— use cross-anchoring between extras instead"
-                )
+                raise ValueError(f"Conflict: {type(mw).__name__} @Next({next_anchor.__name__}) and {prev_targets[next_anchor].__name__} @Prev({next_anchor.__name__}) — use cross-anchoring between extras instead")
             next_targets[next_anchor] = type(mw)
             anchored.append((mw, "next", next_anchor))
         elif prev_anchor:
             if prev_anchor in prev_targets:
-                raise ValueError(
-                    f"Conflict: {type(mw).__name__} and {prev_targets[prev_anchor].__name__} "
-                    f"both @Prev({prev_anchor.__name__})"
-                )
+                raise ValueError(f"Conflict: {type(mw).__name__} and {prev_targets[prev_anchor].__name__} both @Prev({prev_anchor.__name__})")
             if prev_anchor in next_targets:
-                raise ValueError(
-                    f"Conflict: {type(mw).__name__} @Prev({prev_anchor.__name__}) and "
-                    f"{next_targets[prev_anchor].__name__} @Next({prev_anchor.__name__}) "
-                    f"— use cross-anchoring between extras instead"
-                )
+                raise ValueError(f"Conflict: {type(mw).__name__} @Prev({prev_anchor.__name__}) and {next_targets[prev_anchor].__name__} @Next({prev_anchor.__name__}) — use cross-anchoring between extras instead")
             prev_targets[prev_anchor] = type(mw)
             anchored.append((mw, "prev", prev_anchor))
         else:
@@ -381,12 +367,6 @@ def _insert_extra(chain: list[AgentMiddleware], extras: list[AgentMiddleware]) -
             remaining_types = {type(m) for m, _, _ in remaining}
             circular = anchor_types & remaining_types
             if circular:
-                raise ValueError(
-                    f"Circular dependency among extra middlewares: "
-                    f"{', '.join(t.__name__ for t in circular)}"
-                )
-            raise ValueError(
-                f"Cannot resolve positions for {', '.join(names)} "
-                f"— anchors {', '.join(a.__name__ for _, _, a in remaining)} not found in chain"
-            )
+                raise ValueError(f"Circular dependency among extra middlewares: {', '.join(t.__name__ for t in circular)}")
+            raise ValueError(f"Cannot resolve positions for {', '.join(names)} — anchors {', '.join(a.__name__ for _, _, a in remaining)} not found in chain")
         pending = remaining
