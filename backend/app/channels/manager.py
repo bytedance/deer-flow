@@ -8,7 +8,6 @@ import mimetypes
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -388,13 +387,10 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
     if not msg.files:
         return []
 
-    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-    from deerflow.uploads.manager import ensure_uploads_dir
+    from deerflow.uploads.manager import claim_unique_filename, ensure_uploads_dir, normalize_filename
 
     uploads_dir = ensure_uploads_dir(thread_id)
-    sandbox_provider = get_sandbox_provider()
-    sandbox_id = sandbox_provider.acquire(thread_id)
-    sandbox = sandbox_provider.get(sandbox_id)
+    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
 
     created: list[dict[str, Any]] = []
     file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
@@ -430,23 +426,22 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
                     ext = ".png"
                 filename = f"{msg.thread_ts or 'msg'}_{idx}{ext}"
 
-            safe_name = Path(filename).name
+            try:
+                safe_name = claim_unique_filename(normalize_filename(filename), seen_names)
+            except ValueError:
+                logger.warning(
+                    "[Manager] skipping inbound file with unsafe filename: channel=%s, file=%r",
+                    msg.channel_name,
+                    filename,
+                )
+                continue
+
             dest = uploads_dir / safe_name
             try:
                 dest.write_bytes(data)
             except Exception:
                 logger.exception("[Manager] failed to write inbound file: %s", dest)
                 continue
-
-            virtual_path = f"/mnt/user-data/uploads/{safe_name}"
-            if sandbox_id != "local" and sandbox is not None:
-                try:
-                    sandbox.update_file(virtual_path, data)
-                except Exception:
-                    logger.exception(
-                        "[Manager] failed to sync inbound file to sandbox: %s",
-                        virtual_path,
-                    )
 
             created.append(
                 {

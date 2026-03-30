@@ -4,7 +4,8 @@ import asyncio
 import base64
 import hashlib
 import logging
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from app.channels.base import Channel
 from app.channels.message_bus import (
@@ -26,6 +27,7 @@ class WeComChannel(Channel):
         self._ws_task: asyncio.Task | None = None
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
+        self._working_message = "Working on it..."
 
     def _clear_ws_context(self, thread_ts: str | None) -> None:
         if not thread_ts:
@@ -33,26 +35,39 @@ class WeComChannel(Channel):
         self._ws_frames.pop(thread_ts, None)
         self._ws_stream_ids.pop(thread_ts, None)
 
+    async def _send_ws_upload_command(self, req_id: str, body: dict[str, Any], cmd: str) -> dict[str, Any]:
+        if not self._ws_client:
+            raise RuntimeError("WeCom WebSocket client is not available")
+
+        ws_manager = getattr(self._ws_client, "_ws_manager", None)
+        send_reply = getattr(ws_manager, "send_reply", None)
+        if not callable(send_reply):
+            raise RuntimeError("Installed wecom-aibot-python-sdk does not expose the WebSocket media upload API expected by DeerFlow. Use wecom-aibot-python-sdk==0.1.6 or update the adapter.")
+
+        send_reply_async = cast(Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]], send_reply)
+        return await send_reply_async(req_id, body, cmd)
+
     async def start(self) -> None:
         if self._running:
             return
 
         bot_id = self.config.get("bot_id")
         bot_secret = self.config.get("bot_secret")
+        working_message = self.config.get("working_message")
 
         self._bot_id = bot_id if isinstance(bot_id, str) and bot_id else None
         self._bot_secret = bot_secret if isinstance(bot_secret, str) and bot_secret else None
+        self._working_message = working_message if isinstance(working_message, str) and working_message else "Working on it..."
 
         if not self._bot_id or not self._bot_secret:
             logger.error("WeCom channel requires bot_id and bot_secret")
             return
 
-        self._running = True
-        self.bus.subscribe_outbound(self._on_outbound)
         try:
             from aibot import WSClient, WSClientOptions
         except ImportError:
             logger.error("wecom-aibot-python-sdk is not installed. Install it with: uv add wecom-aibot-python-sdk")
+            return
         else:
             self._ws_client = WSClient(WSClientOptions(bot_id=self._bot_id, secret=self._bot_secret, logger=logger))
             self._ws_client.on("message.text", self._on_ws_text)
@@ -60,6 +75,9 @@ class WeComChannel(Channel):
             self._ws_client.on("message.image", self._on_ws_image)
             self._ws_client.on("message.file", self._on_ws_file)
             self._ws_task = asyncio.create_task(self._ws_client.connect())
+
+            self._running = True
+            self.bus.subscribe_outbound(self._on_outbound)
         logger.info("WeCom channel started")
 
     async def stop(self) -> None:
@@ -265,7 +283,7 @@ class WeComChannel(Channel):
         self._ws_stream_ids[msg_id] = stream_id
 
         try:
-            await self._ws_client.reply_stream(frame, stream_id, "Working on it...", False)
+            await self._ws_client.reply_stream(frame, stream_id, self._working_message, False)
         except Exception:
             pass
 
@@ -348,9 +366,7 @@ class WeComChannel(Channel):
             "total_chunks": int(total_chunks),
             "md5": md5,
         }
-        init_ack = await self._ws_client._ws_manager.send_reply(  # type: ignore[attr-defined]
-            init_req_id, init_body, "aibot_upload_media_init"
-        )
+        init_ack = await self._send_ws_upload_command(init_req_id, init_body, "aibot_upload_media_init")
         upload_id = (init_ack.get("body") or {}).get("upload_id")
         if not upload_id:
             logger.warning("[WeCom] upload init returned no upload_id: %s", init_ack)
@@ -367,14 +383,10 @@ class WeComChannel(Channel):
                     "chunk_index": int(idx),
                     "base64_data": base64.b64encode(data).decode("utf-8"),
                 }
-                await self._ws_client._ws_manager.send_reply(  # type: ignore[attr-defined]
-                    chunk_req_id, chunk_body, "aibot_upload_media_chunk"
-                )
+                await self._send_ws_upload_command(chunk_req_id, chunk_body, "aibot_upload_media_chunk")
 
         finish_req_id = generate_req_id("aibot_upload_media_finish")
-        finish_ack = await self._ws_client._ws_manager.send_reply(  # type: ignore[attr-defined]
-            finish_req_id, {"upload_id": upload_id}, "aibot_upload_media_finish"
-        )
+        finish_ack = await self._send_ws_upload_command(finish_req_id, {"upload_id": upload_id}, "aibot_upload_media_finish")
         media_id = (finish_ack.get("body") or {}).get("media_id")
         if not media_id:
             logger.warning("[WeCom] upload finish returned no media_id: %s", finish_ack)

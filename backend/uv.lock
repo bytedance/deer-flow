@@ -694,7 +694,7 @@ requires-dist = [
     { name = "slack-sdk", specifier = ">=3.33.0" },
     { name = "sse-starlette", specifier = ">=2.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
-    { name = "wecom-aibot-python-sdk", specifier = ">=0.1.0" },
+    { name = "wecom-aibot-python-sdk", specifier = ">=0.1.6" },
 ]
 
 [package.metadata.requires-dev]

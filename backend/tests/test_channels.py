@@ -1763,6 +1763,35 @@ class TestWeComChannel:
 
         _run(go())
 
+    def test_publish_ws_inbound_uses_configured_working_message(self, monkeypatch):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = WeComChannel(bus, config={"working_message": "Please wait..."})
+            channel._ws_client = SimpleNamespace(reply_stream=AsyncMock())
+            channel._working_message = "Please wait..."
+
+            monkeypatch.setitem(
+                __import__("sys").modules,
+                "aibot",
+                SimpleNamespace(generate_req_id=lambda prefix: "stream-1"),
+            )
+
+            frame = {
+                "body": {
+                    "msgid": "msg-1",
+                    "from": {"userid": "user-1"},
+                }
+            }
+
+            await channel._publish_ws_inbound(frame, "hello")
+
+            channel._ws_client.reply_stream.assert_awaited_once_with(frame, "stream-1", "Please wait...", False)
+
+        _run(go())
+
     def test_on_outbound_sends_attachment_before_clearing_context(self, tmp_path):
         from app.channels.wecom import WeComChannel
 
