@@ -688,11 +688,34 @@ class DeerFlowClient:
 
         return clear_memory_data()
 
+    def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
+        """Create a single fact manually."""
+        from deerflow.agents.memory.updater import create_memory_fact
+
+        return create_memory_fact(content=content, category=category, confidence=confidence)
+
     def delete_memory_fact(self, fact_id: str) -> dict:
         """Delete a single fact from memory by fact id."""
         from deerflow.agents.memory.updater import delete_memory_fact
 
         return delete_memory_fact(fact_id)
+
+    def update_memory_fact(
+        self,
+        fact_id: str,
+        content: str | None = None,
+        category: str | None = None,
+        confidence: float | None = None,
+    ) -> dict:
+        """Update a single fact manually, preserving omitted fields."""
+        from deerflow.agents.memory.updater import update_memory_fact
+
+        return update_memory_fact(
+            fact_id=fact_id,
+            content=content,
+            category=category,
+            confidence=confidence,
+        )
 
     def get_memory_config(self) -> dict:
         """Get memory system configuration.
