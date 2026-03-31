@@ -48,6 +48,7 @@ deer-flow/
 │   │           ├── community/         # Community tools (tavily, jina_ai, firecrawl, image_search, aio_sandbox)
 │   │           ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
 │   │           ├── utils/             # Utilities (network, readability)
+│   │           ├── pilot/             # Sprint 1 thin adapters layered on DeerFlowClient
 │   │           └── client.py          # Embedded Python client (DeerFlowClient)
 │   ├── app/                   # Application layer (import: app.*)
 │   │   ├── gateway/           # FastAPI Gateway API
@@ -91,6 +92,12 @@ make gateway    # Run Gateway API only (port 8001)
 make test       # Run all backend tests
 make lint       # Lint with ruff
 make format     # Format code with ruff
+```
+
+Sprint 1 Deep Research pilot checks:
+```bash
+python -m py_compile packages/harness/deerflow/pilot/deep_research.py tests/test_deep_research_pilot.py ../scripts/run_deep_research_pilot.py
+PYTHONPATH=.:packages/harness python -m pytest tests/test_deep_research_pilot.py -q
 ```
 
 Regression tests related to Docker/provisioner behavior:
@@ -400,6 +407,19 @@ Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` me
 
 **Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
+### Sprint 1 Pilot Adapter (`packages/harness/deerflow/pilot/deep_research.py`)
+
+This module is intentionally outside the core runtime. It wraps `DeerFlowClient` with a thin operator-facing contract for the `Deep Research` pilot:
+
+- request normalization with `request_id` and `idempotency_key`
+- output shaping via `output_profile` (`default`, `founder_memo`, `operator_memo`)
+- live `status.json` + `events.jsonl`
+- heartbeat and timeout enforcement
+- artifact/result persistence under `backend/.deer-flow/pilots/deep-research/`
+- adapter-managed artifact generation that writes the final Markdown artifact from the marked response contract
+
+Keep this module narrow. Sprint 1 is not the place to generalize it into a broad orchestration framework.
+
 ## Development Workflow
 
 ### Test-Driven Development (TDD) — MANDATORY
@@ -515,3 +535,8 @@ See `docs/` directory for detailed documentation:
 - [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
 - [summarization.md](docs/summarization.md) - Context summarization
 - [plan_mode_usage.md](docs/plan_mode_usage.md) - Plan mode with TodoList
+- [../docs/DEEP-RESEARCH-PILOT-RUNBOOK.md](../docs/DEEP-RESEARCH-PILOT-RUNBOOK.md) - Sprint 1 operator runbook
+- [../docs/DEEP-RESEARCH-PILOT-SMOKE-EVIDENCE-2026-03-31.md](../docs/DEEP-RESEARCH-PILOT-SMOKE-EVIDENCE-2026-03-31.md) - Verification evidence
+- [../docs/DEEP-RESEARCH-PILOT-OUTPUT-PROFILE-EVIDENCE-2026-03-31.md](../docs/DEEP-RESEARCH-PILOT-OUTPUT-PROFILE-EVIDENCE-2026-03-31.md) - Real-runtime validation for output-profile shaping
+- [../docs/SPRINT-1-DEEP-RESEARCH-PILOT-FINAL-REPORT-2026-03-31.md](../docs/SPRINT-1-DEEP-RESEARCH-PILOT-FINAL-REPORT-2026-03-31.md) - Final decision-gate report
+- [../docs/GATE-RESULT-SPRINT-1-DEEP-RESEARCH-PILOT-2026-03-31.md](../docs/GATE-RESULT-SPRINT-1-DEEP-RESEARCH-PILOT-2026-03-31.md) - Canonical PASS / Continue DeerFlow-only gate record

@@ -65,6 +65,8 @@ frontend/node_modules
 backend/.venv
 backend/htmlcov
 backend/.coverage
+backend/.pytest_cache
+backend/pytest-cache-files-*
 *.md
 !README.md
 !frontend/README.md

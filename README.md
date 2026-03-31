@@ -140,6 +140,14 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
        supports_thinking: true
        supports_reasoning_effort: true
 
+     - name: gpt-4o-goclaw-bridge
+       display_name: GPT-4o (GoClaw OAuth Bridge)
+       use: deerflow.models.goclaw_bridge_provider:GoClawBridgeChatModel
+       model: gpt-4o                         # auto-normalized to openai-codex/gpt-4o
+       supports_vision: true
+       supports_thinking: true
+       supports_reasoning_effort: true
+
      - name: claude-sonnet-4.6
        display_name: Claude Sonnet 4.6 (Claude Code OAuth)
        use: deerflow.models.claude_provider:ClaudeChatModel
@@ -149,6 +157,8 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
+   - GoClaw Bridge reads `GOCLAW_GATEWAY_TOKEN` (or `GOCLAW_BRIDGE_ENV_FILE`), injects `X-GoClaw-User-Id` from `GOCLAW_USER_ID`, and optionally targets a specific agent via `GOCLAW_AGENT_ID`
+   - For Dockerized DeerFlow, set `GOCLAW_BRIDGE_BASE_URL=http://host.docker.internal:18790/v1` (host runtime can keep `http://localhost:18790/v1`)
    - The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
    - On macOS, DeerFlow does not probe Keychain automatically. Export Claude Code auth explicitly if needed:
@@ -520,12 +530,45 @@ client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": 
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 
+### Sprint 1 Deep Research Pilot
+
+This repository also includes a narrow Sprint 1 pilot wrapper for one use case: `Deep Research`.
+
+- Runner: `backend/packages/harness/deerflow/pilot/deep_research.py`
+- CLI: `scripts/run_deep_research_pilot.py`
+- Tests: `backend/tests/test_deep_research_pilot.py`
+
+The pilot adds:
+
+- adapter v0.1 (`accepted`, `running`, `completed`, `failed`)
+- `request_id` + `idempotency_key`
+- explicit `output_profile` support (`default`, `founder_memo`, `operator_memo`)
+- heartbeat and timeout handling
+- file-based operator traces under `backend/.deer-flow/pilots/deep-research/`
+- an adapter-managed artifact contract that materializes the final Markdown deliverable from the model response
+
+Example:
+
+```bash
+python scripts/run_deep_research_pilot.py \
+  --model gpt-4o-goclaw-bridge \
+  --objective "Using the provided context, create a Sprint 1 implementation brief focused on scope, guardrails, and next steps." \
+  --context-file docs/FINAL-DECISION-HYBRID-SYSTEM-2026-03-31.md \
+  --output-profile founder_memo \
+  --expected-output "Implementation brief with scope, guardrails, and next steps"
+```
+
 ## Documentation
 
 - [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
+- [Deep Research Pilot Runbook](docs/DEEP-RESEARCH-PILOT-RUNBOOK.md) - Operator workflow for Sprint 1
+- [Deep Research Pilot Smoke Evidence](docs/DEEP-RESEARCH-PILOT-SMOKE-EVIDENCE-2026-03-31.md) - Verification record
+- [Deep Research Output Profile Evidence](docs/DEEP-RESEARCH-PILOT-OUTPUT-PROFILE-EVIDENCE-2026-03-31.md) - Real-runtime validation for founder/operator memo shaping
+- [Sprint 1 Pilot Final Report](docs/SPRINT-1-DEEP-RESEARCH-PILOT-FINAL-REPORT-2026-03-31.md) - Decision gate outcome
+- [Sprint 1 Gate Result](docs/GATE-RESULT-SPRINT-1-DEEP-RESEARCH-PILOT-2026-03-31.md) - Canonical PASS / Continue DeerFlow-only decision
 
 ## Contributing
 
