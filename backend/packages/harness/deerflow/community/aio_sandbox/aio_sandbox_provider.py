@@ -157,6 +157,7 @@ class AioSandboxProvider(SandboxProvider):
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
+            "disable_auto_mounts": getattr(sandbox_config, "disable_auto_mounts", False),
             "mounts": sandbox_config.mounts or [],
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
@@ -190,6 +191,10 @@ class AioSandboxProvider(SandboxProvider):
 
     def _get_extra_mounts(self, thread_id: str | None) -> list[tuple[str, str, bool]]:
         """Collect all extra mounts for a sandbox (thread-specific + skills)."""
+        if self._config.get("disable_auto_mounts", False):
+            logger.info("Automatic sandbox mounts disabled by config")
+            return []
+
         mounts: list[tuple[str, str, bool]] = []
 
         if thread_id:
@@ -636,3 +641,4 @@ class AioSandboxProvider(SandboxProvider):
                 logger.info(f"Destroyed warm-pool sandbox {sandbox_id} during shutdown")
             except Exception as e:
                 logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} during shutdown: {e}")
+
