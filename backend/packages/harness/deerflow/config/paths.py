@@ -1,12 +1,19 @@
+from __future__ import annotations
+
 import os
 import re
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from deerflow.identity.agent_identity import AgentIdentity
 
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+_SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
 class Paths:
@@ -91,6 +98,167 @@ class Paths:
     def agent_memory_file(self, name: str) -> Path:
         """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
         return self.agent_dir(name) / "memory.json"
+
+    # ── User-level paths ────────────────────────────────────────────────
+
+    def user_dir(self, user_id: str) -> Path:
+        """Directory for a specific user: `{base_dir}/users/{user_id}/`.
+
+        Raises:
+            ValueError: If `user_id` contains unsafe characters.
+        """
+        if not _SAFE_USER_ID_RE.match(user_id):
+            raise ValueError(f"Invalid user_id {user_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+        return self.base_dir / "users" / user_id
+
+    def user_memory_file(self, user_id: str) -> Path:
+        """Per-user long-term memory file: `{base_dir}/users/{user_id}/memory.json`."""
+        return self.user_dir(user_id) / "memory.json"
+
+    def user_agent_memory_file(self, user_id: str, agent_name: str) -> Path:
+        """Per-user, per-agent memory file: `{base_dir}/users/{user_id}/agents/{name}/memory.json`."""
+        return self.user_dir(user_id) / "agents" / agent_name.lower() / "memory.json"
+
+    def user_ov_workspace(self, user_id: str) -> Path:
+        """Per-user OpenViking workspace: `{base_dir}/users/{user_id}/ov-workspace/`."""
+        return self.user_dir(user_id) / "ov-workspace"
+
+    def user_profile_file(self, user_id: str) -> Path:
+        """Per-user profile: `{base_dir}/users/{user_id}/profile.json`."""
+        return self.user_dir(user_id) / "profile.json"
+
+    def session_memory_file(self, thread_id: str) -> Path:
+        """Per-thread session memory: `{base_dir}/threads/{thread_id}/session-memory.json`."""
+        return self.thread_dir(thread_id) / "session-memory.json"
+
+    def thread_ownership_file(self) -> Path:
+        """Global thread-to-user ownership mapping: `{base_dir}/thread-ownership.json`."""
+        return self.base_dir / "thread-ownership.json"
+
+    # ── Department-level paths ───────────────────────────────────────────
+
+    def dept_dir(self, dept_id: str) -> Path:
+        """Directory for a specific department: `{base_dir}/depts/{dept_id}/`.
+
+        Raises:
+            ValueError: If `dept_id` contains unsafe characters.
+        """
+        if not _SAFE_USER_ID_RE.match(dept_id):
+            raise ValueError(
+                f"Invalid dept_id {dept_id!r}: only alphanumeric characters, hyphens, and underscores are allowed."
+            )
+        return self.base_dir / "depts" / dept_id
+
+    def dept_user_dir(self, dept_id: str, user_id: str) -> Path:
+        """Directory for a user within a department: `{base_dir}/depts/{dept_id}/users/{user_id}/`."""
+        return self.dept_dir(dept_id) / "users" / user_id
+
+    def dept_user_agent_dir(self, dept_id: str, user_id: str, agent_name: str) -> Path:
+        """Directory for an agent within a dept/user: `{base_dir}/depts/{dept_id}/users/{user_id}/agents/{agent_name}/`."""
+        return self.dept_user_dir(dept_id, user_id) / "agents" / agent_name.lower()
+
+    # ── Identity-aware paths ─────────────────────────────────────────────
+
+    def identity_agent_dir(self, identity: "AgentIdentity") -> Path | None:
+        """Return the agent-level directory for the given identity, or None.
+
+        Priority:
+          1. dept + user + agent   → depts/{dept_id}/users/{user_id}/agents/{agent_name}/
+          2. agent only (legacy)   → agents/{agent_name}/
+          3. None if no agent_name
+        """
+        if not identity.has_agent:
+            return None
+        if identity.has_dept and identity.has_user:
+            return self.dept_user_agent_dir(identity.dept_id, identity.user_id, identity.agent_name)
+        # Legacy: no dept/user, just agent_name
+        return self.agent_dir(identity.agent_name)
+
+    def identity_config_files(self, identity: "AgentIdentity") -> list[Path]:
+        """Return ordered list of config.yaml paths for the given identity.
+
+        Order: global → dept → user → agent (last wins in deep-merge).
+        Only returns paths that correspond to real directory levels in the identity.
+        """
+        paths: list[Path] = [self.base_dir / "config.yaml"]
+
+        if identity.has_dept:
+            paths.append(self.dept_dir(identity.dept_id) / "config.yaml")
+
+        if identity.has_dept and identity.has_user:
+            paths.append(self.dept_user_dir(identity.dept_id, identity.user_id) / "config.yaml")
+
+        agent_dir = self.identity_agent_dir(identity)
+        if agent_dir is not None:
+            paths.append(agent_dir / "config.yaml")
+
+        return paths
+
+    def identity_extensions_dirs(self, identity: "AgentIdentity") -> list[Path]:
+        """Return ordered list of directories that may contain extensions_config.json.
+
+        Order: global → dept → user → agent (intersection strategy applied by caller).
+        """
+        dirs: list[Path] = [self.base_dir]
+
+        if identity.has_dept:
+            dirs.append(self.dept_dir(identity.dept_id))
+
+        if identity.has_dept and identity.has_user:
+            dirs.append(self.dept_user_dir(identity.dept_id, identity.user_id))
+
+        agent_dir = self.identity_agent_dir(identity)
+        if agent_dir is not None:
+            dirs.append(agent_dir)
+
+        return dirs
+
+    def identity_memory_file(self, identity: "AgentIdentity") -> Path:
+        """Return the memory.json path scoped to the given identity.
+
+        Falls back to the global memory.json when no identity is set.
+        """
+        agent_dir = self.identity_agent_dir(identity)
+        if agent_dir is not None:
+            return agent_dir / "memory.json"
+        if identity.has_dept and identity.has_user:
+            return self.dept_user_dir(identity.dept_id, identity.user_id) / "memory.json"
+        return self.memory_file
+
+    def identity_persona_dirs(self, identity: "AgentIdentity") -> list[Path]:
+        """Return ordered list of directories to search for persona files (*.md).
+
+        Order: global → dept → user → agent (Override files use last-wins,
+        Append files are concatenated in order).
+        """
+        dirs: list[Path] = [self.base_dir]
+
+        if identity.has_dept:
+            dirs.append(self.dept_dir(identity.dept_id))
+
+        if identity.has_dept and identity.has_user:
+            dirs.append(self.dept_user_dir(identity.dept_id, identity.user_id))
+
+        agent_dir = self.identity_agent_dir(identity)
+        if agent_dir is not None:
+            dirs.append(agent_dir)
+
+        return dirs
+
+    def identity_workspace_dir(self, identity: "AgentIdentity") -> Path | None:
+        """Persistent workspace directory for the given identity, or None."""
+        agent_dir = self.identity_agent_dir(identity)
+        if agent_dir is None:
+            return None
+        return agent_dir / "workspace"
+
+    def ensure_user_dirs(self, user_id: str) -> None:
+        """Create standard directories for a user."""
+        for d in [
+            self.user_dir(user_id),
+            self.user_ov_workspace(user_id),
+        ]:
+            d.mkdir(parents=True, exist_ok=True)
 
     def thread_dir(self, thread_id: str) -> Path:
         """

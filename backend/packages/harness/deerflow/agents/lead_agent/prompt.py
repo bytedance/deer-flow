@@ -1,11 +1,16 @@
 import logging
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
 from deerflow.subagents import get_available_subagent_names
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from deerflow.identity.agent_identity import AgentIdentity
+    from deerflow.identity.persona import PersonaContext
 
 
 def _build_subagent_section(max_concurrent: int) -> str:
@@ -348,11 +353,12 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None) -> str:
+def _get_memory_context(agent_name: str | None = None, identity: "AgentIdentity | None" = None) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
+        identity: Full three-tier identity; when non-global takes precedence over agent_name.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -365,7 +371,7 @@ def _get_memory_context(agent_name: str | None = None) -> str:
         if not config.enabled or not config.injection_enabled:
             return ""
 
-        memory_data = get_memory_data(agent_name)
+        memory_data = get_memory_data(agent_name, identity)
         memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
 
         if not memory_content.strip():
@@ -380,13 +386,13 @@ def _get_memory_context(agent_name: str | None = None) -> str:
         return ""
 
 
-def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
+def get_skills_prompt_section(available_skills: set[str] | None = None, identity: "AgentIdentity | None" = None) -> str:
     """Generate the skills prompt section with available skills list.
 
     Returns the <skill_system>...</skill_system> block listing all enabled skills,
     suitable for injection into any agent's system prompt.
     """
-    skills = load_skills(enabled_only=True)
+    skills = load_skills(enabled_only=True, identity=identity)
 
     try:
         from deerflow.config import get_app_config
@@ -424,7 +430,10 @@ You have access to skills that provide optimized workflows for specific tasks. E
 </skill_system>"""
 
 
-def get_agent_soul(agent_name: str | None) -> str:
+def get_agent_soul(agent_name: str | None, persona: "PersonaContext | None" = None) -> str:
+    # If persona provides a soul, use it (takes precedence over legacy SOUL.md lookup)
+    if persona is not None and persona.soul:
+        return f"<soul>\n{persona.soul}\n</soul>\n"
     # Append SOUL.md (agent personality) if present
     soul = load_agent_soul(agent_name)
     if soul:
@@ -457,6 +466,32 @@ def get_deferred_tools_prompt_section() -> str:
     return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
 
 
+def _build_persona_sections(persona: "PersonaContext") -> str:
+    """Build XML-tagged persona sections for injection into the system prompt."""
+    parts: list[str] = []
+
+    if persona.identity:
+        parts.append(f"<identity>\n{persona.identity}\n</identity>")
+    if persona.user_context:
+        parts.append(f"<user_context>\n{persona.user_context}\n</user_context>")
+    if persona.bootstrap:
+        parts.append(f"<bootstrap>\n{persona.bootstrap}\n</bootstrap>")
+    if persona.tools_guidance:
+        parts.append(f"<tools_guidance>\n{persona.tools_guidance}\n</tools_guidance>")
+    if persona.workflow:
+        parts.append(f"<workflow>\n{persona.workflow}\n</workflow>")
+    if persona.lessons:
+        parts.append(f"<lessons>\n{persona.lessons}\n</lessons>")
+    if persona.error_patterns:
+        parts.append(f"<error_patterns>\n{persona.error_patterns}\n</error_patterns>")
+    if persona.team_context:
+        parts.append(f"<team_context>\n{persona.team_context}\n</team_context>")
+    if persona.heartbeat:
+        parts.append(f"<heartbeat>\n{persona.heartbeat}\n</heartbeat>")
+
+    return "\n\n".join(parts)
+
+
 def _build_acp_section() -> str:
     """Build the ACP agent prompt section, only if ACP agents are configured."""
     try:
@@ -477,9 +512,9 @@ def _build_acp_section() -> str:
     )
 
 
-def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
-    # Get memory context
-    memory_context = _get_memory_context(agent_name)
+def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None, persona: "PersonaContext | None" = None, identity: "AgentIdentity | None" = None) -> str:
+    # Get memory context (identity-scoped when identity is provided)
+    memory_context = _get_memory_context(agent_name, identity)
 
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
@@ -503,11 +538,14 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         else ""
     )
 
-    # Get skills section
-    skills_section = get_skills_prompt_section(available_skills)
+    # Get skills section (identity-scoped when identity is provided)
+    skills_section = get_skills_prompt_section(available_skills, identity=identity)
 
     # Get deferred tools section (tool_search)
     deferred_tools_section = get_deferred_tools_prompt_section()
+
+    # Build persona sections (identity, bootstrap, tools, workflow, lessons, etc.)
+    persona_sections = _build_persona_sections(persona) if persona is not None else ""
 
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section()
@@ -515,7 +553,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name),
+        soul=get_agent_soul(agent_name, persona),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
         memory_context=memory_context,
@@ -525,4 +563,10 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         acp_section=acp_section,
     )
 
-    return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"
+    result = prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"
+
+    # Append persona sections at the end so they don't disrupt template placeholders
+    if persona_sections:
+        result += f"\n\n{persona_sections}"
+
+    return result

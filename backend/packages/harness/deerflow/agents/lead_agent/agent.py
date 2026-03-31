@@ -5,6 +5,8 @@ from langchain.agents.middleware import AgentMiddleware, SummarizationMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.identity.agent_identity import AgentIdentity
+from deerflow.identity.persona import PersonaLoader
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
@@ -17,6 +19,7 @@ from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddlewar
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
+from deerflow.config.layered_config import load_layered_app_config
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 
@@ -205,7 +208,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None, custom_middlewares: list[AgentMiddleware] | None = None):
+def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None, identity: "AgentIdentity | None" = None, custom_middlewares: list[AgentMiddleware] | None = None):
     """Build middleware chain based on runtime configuration.
 
     Args:
@@ -216,7 +219,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     Returns:
         List of middleware instances.
     """
-    middlewares = build_lead_runtime_middlewares(lazy_init=True)
+    middlewares = build_lead_runtime_middlewares(lazy_init=True, identity=identity)
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
@@ -237,7 +240,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     middlewares.append(TitleMiddleware())
 
     # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name))
+    middlewares.append(MemoryMiddleware(agent_name=agent_name, identity=identity))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
@@ -286,14 +289,27 @@ def make_lead_agent(config: RunnableConfig):
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = cfg.get("agent_name")
 
+    # Parse three-tier identity (dept / user / agent).
+    # All three fields are optional; absence is fully backward-compatible.
+    identity = AgentIdentity.from_config(config)
+
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+
+    # Load layered config for this identity (dept/user/agent overrides apply when set)
+    app_config = load_layered_app_config(identity)
+
     # Custom agent model or fallback to global/default model resolution
-    agent_model_name = agent_config.model if agent_config and agent_config.model else _resolve_model_name()
+    default_model_name = app_config.models[0].name if app_config.models else None
+    if default_model_name is None:
+        raise ValueError("No chat models are configured. Please configure at least one model in config.yaml.")
+    agent_model_name = agent_config.model if agent_config and agent_config.model else default_model_name
 
-    # Final model name resolution with request override, then agent config, then global default
+    # Final model name resolution with request override, then agent config, then layered default
     model_name = requested_model_name or agent_model_name
+    if requested_model_name and not app_config.get_model_config(requested_model_name):
+        logger.warning(f"Model '{requested_model_name}' not found in layered config; fallback to default '{default_model_name}'.")
+        model_name = agent_model_name
 
-    app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
 
     if model_config is None:
@@ -303,7 +319,7 @@ def make_lead_agent(config: RunnableConfig):
         thinking_enabled = False
 
     logger.info(
-        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s, identity: %s",
         agent_name or "default",
         thinking_enabled,
         reasoning_effort,
@@ -311,6 +327,7 @@ def make_lead_agent(config: RunnableConfig):
         is_plan_mode,
         subagent_enabled,
         max_concurrent_subagents,
+        identity,
     )
 
     # Inject run metadata for LangSmith trace tagging
@@ -325,6 +342,8 @@ def make_lead_agent(config: RunnableConfig):
             "reasoning_effort": reasoning_effort,
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
+            "dept_id": identity.dept_id,
+            "user_id": identity.user_id,
         }
     )
 
@@ -339,10 +358,11 @@ def make_lead_agent(config: RunnableConfig):
         )
 
     # Default lead agent (unchanged behavior)
+    persona = PersonaLoader().load(identity)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
-        tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
-        system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
+        tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, identity=identity),
+        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, identity=identity),
+        system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, persona=persona if not persona.is_empty else None, identity=identity),
         state_schema=ThreadState,
     )

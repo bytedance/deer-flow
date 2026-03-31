@@ -209,6 +209,7 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
+| **Identity** (`/api/identity`) | `GET/POST /depts` - list/create departments; `GET/POST /depts/{dept}/users/{user}` - user CRUD; `POST /depts/{dept}/users/{user}/agents` - agent provisioning; `GET/PUT /persona` - persona files; `GET /skills` - identity-scoped skills; `GET /effective-config` - merged config |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
@@ -279,9 +280,47 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 
 - **Location**: `deer-flow/skills/{public,custom}/`
 - **Format**: Directory with `SKILL.md` (YAML frontmatter: name, description, license, allowed-tools)
-- **Loading**: `load_skills()` recursively scans `skills/{public,custom}` for `SKILL.md`, parses metadata, and reads enabled state from extensions_config.json
+- **Loading**: `load_skills(identity)` recursively scans `skills/{public,custom}` for `SKILL.md`, then calls `load_layered_extensions(identity)` (or global identity when none provided) to set enabled state — always reads latest config from disk, no caching
+- **Identity-scoped filtering**: Non-global identity triggers intersection strategy via `load_layered_extensions()`; dept-disabled skills cannot be re-enabled by user layer
 - **Injection**: Enabled skills listed in agent system prompt with container paths
 - **Installation**: `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory
+
+### Identity System (`packages/harness/deerflow/identity/`)
+
+Three-tier identity model: **dept** (department) → **user** (personal) → **agent** (named agent instance).
+
+**`AgentIdentity`** (`identity/agent_identity.py`):
+- Immutable dataclass with optional `dept_id`, `user_id`, `agent_name` fields
+- `_validate_id()` enforces safe filename characters (letters, digits, `-`, `_`, `.`; max 64 chars)
+- Predicates: `is_global`, `has_dept`, `has_user`, `has_agent`
+- `from_config(config)` extracts identity from LangGraph `config.configurable` dict
+- `ov_headers` / `ov_account` / `ov_user` / `ov_agent` — OpenViking memory backend identity headers (falls back to `"default"` for missing fields)
+
+**Layered Configuration** (`config/layered_config.py`, `config/layered_extensions.py`):
+- `load_layered_config_dict(identity)` — deep-merges `config.yaml` from: global → dept → user → agent. Named-list merge by `"name"` key; scalar override.
+- `load_layered_extensions(identity)` — merges `extensions_config.json` across identity dirs. MCP: last layer wins (shallow merge per server). Skills: intersection (disabled at any layer → permanently disabled; user cannot re-enable dept-blocked skill).
+- `load_layered_app_config(identity)` — returns `AppConfig` from the merged dict (used by `make_lead_agent`)
+
+**Paths** (`config/paths.py`):
+- `identity_config_files(identity)` — ordered list of 4 `config.yaml` paths (global, dept, user, agent)
+- `identity_extensions_dirs(identity)` — ordered directories for `extensions_config.json`
+- `identity_memory_file(identity)` — scoped memory.json (falls back to global)
+- `identity_workspace_dir(identity)` — agent persistent workspace dir (None if no agent)
+- `identity_persona_dirs(identity)` — persona file search dirs
+
+**Workspace Sync** (`sandbox/workspace/`):
+- `WorkspaceBackend` ABC with `sync_down(identity, local_dir)` / `sync_up(identity, local_dir)` (async)
+- `LocalWorkspaceBackend` — copies files between `identity_workspace_dir` and the thread-local sandbox dir
+- `WorkspaceConfig` (`config/workspace_config.py`) — Pydantic model, `backend: "local"|"minio"`, optional `MinioConfig`; registered in `AppConfig.workspace`
+- `SandboxMiddleware` — calls `sync_down` in `before_agent` and `sync_up` in `after_agent` using `_run_async_sync()` (handles already-running event loop via `ThreadPoolExecutor`)
+
+**Identity Gateway** (`app/gateway/routers/identity.py`):
+- Dept/user/agent CRUD via directory hierarchy under `{base_dir}/depts/`
+- `GET /api/identity/effective-config` — returns deep-merged config for a given identity
+- `GET/PUT /api/identity/persona` — read/write persona `.md` files at any identity layer
+- `GET /api/identity/skills` — identity-scoped skills with enabled state
+
+**Tests**: `tests/test_identity.py`, `tests/test_layered_config.py`, `tests/test_layered_skills.py`, `tests/test_workspace_backend.py`, `tests/test_identity_gateway.py`
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 

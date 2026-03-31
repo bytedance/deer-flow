@@ -54,3 +54,9 @@ web/
 # Deployment artifacts
 backend/Dockerfile.langgraph
 config.yaml.bak
+.gitnexus
+ov.conf
+
+# OpenViking runtime state and local data
+.openviking/
+data/

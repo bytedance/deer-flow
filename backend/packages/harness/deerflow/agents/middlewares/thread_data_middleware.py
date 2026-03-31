@@ -1,6 +1,9 @@
 import logging
 from typing import NotRequired, override
 
+import json
+import time
+
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.config import get_config
@@ -84,16 +87,51 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")
 
+        # Extract user_id from context for thread ownership tracking
+        user_id = context.get("user_id")
+        if user_id is None:
+            try:
+                config = get_config()
+                user_id = config.get("configurable", {}).get("user_id")
+            except RuntimeError:
+                user_id = None
+
         if self._lazy_init:
-            # Lazy initialization: only compute paths, don't create directories
             paths = self._get_thread_paths(thread_id)
         else:
-            # Eager initialization: create directories immediately
             paths = self._create_thread_directories(thread_id)
             logger.debug("Created thread data directories for thread %s", thread_id)
 
-        return {
+        # Record thread ownership if user_id is available
+        if user_id:
+            self._record_thread_ownership(thread_id, user_id)
+            # Ensure user directories exist
+            self._paths.ensure_user_dirs(user_id)
+
+        result = {
             "thread_data": {
                 **paths,
             }
         }
+        if user_id:
+            result["user_id"] = user_id
+
+        return result
+
+    def _record_thread_ownership(self, thread_id: str, user_id: str) -> None:
+        """Record thread-to-user ownership mapping."""
+        ownership_file = self._paths.thread_ownership_file()
+        ownership: dict = {}
+        if ownership_file.exists():
+            try:
+                ownership = json.loads(ownership_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                ownership = {}
+
+        if thread_id not in ownership:
+            ownership[thread_id] = {
+                "user_id": user_id,
+                "created_at": time.time(),
+            }
+            ownership_file.parent.mkdir(parents=True, exist_ok=True)
+            ownership_file.write_text(json.dumps(ownership, indent=2))

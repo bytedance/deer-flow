@@ -1,9 +1,13 @@
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .parser import parse_skill_file
 from .types import Skill
+
+if TYPE_CHECKING:
+    from deerflow.identity.agent_identity import AgentIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +26,7 @@ def get_skills_root_path() -> Path:
     return skills_dir
 
 
-def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False) -> list[Skill]:
+def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False, identity: "AgentIdentity | None" = None) -> list[Skill]:
     """
     Load all skills from the skills directory.
 
@@ -35,6 +39,9 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
                      Otherwise defaults to deer-flow/skills
         use_config: Whether to load skills path from config (default: True)
         enabled_only: If True, only return enabled skills (default: False)
+        identity: Optional three-tier identity for identity-scoped extensions loading.
+                  When provided and non-global, uses load_layered_extensions(identity)
+                  instead of the global ExtensionsConfig to determine enabled state.
 
     Returns:
         List of Skill objects, sorted by name
@@ -76,15 +83,22 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
             if skill:
                 skills.append(skill)
 
-    # Load skills state configuration and update enabled status
-    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected in the LangGraph Server when loading skills.
+    # Load skills state configuration and update enabled status.
+    # When identity is provided and non-global, use load_layered_extensions to respect
+    # per-dept/user skill restrictions (intersection strategy: disabled at any layer → disabled).
+    # Always route through load_layered_extensions so that get_paths() is used for path
+    # resolution in all cases (testable via monkeypatching).  For a global identity the
+    # function reads only the single base-dir extensions_config.json, which is equivalent
+    # to ExtensionsConfig.from_file() but honours the configured paths root instead of CWD.
+    # NOTE: We use load_layered_extensions() instead of get_extensions_config() to always
+    # read the latest configuration from disk, so changes from the Gateway API
+    # (separate process) are immediately reflected in the LangGraph Server.
     try:
-        from deerflow.config.extensions_config import ExtensionsConfig
+        from deerflow.config.layered_extensions import load_layered_extensions
+        from deerflow.identity.agent_identity import AgentIdentity as _AgentIdentity
 
-        extensions_config = ExtensionsConfig.from_file()
+        _effective_identity = identity if identity is not None else _AgentIdentity()
+        extensions_config = load_layered_extensions(_effective_identity)
         for skill in skills:
             skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
     except Exception as e:

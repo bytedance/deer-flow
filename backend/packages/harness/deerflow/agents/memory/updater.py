@@ -6,7 +6,8 @@ import math
 import re
 import uuid
 from datetime import datetime
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
@@ -16,7 +17,52 @@ from deerflow.agents.memory.storage import create_empty_memory, get_memory_stora
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
 
+if TYPE_CHECKING:
+    from deerflow.identity.agent_identity import AgentIdentity
+
 logger = logging.getLogger(__name__)
+
+
+def _memory_cache_key(agent_name: str | None, identity: "AgentIdentity | None") -> tuple:
+    """Build the cache key for memory data.
+
+    When identity is present and non-global, it is the authoritative key.
+    Otherwise fall back to agent_name so existing callers are unaffected.
+    """
+    if identity is not None and not identity.is_global:
+        return ("identity", str(identity))
+    return ("agent", agent_name)
+
+
+def _get_memory_file_path(agent_name: str | None = None, identity: "AgentIdentity | None" = None) -> Path:
+    """Get the path to the memory file.
+
+    Priority:
+      1. identity (non-global) → identity_memory_file(identity)
+      2. agent_name            → agent_memory_file(agent_name)
+      3. config.storage_path or global memory_file
+
+    Args:
+        agent_name: Per-agent memory path (legacy).
+        identity: Full three-tier identity; when non-global takes precedence.
+
+    Returns:
+        Path to the memory file.
+    """
+    # Identity-scoped path takes priority
+    if identity is not None and not identity.is_global:
+        return get_paths().identity_memory_file(identity)
+
+    # Original logic (unchanged)
+    if agent_name is not None:
+        return get_paths().agent_memory_file(agent_name)
+
+    config = get_memory_config()
+    if config.storage_path:
+        p = Path(config.storage_path)
+        # Absolute path: use as-is; relative path: resolve against base_dir
+        return p if p.is_absolute() else get_paths().base_dir / p
+    return get_paths().memory_file
 
 
 def _create_empty_memory() -> dict[str, Any]:
@@ -29,14 +75,65 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
     return get_memory_storage().save(memory_data, agent_name)
 
 
-def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
-    """Get the current memory data via storage provider."""
-    return get_memory_storage().load(agent_name)
+# Per-agent memory cache: keyed by (scope, key) tuple → (memory_data, file_mtime)
+_memory_cache: dict[tuple, tuple[dict[str, Any], float | None]] = {}
 
 
-def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
-    """Reload memory data via storage provider."""
-    return get_memory_storage().reload(agent_name)
+def get_memory_data(agent_name: str | None = None, identity: "AgentIdentity | None" = None) -> dict[str, Any]:
+    """Get the current memory data (cached with file modification time check).
+
+    The cache is automatically invalidated if the memory file has been modified
+    since the last load, ensuring fresh data is always returned.
+
+    Args:
+        agent_name: Per-agent memory scope (legacy).
+        identity: Full three-tier identity; when non-global takes precedence over agent_name.
+
+    Returns:
+        The memory data dictionary.
+    """
+    file_path = _get_memory_file_path(agent_name, identity)
+    cache_key = _memory_cache_key(agent_name, identity)
+
+    # Get current file modification time
+    try:
+        current_mtime = file_path.stat().st_mtime if file_path.exists() else None
+    except OSError:
+        current_mtime = None
+
+    cached = _memory_cache.get(cache_key)
+
+    # Invalidate cache if file has been modified or doesn't exist
+    if cached is None or cached[1] != current_mtime:
+        memory_data = _load_memory_from_file(agent_name, identity)
+        _memory_cache[cache_key] = (memory_data, current_mtime)
+        return memory_data
+
+    return cached[0]
+
+
+def reload_memory_data(agent_name: str | None = None, identity: "AgentIdentity | None" = None) -> dict[str, Any]:
+    """Reload memory data from file, forcing cache invalidation.
+
+    Args:
+        agent_name: Per-agent memory scope (legacy).
+        identity: Full three-tier identity; when non-global takes precedence.
+
+    Returns:
+        The saved memory data after storage normalization.
+
+    Raises:
+        OSError: If persisting the imported memory fails.
+    """
+    file_path = _get_memory_file_path(agent_name, identity)
+    cache_key = _memory_cache_key(agent_name, identity)
+    memory_data = _load_memory_from_file(agent_name, identity)
+    try:
+        mtime = file_path.stat().st_mtime if file_path.exists() else None
+    except OSError:
+        mtime = None
+    _memory_cache[cache_key] = (memory_data, mtime)
+    return memory_data
 
 
 def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = None) -> dict[str, Any]:
@@ -203,6 +300,30 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
+def _load_memory_from_file(agent_name: str | None = None, identity: "AgentIdentity | None" = None) -> dict[str, Any]:
+    """Load memory data from file.
+
+    Args:
+        agent_name: Per-agent memory scope (legacy).
+        identity: Full three-tier identity; when non-global takes precedence.
+
+    Returns:
+        The memory data dictionary.
+    """
+    file_path = _get_memory_file_path(agent_name, identity)
+
+    if not file_path.exists():
+        return _create_empty_memory()
+
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to load memory file: %s", e)
+        return _create_empty_memory()
+
+
 # Matches sentences that describe a file-upload *event* rather than general
 # file-related work.  Deliberately narrow to avoid removing legitimate facts
 # such as "User works with CSV files" or "prefers PDF export".
@@ -249,6 +370,50 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped
 
 
+def _save_memory_to_file_identity(memory_data: dict[str, Any], agent_name: str | None = None, identity: "AgentIdentity | None" = None) -> bool:
+    """Save memory data to file and update cache.
+
+    Args:
+        memory_data: The memory data to save.
+        agent_name: If provided, saves to per-agent memory file. If None, saves to global.
+        identity: Full three-tier identity; when non-global takes precedence over agent_name.
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    file_path = _get_memory_file_path(agent_name, identity)
+    cache_key = _memory_cache_key(agent_name, identity)
+
+    try:
+        # Ensure directory exists
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Update lastUpdated timestamp
+        memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
+
+        # Write atomically using temp file
+        temp_path = file_path.with_suffix(".tmp")
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(memory_data, f, indent=2, ensure_ascii=False)
+
+        # Rename temp file to actual file (atomic on most systems)
+        temp_path.replace(file_path)
+
+        # Update cache and file modification time
+        try:
+            mtime = file_path.stat().st_mtime
+        except OSError:
+            mtime = None
+
+        _memory_cache[cache_key] = (memory_data, mtime)
+
+        logger.info("Memory saved to %s", file_path)
+        return True
+    except OSError as e:
+        logger.error("Failed to save memory file: %s", e)
+        return False
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -266,13 +431,15 @@ class MemoryUpdater:
         model_name = self._model_name or config.model_name
         return create_chat_model(name=model_name, thinking_enabled=False)
 
-    def update_memory(self, messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
+    def update_memory(self, messages: list[Any], thread_id: str | None = None, agent_name: str | None = None, user_id: str | None = None, identity: "AgentIdentity | None" = None) -> bool:
         """Update memory based on conversation messages.
 
         Args:
             messages: List of conversation messages.
             thread_id: Optional thread ID for tracking source.
             agent_name: If provided, updates per-agent memory. If None, updates global memory.
+            user_id: Ignored (legacy parameter, superseded by identity).
+            identity: Full three-tier identity; when non-global takes precedence over agent_name.
 
         Returns:
             True if update was successful, False otherwise.
@@ -285,8 +452,8 @@ class MemoryUpdater:
             return False
 
         try:
-            # Get current memory
-            current_memory = get_memory_data(agent_name)
+            # Get current memory (identity-scoped when available)
+            current_memory = get_memory_data(agent_name, identity)
 
             # Format conversation for prompt
             conversation_text = format_conversation_for_update(messages)
@@ -322,8 +489,8 @@ class MemoryUpdater:
             # try (and fail) to locate those files in subsequent conversations.
             updated_memory = _strip_upload_mentions_from_memory(updated_memory)
 
-            # Save
-            return get_memory_storage().save(updated_memory, agent_name)
+            # Save (identity-scoped when available)
+            return _save_memory_to_file_identity(updated_memory, agent_name, identity)
 
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
@@ -412,16 +579,17 @@ class MemoryUpdater:
         return current_memory
 
 
-def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
+def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None, agent_name: str | None = None, identity: "AgentIdentity | None" = None) -> bool:
     """Convenience function to update memory from a conversation.
 
     Args:
         messages: List of conversation messages.
         thread_id: Optional thread ID.
         agent_name: If provided, updates per-agent memory. If None, updates global memory.
+        identity: Full three-tier identity; when non-global takes precedence over agent_name.
 
     Returns:
         True if successful, False otherwise.
     """
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name)
+    return updater.update_memory(messages, thread_id, agent_name, identity=identity)

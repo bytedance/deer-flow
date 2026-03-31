@@ -190,6 +190,7 @@ class DeerFlowClient:
         """Build a RunnableConfig for agent invocation."""
         configurable = {
             "thread_id": thread_id,
+            "user_id": overrides.get("user_id", getattr(self, "_user_id", None)),
             "model_name": overrides.get("model_name", self._model_name),
             "thinking_enabled": overrides.get("thinking_enabled", self._thinking_enabled),
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),

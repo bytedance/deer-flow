@@ -1,8 +1,10 @@
 """Middleware for memory mechanism."""
 
+import asyncio
+import concurrent.futures
 import logging
 import re
-from typing import Any, override
+from typing import TYPE_CHECKING, Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -12,8 +14,45 @@ from langgraph.runtime import Runtime
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.config.memory_config import get_memory_config
 
+if TYPE_CHECKING:
+    from deerflow.identity.agent_identity import AgentIdentity
+
 logger = logging.getLogger(__name__)
 
+# Shared executor for fire-and-forget OV async store calls
+_OV_STORE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="ov-memory")
+
+
+def _serialize_messages(messages: list[Any]) -> list[dict[str, str]]:
+    """Convert LangChain message objects to plain {role, content} dicts for OV API."""
+    serialized = []
+    for msg in messages:
+        msg_type = getattr(msg, "type", None)
+        role = {"human": "user", "ai": "assistant", "system": "system"}.get(msg_type, msg_type or "user")
+        content = getattr(msg, "content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                block.get("text", "") for block in content if isinstance(block, dict)
+            )
+        serialized.append({"role": role, "content": str(content)})
+    return serialized
+
+
+def _fire_ov_store(ov_url: str, api_key: str | None, identity: "AgentIdentity", messages: list[dict[str, str]]) -> None:
+    """Run OVMemoryBackend.store_memory in a background thread (fire-and-forget)."""
+    from deerflow.agents.memory.ov_backend import OVMemoryBackend
+
+    async def _run() -> None:
+        backend = OVMemoryBackend(ov_url, api_key, identity)
+        try:
+            await backend.store_memory(messages)
+        except Exception as exc:
+            logger.warning("OV memory store failed (non-fatal): %s", exc)
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        logger.warning("OV memory store executor error (non-fatal): %s", exc)
 
 class MemoryMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
@@ -99,14 +138,17 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
     state_schema = MemoryMiddlewareState
 
-    def __init__(self, agent_name: str | None = None):
+    def __init__(self, agent_name: str | None = None, identity: "AgentIdentity | None" = None):
         """Initialize the MemoryMiddleware.
 
         Args:
             agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            identity: Full three-tier identity for identity-scoped memory isolation.
+                      When set, takes precedence over agent_name for path resolution.
         """
         super().__init__()
         self._agent_name = agent_name
+        self._identity = identity
 
     @override
     def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
@@ -149,8 +191,14 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         if not user_messages or not assistant_messages:
             return None
 
-        # Queue the filtered conversation for memory update
-        queue = get_memory_queue()
-        queue.add(thread_id=thread_id, messages=filtered_messages, agent_name=self._agent_name)
+        # Route to OV backend and/or local queue based on memory_config.backend
+        if config.backend in ("ov", "ov+local") and self._identity is not None:
+            serialized = _serialize_messages(filtered_messages)
+            _OV_STORE_EXECUTOR.submit(_fire_ov_store, config.ov_url, config.ov_api_key, self._identity, serialized)
+
+        if config.backend in ("local", "ov+local"):
+            # Queue the filtered conversation for memory update (identity-scoped when available)
+            queue = get_memory_queue()
+            queue.add(thread_id=thread_id, messages=filtered_messages, agent_name=self._agent_name, identity=self._identity)
 
         return None

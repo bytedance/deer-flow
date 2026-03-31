@@ -1,5 +1,7 @@
 """Configuration for memory mechanism."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -58,6 +60,25 @@ class MemoryConfig(BaseModel):
         ge=100,
         le=8000,
         description="Maximum tokens to use for memory injection",
+    )
+
+    # ── OV / identity-aware memory ─────────────────────────────────────────
+    backend: Literal["local", "ov", "ov+local"] = Field(
+        default="local",
+        description=(
+            "Memory storage backend. "
+            "'local' = JSON file on disk (default). "
+            "'ov' = OpenViking semantic memory with three-tier identity isolation. "
+            "'ov+local' = dual-write to both OV and local JSON (migration mode)."
+        ),
+    )
+    ov_url: str = Field(
+        default="http://localhost:1933",
+        description="OpenViking server base URL (used when backend is 'ov' or 'ov+local').",
+    )
+    ov_api_key: str | None = Field(
+        default=None,
+        description="Optional API key for the OpenViking server.",
     )
 
 

@@ -2,12 +2,15 @@
 
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel
 
 from deerflow.config.paths import get_paths
+
+if TYPE_CHECKING:
+    from deerflow.identity.agent_identity import AgentIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -24,33 +27,54 @@ class AgentConfig(BaseModel):
     tool_groups: list[str] | None = None
 
 
-def load_agent_config(name: str | None) -> AgentConfig | None:
+def load_agent_config(name: str | None, identity: "AgentIdentity | None" = None) -> AgentConfig | None:
     """Load the custom or default agent's config from its directory.
+
+    When *identity* is provided and non-global (has dept_id or user_id), the
+    identity-scoped path is tried first:
+      depts/{dept_id}/users/{user_id}/agents/{name}/config.yaml
+    If that directory or config.yaml does not exist, None is returned
+    (the caller should fall back to global defaults).
+
+    When *identity* is absent or global, the original path is used:
+      agents/{name}/config.yaml
 
     Args:
         name: The agent name.
+        identity: Optional three-tier identity for path resolution.
 
     Returns:
-        AgentConfig instance.
+        AgentConfig instance, or None if no config file was found.
 
     Raises:
-        FileNotFoundError: If the agent directory or config.yaml does not exist.
-        ValueError: If config.yaml cannot be parsed.
+        FileNotFoundError: Only for the legacy (no-identity) path when the
+            agent directory itself is missing.
+        ValueError: If the agent name is invalid (legacy path only).
     """
-
     if name is None:
         return None
 
-    if not AGENT_NAME_PATTERN.match(name):
-        raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
-    agent_dir = get_paths().agent_dir(name)
-    config_file = agent_dir / "config.yaml"
+    # ── Identity-scoped path (new behaviour) ────────────────────────────
+    if identity is not None and not identity.is_global:
+        agent_dir = get_paths().identity_agent_dir(identity)
+        if agent_dir is None or not agent_dir.exists():
+            # Identity directory not set up yet — gracefully return None
+            return None
+        config_file = agent_dir / "config.yaml"
+        if not config_file.exists():
+            # config.yaml is optional in the identity path
+            return None
+    else:
+        # ── Legacy path (original behaviour, unchanged) ─────────────────
+        if not AGENT_NAME_PATTERN.match(name):
+            raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
+        agent_dir = get_paths().agent_dir(name)
+        config_file = agent_dir / "config.yaml"
 
-    if not agent_dir.exists():
-        raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
-
-    if not config_file.exists():
-        raise FileNotFoundError(f"Agent config not found: {config_file}")
+        if not agent_dir.exists():
+            raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
+        if not config_file.exists():
+            raise FileNotFoundError(f"Agent config not found: {config_file}")
 
     try:
         with open(config_file, encoding="utf-8") as f:

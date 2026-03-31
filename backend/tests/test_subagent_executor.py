@@ -31,7 +31,7 @@ _MOCKED_MODULE_NAMES = [
 ]
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="module")
 def _setup_executor_classes():
     """Set up mocked modules and import real executor classes.
 

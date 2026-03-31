@@ -21,6 +21,11 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest>=8.0.0", "ruff>=0.14.11"]
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: end-to-end tests that require a live DeerFlow stack and OpenViking service (deselect with '-m not integration')",
+]
+
 [tool.uv.workspace]
 members = ["packages/harness"]
 

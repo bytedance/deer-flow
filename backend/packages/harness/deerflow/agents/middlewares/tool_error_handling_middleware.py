@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -10,6 +10,9 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
+
+if TYPE_CHECKING:
+    from deerflow.identity.agent_identity import AgentIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,7 @@ def _build_runtime_middlewares(
     include_uploads: bool,
     include_dangling_tool_call_patch: bool,
     lazy_init: bool = True,
+    identity: "AgentIdentity | None" = None,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
@@ -77,7 +81,7 @@ def _build_runtime_middlewares(
 
     middlewares: list[AgentMiddleware] = [
         ThreadDataMiddleware(lazy_init=lazy_init),
-        SandboxMiddleware(lazy_init=lazy_init),
+        SandboxMiddleware(lazy_init=lazy_init, identity=identity),
     ]
 
     if include_uploads:
@@ -122,12 +126,13 @@ def _build_runtime_middlewares(
     return middlewares
 
 
-def build_lead_runtime_middlewares(*, lazy_init: bool = True) -> list[AgentMiddleware]:
+def build_lead_runtime_middlewares(*, lazy_init: bool = True, identity: "AgentIdentity | None" = None) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
         include_uploads=True,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
+        identity=identity,
     )
 
 

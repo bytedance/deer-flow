@@ -1,4 +1,5 @@
 import logging
+from typing import TYPE_CHECKING
 
 from langchain.tools import BaseTool
 
@@ -7,6 +8,9 @@ from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, task_tool, view_image_tool
 from deerflow.tools.builtins.tool_search import reset_deferred_registry
+
+if TYPE_CHECKING:
+    from deerflow.identity.agent_identity import AgentIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,7 @@ def get_available_tools(
     include_mcp: bool = True,
     model_name: str | None = None,
     subagent_enabled: bool = False,
+    identity: "AgentIdentity | None" = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -48,6 +53,9 @@ def get_available_tools(
         include_mcp: Whether to include tools from MCP servers (default: True).
         model_name: Optional model name to determine if vision tools should be included.
         subagent_enabled: Whether to include subagent tools (task, task_status).
+        identity: Optional three-tier identity for identity-scoped extensions loading.
+                  When provided and non-global, uses load_layered_extensions(identity)
+                  instead of the global ExtensionsConfig to determine enabled MCP servers.
 
     Returns:
         List of available tools.
@@ -79,8 +87,10 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
-    # Get cached MCP tools if enabled
-    # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
+    # Get cached MCP tools if enabled.
+    # When identity is provided and non-global, use load_layered_extensions to respect
+    # per-dept/user MCP server restrictions. Otherwise use ExtensionsConfig.from_file().
+    # NOTE: We use from_file() / load_layered_extensions() instead of config.extensions
     # to always read the latest configuration from disk. This ensures that changes
     # made through the Gateway API (which runs in a separate process) are immediately
     # reflected when loading MCP tools.
@@ -89,10 +99,17 @@ def get_available_tools(
     reset_deferred_registry()
     if include_mcp:
         try:
-            from deerflow.config.extensions_config import ExtensionsConfig
             from deerflow.mcp.cache import get_cached_mcp_tools
 
-            extensions_config = ExtensionsConfig.from_file()
+            if identity is not None and not identity.is_global:
+                from deerflow.config.layered_extensions import load_layered_extensions
+
+                extensions_config = load_layered_extensions(identity)
+            else:
+                from deerflow.config.extensions_config import ExtensionsConfig
+
+                extensions_config = ExtensionsConfig.from_file()
+
             if extensions_config.get_enabled_mcp_servers():
                 mcp_tools = get_cached_mcp_tools()
                 if mcp_tools:

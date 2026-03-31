@@ -42,6 +42,17 @@ async def task_tool(
     - **bash**: Command execution specialist for running bash commands. This is only
       available when host bash is explicitly allowed or when using an isolated shell
       sandbox such as `AioSandboxProvider`.
+    - **literature-analyzer**: Deep academic paper analysis specialist. Use for
+      structured close-reading of research papers: extracting research questions,
+      methodology, findings, limitations, and differentiators from a single paper.
+    - **data-extractor**: Structured data extraction specialist. Use for extracting
+      numerical data, performance metrics, and comparison tables from research documents
+      with high accuracy.
+    - **report-writer**: Academic report writing specialist. Use for drafting specific
+      sections of scientific reports (literature review, methodology, data comparison)
+      from provided research notes and analysis outputs.
+    - **ov-retriever**: OpenViking semantic retrieval specialist. Use for searching
+      the indexed research knowledge base via `ov find` and `ov read` commands.
 
     When to use this tool:
     - Complex tasks requiring multiple steps or tools

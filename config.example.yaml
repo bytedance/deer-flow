@@ -246,6 +246,29 @@ models:
   #   max_tokens: 8192
   #   temperature: 0.7
 
+  # Example: Ollama (local inference, no API key required)
+  # Requires: uv add langchain-ollama  (run in backend/ then restart DeerFlow)
+  # Start Ollama: https://ollama.com  →  ollama serve
+  # Pull a model:  ollama pull llama3.2
+  #
+  # Text-only model:
+  # - name: ollama-llama3.2
+  #   display_name: Llama 3.2 (Ollama)
+  #   use: langchain_ollama:ChatOllama
+  #   model: llama3.2
+  #   base_url: http://localhost:11434   # optional, this is the default
+  #   temperature: 0.7
+  #   supports_thinking: false
+  #   supports_vision: false
+  #
+  # Vision-capable model (requires a multimodal model such as llava):
+  # - name: ollama-llava
+  #   display_name: LLaVA (Ollama)
+  #   use: langchain_ollama:ChatOllama
+  #   model: llava
+  #   base_url: http://localhost:11434
+  #   supports_vision: true
+
 # ============================================================================
 # Tool Groups Configuration
 # ============================================================================
@@ -681,3 +704,49 @@ checkpointer:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# Identity System
+# ============================================================================
+# dept_id / user_id / agent_name are passed at runtime via config.configurable.
+# No config.yaml changes are needed for basic identity support.
+#
+# To customize config per layer, place config.yaml files at:
+#   $DEER_FLOW_HOME/depts/{dept_id}/config.yaml
+#   $DEER_FLOW_HOME/depts/{dept_id}/users/{user_id}/config.yaml
+#   $DEER_FLOW_HOME/depts/{dept_id}/users/{user_id}/agents/{agent_name}/config.yaml
+#
+# Persona files (IDENTITY.md, SOUL.md, BOOTSTRAP.md, TOOLS.md, etc.) can be
+# placed in any layer directory.  See docs/IDENTITY_ISOLATION.md for details.
+
+# ============================================================================
+# Workspace Configuration
+# ============================================================================
+workspace:
+  backend: local  # local | minio
+
+  # MinIO backend (backend: minio 时生效)
+  # minio:
+  #   endpoint: $MINIO_ENDPOINT       # e.g. localhost:9000
+  #   bucket: deer-flow
+  #   access_key: $MINIO_ACCESS_KEY
+  #   secret_key: $MINIO_SECRET_KEY
+  #   secure: false
+  #   prefix: workspaces
+
+# ============================================================================
+# OpenViking Integration
+# ============================================================================
+# When enabled, memory can be stored/retrieved via OpenViking for three-tier
+# identity isolation (dept / user / agent).
+#
+# openviking:
+#   enabled: false
+#   url: http://localhost:1933
+#   api_key: $OV_API_KEY   # optional
+
+# Memory backend when OV is configured:
+# memory:
+#   backend: local          # local | ov | ov+local
+#   ov_url: http://localhost:1933
+#   ov_api_key: $OV_API_KEY

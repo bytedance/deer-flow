@@ -82,8 +82,12 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
     import deerflow.tools as tools_module
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    # load_layered_app_config returns get_app_config() for global identity; patch it so the
+    # test-injected app_config is used without hitting the real config.yaml on disk.
+    monkeypatch.setattr(lead_agent_module, "load_layered_app_config", lambda identity: app_config)
     monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
-    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda config, model_name, agent_name=None: [])
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda config, model_name, agent_name=None, identity=None: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "test-prompt")
 
     captured: dict[str, object] = {}
 
