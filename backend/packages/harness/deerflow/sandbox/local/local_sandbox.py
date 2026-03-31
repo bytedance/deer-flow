@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import errno
 import ntpath
 import os
 import shutil
@@ -62,14 +63,29 @@ class LocalSandbox(Sandbox):
         self.path_mappings = path_mappings or []
 
     def _is_read_only_path(self, resolved_path: str) -> bool:
-        """Check if a resolved path is under a read-only mount."""
+        """Check if a resolved path is under a read-only mount.
+
+        When multiple mappings match (nested mounts), prefer the most specific
+        mapping (i.e. the one whose local_path is the longest prefix of the
+        resolved path), similar to how ``_resolve_path`` handles container paths.
+        """
         resolved = str(Path(resolved_path).resolve())
+
+        best_mapping: PathMapping | None = None
+        best_prefix_len = -1
+
         for mapping in self.path_mappings:
             local_resolved = str(Path(mapping.local_path).resolve())
             if resolved == local_resolved or resolved.startswith(local_resolved + os.sep):
-                if mapping.read_only:
-                    return True
-        return False
+                prefix_len = len(local_resolved)
+                if prefix_len > best_prefix_len:
+                    best_prefix_len = prefix_len
+                    best_mapping = mapping
+
+        if best_mapping is None:
+            return False
+
+        return best_mapping.read_only
 
     def _resolve_path(self, path: str) -> str:
         """
@@ -137,6 +153,9 @@ class LocalSandbox(Sandbox):
 
         if not sorted_mappings:
             return output
+
+        # Note: only forward-slash separators are matched here — LocalSandbox targets
+        # macOS/Linux environments where backslash paths do not occur.
 
         # Create pattern that matches absolute paths
         # Match paths like /Users/... or other absolute paths
@@ -270,7 +289,7 @@ class LocalSandbox(Sandbox):
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved_path = self._resolve_path(path)
         if self._is_read_only_path(resolved_path):
-            raise OSError(30, "Read-only file system", path)
+            raise OSError(errno.EROFS, "Read-only file system", path)
         try:
             dir_path = os.path.dirname(resolved_path)
             if dir_path:
@@ -285,7 +304,7 @@ class LocalSandbox(Sandbox):
     def update_file(self, path: str, content: bytes) -> None:
         resolved_path = self._resolve_path(path)
         if self._is_read_only_path(resolved_path):
-            raise OSError(30, "Read-only file system", path)
+            raise OSError(errno.EROFS, "Read-only file system", path)
         try:
             dir_path = os.path.dirname(resolved_path)
             if dir_path:

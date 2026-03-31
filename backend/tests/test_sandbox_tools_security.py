@@ -613,9 +613,7 @@ def test_get_custom_mounts_caching(monkeypatch) -> None:
     mock_sandbox = SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", mounts=mounts)
     mock_config = SimpleNamespace(sandbox=mock_sandbox)
 
-    with patch("deerflow.sandbox.tools.get_app_config", mock_config) if False else patch(
-        "deerflow.config.get_app_config", return_value=mock_config
-    ):
+    with patch("deerflow.config.get_app_config", return_value=mock_config):
         result = _get_custom_mounts()
         assert len(result) == 2
 

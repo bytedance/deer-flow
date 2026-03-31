@@ -1,5 +1,6 @@
+import errno
+
 import pytest
-from pathlib import Path
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
@@ -106,7 +107,7 @@ class TestReadOnlyPath:
         # Skills dir is read-only, write should be blocked
         with pytest.raises(OSError) as exc_info:
             sandbox.write_file("/mnt/skills/new_file.py", "content")
-        assert exc_info.value.errno == 30  # EROFS
+        assert exc_info.value.errno == errno.EROFS
 
     def test_write_file_allowed_on_writable_mount(self, tmp_path):
         data_dir = tmp_path / "data"
@@ -129,7 +130,7 @@ class TestReadOnlyPath:
         ])
         with pytest.raises(OSError) as exc_info:
             sandbox.update_file("/mnt/skills/existing.py", b"updated")
-        assert exc_info.value.errno == 30
+        assert exc_info.value.errno == errno.EROFS
 
 
 class TestMultipleMounts:

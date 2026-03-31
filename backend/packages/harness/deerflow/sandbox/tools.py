@@ -125,13 +125,15 @@ def _get_custom_mounts():
         from deerflow.config import get_app_config
 
         config = get_app_config()
+        mounts = []
         if config.sandbox and config.sandbox.mounts:
-            value = list(config.sandbox.mounts)
-            _get_custom_mounts._cached = value  # type: ignore[attr-defined]
-            return value
+            mounts = list(config.sandbox.mounts)
+        _get_custom_mounts._cached = mounts  # type: ignore[attr-defined]
+        return mounts
     except Exception:
-        pass
-    return []
+        # If config loading fails, return an empty list without caching so that
+        # a later call can retry once the config is available.
+        return []
 
 
 def _is_custom_mount_path(path: str) -> bool:
@@ -468,6 +470,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
       - ``/mnt/user-data/*``  — always allowed (read + write)
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
+      - Custom mount paths (from config.yaml) — respects per-mount ``read_only`` flag
 
     Args:
         path: The virtual path to validate.
@@ -556,9 +559,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     boundary and must not be treated as isolation from the host filesystem.
 
     In local mode, commands must use virtual paths under /mnt/user-data for
-    user data access. Skills paths under /mnt/skills and ACP workspace paths
-    under /mnt/acp-workspace are allowed (path-traversal checks only; write
-    prevention for bash commands is not enforced here).
+    user data access. Skills paths under /mnt/skills, ACP workspace paths
+    under /mnt/acp-workspace, and custom mount container paths (configured in
+    config.yaml) are allowed (path-traversal checks only; write prevention
+    for bash commands is not enforced here).
     A small allowlist of common system path prefixes is kept for executable
     and device references (e.g. /bin/sh, /dev/null).
     """
