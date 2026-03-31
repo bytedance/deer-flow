@@ -53,6 +53,10 @@ class MemoryConfig(BaseModel):
         default=True,
         description="Whether to inject memory into system prompt",
     )
+    management_api_enabled: bool = Field(
+        default=False,
+        description=("Whether to expose the HTTP memory management API. Disabled by default because the gateway does not implement built-in authentication."),
+    )
     max_injection_tokens: int = Field(
         default=2000,
         ge=100,

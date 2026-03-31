@@ -740,6 +740,7 @@ class DeerFlowClient:
         config = get_memory_config()
         return {
             "enabled": config.enabled,
+            "management_api_enabled": config.management_api_enabled,
             "storage_path": config.storage_path,
             "debounce_seconds": config.debounce_seconds,
             "max_facts": config.max_facts,

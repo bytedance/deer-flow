@@ -15,6 +15,7 @@ from deerflow.agents.memory.updater import (
 from deerflow.config.memory_config import get_memory_config
 
 router = APIRouter(prefix="/api", tags=["memory"])
+MEMORY_MANAGEMENT_DISABLED_DETAIL = "Memory management API is disabled. Set memory.management_api_enabled to true to enable it."
 
 
 class ContextSection(BaseModel):
@@ -90,7 +91,7 @@ class MemoryConfigResponse(BaseModel):
     """Response model for memory configuration."""
 
     enabled: bool = Field(..., description="Whether memory is enabled")
-    storage_path: str = Field(..., description="Path to memory storage file")
+    management_api_enabled: bool = Field(..., description="Whether the HTTP memory management API is enabled")
     debounce_seconds: int = Field(..., description="Debounce time for memory updates")
     max_facts: int = Field(..., description="Maximum number of facts to store")
     fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
@@ -103,6 +104,26 @@ class MemoryStatusResponse(BaseModel):
 
     config: MemoryConfigResponse
     data: MemoryResponse
+
+
+def _require_memory_management_api_enabled() -> None:
+    """Block the public memory management surface unless explicitly enabled."""
+    if not get_memory_config().management_api_enabled:
+        raise HTTPException(status_code=403, detail=MEMORY_MANAGEMENT_DISABLED_DETAIL)
+
+
+def _build_memory_config_response() -> MemoryConfigResponse:
+    """Return the safe memory configuration metadata exposed over HTTP."""
+    config = get_memory_config()
+    return MemoryConfigResponse(
+        enabled=config.enabled,
+        management_api_enabled=config.management_api_enabled,
+        debounce_seconds=config.debounce_seconds,
+        max_facts=config.max_facts,
+        fact_confidence_threshold=config.fact_confidence_threshold,
+        injection_enabled=config.injection_enabled,
+        max_injection_tokens=config.max_injection_tokens,
+    )
 
 
 @router.get(
@@ -145,6 +166,7 @@ async def get_memory() -> MemoryResponse:
         }
         ```
     """
+    _require_memory_management_api_enabled()
     memory_data = get_memory_data()
     return MemoryResponse(**memory_data)
 
@@ -164,6 +186,7 @@ async def reload_memory() -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
+    _require_memory_management_api_enabled()
     memory_data = reload_memory_data()
     return MemoryResponse(**memory_data)
 
@@ -176,6 +199,7 @@ async def reload_memory() -> MemoryResponse:
 )
 async def clear_memory() -> MemoryResponse:
     """Clear all persisted memory data."""
+    _require_memory_management_api_enabled()
     try:
         memory_data = clear_memory_data()
     except OSError as exc:
@@ -192,6 +216,7 @@ async def clear_memory() -> MemoryResponse:
 )
 async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryResponse:
     """Create a single fact manually."""
+    _require_memory_management_api_enabled()
     try:
         memory_data = create_memory_fact(
             content=request.content,
@@ -214,6 +239,7 @@ async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryRespo
 )
 async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
+    _require_memory_management_api_enabled()
     try:
         memory_data = delete_memory_fact(fact_id)
     except KeyError as exc:
@@ -232,6 +258,7 @@ async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
 )
 async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -> MemoryResponse:
     """Partially update a single fact manually."""
+    _require_memory_management_api_enabled()
     try:
         memory_data = update_memory_fact(
             fact_id=fact_id,
@@ -257,6 +284,7 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
 )
 async def export_memory() -> MemoryResponse:
     """Export the current memory data."""
+    _require_memory_management_api_enabled()
     memory_data = get_memory_data()
     return MemoryResponse(**memory_data)
 
@@ -269,6 +297,7 @@ async def export_memory() -> MemoryResponse:
 )
 async def import_memory(request: MemoryResponse) -> MemoryResponse:
     """Import and persist memory data."""
+    _require_memory_management_api_enabled()
     try:
         memory_data = import_memory_data(request.model_dump())
     except OSError as exc:
@@ -293,7 +322,7 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         ```json
         {
             "enabled": true,
-            "storage_path": ".deer-flow/memory.json",
+            "management_api_enabled": false,
             "debounce_seconds": 30,
             "max_facts": 100,
             "fact_confidence_threshold": 0.7,
@@ -302,16 +331,7 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         }
         ```
     """
-    config = get_memory_config()
-    return MemoryConfigResponse(
-        enabled=config.enabled,
-        storage_path=config.storage_path,
-        debounce_seconds=config.debounce_seconds,
-        max_facts=config.max_facts,
-        fact_confidence_threshold=config.fact_confidence_threshold,
-        injection_enabled=config.injection_enabled,
-        max_injection_tokens=config.max_injection_tokens,
-    )
+    return _build_memory_config_response()
 
 
 @router.get(
@@ -326,18 +346,10 @@ async def get_memory_status() -> MemoryStatusResponse:
     Returns:
         Combined memory configuration and current data.
     """
-    config = get_memory_config()
+    _require_memory_management_api_enabled()
     memory_data = get_memory_data()
 
     return MemoryStatusResponse(
-        config=MemoryConfigResponse(
-            enabled=config.enabled,
-            storage_path=config.storage_path,
-            debounce_seconds=config.debounce_seconds,
-            max_facts=config.max_facts,
-            fact_confidence_threshold=config.fact_confidence_threshold,
-            injection_enabled=config.injection_enabled,
-            max_injection_tokens=config.max_injection_tokens,
-        ),
+        config=_build_memory_config_response(),
         data=MemoryResponse(**memory_data),
     )
