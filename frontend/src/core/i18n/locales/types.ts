@@ -282,6 +282,10 @@ export interface Translations {
       noFacts: string;
       summaryReadOnly: string;
       memoryFullyEmpty: string;
+      memoryDisabledTitle: string;
+      memoryDisabledDescription: string;
+      managementDisabledTitle: string;
+      managementDisabledDescription: string;
       factPreviewLabel: string;
       searchPlaceholder: string;
       filterAll: string;

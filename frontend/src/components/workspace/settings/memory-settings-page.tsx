@@ -4,6 +4,7 @@ import {
   DownloadIcon,
   PenLineIcon,
   PlusIcon,
+  TriangleAlertIcon,
   Trash2Icon,
   UploadIcon,
 } from "lucide-react";
@@ -12,6 +13,11 @@ import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -31,6 +37,7 @@ import {
   useCreateMemoryFact,
   useDeleteMemoryFact,
   useImportMemory,
+  useMemoryConfig,
   useMemory,
   useUpdateMemoryFact,
 } from "@/core/memory/hooks";
@@ -275,7 +282,19 @@ function upperFirst(str: string) {
 
 export function MemorySettingsPage() {
   const { t } = useI18n();
-  const { memory, isLoading, error } = useMemory();
+  const {
+    memoryConfig,
+    isLoading: isConfigLoading,
+    error: configError,
+  } = useMemoryConfig();
+  const memoryManagementEnabled = Boolean(
+    memoryConfig?.enabled && memoryConfig.management_api_enabled,
+  );
+  const {
+    memory,
+    isLoading: isMemoryLoading,
+    error: memoryError,
+  } = useMemory(memoryManagementEnabled);
   const clearMemory = useClearMemory();
   const createMemoryFact = useCreateMemoryFact();
   const deleteMemoryFact = useDeleteMemoryFact();
@@ -348,6 +367,24 @@ export function MemorySettingsPage() {
     t.settings.memory.exportSuccess ?? t.common.exportSuccess;
   const importButton = t.settings.memory.importButton ?? t.common.import;
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
+  const memoryDisabledTitle =
+    t.settings.memory.memoryDisabledTitle ?? "Memory is disabled";
+  const memoryDisabledDescription =
+    t.settings.memory.memoryDisabledDescription ??
+    "This deployment has DeerFlow memory turned off, so there is no saved memory to manage here.";
+  const managementDisabledTitle =
+    t.settings.memory.managementDisabledTitle ??
+    "Memory management is disabled";
+  const managementDisabledDescription =
+    t.settings.memory.managementDisabledDescription ??
+    "This deployment does not expose persisted memory over HTTP by default. Enable memory.management_api_enabled: true only behind strong authentication.";
+  const isLoading =
+    isConfigLoading || (memoryManagementEnabled && isMemoryLoading);
+  const error = configError ?? memoryError;
+  const isMemoryFeatureDisabled = memoryConfig?.enabled === false;
+  const isMemoryManagementDisabled =
+    memoryConfig?.enabled === true &&
+    memoryConfig.management_api_enabled === false;
 
   const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
   const filteredSectionGroups = sectionGroups
@@ -543,6 +580,20 @@ export function MemorySettingsPage() {
           </div>
         ) : error ? (
           <div>Error: {error.message}</div>
+        ) : isMemoryFeatureDisabled ? (
+          <Alert>
+            <TriangleAlertIcon />
+            <AlertTitle>{memoryDisabledTitle}</AlertTitle>
+            <AlertDescription>{memoryDisabledDescription}</AlertDescription>
+          </Alert>
+        ) : isMemoryManagementDisabled ? (
+          <Alert>
+            <TriangleAlertIcon />
+            <AlertTitle>{managementDisabledTitle}</AlertTitle>
+            <AlertDescription>
+              {managementDisabledDescription}
+            </AlertDescription>
+          </Alert>
         ) : !memory ? (
           <div className="text-muted-foreground text-sm">
             {t.settings.memory.empty}

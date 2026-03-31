@@ -19,6 +19,16 @@ export interface MemoryFactPatchInput {
   confidence?: number;
 }
 
+export interface MemoryConfig {
+  enabled: boolean;
+  management_api_enabled: boolean;
+  debounce_seconds: number;
+  max_facts: number;
+  fact_confidence_threshold: number;
+  injection_enabled: boolean;
+  max_injection_tokens: number;
+}
+
 export interface UserMemory {
   version: string;
   lastUpdated: string;

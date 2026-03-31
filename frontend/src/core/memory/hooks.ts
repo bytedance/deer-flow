@@ -5,6 +5,7 @@ import {
   createMemoryFact,
   deleteMemoryFact,
   importMemory,
+  loadMemoryConfig,
   loadMemory,
   updateMemoryFact,
 } from "./api";
@@ -14,12 +15,21 @@ import type {
   UserMemory,
 } from "./types";
 
-export function useMemory() {
+export function useMemoryConfig() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["memory", "config"],
+    queryFn: () => loadMemoryConfig(),
+  });
+  return { memoryConfig: data ?? null, isLoading, error };
+}
+
+export function useMemory(enabled = true) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["memory"],
     queryFn: () => loadMemory(),
+    enabled,
   });
-  return { memory: data ?? null, isLoading, error };
+  return { memory: data ?? null, isLoading: enabled ? isLoading : false, error };
 }
 
 export function useClearMemory() {

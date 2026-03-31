@@ -353,6 +353,12 @@ export const enUS: Translations = {
       summaryReadOnly:
         "Summary sections are read-only for now. You can currently add, edit, or delete individual facts, or clear all memory.",
       memoryFullyEmpty: "No memory saved yet.",
+      memoryDisabledTitle: "Memory is disabled",
+      memoryDisabledDescription:
+        "This deployment has DeerFlow memory turned off, so there is no saved memory to manage here.",
+      managementDisabledTitle: "Memory management is disabled",
+      managementDisabledDescription:
+        "This deployment does not expose persisted memory over HTTP by default. Enable memory.management_api_enabled: true only behind strong authentication.",
       factPreviewLabel: "Fact to delete",
       searchPlaceholder: "Search memory",
       filterAll: "All",
