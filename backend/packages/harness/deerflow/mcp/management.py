@@ -86,9 +86,7 @@ def update_mcp_server_enabled_states(
     """
     resolved_path, config_data = _load_raw_extensions_config(config_path)
     if resolved_path is None:
-        raise FileNotFoundError(
-            "Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root."
-        )
+        raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
     raw_servers = config_data["mcpServers"]
     unknown_servers = sorted(set(enabled_updates) - set(raw_servers))
