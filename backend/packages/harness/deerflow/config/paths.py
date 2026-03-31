@@ -1,12 +1,47 @@
 import os
 import re
 import shutil
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _validate_thread_id(thread_id: str) -> str:
+    """Validate a thread ID before using it in filesystem paths."""
+    if not _SAFE_THREAD_ID_RE.match(thread_id):
+        raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+    return thread_id
+
+
+def _join_host_path(base: str, *parts: str) -> str:
+    """Join host filesystem path segments while preserving native style.
+
+    Docker Desktop on Windows expects bind mount sources to stay in Windows
+    path form (for example ``C:\\repo\\backend\\.deer-flow``).  Using
+    ``Path(base) / ...`` on a POSIX host can accidentally rewrite those paths
+    with mixed separators, so this helper preserves the original style.
+    """
+    if not parts:
+        return base
+
+    if re.match(r"^[A-Za-z]:[\\/]", base) or base.startswith("\\\\") or "\\" in base:
+        result = PureWindowsPath(base)
+        for part in parts:
+            result /= part
+        return str(result)
+
+    result = Path(base)
+    for part in parts:
+        result /= part
+    return str(result)
+
+
+def join_host_path(base: str, *parts: str) -> str:
+    """Join host filesystem path segments while preserving native style."""
+    return _join_host_path(base, *parts)
 
 
 class Paths:
@@ -53,6 +88,12 @@ class Paths:
         if env := os.getenv("DEER_FLOW_HOST_BASE_DIR"):
             return Path(env)
         return self.base_dir
+
+    def _host_base_dir_str(self) -> str:
+        """Return the host base dir as a raw string for bind mounts."""
+        if env := os.getenv("DEER_FLOW_HOST_BASE_DIR"):
+            return env
+        return str(self.base_dir)
 
     @property
     def base_dir(self) -> Path:
@@ -103,9 +144,7 @@ class Paths:
             ValueError: If `thread_id` contains unsafe characters (path separators
                         or `..`) that could cause directory traversal.
         """
-        if not _SAFE_THREAD_ID_RE.match(thread_id):
-            raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
-        return self.base_dir / "threads" / thread_id
+        return self.base_dir / "threads" / _validate_thread_id(thread_id)
 
     def sandbox_work_dir(self, thread_id: str) -> Path:
         """
@@ -149,6 +188,30 @@ class Paths:
         Sandbox: `/mnt/user-data/`
         """
         return self.thread_dir(thread_id) / "user-data"
+
+    def host_thread_dir(self, thread_id: str) -> str:
+        """Host path for a thread directory, preserving Windows path syntax."""
+        return _join_host_path(self._host_base_dir_str(), "threads", _validate_thread_id(thread_id))
+
+    def host_sandbox_user_data_dir(self, thread_id: str) -> str:
+        """Host path for a thread's user-data root."""
+        return _join_host_path(self.host_thread_dir(thread_id), "user-data")
+
+    def host_sandbox_work_dir(self, thread_id: str) -> str:
+        """Host path for the workspace mount source."""
+        return _join_host_path(self.host_sandbox_user_data_dir(thread_id), "workspace")
+
+    def host_sandbox_uploads_dir(self, thread_id: str) -> str:
+        """Host path for the uploads mount source."""
+        return _join_host_path(self.host_sandbox_user_data_dir(thread_id), "uploads")
+
+    def host_sandbox_outputs_dir(self, thread_id: str) -> str:
+        """Host path for the outputs mount source."""
+        return _join_host_path(self.host_sandbox_user_data_dir(thread_id), "outputs")
+
+    def host_acp_workspace_dir(self, thread_id: str) -> str:
+        """Host path for the ACP workspace mount source."""
+        return _join_host_path(self.host_thread_dir(thread_id), "acp-workspace")
 
     def ensure_thread_dirs(self, thread_id: str) -> None:
         """Create all standard sandbox directories for a thread.
