@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 
@@ -39,7 +40,7 @@ from fastapi import FastAPI, HTTPException
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Suppress only the InsecureRequestWarning from urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -59,6 +60,7 @@ SANDBOX_IMAGE = os.environ.get(
 )
 SKILLS_HOST_PATH = os.environ.get("SKILLS_HOST_PATH", "/skills")
 THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
+SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 
 # Path to the kubeconfig *inside* the provisioner container.
 # Typically the host's ~/.kube/config is mounted here.
@@ -68,6 +70,36 @@ KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
 # services on the host Kubernetes node.  On Docker Desktop for macOS this
 # is ``host.docker.internal``; on Linux it may be the host's LAN IP.
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
+
+
+def join_host_path(base: str, *parts: str) -> str:
+    """Join host filesystem path segments while preserving native style."""
+    if not parts:
+        return base
+
+    if re.match(r"^[A-Za-z]:[\\/]", base) or base.startswith("\\\\") or "\\" in base:
+        from pathlib import PureWindowsPath
+
+        result = PureWindowsPath(base)
+        for part in parts:
+            result /= part
+        return str(result)
+
+    from pathlib import Path
+
+    result = Path(base)
+    for part in parts:
+        result /= part
+    return str(result)
+
+
+def _validate_thread_id(thread_id: str) -> str:
+    if not re.match(SAFE_THREAD_ID_PATTERN, thread_id):
+        raise ValueError(
+            "Invalid thread_id: only alphanumeric characters, hyphens, and underscores are allowed."
+        )
+    return thread_id
+
 
 # ── K8s client setup ────────────────────────────────────────────────────
 
@@ -186,7 +218,7 @@ app = FastAPI(title="DeerFlow Sandbox Provisioner", lifespan=lifespan)
 
 class CreateSandboxRequest(BaseModel):
     sandbox_id: str
-    thread_id: str
+    thread_id: str = Field(pattern=SAFE_THREAD_ID_PATTERN)
 
 
 class SandboxResponse(BaseModel):
@@ -213,6 +245,7 @@ def _sandbox_url(node_port: int) -> str:
 
 def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
+    thread_id = _validate_thread_id(thread_id)
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
@@ -298,7 +331,7 @@ def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
                 k8s_client.V1Volume(
                     name="user-data",
                     host_path=k8s_client.V1HostPathVolumeSource(
-                        path=f"{THREADS_HOST_PATH}/{thread_id}/user-data",
+                        path=join_host_path(THREADS_HOST_PATH, thread_id, "user-data"),
                         type="DirectoryOrCreate",
                     ),
                 ),
