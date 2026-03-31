@@ -648,18 +648,63 @@ class TestConfigManagement:
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
         assert c.get_skill("nonexistent-skill-xyz") is None
 
-    def test_get_mcp_config_returns_dict(self, e2e_env):
-        """get_mcp_config() returns a dict with 'mcp_servers' key."""
+    def test_get_mcp_config_returns_dict(self, e2e_env, monkeypatch):
+        """get_mcp_config() returns the public MCP summary only."""
+        config_file = e2e_env["tmp_path"] / "extensions_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "test-server": {
+                            "enabled": True,
+                            "type": "stdio",
+                            "command": "echo",
+                            "args": ["hello"],
+                            "env": {"TEST_TOKEN": "$TEST_TOKEN"},
+                            "description": "Test server",
+                        }
+                    },
+                    "skills": {},
+                }
+            )
+        )
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
+        from deerflow.config.extensions_config import reload_extensions_config
+
+        reload_extensions_config()
+
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
         result = c.get_mcp_config()
-        assert "mcp_servers" in result
-        assert isinstance(result["mcp_servers"], dict)
+        assert result == {
+            "mcp_servers": {
+                "test-server": {
+                    "enabled": True,
+                    "description": "Test server",
+                }
+            }
+        }
 
     def test_update_mcp_config_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
         """update_mcp_config() writes extensions_config.json and invalidates the agent."""
         # Set up a writable extensions_config.json
         config_file = tmp_path / "extensions_config.json"
-        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
+        config_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "test-server": {
+                            "enabled": False,
+                            "type": "stdio",
+                            "command": "echo",
+                            "args": ["hello"],
+                            "env": {"TEST_TOKEN": "$TEST_TOKEN"},
+                            "description": "Test server",
+                        }
+                    },
+                    "skills": {},
+                }
+            )
+        )
         monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
 
         # Force reload so the singleton picks up our test file
@@ -672,7 +717,7 @@ class TestConfigManagement:
         c._agent = "fake-agent-placeholder"
         c._agent_config_key = ("a", "b", "c", "d")
 
-        result = c.update_mcp_config({"test-server": {"enabled": True, "type": "stdio", "command": "echo"}})
+        result = c.update_mcp_config({"test-server": {"enabled": True}})
         assert "mcp_servers" in result
 
         # Agent should be invalidated
@@ -682,6 +727,9 @@ class TestConfigManagement:
         # File should be written
         written = json.loads(config_file.read_text())
         assert "test-server" in written["mcpServers"]
+        assert written["mcpServers"]["test-server"]["enabled"] is True
+        assert written["mcpServers"]["test-server"]["command"] == "echo"
+        assert written["mcpServers"]["test-server"]["env"]["TEST_TOKEN"] == "$TEST_TOKEN"
 
     def test_update_skill_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
         """update_skill() writes extensions_config.json and invalidates the agent."""

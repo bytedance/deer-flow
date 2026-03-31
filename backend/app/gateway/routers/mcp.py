@@ -1,48 +1,31 @@
-import json
 import logging
-from pathlib import Path
-from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import get_extensions_config
+from deerflow.mcp.management import summarize_mcp_servers, update_mcp_server_enabled_states
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
 
 
-class McpOAuthConfigResponse(BaseModel):
-    """OAuth configuration for an MCP server."""
-
-    enabled: bool = Field(default=True, description="Whether OAuth token injection is enabled")
-    token_url: str = Field(default="", description="OAuth token endpoint URL")
-    grant_type: Literal["client_credentials", "refresh_token"] = Field(default="client_credentials", description="OAuth grant type")
-    client_id: str | None = Field(default=None, description="OAuth client ID")
-    client_secret: str | None = Field(default=None, description="OAuth client secret")
-    refresh_token: str | None = Field(default=None, description="OAuth refresh token")
-    scope: str | None = Field(default=None, description="OAuth scope")
-    audience: str | None = Field(default=None, description="OAuth audience")
-    token_field: str = Field(default="access_token", description="Token response field containing access token")
-    token_type_field: str = Field(default="token_type", description="Token response field containing token type")
-    expires_in_field: str = Field(default="expires_in", description="Token response field containing expires-in seconds")
-    default_token_type: str = Field(default="Bearer", description="Default token type when response omits token_type")
-    refresh_skew_seconds: int = Field(default=60, description="Refresh this many seconds before expiry")
-    extra_token_params: dict[str, str] = Field(default_factory=dict, description="Additional form params sent to token endpoint")
-
-
 class McpServerConfigResponse(BaseModel):
-    """Response model for MCP server configuration."""
+    """Public MCP server info exposed to the settings UI."""
 
     enabled: bool = Field(default=True, description="Whether this MCP server is enabled")
-    type: str = Field(default="stdio", description="Transport type: 'stdio', 'sse', or 'http'")
-    command: str | None = Field(default=None, description="Command to execute to start the MCP server (for stdio type)")
-    args: list[str] = Field(default_factory=list, description="Arguments to pass to the command (for stdio type)")
-    env: dict[str, str] = Field(default_factory=dict, description="Environment variables for the MCP server")
-    url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
-    headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
-    oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+
+
+class McpServerConfigUpdateRequest(BaseModel):
+    """HTTP-updatable MCP server state.
+
+    The gateway intentionally allows toggling the enabled bit only. Transport
+    details stay file-managed to avoid exposing secrets or remote command
+    execution through the HTTP API.
+    """
+
+    enabled: bool = Field(..., description="Whether this MCP server is enabled")
 
 
 class McpConfigResponse(BaseModel):
@@ -55,11 +38,11 @@ class McpConfigResponse(BaseModel):
 
 
 class McpConfigUpdateRequest(BaseModel):
-    """Request model for updating MCP configuration."""
+    """Request model for updating MCP enabled states."""
 
-    mcp_servers: dict[str, McpServerConfigResponse] = Field(
+    mcp_servers: dict[str, McpServerConfigUpdateRequest] = Field(
         ...,
-        description="Map of MCP server name to configuration",
+        description="Map of MCP server name to enabled-state updates",
     )
 
 
@@ -70,10 +53,10 @@ class McpConfigUpdateRequest(BaseModel):
     description="Retrieve the current Model Context Protocol (MCP) server configurations.",
 )
 async def get_mcp_configuration() -> McpConfigResponse:
-    """Get the current MCP configuration.
+    """Get the current MCP configuration summary.
 
     Returns:
-        The current MCP configuration with all servers.
+        The current MCP configuration summary with all servers.
 
     Example:
         ```json
@@ -81,9 +64,6 @@ async def get_mcp_configuration() -> McpConfigResponse:
             "mcp_servers": {
                 "github": {
                     "enabled": true,
-                    "command": "npx",
-                    "args": ["-y", "@modelcontextprotocol/server-github"],
-                    "env": {"GITHUB_TOKEN": "ghp_xxx"},
                     "description": "GitHub MCP server for repository operations"
                 }
             }
@@ -92,7 +72,7 @@ async def get_mcp_configuration() -> McpConfigResponse:
     """
     config = get_extensions_config()
 
-    return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in config.mcp_servers.items()})
+    return McpConfigResponse(mcp_servers=summarize_mcp_servers(config))
 
 
 @router.put(
@@ -102,20 +82,21 @@ async def get_mcp_configuration() -> McpConfigResponse:
     description="Update Model Context Protocol (MCP) server configurations and save to file.",
 )
 async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfigResponse:
-    """Update the MCP configuration.
+    """Update MCP enabled states for existing servers.
 
     This will:
-    1. Save the new configuration to the mcp_config.json file
-    2. Reload the configuration cache
-    3. Reset MCP tools cache to trigger reinitialization
+    1. Persist `enabled` changes for existing MCP servers
+    2. Preserve the raw JSON transport definitions and env placeholders
+    3. Reload the configuration cache
 
     Args:
-        request: The new MCP configuration to save.
+        request: The MCP enabled-state changes to save.
 
     Returns:
-        The updated MCP configuration.
+        The updated MCP configuration summary.
 
     Raises:
+        HTTPException: 404 if an MCP server is unknown.
         HTTPException: 500 if the configuration file cannot be written.
 
     Example Request:
@@ -123,47 +104,24 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
         {
             "mcp_servers": {
                 "github": {
-                    "enabled": true,
-                    "command": "npx",
-                    "args": ["-y", "@modelcontextprotocol/server-github"],
-                    "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"},
-                    "description": "GitHub MCP server for repository operations"
+                    "enabled": true
                 }
             }
         }
         ```
     """
     try:
-        # Get the current config path (or determine where to save it)
-        config_path = ExtensionsConfig.resolve_config_path()
-
-        # If no config file exists, create one in the parent directory (project root)
-        if config_path is None:
-            config_path = Path.cwd().parent / "extensions_config.json"
-            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
-
-        # Load current config to preserve skills configuration
-        current_config = get_extensions_config()
-
-        # Convert request to dict format for JSON serialization
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in request.mcp_servers.items()},
-            "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
-        }
-
-        # Write the configuration to file
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
-
-        logger.info(f"MCP configuration updated and saved to: {config_path}")
-
-        # NOTE: No need to reload/reset cache here - LangGraph Server (separate process)
-        # will detect config file changes via mtime and reinitialize MCP tools automatically
-
-        # Reload the configuration and update the global cache
-        reloaded_config = reload_extensions_config()
-        return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in reloaded_config.mcp_servers.items()})
-
+        enabled_updates = {name: server.enabled for name, server in request.mcp_servers.items()}
+        reloaded_config = update_mcp_server_enabled_states(enabled_updates)
+        logger.info("MCP enabled states updated for server(s): %s", ", ".join(sorted(enabled_updates)))
+        return McpConfigResponse(mcp_servers=summarize_mcp_servers(reloaded_config))
+    except KeyError as e:
+        detail = e.args[0] if e.args else str(e)
+        raise HTTPException(status_code=404, detail=detail) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")

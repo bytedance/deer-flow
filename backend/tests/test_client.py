@@ -481,52 +481,47 @@ class TestGetModel:
 class TestMcpConfig:
     def test_get_mcp_config(self, client):
         server = MagicMock()
-        server.model_dump.return_value = {"enabled": True, "type": "stdio"}
+        server.enabled = True
+        server.description = "GitHub operations"
         ext_config = MagicMock()
         ext_config.mcp_servers = {"github": server}
 
         with patch("deerflow.client.get_extensions_config", return_value=ext_config):
             result = client.get_mcp_config()
 
-        assert "mcp_servers" in result
-        assert "github" in result["mcp_servers"]
-        assert result["mcp_servers"]["github"]["enabled"] is True
+        assert result == {
+            "mcp_servers": {
+                "github": {
+                    "enabled": True,
+                    "description": "GitHub operations",
+                }
+            }
+        }
 
     def test_update_mcp_config(self, client):
-        # Set up current config with skills
-        current_config = MagicMock()
-        current_config.skills = {}
-
         reloaded_server = MagicMock()
-        reloaded_server.model_dump.return_value = {"enabled": True, "type": "sse"}
+        reloaded_server.enabled = True
+        reloaded_server.description = "New server"
         reloaded_config = MagicMock()
         reloaded_config.mcp_servers = {"new-server": reloaded_server}
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({}, f)
-            tmp_path = Path(f.name)
+        client._agent = MagicMock()
+        client._agent_config_key = ("model", True, False, False)
 
-        try:
-            # Pre-set agent to verify it gets invalidated
-            client._agent = MagicMock()
+        with patch("deerflow.client.update_mcp_server_enabled_states", return_value=reloaded_config) as mock_update:
+            result = client.update_mcp_config({"new-server": {"enabled": True, "type": "sse"}})
 
-            with (
-                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
-                patch("deerflow.client.get_extensions_config", return_value=current_config),
-                patch("deerflow.client.reload_extensions_config", return_value=reloaded_config),
-            ):
-                result = client.update_mcp_config({"new-server": {"enabled": True, "type": "sse"}})
-
-            assert "mcp_servers" in result
-            assert "new-server" in result["mcp_servers"]
-            assert client._agent is None  # M2: agent invalidated
-
-            # Verify file was actually written
-            with open(tmp_path) as f:
-                saved = json.load(f)
-            assert "mcpServers" in saved
-        finally:
-            tmp_path.unlink()
+        mock_update.assert_called_once_with({"new-server": True})
+        assert result == {
+            "mcp_servers": {
+                "new-server": {
+                    "enabled": True,
+                    "description": "New server",
+                }
+            }
+        }
+        assert client._agent is None
+        assert client._agent_config_key is None
 
 
 # ---------------------------------------------------------------------------
@@ -1102,20 +1097,14 @@ class TestScenarioConfigManagement:
             config_file.write_text("{}")
 
             # --- MCP update ---
-            current_config = MagicMock()
-            current_config.skills = {}
-
             reloaded_server = MagicMock()
-            reloaded_server.model_dump.return_value = {"enabled": True, "type": "sse"}
+            reloaded_server.enabled = True
+            reloaded_server.description = "MCP server"
             reloaded_config = MagicMock()
             reloaded_config.mcp_servers = {"my-mcp": reloaded_server}
 
             client._agent = MagicMock()  # Simulate existing agent
-            with (
-                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
-                patch("deerflow.client.get_extensions_config", return_value=current_config),
-                patch("deerflow.client.reload_extensions_config", return_value=reloaded_config),
-            ):
+            with patch("deerflow.client.update_mcp_server_enabled_states", return_value=reloaded_config):
                 mcp_result = client.update_mcp_config({"my-mcp": {"enabled": True}})
             assert "my-mcp" in mcp_result["mcp_servers"]
             assert client._agent is None  # Agent invalidated
@@ -1599,16 +1588,8 @@ class TestGatewayConformance:
 
     def test_get_mcp_config(self, client):
         server = MagicMock()
-        server.model_dump.return_value = {
-            "enabled": True,
-            "type": "stdio",
-            "command": "npx",
-            "args": ["-y", "server"],
-            "env": {},
-            "url": None,
-            "headers": {},
-            "description": "test server",
-        }
+        server.enabled = True
+        server.description = "test server"
         ext_config = MagicMock()
         ext_config.mcp_servers = {"test": server}
 
@@ -1617,35 +1598,24 @@ class TestGatewayConformance:
 
         parsed = McpConfigResponse(**result)
         assert "test" in parsed.mcp_servers
+        assert parsed.mcp_servers["test"].enabled is True
+        assert parsed.mcp_servers["test"].description == "test server"
 
-    def test_update_mcp_config(self, client, tmp_path):
+    def test_update_mcp_config(self, client):
         server = MagicMock()
-        server.model_dump.return_value = {
-            "enabled": True,
-            "type": "stdio",
-            "command": "npx",
-            "args": [],
-            "env": {},
-            "url": None,
-            "headers": {},
-            "description": "",
-        }
+        server.enabled = False
+        server.description = "updated server"
         ext_config = MagicMock()
         ext_config.mcp_servers = {"srv": server}
-        ext_config.skills = {}
 
-        config_file = tmp_path / "extensions_config.json"
-        config_file.write_text("{}")
+        with patch("deerflow.client.update_mcp_server_enabled_states", return_value=ext_config) as mock_update:
+            result = client.update_mcp_config({"srv": {"enabled": False, "description": "ignored"}})
 
-        with (
-            patch("deerflow.client.get_extensions_config", return_value=ext_config),
-            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
-            patch("deerflow.client.reload_extensions_config", return_value=ext_config),
-        ):
-            result = client.update_mcp_config({"srv": server.model_dump.return_value})
-
+        mock_update.assert_called_once_with({"srv": False})
         parsed = McpConfigResponse(**result)
         assert "srv" in parsed.mcp_servers
+        assert parsed.mcp_servers["srv"].enabled is False
+        assert parsed.mcp_servers["srv"].description == "updated server"
 
     def test_upload_files(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"
@@ -1964,9 +1934,12 @@ class TestAtomicWriteJson:
 class TestConfigUpdateErrors:
     def test_update_mcp_config_no_config_file(self, client):
         """FileNotFoundError when extensions_config.json cannot be located."""
-        with patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=None):
+        with patch(
+            "deerflow.client.update_mcp_server_enabled_states",
+            side_effect=FileNotFoundError("Cannot locate extensions_config.json."),
+        ):
             with pytest.raises(FileNotFoundError, match="Cannot locate"):
-                client.update_mcp_config({"server": {}})
+                client.update_mcp_config({"server": {"enabled": True}})
 
     def test_update_skill_no_config_file(self, client):
         """FileNotFoundError when extensions_config.json cannot be located."""
@@ -2353,21 +2326,14 @@ class TestBugAgentInvalidationInconsistency:
         client._agent = MagicMock()
         client._agent_config_key = ("model", True, False, False)
 
-        current_config = MagicMock()
-        current_config.skills = {}
+        reloaded_server = MagicMock()
+        reloaded_server.enabled = True
+        reloaded_server.description = "Reset test"
         reloaded = MagicMock()
-        reloaded.mcp_servers = {}
+        reloaded.mcp_servers = {"srv": reloaded_server}
 
-        with tempfile.TemporaryDirectory() as tmp:
-            config_file = Path(tmp) / "ext.json"
-            config_file.write_text("{}")
-
-            with (
-                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
-                patch("deerflow.client.get_extensions_config", return_value=current_config),
-                patch("deerflow.client.reload_extensions_config", return_value=reloaded),
-            ):
-                client.update_mcp_config({})
+        with patch("deerflow.client.update_mcp_server_enabled_states", return_value=reloaded):
+            client.update_mcp_config({"srv": {"enabled": True}})
 
         assert client._agent is None
         assert client._agent_config_key is None
