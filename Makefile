@@ -97,8 +97,7 @@ setup-sandbox:
 # Start all services in development mode (with hot-reloading)
 dev:
 ifeq ($(OS),Windows_NT)
-	@echo "Detected Windows - using Git Bash..."
-	@$(BASH) ./scripts/serve.sh --dev
+	@call scripts\run-with-git-bash.cmd ./scripts/serve.sh --dev
 else
 	@./scripts/serve.sh --dev
 endif
@@ -106,8 +105,7 @@ endif
 # Start all services in production mode (with optimizations)
 start:
 ifeq ($(OS),Windows_NT)
-	@echo "Detected Windows - using Git Bash..."
-	@$(BASH) ./scripts/serve.sh --prod
+	@call scripts\run-with-git-bash.cmd ./scripts/serve.sh --prod
 else
 	@./scripts/serve.sh --prod
 endif

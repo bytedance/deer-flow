@@ -13,7 +13,7 @@
 - ✅ 提供 `get_title_config()` 和 `set_title_config()` 函数
 - ✅ 提供 `load_title_config_from_dict()` 从配置文件加载
 
-#### [`packages/harness/deerflow/agents/title_middleware.py`](../packages/harness/deerflow/agents/title_middleware.py) (新建)
+#### [`packages/harness/deerflow/agents/middlewares/title_middleware.py`](../packages/harness/deerflow/agents/middlewares/title_middleware.py) (新建)
 - ✅ 创建 `TitleMiddleware` 类
 - ✅ 实现 `_should_generate_title()` 检查是否需要生成
 - ✅ 实现 `_generate_title()` 调用 LLM 生成标题

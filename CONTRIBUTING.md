@@ -70,6 +70,13 @@ make docker-logs-frontend
 make docker-logs-gateway
 ```
 
+If Docker builds are slow in your network, you can override the default package registries before running `make docker-init` or `make docker-start`:
+
+```bash
+export UV_INDEX_URL=https://pypi.org/simple
+export NPM_REGISTRY=https://registry.npmjs.org
+```
+
 #### Linux: Docker daemon permission denied
 
 If `make docker-init`, `make docker-start`, or `make docker-stop` fails on Linux with an error like below, your current user likely does not have permission to access the Docker daemon socket:
@@ -250,15 +257,26 @@ Nginx (port 2026) ← Unified entry point
 
 2. **Make your changes** with hot-reload enabled
 
-3. **Test your changes** thoroughly
+3. **Format and lint your code** (CI will reject unformatted code):
+   ```bash
+   # Backend
+   cd backend
+   make format   # ruff check --fix + ruff format
 
-4. **Commit your changes**:
+   # Frontend
+   cd frontend
+   pnpm format:write   # Prettier
+   ```
+
+4. **Test your changes** thoroughly
+
+5. **Commit your changes**:
    ```bash
    git add .
    git commit -m "feat: description of your changes"
    ```
 
-5. **Push and create a Pull Request**:
+6. **Push and create a Pull Request**:
    ```bash
    git push origin feature/your-feature-name
    ```
@@ -284,8 +302,9 @@ Every pull request runs the backend regression workflow at [.github/workflows/ba
 
 ## Code Style
 
-- **Backend (Python)**: We use `ruff` for linting and formatting
-- **Frontend (TypeScript)**: We use ESLint and Prettier
+- **Backend (Python)**: We use `ruff` for linting and formatting. Run `make format` before committing.
+- **Frontend (TypeScript)**: We use ESLint and Prettier. Run `pnpm format:write` before committing.
+- CI enforces formatting — PRs with unformatted code will fail the lint check.
 
 ## Documentation
 
