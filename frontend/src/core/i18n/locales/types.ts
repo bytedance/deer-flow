@@ -33,6 +33,7 @@ export interface Translations {
     save: string;
     install: string;
     create: string;
+    import: string;
     export: string;
     exportAsMarkdown: string;
     exportAsJSON: string;
@@ -249,6 +250,15 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
+      exportButton: string;
+      exportSuccess: string;
+      importButton: string;
+      importConfirmTitle: string;
+      importConfirmDescription: string;
+      importFileLabel: string;
+      importInvalidFile: string;
+      importSuccess: string;
+      manualFactSource: string;
       addFact: string;
       addFactTitle: string;
       editFactTitle: string;
@@ -270,7 +280,6 @@ export interface Translations {
       factSave: string;
       factValidationContent: string;
       factValidationConfidence: string;
-      manualFactSource: string;
       noFacts: string;
       summaryReadOnly: string;
       memoryFullyEmpty: string;

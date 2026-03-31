@@ -507,6 +507,18 @@ class DeerFlowClient:
 
         return get_memory_data()
 
+    def export_memory(self) -> dict:
+        """Export current memory data for backup or transfer."""
+        from deerflow.agents.memory.updater import get_memory_data
+
+        return get_memory_data()
+
+    def import_memory(self, memory_data: dict) -> dict:
+        """Import and persist full memory data."""
+        from deerflow.agents.memory.updater import import_memory_data
+
+        return import_memory_data(memory_data)
+
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
 
