@@ -19,7 +19,7 @@ class JinaClient:
             logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
         data = {"url": url}
         try:
-            response = requests.post("https://r.jina.ai/", headers=headers, json=data)
+            response = requests.post("https://r.jina.ai/", headers=headers, json=data, timeout=timeout)
 
             if response.status_code != 200:
                 error_message = f"Jina API returned status {response.status_code}: {response.text}"
