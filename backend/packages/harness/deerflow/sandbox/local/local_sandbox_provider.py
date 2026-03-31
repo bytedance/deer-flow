@@ -44,9 +44,20 @@ class LocalSandboxProvider(SandboxProvider):
                 ))
 
             # Map custom mounts from sandbox config
+            _RESERVED_CONTAINER_PREFIXES = ["/mnt/skills", "/mnt/acp-workspace", "/mnt/user-data"]
             sandbox_config = config.sandbox
             if sandbox_config and sandbox_config.mounts:
                 for mount in sandbox_config.mounts:
+                    # Reject mounts that conflict with reserved container paths
+                    if any(
+                        mount.container_path == p or mount.container_path.startswith(p + "/")
+                        for p in _RESERVED_CONTAINER_PREFIXES
+                    ):
+                        logger.warning(
+                            "Mount container_path conflicts with reserved prefix, skipping: %s",
+                            mount.container_path,
+                        )
+                        continue
                     # Ensure the host path exists before adding mapping
                     host_path = Path(mount.host_path)
                     if host_path.exists():

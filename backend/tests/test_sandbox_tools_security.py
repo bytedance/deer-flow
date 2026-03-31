@@ -623,3 +623,36 @@ def test_get_custom_mounts_caching(monkeypatch) -> None:
 
     # Cleanup
     monkeypatch.delattr(_get_custom_mounts, "_cached")
+
+
+def test_get_custom_mounts_filters_nonexistent_host_path(monkeypatch, tmp_path) -> None:
+    """_get_custom_mounts should only return mounts whose host_path exists."""
+    if hasattr(_get_custom_mounts, "_cached"):
+        monkeypatch.delattr(_get_custom_mounts, "_cached")
+
+    from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+
+    existing_dir = tmp_path / "existing"
+    existing_dir.mkdir()
+
+    mounts = [
+        VolumeMountConfig(host_path=str(existing_dir), container_path="/mnt/existing", read_only=True),
+        VolumeMountConfig(host_path="/nonexistent/path/12345", container_path="/mnt/ghost", read_only=False),
+    ]
+    mock_sandbox = SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", mounts=mounts)
+    mock_config = SimpleNamespace(sandbox=mock_sandbox)
+
+    with patch("deerflow.config.get_app_config", return_value=mock_config):
+        result = _get_custom_mounts()
+        assert len(result) == 1
+        assert result[0].container_path == "/mnt/existing"
+
+    # Cleanup
+    monkeypatch.delattr(_get_custom_mounts, "_cached")
+
+
+def test_get_custom_mount_for_path_boundary_no_false_prefix_match() -> None:
+    """_get_custom_mount_for_path must not match /mnt/code-read-extra for /mnt/code-read."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        mount = _get_custom_mount_for_path("/mnt/code-read-extra/foo")
+        assert mount is None

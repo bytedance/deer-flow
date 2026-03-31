@@ -160,6 +160,26 @@ class TestMultipleMounts:
         with pytest.raises(OSError):
             sandbox.write_file("/mnt/external/file.txt", "content")
 
+    def test_nested_mounts_writable_under_readonly(self, tmp_path):
+        """A writable mount nested under a read-only mount should allow writes."""
+        ro_dir = tmp_path / "ro"
+        ro_dir.mkdir()
+        rw_dir = ro_dir / "writable"
+        rw_dir.mkdir()
+
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/repo", local_path=str(ro_dir), read_only=True),
+            PathMapping(container_path="/mnt/repo/writable", local_path=str(rw_dir), read_only=False),
+        ])
+
+        # Parent mount is read-only
+        with pytest.raises(OSError):
+            sandbox.write_file("/mnt/repo/file.txt", "content")
+
+        # Nested writable mount should allow writes
+        sandbox.write_file("/mnt/repo/writable/file.txt", "content")
+        assert (rw_dir / "file.txt").read_text() == "content"
+
     def test_execute_command_path_replacement(self, tmp_path, monkeypatch):
         data_dir = tmp_path / "data"
         data_dir.mkdir()

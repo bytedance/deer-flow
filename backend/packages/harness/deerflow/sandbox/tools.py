@@ -124,10 +124,15 @@ def _get_custom_mounts():
     try:
         from deerflow.config import get_app_config
 
+        from pathlib import Path
+
         config = get_app_config()
         mounts = []
         if config.sandbox and config.sandbox.mounts:
-            mounts = list(config.sandbox.mounts)
+            # Only include mounts whose host_path exists, consistent with
+            # LocalSandboxProvider._setup_path_mappings() which also filters
+            # by host_path.exists().
+            mounts = [m for m in config.sandbox.mounts if Path(m.host_path).exists()]
         _get_custom_mounts._cached = mounts  # type: ignore[attr-defined]
         return mounts
     except Exception:
