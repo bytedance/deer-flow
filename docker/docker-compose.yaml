@@ -121,8 +121,8 @@ services:
     container_name: deer-flow-langgraph
     command: sh -c "cd /app/backend && uv run langgraph dev --no-browser --allow-blocking --no-reload --host 0.0.0.0 --port 2024 --n-jobs-per-worker 10"
     volumes:
-      - ${DEER_FLOW_CONFIG_PATH}:/app/config.yaml:ro
-      - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/extensions_config.json:ro
+      - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
+      - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
       - ../skills:/app/skills:ro
       - ../backend/.langgraph_api:/app/backend/.langgraph_api
@@ -144,8 +144,8 @@ services:
     environment:
       - CI=true
       - DEER_FLOW_HOME=/app/backend/.deer-flow
-      - DEER_FLOW_CONFIG_PATH=/app/config.yaml
-      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/extensions_config.json
+      - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
