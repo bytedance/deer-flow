@@ -36,17 +36,25 @@ DEFAULT_EXPECTED_OUTPUTS = [
     "A concise short summary that can be reused by a presence layer",
 ]
 DEFAULT_OUTPUT_PROFILE = "default"
+SUPPORTED_OUTPUT_PROFILES = ("default", "founder", "operator")
+OUTPUT_PROFILE_ALIASES = {
+    "default": "default",
+    "founder": "founder",
+    "operator": "operator",
+    "founder_memo": "founder",
+    "operator_memo": "operator",
+}
 OUTPUT_PROFILE_INSTRUCTIONS = {
     "default": (
         "- Format the executive brief as a balanced research artifact.\n"
         "- Optimize for a reader who wants fast comprehension plus enough evidence to trust the recommendation."
     ),
-    "founder_memo": (
+    "founder": (
         "- Format the executive brief as a founder memo.\n"
         "- Prioritize decision-ready findings, strategic implications, sharp tradeoffs, and one clear recommendation.\n"
         "- Keep the body concise and avoid long implementation detail unless it changes the decision."
     ),
-    "operator_memo": (
+    "operator": (
         "- Format the executive brief as an operator memo.\n"
         "- Prioritize execution detail, evidence traceability, risks, assumptions, and the next concrete actions.\n"
         "- Make handoff-ready sections explicit so an operator can act without reinterpreting the brief."
@@ -56,6 +64,21 @@ INLINE_ATTACHMENT_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}
 INLINE_ATTACHMENT_CHAR_LIMIT = 8000
 MARKDOWN_FALLBACK_START = "EXECUTIVE_BRIEF_MARKDOWN_START"
 MARKDOWN_FALLBACK_END = "EXECUTIVE_BRIEF_MARKDOWN_END"
+
+
+def normalize_output_profile(profile: str | None, *, strict: bool) -> str:
+    """Normalize profile names while keeping compatibility with legacy aliases."""
+    normalized = (profile or DEFAULT_OUTPUT_PROFILE).strip().lower()
+    mapped = OUTPUT_PROFILE_ALIASES.get(normalized)
+    if mapped:
+        return mapped
+
+    supported = ", ".join(SUPPORTED_OUTPUT_PROFILES)
+    if strict:
+        raise ValueError(f"output_profile must be one of: {supported}")
+
+    logger.warning("Unknown output_profile=%s, fallback=%s", normalized, DEFAULT_OUTPUT_PROFILE)
+    return DEFAULT_OUTPUT_PROFILE
 
 
 class DeepResearchClientLike(Protocol):
@@ -102,10 +125,7 @@ class DeepResearchPilotRequest:
             raise ValueError("heartbeat_interval_seconds must be greater than 0")
         if self.heartbeat_start_after_seconds < 0:
             raise ValueError("heartbeat_start_after_seconds must be >= 0")
-        output_profile = (self.output_profile or DEFAULT_OUTPUT_PROFILE).strip().lower()
-        if output_profile not in OUTPUT_PROFILE_INSTRUCTIONS:
-            supported = ", ".join(sorted(OUTPUT_PROFILE_INSTRUCTIONS))
-            raise ValueError(f"output_profile must be one of: {supported}")
+        output_profile = normalize_output_profile(self.output_profile, strict=True)
 
         request_id = (self.request_id or uuid.uuid4().hex).strip()
         thread_id = (self.thread_id or f"deep-research-{request_id}").strip()
@@ -159,7 +179,7 @@ class DeepResearchPilotResult:
             request_id=str(data.get("request_id", "")),
             idempotency_key=str(data.get("idempotency_key", "")),
             thread_id=str(data.get("thread_id", "")),
-            output_profile=str(data.get("output_profile", DEFAULT_OUTPUT_PROFILE)),
+            output_profile=normalize_output_profile(str(data.get("output_profile", DEFAULT_OUTPUT_PROFILE)), strict=False),
             status=str(data.get("status", "failed")),
             short_summary=str(data.get("short_summary", "")),
             artifacts=list(data.get("artifacts", [])),
@@ -381,7 +401,7 @@ class DeepResearchPilotRunner:
             request_id=request_id,
             idempotency_key=idempotency_key,
             thread_id=str(status.get("thread_id", "")),
-            output_profile=str(status.get("output_profile", DEFAULT_OUTPUT_PROFILE)),
+            output_profile=normalize_output_profile(str(status.get("output_profile", DEFAULT_OUTPUT_PROFILE)), strict=False),
             status=str(status.get("status", "running")),
             short_summary=str(status.get("short_summary", "")),
             artifacts=list(status.get("artifacts", [])),
@@ -909,11 +929,11 @@ Expected outputs:
     def _summary_from_markdown(self, markdown: str, output_profile: str) -> str:
         lines = [line.strip() for line in markdown.splitlines() if line.strip()]
         title = self._first_heading(lines)
-        if output_profile == "founder_memo":
+        if output_profile == "founder":
             decision = self._extract_section_summary(lines, ("Decision", "Recommendation"))
             rationale = self._extract_section_summary(lines, ("One-line Rationale", "Key Findings"))
             return self._compact_summary(" ".join(part for part in (title, decision, rationale) if part))
-        if output_profile == "operator_memo":
+        if output_profile == "operator":
             objective = self._extract_section_summary(lines, ("1) Objective", "Objective"))
             next_actions = self._extract_section_summary(lines, ("9) Next Concrete Actions", "Recommendation"))
             return self._compact_summary(" ".join(part for part in (title, objective, next_actions) if part))

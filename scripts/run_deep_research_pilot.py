@@ -30,10 +30,15 @@ def _parse_args() -> argparse.Namespace:
         help="Expected output line. Repeat for multiple expectations.",
     )
     parser.add_argument(
-        "--output-profile",
-        default="default",
-        choices=["default", "founder_memo", "operator_memo"],
+        "--profile",
+        choices=["default", "founder", "operator"],
         help="Shape the final artifact for a founder memo or operator handoff.",
+    )
+    parser.add_argument(
+        "--output-profile",
+        dest="legacy_output_profile",
+        choices=["default", "founder", "operator", "founder_memo", "operator_memo"],
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--request-id", help="Optional fixed request ID.")
     parser.add_argument("--idempotency-key", help="Optional fixed idempotency key.")
@@ -61,12 +66,13 @@ def main() -> int:
     if args.context_file:
         context_summary = Path(args.context_file).read_text(encoding="utf-8")
 
+    selected_profile = args.profile or args.legacy_output_profile or "default"
     request = DeepResearchPilotRequest(
         objective=args.objective,
         context_summary=context_summary,
         attachments=list(args.attachment),
         expected_outputs=list(args.expected_output),
-        output_profile=args.output_profile,
+        output_profile=selected_profile,
         request_id=args.request_id,
         idempotency_key=args.idempotency_key,
         thread_id=args.thread_id,

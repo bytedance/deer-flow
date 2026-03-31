@@ -98,7 +98,7 @@ def test_builds_prompt_and_persists_artifact_result(tmp_path: Path) -> None:
             request_id="req-1",
             thread_id="deep-research-req-1",
             attachments=["C:/tmp/context.md"],
-            output_profile="founder_memo",
+            output_profile="founder",
         )
     )
 
@@ -109,11 +109,16 @@ def test_builds_prompt_and_persists_artifact_result(tmp_path: Path) -> None:
     assert "/mnt/user-data/uploads/context.md" in client.last_prompt
     assert "EXECUTIVE_BRIEF_MARKDOWN_START" in client.last_prompt
     assert "Deep Research` as the only in-scope use case" in client.last_prompt
-    assert "Selected profile: founder_memo" in client.last_prompt
+    assert "Selected profile: founder" in client.last_prompt
     assert "Format the executive brief as a founder memo." in client.last_prompt
     stored = json.loads((runner.request_dir("req-1") / "result.json").read_text(encoding="utf-8"))
     assert stored["status"] == "completed"
-    assert stored["output_profile"] == "founder_memo"
+    assert stored["output_profile"] == "founder"
+
+
+def test_normalizes_legacy_profile_aliases() -> None:
+    assert DeepResearchPilotRequest(objective="x", output_profile="founder_memo").normalized().output_profile == "founder"
+    assert DeepResearchPilotRequest(objective="x", output_profile="operator_memo").normalized().output_profile == "operator"
 
 
 def test_rejects_unknown_output_profile() -> None:
@@ -137,7 +142,7 @@ def test_idempotency_reuses_completed_result(tmp_path: Path) -> None:
         request_id="existing-request",
         idempotency_key="same-key",
         thread_id="deep-research-existing-request",
-        output_profile="operator_memo",
+        output_profile="operator",
         status="completed",
         short_summary="cached",
         artifacts=[],
@@ -160,7 +165,7 @@ def test_idempotency_reuses_completed_result(tmp_path: Path) -> None:
 
     assert result.status == "completed"
     assert result.request_id == "existing-request"
-    assert result.output_profile == "operator_memo"
+    assert result.output_profile == "operator"
     assert client.stream_calls == 0
 
 
@@ -289,7 +294,7 @@ def test_operator_profile_short_summary_ignores_metadata_lines(tmp_path: Path) -
             objective="Operator memo summary shaping",
             request_id="operator-summary-1",
             thread_id="deep-research-operator-summary-1",
-            output_profile="operator_memo",
+            output_profile="operator",
         )
     )
 

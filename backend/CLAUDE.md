@@ -412,7 +412,7 @@ Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` me
 This module is intentionally outside the core runtime. It wraps `DeerFlowClient` with a thin operator-facing contract for the `Deep Research` pilot:
 
 - request normalization with `request_id` and `idempotency_key`
-- output shaping via `output_profile` (`default`, `founder_memo`, `operator_memo`)
+- output shaping via `output_profile` (`default`, `founder`, `operator`) with compatibility aliases
 - live `status.json` + `events.jsonl`
 - heartbeat and timeout enforcement
 - artifact/result persistence under `backend/.deer-flow/pilots/deep-research/`

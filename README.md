@@ -542,7 +542,7 @@ The pilot adds:
 
 - adapter v0.1 (`accepted`, `running`, `completed`, `failed`)
 - `request_id` + `idempotency_key`
-- explicit `output_profile` support (`default`, `founder_memo`, `operator_memo`)
+- explicit `output_profile` support (`default`, `founder`, `operator`) with compatibility aliases
 - heartbeat and timeout handling
 - file-based operator traces under `backend/.deer-flow/pilots/deep-research/`
 - an adapter-managed artifact contract that materializes the final Markdown deliverable from the model response
@@ -554,7 +554,7 @@ python scripts/run_deep_research_pilot.py \
   --model gpt-4o-goclaw-bridge \
   --objective "Using the provided context, create a Sprint 1 implementation brief focused on scope, guardrails, and next steps." \
   --context-file docs/FINAL-DECISION-HYBRID-SYSTEM-2026-03-31.md \
-  --output-profile founder_memo \
+  --profile founder \
   --expected-output "Implementation brief with scope, guardrails, and next steps"
 ```
 

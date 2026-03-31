@@ -8,7 +8,7 @@ The pilot wrapper lives outside the core runtime and provides:
 
 - adapter v0.1 with `accepted`, `running`, `completed`, `failed`
 - `request_id` and `idempotency_key`
-- explicit `output_profile` selection for `default`, `founder_memo`, or `operator_memo`
+- explicit `output_profile` selection for `default`, `founder`, or `operator` (legacy aliases still supported)
 - heartbeat logging for long-running tasks
 - timeout handling
 - usable partial-result policy
@@ -48,7 +48,7 @@ python scripts/run_deep_research_pilot.py \
   --model gpt-4o-goclaw-bridge \
   --objective "Using the provided context, create a Sprint 1 implementation brief focused on scope, guardrails, and next steps." \
   --context-file docs/FINAL-DECISION-HYBRID-SYSTEM-2026-03-31.md \
-  --output-profile founder_memo \
+  --profile founder \
   --expected-output "Implementation brief with scope, guardrails, and next steps" \
   --request-id smoke-20260331-v7 \
   --idempotency-key smoke-20260331-v7 \
@@ -71,16 +71,17 @@ docker run --rm \
   -v D:/project/research-agentic/deer-flow/.home/.codex:/root/.codex:ro \
   -w /repo \
   docker-gateway \
-  sh -lc "/app/backend/.venv/bin/python scripts/run_deep_research_pilot.py --model gpt-4o-goclaw-bridge --objective 'Using the provided context, create a Sprint 1 implementation brief focused on scope, guardrails, and next steps.' --context-file /repo/docs/FINAL-DECISION-HYBRID-SYSTEM-2026-03-31.md --output-profile founder_memo --expected-output 'Implementation brief with scope, guardrails, and next steps' --request-id smoke-20260331-v7 --idempotency-key smoke-20260331-v7 --thread-id deep-research-smoke-20260331-v7 --timeout-seconds 240 --heartbeat-interval-seconds 15 --heartbeat-start-after-seconds 15"
+  sh -lc "/app/backend/.venv/bin/python scripts/run_deep_research_pilot.py --model gpt-4o-goclaw-bridge --objective 'Using the provided context, create a Sprint 1 implementation brief focused on scope, guardrails, and next steps.' --context-file /repo/docs/FINAL-DECISION-HYBRID-SYSTEM-2026-03-31.md --profile founder --expected-output 'Implementation brief with scope, guardrails, and next steps' --request-id smoke-20260331-v7 --idempotency-key smoke-20260331-v7 --thread-id deep-research-smoke-20260331-v7 --timeout-seconds 240 --heartbeat-interval-seconds 15 --heartbeat-start-after-seconds 15"
 ```
 
 ## Output Profiles
 
-Use `--output-profile` to shape the artifact for the reader:
+Use `--profile` to shape the artifact for the reader:
 
 - `default`: balanced research brief
-- `founder_memo`: short, decision-oriented memo with strategic tradeoffs up front
-- `operator_memo`: handoff-oriented memo with assumptions, evidence, risks, and next actions spelled out
+- `founder`: short, decision-oriented memo with strategic tradeoffs up front
+- `operator`: handoff-oriented memo with assumptions, evidence, risks, and next actions spelled out
+- `founder_memo` and `operator_memo`: accepted as compatibility aliases
 
 ## Adapter Behavior
 
