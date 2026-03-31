@@ -72,7 +72,12 @@ async def task_tool(
     # Build config overrides
     overrides: dict = {}
 
-    skills_section = get_skills_prompt_section()
+    # Propagate web_search_enabled from parent agent context to subagent
+    web_search_enabled = True
+    if runtime is not None:
+        web_search_enabled = bool(runtime.config.get("configurable", {}).get("web_search_enabled", True))
+
+    skills_section = get_skills_prompt_section(web_search_enabled=web_search_enabled)
     if skills_section:
         overrides["system_prompt"] = config.system_prompt + "\n\n" + skills_section
 
@@ -108,7 +113,7 @@ async def task_tool(
     from deerflow.tools import get_available_tools
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    tools = get_available_tools(model_name=parent_model, subagent_enabled=False)
+    tools = get_available_tools(model_name=parent_model, subagent_enabled=False, web_search_enabled=web_search_enabled)
 
     # Create executor
     executor = SubagentExecutor(

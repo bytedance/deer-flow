@@ -32,11 +32,15 @@ def _is_host_bash_tool(tool: object) -> bool:
     return False
 
 
+WEB_TOOL_NAMES = {"web_search", "web_fetch"}
+
+
 def get_available_tools(
     groups: list[str] | None = None,
     include_mcp: bool = True,
     model_name: str | None = None,
     subagent_enabled: bool = False,
+    web_search_enabled: bool = True,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -48,6 +52,7 @@ def get_available_tools(
         include_mcp: Whether to include tools from MCP servers (default: True).
         model_name: Optional model name to determine if vision tools should be included.
         subagent_enabled: Whether to include subagent tools (task, task_status).
+        web_search_enabled: Whether to include web search/fetch tools.
 
     Returns:
         List of available tools.
@@ -128,5 +133,11 @@ def get_available_tools(
     except Exception as e:
         logger.warning(f"Failed to load ACP tool: {e}")
 
+    all_tools = loaded_tools + builtin_tools + mcp_tools + acp_tools
+
+    if not web_search_enabled:
+        all_tools = [t for t in all_tools if getattr(t, "name", None) not in WEB_TOOL_NAMES]
+        logger.info("Web search disabled: filtered out web_search/web_fetch tools")
+
     logger.info(f"Total tools loaded: {len(loaded_tools)}, built-in tools: {len(builtin_tools)}, MCP tools: {len(mcp_tools)}, ACP tools: {len(acp_tools)}")
-    return loaded_tools + builtin_tools + mcp_tools + acp_tools
+    return all_tools

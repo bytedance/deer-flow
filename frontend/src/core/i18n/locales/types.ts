@@ -61,6 +61,8 @@ export interface Translations {
     placeholder: string;
     createSkillPrompt: string;
     addAttachments: string;
+    webSearchEnabled: string;
+    webSearchDisabled: string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;

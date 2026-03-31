@@ -102,11 +102,14 @@ def resolve_agent_factory(assistant_id: str | None):
     return make_lead_agent
 
 
-def build_run_config(thread_id: str, request_config: dict[str, Any] | None, metadata: dict[str, Any] | None) -> dict[str, Any]:
+def build_run_config(thread_id: str, request_config: dict[str, Any] | None, metadata: dict[str, Any] | None, context: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a RunnableConfig dict for the agent."""
     configurable = {"thread_id": thread_id}
     if request_config:
         configurable.update(request_config.get("configurable", {}))
+    # Merge context into configurable (LangGraph Platform protocol)
+    if context:
+        configurable.update(context)
     config: dict[str, Any] = {"configurable": configurable, "recursion_limit": 100}
     if request_config:
         for k, v in request_config.items():
@@ -233,7 +236,7 @@ async def start_run(
 
     agent_factory = resolve_agent_factory(body.assistant_id)
     graph_input = normalize_input(body.input)
-    config = build_run_config(thread_id, body.config, body.metadata)
+    config = build_run_config(thread_id, body.config, body.metadata, getattr(body, "context", None))
     stream_modes = normalize_stream_modes(body.stream_mode)
 
     task = asyncio.create_task(

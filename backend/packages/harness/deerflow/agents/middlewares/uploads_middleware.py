@@ -38,6 +38,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """
         super().__init__()
         self._paths = Paths(base_dir) if base_dir else get_paths()
+        self._web_search_enabled = True
 
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
         """Create a formatted message listing uploaded files.
@@ -74,6 +75,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 lines.append("")
 
         lines.append("You can read these files using the `read_file` tool with the paths shown above.")
+        if not self._web_search_enabled:
+            lines.append("")
+            lines.append("**Web search is disabled.** You MUST answer this question using only the uploaded files and your own knowledge. Call `read_file` to read the uploaded files first.")
         lines.append("</uploaded_files>")
 
         return "\n".join(lines)
@@ -145,8 +149,12 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return None
 
+        # Read web_search_enabled flag from runtime context
+        context = runtime.context or {}
+        self._web_search_enabled = bool(context.get("web_search_enabled", True))
+
         # Resolve uploads directory for existence checks
-        thread_id = (runtime.context or {}).get("thread_id")
+        thread_id = context.get("thread_id")
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files

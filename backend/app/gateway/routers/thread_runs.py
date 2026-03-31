@@ -52,6 +52,7 @@ class RunCreateRequest(BaseModel):
     after_seconds: float | None = Field(default=None, description="Delayed execution")
     if_not_exists: Literal["reject", "create"] = Field(default="create", description="Thread creation policy")
     feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
+    context: dict[str, Any] | None = Field(default=None, description="Context merged into config.configurable")
 
 
 class RunResponse(BaseModel):

@@ -8,24 +8,28 @@ from deerflow.subagents import get_available_subagent_names
 logger = logging.getLogger(__name__)
 
 
-def _build_subagent_section(max_concurrent: int) -> str:
+def _build_subagent_section(max_concurrent: int, web_search_enabled: bool = True) -> str:
     """Build the subagent system prompt section with dynamic concurrency limit.
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed per response.
+        web_search_enabled: Whether web search is enabled.
 
     Returns:
         Formatted subagent section string.
     """
     n = max_concurrent
     bash_available = "bash" in get_available_subagent_names()
+    general_purpose_desc = "web research, code exploration, file operations, analysis, etc." if web_search_enabled else "code exploration, file operations, analysis, etc."
     available_subagents = (
-        "- **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.\n- **bash**: For command execution (git, build, test, deploy operations)"
+        f"- **general-purpose**: For ANY non-trivial task - {general_purpose_desc}\n- **bash**: For command execution (git, build, test, deploy operations)"
         if bash_available
-        else "- **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.\n"
-        "- **bash**: Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
+        else f"- **general-purpose**: For ANY non-trivial task - {general_purpose_desc}\n- **bash**: Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
     )
-    direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
+    if web_search_enabled:
+        direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
+    else:
+        direct_tool_examples = "bash, ls, read_file, etc." if bash_available else "ls, read_file, etc."
     direct_execution_example = (
         '# User asks: "Run the tests"\n# Thinking: Cannot decompose into parallel sub-tasks\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
         if bash_available
@@ -271,72 +275,12 @@ You: "Deploying to staging..." [proceed]
 - Action-Oriented: Focus on delivering results, not explaining processes
 </response_style>
 
-<citations>
-**CRITICAL: Always include citations when using web search results**
-
-- **When to Use**: MANDATORY after web_search, web_fetch, or any external information source
-- **Format**: Use Markdown link format `[citation:TITLE](URL)` immediately after the claim
-- **Placement**: Inline citations should appear right after the sentence or claim they support
-- **Sources Section**: Also collect all citations in a "Sources" section at the end of reports
-
-**Example - Inline Citations:**
-```markdown
-The key AI trends for 2026 include enhanced reasoning capabilities and multimodal integration
-[citation:AI Trends 2026](https://techcrunch.com/ai-trends).
-Recent breakthroughs in language models have also accelerated progress
-[citation:OpenAI Research](https://openai.com/research).
-```
-
-**Example - Deep Research Report with Citations:**
-```markdown
-## Executive Summary
-
-DeerFlow is an open-source AI agent framework that gained significant traction in early 2026
-[citation:GitHub Repository](https://github.com/bytedance/deer-flow). The project focuses on
-providing a production-ready agent system with sandbox execution and memory management
-[citation:DeerFlow Documentation](https://deer-flow.dev/docs).
-
-## Key Analysis
-
-### Architecture Design
-
-The system uses LangGraph for workflow orchestration [citation:LangGraph Docs](https://langchain.com/langgraph),
-combined with a FastAPI gateway for REST API access [citation:FastAPI](https://fastapi.tiangolo.com).
-
-## Sources
-
-### Primary Sources
-- [GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
-- [DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
-
-### Media Coverage
-- [AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
-```
-
-**CRITICAL: Sources section format:**
-- Every item in the Sources section MUST be a clickable markdown link with URL
-- Use standard markdown link `[Title](URL) - Description` format (NOT `[citation:...]` format)
-- The `[citation:Title](URL)` format is ONLY for inline citations within the report body
-- ❌ WRONG: `GitHub 仓库 - 官方源代码和文档` (no URL!)
-- ❌ WRONG in Sources: `[citation:GitHub Repository](url)` (citation prefix is for inline only!)
-- ✅ RIGHT in Sources: `[GitHub Repository](https://github.com/bytedance/deer-flow) - 官方源代码和文档`
-
-**WORKFLOW for Research Tasks:**
-1. Use web_search to find sources → Extract {{title, url, snippet}} from results
-2. Write content with inline citations: `claim [citation:Title](url)`
-3. Collect all citations in a "Sources" section at the end
-4. NEVER write claims without citations when sources are available
-
-**CRITICAL RULES:**
-- ❌ DO NOT write research content without citations
-- ❌ DO NOT forget to extract URLs from search results
-- ✅ ALWAYS add `[citation:Title](URL)` after claims from external sources
-- ✅ ALWAYS include a "Sources" section listing all references
-</citations>
+{citations_section}
 
 <critical_reminders>
 - **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
-{subagent_reminder}- Skill First: Always load the relevant skill before starting **complex** tasks.
+{subagent_reminder}- **Uploaded Files First**: When `<uploaded_files>` is present, ALWAYS `read_file` BEFORE loading any skill. Answer from file content first.
+- Skill First: Always load the relevant skill before starting **complex** tasks.
 - Progressive Loading: Load resources incrementally as referenced in skills
 - Output Files: Final deliverables must be in `/mnt/user-data/outputs`
 - Clarity: Be direct and helpful, avoid unnecessary meta-commentary
@@ -380,7 +324,10 @@ def _get_memory_context(agent_name: str | None = None) -> str:
         return ""
 
 
-def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
+WEB_RESEARCH_SKILLS = {"deep-research", "github-deep-research"}
+
+
+def get_skills_prompt_section(available_skills: set[str] | None = None, web_search_enabled: bool = True) -> str:
     """Generate the skills prompt section with available skills list.
 
     Returns the <skill_system>...</skill_system> block listing all enabled skills,
@@ -401,6 +348,9 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
 
     if available_skills is not None:
         skills = [skill for skill in skills if skill.name in available_skills]
+
+    if not web_search_enabled:
+        skills = [skill for skill in skills if skill.name not in WEB_RESEARCH_SKILLS]
 
     skill_items = "\n".join(
         f"    <skill>\n        <name>{skill.name}</name>\n        <description>{skill.description}</description>\n        <location>{skill.get_container_file_path(container_base_path)}</location>\n    </skill>" for skill in skills
@@ -477,13 +427,86 @@ def _build_acp_section() -> str:
     )
 
 
-def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
+CITATIONS_SECTION = """<citations>
+**CRITICAL: Always include citations when using web search results**
+
+- **When to Use**: MANDATORY after web_search, web_fetch, or any external information source
+- **Format**: Use Markdown link format `[citation:TITLE](URL)` immediately after the claim
+- **Placement**: Inline citations should appear right after the sentence or claim they support
+- **Sources Section**: Also collect all citations in a "Sources" section at the end of reports
+
+**Example - Inline Citations:**
+```markdown
+The key AI trends for 2026 include enhanced reasoning capabilities and multimodal integration
+[citation:AI Trends 2026](https://techcrunch.com/ai-trends).
+Recent breakthroughs in language models have also accelerated progress
+[citation:OpenAI Research](https://openai.com/research).
+```
+
+**Example - Deep Research Report with Citations:**
+```markdown
+## Executive Summary
+
+DeerFlow is an open-source AI agent framework that gained significant traction in early 2026
+[citation:GitHub Repository](https://github.com/bytedance/deer-flow). The project focuses on
+providing a production-ready agent system with sandbox execution and memory management
+[citation:DeerFlow Documentation](https://deer-flow.dev/docs).
+
+## Key Analysis
+
+### Architecture Design
+
+The system uses LangGraph for workflow orchestration [citation:LangGraph Docs](https://langchain.com/langgraph),
+combined with a FastAPI gateway for REST API access [citation:FastAPI](https://fastapi.tiangolo.com).
+
+## Sources
+
+### Primary Sources
+- [GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
+- [DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
+
+### Media Coverage
+- [AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
+```
+
+**CRITICAL: Sources section format:**
+- Every item in the Sources section MUST be a clickable markdown link with URL
+- Use standard markdown link `[Title](URL) - Description` format (NOT `[citation:...]` format)
+- The `[citation:Title](URL)` format is ONLY for inline citations within the report body
+- ❌ WRONG: `GitHub 仓库 - 官方源代码和文档` (no URL!)
+- ❌ WRONG in Sources: `[citation:GitHub Repository](url)` (citation prefix is for inline only!)
+- ✅ RIGHT in Sources: `[GitHub Repository](https://github.com/bytedance/deer-flow) - 官方源代码和文档`
+
+**WORKFLOW for Research Tasks:**
+1. Use web_search to find sources → Extract {{title, url, snippet}} from results
+2. Write content with inline citations: `claim [citation:Title](url)`
+3. Collect all citations in a "Sources" section at the end
+4. NEVER write claims without citations when sources are available
+
+**CRITICAL RULES:**
+- ❌ DO NOT write research content without citations
+- ❌ DO NOT forget to extract URLs from search results
+- ✅ ALWAYS add `[citation:Title](URL)` after claims from external sources
+- ✅ ALWAYS include a "Sources" section listing all references
+</citations>"""
+
+WEB_SEARCH_DISABLED_SECTION = """<web_search_disabled>
+**Web search is DISABLED for this conversation.**
+
+- Do NOT attempt to use web_search, web_fetch, or any web research skills (such as deep-research or github-deep-research).
+- Do NOT plan or think about using web search tools — they are not available.
+- Answer using ONLY your own knowledge and any uploaded files provided by the user.
+- If the user's question would normally require web search, provide the best answer you can from your existing knowledge and clearly state that web search is disabled.
+</web_search_disabled>"""
+
+
+def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None, web_search_enabled: bool = True) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
 
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
-    subagent_section = _build_subagent_section(n) if subagent_enabled else ""
+    subagent_section = _build_subagent_section(n, web_search_enabled=web_search_enabled) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled
     subagent_reminder = (
@@ -504,13 +527,16 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
     )
 
     # Get skills section
-    skills_section = get_skills_prompt_section(available_skills)
+    skills_section = get_skills_prompt_section(available_skills, web_search_enabled=web_search_enabled)
 
     # Get deferred tools section (tool_search)
     deferred_tools_section = get_deferred_tools_prompt_section()
 
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section()
+
+    # Use web search disabled notice instead of citations when web search is off
+    citations_section = CITATIONS_SECTION if web_search_enabled else WEB_SEARCH_DISABLED_SECTION
 
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -523,6 +549,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
         acp_section=acp_section,
+        citations_section=citations_section,
     )
 
     return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"

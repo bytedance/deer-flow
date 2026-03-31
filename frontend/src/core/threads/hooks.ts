@@ -382,6 +382,7 @@ export function useThreadStream({
                     : context.mode === "thinking"
                       ? "low"
                       : undefined),
+              web_search_enabled: context.web_search_enabled ?? true,
               thread_id: threadId,
             },
           },

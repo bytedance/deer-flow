@@ -26,6 +26,7 @@ export interface LocalSettings {
   > & {
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
+    web_search_enabled?: boolean;
   };
   layout: {
     sidebar_collapsed: boolean;

@@ -3,6 +3,7 @@
 import type { ChatStatus } from "ai";
 import {
   CheckIcon,
+  GlobeIcon,
   GraduationCapIcon,
   LightbulbIcon,
   PaperclipIcon,
@@ -424,6 +425,16 @@ export function InputBox({
             </PromptInputActionMenuContent>
           </PromptInputActionMenu> */}
             <AddAttachmentsButton className="px-2!" />
+            <WebSearchToggle
+              className="px-2!"
+              disabled={context.web_search_enabled === false}
+              onToggle={() =>
+                onContextChange?.({
+                  ...context,
+                  web_search_enabled: !(context.web_search_enabled ?? true),
+                })
+              }
+            />
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -895,6 +906,40 @@ function SuggestionList() {
         </DropdownMenuContent>
       </DropdownMenu>
     </Suggestions>
+  );
+}
+
+function WebSearchToggle({
+  className,
+  disabled,
+  onToggle,
+}: {
+  className?: string;
+  disabled?: boolean;
+  onToggle?: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <Tooltip
+      content={disabled ? t.inputBox.webSearchDisabled : t.inputBox.webSearchEnabled}
+    >
+      <PromptInputButton
+        className={cn("px-2!", className)}
+        onClick={onToggle}
+      >
+        <div className="relative">
+          <GlobeIcon
+            className={cn(
+              "size-3 transition-colors",
+              disabled ? "text-muted-foreground/40" : "",
+            )}
+          />
+          {disabled && (
+            <div className="bg-muted-foreground/60 absolute -top-0.5 left-1/2 h-4 w-px -translate-x-1/2 rotate-45" />
+          )}
+        </div>
+      </PromptInputButton>
+    </Tooltip>
   );
 }
 
