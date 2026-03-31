@@ -14,7 +14,8 @@ type MockThreadSearchResult = Record<string, unknown> & {
 };
 
 export async function POST(request: Request) {
-  const body = ((await request.json().catch(() => ({}))) ?? {}) as ThreadSearchRequest;
+  const body = ((await request.json().catch(() => ({}))) ??
+    {}) as ThreadSearchRequest;
 
   const rawLimit = body.limit;
   let limit = 50;

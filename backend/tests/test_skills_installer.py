@@ -25,6 +25,10 @@ class TestIsUnsafeZipMember:
         info = zipfile.ZipInfo("/etc/passwd")
         assert is_unsafe_zip_member(info) is True
 
+    def test_windows_absolute_path(self):
+        info = zipfile.ZipInfo("C:\\Windows\\system32\\drivers\\etc\\hosts")
+        assert is_unsafe_zip_member(info) is True
+
     def test_dotdot_traversal(self):
         info = zipfile.ZipInfo("foo/../../../etc/passwd")
         assert is_unsafe_zip_member(info) is True

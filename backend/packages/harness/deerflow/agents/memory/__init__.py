@@ -18,8 +18,15 @@ from deerflow.agents.memory.queue import (
     get_memory_queue,
     reset_memory_queue,
 )
+from deerflow.agents.memory.storage import (
+    FileMemoryStorage,
+    MemoryStorage,
+    get_memory_storage,
+)
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
+    clear_memory_data,
+    delete_memory_fact,
     get_memory_data,
     reload_memory_data,
     update_memory_from_conversation,
@@ -36,8 +43,14 @@ __all__ = [
     "MemoryUpdateQueue",
     "get_memory_queue",
     "reset_memory_queue",
+    # Storage
+    "MemoryStorage",
+    "FileMemoryStorage",
+    "get_memory_storage",
     # Updater
     "MemoryUpdater",
+    "clear_memory_data",
+    "delete_memory_fact",
     "get_memory_data",
     "reload_memory_data",
     "update_memory_from_conversation",

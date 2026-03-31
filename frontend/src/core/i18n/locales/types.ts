@@ -11,6 +11,7 @@ export interface Translations {
     home: string;
     settings: string;
     delete: string;
+    edit: string;
     rename: string;
     share: string;
     openInNewWindow: string;
@@ -32,6 +33,7 @@ export interface Translations {
     save: string;
     install: string;
     create: string;
+    import: string;
     export: string;
     exportAsMarkdown: string;
     exportAsJSON: string;
@@ -218,7 +220,7 @@ export interface Translations {
     output: string;
     total: string;
   };
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: string;
@@ -247,6 +249,45 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
+      exportButton: string;
+      exportSuccess: string;
+      importButton: string;
+      importConfirmTitle: string;
+      importConfirmDescription: string;
+      importFileLabel: string;
+      importInvalidFile: string;
+      importSuccess: string;
+      manualFactSource: string;
+      addFact: string;
+      addFactTitle: string;
+      editFactTitle: string;
+      addFactSuccess: string;
+      editFactSuccess: string;
+      clearAll: string;
+      clearAllConfirmTitle: string;
+      clearAllConfirmDescription: string;
+      clearAllSuccess: string;
+      factDeleteConfirmTitle: string;
+      factDeleteConfirmDescription: string;
+      factDeleteSuccess: string;
+      factContentLabel: string;
+      factCategoryLabel: string;
+      factConfidenceLabel: string;
+      factContentPlaceholder: string;
+      factCategoryPlaceholder: string;
+      factConfidenceHint: string;
+      factSave: string;
+      factValidationContent: string;
+      factValidationConfidence: string;
+      noFacts: string;
+      summaryReadOnly: string;
+      memoryFullyEmpty: string;
+      factPreviewLabel: string;
+      searchPlaceholder: string;
+      filterAll: string;
+      filterFacts: string;
+      filterSummaries: string;
+      noMatches: string;
       markdown: {
         overview: string;
         userContext: string;

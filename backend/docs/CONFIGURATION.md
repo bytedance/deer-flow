@@ -208,6 +208,7 @@ DeerFlow supports multiple sandbox execution modes. Configure your preferred mod
 ```yaml
 sandbox:
    use: deerflow.sandbox.local:LocalSandboxProvider # Local execution
+   allow_host_bash: false # default; host bash is disabled unless explicitly re-enabled
 ```
 
 **Docker Execution** (runs sandbox code in isolated Docker containers):
@@ -228,7 +229,7 @@ sandbox:
 
 When using Docker development (`make docker-start`), DeerFlow starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
 
-See [Provisioner Setup Guide](docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
+See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
 
 Choose between local execution or Docker-based isolation:
 
@@ -236,7 +237,10 @@ Choose between local execution or Docker-based isolation:
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false
 ```
+
+`allow_host_bash` is intentionally `false` by default. DeerFlow's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
 
 **Option 2: Docker Sandbox** (isolated, more secure):
 ```yaml
@@ -283,6 +287,14 @@ title:
   max_chars: 60
   model_name: null  # Use first model in list
 ```
+
+### GitHub API Token (Optional for GitHub Deep Research Skill)
+
+The default GitHub API rate limits are quite restrictive. For frequent project research, we recommend configuring a personal access token (PAT) with read-only permissions.
+
+**Configuration Steps**:
+1. Uncomment the `GITHUB_TOKEN` line in the `.env` file and add your personal access token
+2. Restart the DeerFlow service to apply changes
 
 ## Environment Variables
 

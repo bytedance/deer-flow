@@ -22,6 +22,7 @@ export const enUS: Translations = {
     home: "Home",
     settings: "Settings",
     delete: "Delete",
+    edit: "Edit",
     rename: "Rename",
     share: "Share",
     openInNewWindow: "Open in new window",
@@ -43,6 +44,7 @@ export const enUS: Translations = {
     save: "Save",
     install: "Install",
     create: "Create",
+    import: "Import",
     export: "Export",
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
@@ -192,7 +194,8 @@ export const enUS: Translations = {
     nameStepInvalidError:
       "Invalid name — use only letters, digits, and hyphens",
     nameStepAlreadyExistsError: "An agent with this name already exists",
-    nameStepCheckError: "Could not verify name availability — please try again",
+    nameStepCheckError:
+      "Could not reach the DeerFlow backend to verify name availability. Start the backend or set NEXT_PUBLIC_BACKEND_BASE_URL, then try again.",
     nameStepBootstrapMessage:
       "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
     agentCreated: "Agent created!",
@@ -281,14 +284,15 @@ export const enUS: Translations = {
     output: "Output",
     total: "Total",
   },
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: "Search actions...",
     noResults: "No results found.",
     actions: "Actions",
     keyboardShortcuts: "Keyboard Shortcuts",
-    keyboardShortcutsDescription: "Navigate DeerFlow faster with keyboard shortcuts.",
+    keyboardShortcutsDescription:
+      "Navigate DeerFlow faster with keyboard shortcuts.",
     openCommandPalette: "Open Command Palette",
     toggleSidebar: "Toggle Sidebar",
   },
@@ -311,6 +315,50 @@ export const enUS: Translations = {
         "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
+      exportButton: "Export memory",
+      exportSuccess: "Memory exported",
+      importButton: "Import memory",
+      importConfirmTitle: "Import memory?",
+      importConfirmDescription:
+        "This will overwrite your current memory with the selected JSON backup.",
+      importFileLabel: "Selected file",
+      importInvalidFile:
+        "Failed to read the selected memory file. Please choose a valid JSON export.",
+      importSuccess: "Memory imported",
+      manualFactSource: "Manual",
+      addFact: "Add fact",
+      addFactTitle: "Add memory fact",
+      editFactTitle: "Edit memory fact",
+      addFactSuccess: "Fact created",
+      editFactSuccess: "Fact updated",
+      clearAll: "Clear all memory",
+      clearAllConfirmTitle: "Clear all memory?",
+      clearAllConfirmDescription:
+        "This will remove all saved summaries and facts. This action cannot be undone.",
+      clearAllSuccess: "All memory cleared",
+      factDeleteConfirmTitle: "Delete this fact?",
+      factDeleteConfirmDescription:
+        "This fact will be removed from memory immediately. This action cannot be undone.",
+      factDeleteSuccess: "Fact deleted",
+      factContentLabel: "Content",
+      factCategoryLabel: "Category",
+      factConfidenceLabel: "Confidence",
+      factContentPlaceholder: "Describe the memory fact you want to save",
+      factCategoryPlaceholder: "context",
+      factConfidenceHint: "Use a number between 0 and 1.",
+      factSave: "Save fact",
+      factValidationContent: "Fact content cannot be empty.",
+      factValidationConfidence: "Confidence must be a number between 0 and 1.",
+      noFacts: "No saved facts yet.",
+      summaryReadOnly:
+        "Summary sections are read-only for now. You can currently add, edit, or delete individual facts, or clear all memory.",
+      memoryFullyEmpty: "No memory saved yet.",
+      factPreviewLabel: "Fact to delete",
+      searchPlaceholder: "Search memory",
+      filterAll: "All",
+      filterFacts: "Facts",
+      filterSummaries: "Summaries",
+      noMatches: "No matching memory found.",
       markdown: {
         overview: "Overview",
         userContext: "User context",

@@ -1,0 +1,114 @@
+{
+  "version": "1.0",
+  "lastUpdated": "2026-03-28T10:30:00Z",
+  "user": {
+    "workContext": {
+      "summary": "Working on DeerFlow memory management UX, including local search, local filters, clear-all, and single-fact deletion in Settings > Memory.",
+      "updatedAt": "2026-03-28T10:30:00Z"
+    },
+    "personalContext": {
+      "summary": "Prefers Chinese during collaboration, but wants GitHub PR titles and bodies written in English with a Chinese translation provided alongside them.",
+      "updatedAt": "2026-03-28T10:28:00Z"
+    },
+    "topOfMind": {
+      "summary": "Wants reviewers to be able to reproduce the memory search and filter flow quickly with pre-populated sample data.",
+      "updatedAt": "2026-03-28T10:26:00Z"
+    }
+  },
+  "history": {
+    "recentMonths": {
+      "summary": "Recently contributed multiple DeerFlow pull requests covering memory, uploads, and compatibility fixes.",
+      "updatedAt": "2026-03-28T10:24:00Z"
+    },
+    "earlierContext": {
+      "summary": "Often prefers shipping smaller, reviewable changes with explicit validation notes.",
+      "updatedAt": "2026-03-28T10:22:00Z"
+    },
+    "longTermBackground": {
+      "summary": "Actively building open-source contribution experience and improving end-to-end delivery quality.",
+      "updatedAt": "2026-03-28T10:20:00Z"
+    }
+  },
+  "facts": [
+    {
+      "id": "fact_review_001",
+      "content": "User prefers Chinese for day-to-day collaboration.",
+      "category": "preference",
+      "confidence": 0.95,
+      "createdAt": "2026-03-28T09:50:00Z",
+      "source": "thread_pref_cn"
+    },
+    {
+      "id": "fact_review_002",
+      "content": "PR titles and bodies should be drafted in English and accompanied by a Chinese translation.",
+      "category": "workflow",
+      "confidence": 0.93,
+      "createdAt": "2026-03-28T09:52:00Z",
+      "source": "thread_pr_style"
+    },
+    {
+      "id": "fact_review_003",
+      "content": "User implemented memory search and filter improvements in the DeerFlow settings page.",
+      "category": "project",
+      "confidence": 0.91,
+      "createdAt": "2026-03-28T09:54:00Z",
+      "source": "thread_memory_filters"
+    },
+    {
+      "id": "fact_review_004",
+      "content": "User added clear-all memory support through the gateway memory API.",
+      "category": "project",
+      "confidence": 0.89,
+      "createdAt": "2026-03-28T09:56:00Z",
+      "source": "thread_memory_clear"
+    },
+    {
+      "id": "fact_review_005",
+      "content": "User added single-fact deletion support for persisted memory entries.",
+      "category": "project",
+      "confidence": 0.9,
+      "createdAt": "2026-03-28T09:58:00Z",
+      "source": "thread_memory_delete"
+    },
+    {
+      "id": "fact_review_006",
+      "content": "Reviewer can search for keyword memory to see multiple matching facts.",
+      "category": "testing",
+      "confidence": 0.84,
+      "createdAt": "2026-03-28T10:00:00Z",
+      "source": "thread_review_demo"
+    },
+    {
+      "id": "fact_review_007",
+      "content": "Reviewer can search for keyword Chinese to verify cross-category matching.",
+      "category": "testing",
+      "confidence": 0.82,
+      "createdAt": "2026-03-28T10:02:00Z",
+      "source": "thread_review_demo"
+    },
+    {
+      "id": "fact_review_008",
+      "content": "Reviewer can search for workflow to verify category text is included in local filtering.",
+      "category": "testing",
+      "confidence": 0.81,
+      "createdAt": "2026-03-28T10:04:00Z",
+      "source": "thread_review_demo"
+    },
+    {
+      "id": "fact_review_009",
+      "content": "Delete fact testing can target this disposable sample entry.",
+      "category": "testing",
+      "confidence": 0.78,
+      "createdAt": "2026-03-28T10:06:00Z",
+      "source": "thread_delete_demo"
+    },
+    {
+      "id": "fact_review_010",
+      "content": "This sample fact is intended for edit testing.",
+      "category": "testing",
+      "confidence": 0.8,
+      "createdAt": "2026-03-28T10:08:00Z",
+      "source": "manual"
+    }
+  ]
+}

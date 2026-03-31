@@ -2,118 +2,168 @@
 
 import json
 import logging
+import math
 import re
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
+from deerflow.agents.memory.storage import create_empty_memory, get_memory_storage
 from deerflow.config.memory_config import get_memory_config
-from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
 
 
-def _get_memory_file_path(agent_name: str | None = None) -> Path:
-    """Get the path to the memory file.
-
-    Args:
-        agent_name: If provided, returns the per-agent memory file path.
-                    If None, returns the global memory file path.
-
-    Returns:
-        Path to the memory file.
-    """
-    if agent_name is not None:
-        return get_paths().agent_memory_file(agent_name)
-
-    config = get_memory_config()
-    if config.storage_path:
-        p = Path(config.storage_path)
-        # Absolute path: use as-is; relative path: resolve against base_dir
-        return p if p.is_absolute() else get_paths().base_dir / p
-    return get_paths().memory_file
-
-
 def _create_empty_memory() -> dict[str, Any]:
-    """Create an empty memory structure."""
-    return {
-        "version": "1.0",
-        "lastUpdated": datetime.utcnow().isoformat() + "Z",
-        "user": {
-            "workContext": {"summary": "", "updatedAt": ""},
-            "personalContext": {"summary": "", "updatedAt": ""},
-            "topOfMind": {"summary": "", "updatedAt": ""},
-        },
-        "history": {
-            "recentMonths": {"summary": "", "updatedAt": ""},
-            "earlierContext": {"summary": "", "updatedAt": ""},
-            "longTermBackground": {"summary": "", "updatedAt": ""},
-        },
-        "facts": [],
-    }
+    """Backward-compatible wrapper around the storage-layer empty-memory factory."""
+    return create_empty_memory()
 
 
-# Per-agent memory cache: keyed by agent_name (None = global)
-# Value: (memory_data, file_mtime)
-_memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
+def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    """Backward-compatible wrapper around the configured memory storage save path."""
+    return get_memory_storage().save(memory_data, agent_name)
 
 
 def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
-    """Get the current memory data (cached with file modification time check).
-
-    The cache is automatically invalidated if the memory file has been modified
-    since the last load, ensuring fresh data is always returned.
-
-    Args:
-        agent_name: If provided, loads per-agent memory. If None, loads global memory.
-
-    Returns:
-        The memory data dictionary.
-    """
-    file_path = _get_memory_file_path(agent_name)
-
-    # Get current file modification time
-    try:
-        current_mtime = file_path.stat().st_mtime if file_path.exists() else None
-    except OSError:
-        current_mtime = None
-
-    cached = _memory_cache.get(agent_name)
-
-    # Invalidate cache if file has been modified or doesn't exist
-    if cached is None or cached[1] != current_mtime:
-        memory_data = _load_memory_from_file(agent_name)
-        _memory_cache[agent_name] = (memory_data, current_mtime)
-        return memory_data
-
-    return cached[0]
+    """Get the current memory data via storage provider."""
+    return get_memory_storage().load(agent_name)
 
 
 def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
-    """Reload memory data from file, forcing cache invalidation.
+    """Reload memory data via storage provider."""
+    return get_memory_storage().reload(agent_name)
+
+
+def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = None) -> dict[str, Any]:
+    """Persist imported memory data via storage provider.
 
     Args:
-        agent_name: If provided, reloads per-agent memory. If None, reloads global memory.
+        memory_data: Full memory payload to persist.
+        agent_name: If provided, imports into per-agent memory.
 
     Returns:
-        The reloaded memory data dictionary.
+        The saved memory data after storage normalization.
+
+    Raises:
+        OSError: If persisting the imported memory fails.
     """
-    file_path = _get_memory_file_path(agent_name)
-    memory_data = _load_memory_from_file(agent_name)
+    storage = get_memory_storage()
+    if not storage.save(memory_data, agent_name):
+        raise OSError("Failed to save imported memory data")
+    return storage.load(agent_name)
 
-    try:
-        mtime = file_path.stat().st_mtime if file_path.exists() else None
-    except OSError:
-        mtime = None
 
-    _memory_cache[agent_name] = (memory_data, mtime)
-    return memory_data
+def clear_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+    """Clear all stored memory data and persist an empty structure."""
+    cleared_memory = create_empty_memory()
+    if not _save_memory_to_file(cleared_memory, agent_name):
+        raise OSError("Failed to save cleared memory data")
+    return cleared_memory
+
+
+def _validate_confidence(confidence: float) -> float:
+    """Validate persisted fact confidence so stored JSON stays standards-compliant."""
+    if not math.isfinite(confidence) or confidence < 0 or confidence > 1:
+        raise ValueError("confidence")
+    return confidence
+
+
+def create_memory_fact(
+    content: str,
+    category: str = "context",
+    confidence: float = 0.5,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
+    """Create a new fact and persist the updated memory data."""
+    normalized_content = content.strip()
+    if not normalized_content:
+        raise ValueError("content")
+
+    normalized_category = category.strip() or "context"
+    validated_confidence = _validate_confidence(confidence)
+    now = datetime.utcnow().isoformat() + "Z"
+    memory_data = get_memory_data(agent_name)
+    updated_memory = dict(memory_data)
+    facts = list(memory_data.get("facts", []))
+    facts.append(
+        {
+            "id": f"fact_{uuid.uuid4().hex[:8]}",
+            "content": normalized_content,
+            "category": normalized_category,
+            "confidence": validated_confidence,
+            "createdAt": now,
+            "source": "manual",
+        }
+    )
+    updated_memory["facts"] = facts
+
+    if not _save_memory_to_file(updated_memory, agent_name):
+        raise OSError("Failed to save memory data after creating fact")
+
+    return updated_memory
+
+
+def delete_memory_fact(fact_id: str, agent_name: str | None = None) -> dict[str, Any]:
+    """Delete a fact by its id and persist the updated memory data."""
+    memory_data = get_memory_data(agent_name)
+    facts = memory_data.get("facts", [])
+    updated_facts = [fact for fact in facts if fact.get("id") != fact_id]
+    if len(updated_facts) == len(facts):
+        raise KeyError(fact_id)
+
+    updated_memory = dict(memory_data)
+    updated_memory["facts"] = updated_facts
+
+    if not _save_memory_to_file(updated_memory, agent_name):
+        raise OSError(f"Failed to save memory data after deleting fact '{fact_id}'")
+
+    return updated_memory
+
+
+def update_memory_fact(
+    fact_id: str,
+    content: str | None = None,
+    category: str | None = None,
+    confidence: float | None = None,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
+    """Update an existing fact and persist the updated memory data."""
+    memory_data = get_memory_data(agent_name)
+    updated_memory = dict(memory_data)
+    updated_facts: list[dict[str, Any]] = []
+    found = False
+
+    for fact in memory_data.get("facts", []):
+        if fact.get("id") == fact_id:
+            found = True
+            updated_fact = dict(fact)
+            if content is not None:
+                normalized_content = content.strip()
+                if not normalized_content:
+                    raise ValueError("content")
+                updated_fact["content"] = normalized_content
+            if category is not None:
+                updated_fact["category"] = category.strip() or "context"
+            if confidence is not None:
+                updated_fact["confidence"] = _validate_confidence(confidence)
+            updated_facts.append(updated_fact)
+        else:
+            updated_facts.append(fact)
+
+    if not found:
+        raise KeyError(fact_id)
+
+    updated_memory["facts"] = updated_facts
+
+    if not _save_memory_to_file(updated_memory, agent_name):
+        raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
+
+    return updated_memory
 
 
 def _extract_text(content: Any) -> str:
@@ -151,29 +201,6 @@ def _extract_text(content: Any) -> str:
         flush_pending_str_parts()
         return "\n".join(pieces)
     return str(content)
-
-
-def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
-    """Load memory data from file.
-
-    Args:
-        agent_name: If provided, loads per-agent memory file. If None, loads global.
-
-    Returns:
-        The memory data dictionary.
-    """
-    file_path = _get_memory_file_path(agent_name)
-
-    if not file_path.exists():
-        return _create_empty_memory()
-
-    try:
-        with open(file_path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Failed to load memory file: %s", e)
-        return _create_empty_memory()
 
 
 # Matches sentences that describe a file-upload *event* rather than general
@@ -220,48 +247,6 @@ def _fact_content_key(content: Any) -> str | None:
     if not stripped:
         return None
     return stripped
-
-
-def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
-    """Save memory data to file and update cache.
-
-    Args:
-        memory_data: The memory data to save.
-        agent_name: If provided, saves to per-agent memory file. If None, saves to global.
-
-    Returns:
-        True if successful, False otherwise.
-    """
-    file_path = _get_memory_file_path(agent_name)
-
-    try:
-        # Ensure directory exists
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Update lastUpdated timestamp
-        memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
-
-        # Write atomically using temp file
-        temp_path = file_path.with_suffix(".tmp")
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(memory_data, f, indent=2, ensure_ascii=False)
-
-        # Rename temp file to actual file (atomic on most systems)
-        temp_path.replace(file_path)
-
-        # Update cache and file modification time
-        try:
-            mtime = file_path.stat().st_mtime
-        except OSError:
-            mtime = None
-
-        _memory_cache[agent_name] = (memory_data, mtime)
-
-        logger.info("Memory saved to %s", file_path)
-        return True
-    except OSError as e:
-        logger.error("Failed to save memory file: %s", e)
-        return False
 
 
 class MemoryUpdater:
@@ -338,7 +323,7 @@ class MemoryUpdater:
             updated_memory = _strip_upload_mentions_from_memory(updated_memory)
 
             # Save
-            return _save_memory_to_file(updated_memory, agent_name)
+            return get_memory_storage().save(updated_memory, agent_name)
 
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)

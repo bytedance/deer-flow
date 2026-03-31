@@ -1,10 +1,10 @@
 """Task tool for delegating work to subagents."""
 
+import asyncio
 import logging
-import time
 import uuid
 from dataclasses import replace
-from typing import Annotated, Literal
+from typing import Annotated
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langgraph.config import get_stream_writer
@@ -12,18 +12,19 @@ from langgraph.typing import ContextT
 
 from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 from deerflow.agents.thread_state import ThreadState
-from deerflow.subagents import SubagentExecutor, get_subagent_config
+from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
 
 logger = logging.getLogger(__name__)
 
 
 @tool("task", parse_docstring=True)
-def task_tool(
+async def task_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
     description: str,
     prompt: str,
-    subagent_type: Literal["general-purpose", "bash"],
+    subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
     max_turns: int | None = None,
 ) -> str:
@@ -34,12 +35,13 @@ def task_tool(
     - Handle complex multi-step tasks autonomously
     - Execute commands or operations in isolated contexts
 
-    Available subagent types:
+    Available subagent types depend on the active sandbox configuration:
     - **general-purpose**: A capable agent for complex, multi-step tasks that require
       both exploration and action. Use when the task requires complex reasoning,
       multiple dependent steps, or would benefit from isolated context.
-    - **bash**: Command execution specialist for running bash commands. Use for
-      git operations, build processes, or when command output would be verbose.
+    - **bash**: Command execution specialist for running bash commands. This is only
+      available when host bash is explicitly allowed or when using an isolated shell
+      sandbox such as `AioSandboxProvider`.
 
     When to use this tool:
     - Complex tasks requiring multiple steps or tools
@@ -57,10 +59,15 @@ def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
         max_turns: Optional maximum number of agent turns. Defaults to subagent's configured max.
     """
+    available_subagent_names = get_available_subagent_names()
+
     # Get subagent configuration
     config = get_subagent_config(subagent_type)
     if config is None:
-        return f"Error: Unknown subagent type '{subagent_type}'. Available: general-purpose, bash"
+        available = ", ".join(available_subagent_names)
+        return f"Error: Unknown subagent type '{subagent_type}'. Available: {available}"
+    if subagent_type == "bash" and not is_host_bash_allowed():
+        return f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}"
 
     # Build config overrides
     overrides: dict = {}
@@ -86,6 +93,8 @@ def task_tool(
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
         thread_id = runtime.context.get("thread_id") if runtime.context else None
+        if thread_id is None:
+            thread_id = runtime.config.get("configurable", {}).get("thread_id")
 
         # Try to get parent model from configurable
         metadata = runtime.config.get("metadata", {})
@@ -129,67 +138,101 @@ def task_tool(
     # Send Task Started message'
     writer({"type": "task_started", "task_id": task_id, "description": description})
 
-    while True:
-        result = get_background_task_result(task_id)
+    try:
+        while True:
+            result = get_background_task_result(task_id)
 
-        if result is None:
-            logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
-            writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
-            cleanup_background_task(task_id)
-            return f"Error: Task {task_id} disappeared from background tasks"
+            if result is None:
+                logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
+                writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
+                cleanup_background_task(task_id)
+                return f"Error: Task {task_id} disappeared from background tasks"
 
-        # Log status changes for debugging
-        if result.status != last_status:
-            logger.info(f"[trace={trace_id}] Task {task_id} status: {result.status.value}")
-            last_status = result.status
+            # Log status changes for debugging
+            if result.status != last_status:
+                logger.info(f"[trace={trace_id}] Task {task_id} status: {result.status.value}")
+                last_status = result.status
 
-        # Check for new AI messages and send task_running events
-        current_message_count = len(result.ai_messages)
-        if current_message_count > last_message_count:
-            # Send task_running event for each new message
-            for i in range(last_message_count, current_message_count):
-                message = result.ai_messages[i]
-                writer(
-                    {
-                        "type": "task_running",
-                        "task_id": task_id,
-                        "message": message,
-                        "message_index": i + 1,  # 1-based index for display
-                        "total_messages": current_message_count,
-                    }
-                )
-                logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
-            last_message_count = current_message_count
+            # Check for new AI messages and send task_running events
+            current_message_count = len(result.ai_messages)
+            if current_message_count > last_message_count:
+                # Send task_running event for each new message
+                for i in range(last_message_count, current_message_count):
+                    message = result.ai_messages[i]
+                    writer(
+                        {
+                            "type": "task_running",
+                            "task_id": task_id,
+                            "message": message,
+                            "message_index": i + 1,  # 1-based index for display
+                            "total_messages": current_message_count,
+                        }
+                    )
+                    logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
+                last_message_count = current_message_count
 
-        # Check if task completed, failed, or timed out
-        if result.status == SubagentStatus.COMPLETED:
-            writer({"type": "task_completed", "task_id": task_id, "result": result.result})
-            logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
-            cleanup_background_task(task_id)
-            return f"Task Succeeded. Result: {result.result}"
-        elif result.status == SubagentStatus.FAILED:
-            writer({"type": "task_failed", "task_id": task_id, "error": result.error})
-            logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
-            cleanup_background_task(task_id)
-            return f"Task failed. Error: {result.error}"
-        elif result.status == SubagentStatus.TIMED_OUT:
-            writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
-            logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
-            cleanup_background_task(task_id)
-            return f"Task timed out. Error: {result.error}"
+            # Check if task completed, failed, or timed out
+            if result.status == SubagentStatus.COMPLETED:
+                writer({"type": "task_completed", "task_id": task_id, "result": result.result})
+                logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
+                cleanup_background_task(task_id)
+                return f"Task Succeeded. Result: {result.result}"
+            elif result.status == SubagentStatus.FAILED:
+                writer({"type": "task_failed", "task_id": task_id, "error": result.error})
+                logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
+                cleanup_background_task(task_id)
+                return f"Task failed. Error: {result.error}"
+            elif result.status == SubagentStatus.TIMED_OUT:
+                writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
+                logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
+                cleanup_background_task(task_id)
+                return f"Task timed out. Error: {result.error}"
 
-        # Still running, wait before next poll
-        time.sleep(5)  # Poll every 5 seconds
-        poll_count += 1
+            # Still running, wait before next poll
+            await asyncio.sleep(5)
+            poll_count += 1
 
-        # Polling timeout as a safety net (in case thread pool timeout doesn't work)
-        # Set to execution timeout + 60s buffer, in 5s poll intervals
-        # This catches edge cases where the background task gets stuck
-        # Note: We don't call cleanup_background_task here because the task may
-        # still be running in the background. The cleanup will happen when the
-        # executor completes and sets a terminal status.
-        if poll_count > max_poll_count:
-            timeout_minutes = config.timeout_seconds // 60
-            logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
-            writer({"type": "task_timed_out", "task_id": task_id})
-            return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+            # Polling timeout as a safety net (in case thread pool timeout doesn't work)
+            # Set to execution timeout + 60s buffer, in 5s poll intervals
+            # This catches edge cases where the background task gets stuck
+            # Note: We don't call cleanup_background_task here because the task may
+            # still be running in the background. The cleanup will happen when the
+            # executor completes and sets a terminal status.
+            if poll_count > max_poll_count:
+                timeout_minutes = config.timeout_seconds // 60
+                logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
+                writer({"type": "task_timed_out", "task_id": task_id})
+                return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+    except asyncio.CancelledError:
+
+        async def cleanup_when_done() -> None:
+            max_cleanup_polls = max_poll_count
+            cleanup_poll_count = 0
+
+            while True:
+                result = get_background_task_result(task_id)
+                if result is None:
+                    return
+
+                if result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None:
+                    cleanup_background_task(task_id)
+                    return
+
+                if cleanup_poll_count > max_cleanup_polls:
+                    logger.warning(f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls")
+                    return
+
+                await asyncio.sleep(5)
+                cleanup_poll_count += 1
+
+        def log_cleanup_failure(cleanup_task: asyncio.Task[None]) -> None:
+            if cleanup_task.cancelled():
+                return
+
+            exc = cleanup_task.exception()
+            if exc is not None:
+                logger.error(f"[trace={trace_id}] Deferred cleanup failed for task {task_id}: {exc}")
+
+        logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled task {task_id}")
+        asyncio.create_task(cleanup_when_done()).add_done_callback(log_cleanup_failure)
+        raise

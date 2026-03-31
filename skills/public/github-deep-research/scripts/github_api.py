@@ -4,6 +4,7 @@ GitHub API client for deep research.
 Uses requests for HTTP operations.
 """
 
+import os
 import json
 import sys
 from typing import Any, Dict, List, Optional
@@ -57,9 +58,10 @@ class GitHubAPI:
         Initialize GitHub API client.
 
         Args:
-            token: Optional GitHub personal access token for higher rate limits
+            token:
+                Optional GitHub personal access token for higher rate limits.
+                User can set it in .env by uncommenting the line "GITHUB_TOKEN=your-github-token".
         """
-        self.token = token
         self.headers = {
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "Deep-Research-Bot/1.0",
@@ -294,7 +296,8 @@ def main():
     owner, repo = sys.argv[1], sys.argv[2]
     command = sys.argv[3] if len(sys.argv) > 3 else "summary"
 
-    api = GitHubAPI()
+    token = os.getenv("GITHUB_TOKEN")
+    api = GitHubAPI(token=token)
 
     commands = {
         "info": lambda: api.get_repo_info(owner, repo),

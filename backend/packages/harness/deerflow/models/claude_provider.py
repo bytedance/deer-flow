@@ -5,6 +5,7 @@ Supports two authentication modes:
   2. Claude Code OAuth token (Authorization: Bearer header)
      - Detected by sk-ant-oat prefix
      - Requires anthropic-beta: oauth-2025-04-20,claude-code-20250219
+     - Requires billing header in system prompt for all OAuth requests
 
 Auto-loads credentials from explicit runtime handoff:
   - $ANTHROPIC_API_KEY environment variable
@@ -14,18 +15,30 @@ Auto-loads credentials from explicit runtime handoff:
   - ~/.claude/.credentials.json
 """
 
+import hashlib
+import json
 import logging
+import os
+import socket
 import time
+import uuid
 from typing import Any
 
 import anthropic
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
+from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 THINKING_BUDGET_RATIO = 0.8
+
+# Billing header required by Anthropic API for OAuth token access.
+# Must be the first system prompt block. Format mirrors Claude Code CLI.
+# Override with ANTHROPIC_BILLING_HEADER env var if the hardcoded version drifts.
+_DEFAULT_BILLING_HEADER = "x-anthropic-billing-header: cc_version=2.1.85.351; cc_entrypoint=cli; cch=6c6d5;"
+OAUTH_BILLING_HEADER = os.environ.get("ANTHROPIC_BILLING_HEADER", _DEFAULT_BILLING_HEADER)
 
 
 class ClaudeChatModel(ChatAnthropic):
@@ -44,8 +57,8 @@ class ClaudeChatModel(ChatAnthropic):
     prompt_cache_size: int = 3
     auto_thinking_budget: bool = True
     retry_max_attempts: int = MAX_RETRIES
-    _is_oauth: bool = False
-    _oauth_access_token: str = ""
+    _is_oauth: bool = PrivateAttr(default=False)
+    _oauth_access_token: str = PrivateAttr(default="")
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -125,8 +138,11 @@ class ClaudeChatModel(ChatAnthropic):
         stop: list[str] | None = None,
         **kwargs: Any,
     ) -> dict:
-        """Override to inject prompt caching and thinking budget."""
+        """Override to inject prompt caching, thinking budget, and OAuth billing."""
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+
+        if self._is_oauth:
+            self._apply_oauth_billing(payload)
 
         if self.enable_prompt_caching:
             self._apply_prompt_caching(payload)
@@ -135,6 +151,43 @@ class ClaudeChatModel(ChatAnthropic):
             self._apply_thinking_budget(payload)
 
         return payload
+
+    def _apply_oauth_billing(self, payload: dict) -> None:
+        """Inject the billing header block required for all OAuth requests.
+
+        The billing block is always placed first in the system list, removing any
+        existing occurrence to avoid duplication or out-of-order positioning.
+        """
+        billing_block = {"type": "text", "text": OAUTH_BILLING_HEADER}
+
+        system = payload.get("system")
+        if isinstance(system, list):
+            # Remove any existing billing blocks, then insert a single one at index 0.
+            filtered = [b for b in system if not (isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", ""))]
+            payload["system"] = [billing_block] + filtered
+        elif isinstance(system, str):
+            if OAUTH_BILLING_HEADER in system:
+                payload["system"] = [billing_block]
+            else:
+                payload["system"] = [billing_block, {"type": "text", "text": system}]
+        else:
+            payload["system"] = [billing_block]
+
+        # Add metadata.user_id required by the API for OAuth billing validation
+        if not isinstance(payload.get("metadata"), dict):
+            payload["metadata"] = {}
+        if "user_id" not in payload["metadata"]:
+            # Generate a stable device_id from the machine's hostname
+            hostname = socket.gethostname()
+            device_id = hashlib.sha256(f"deerflow-{hostname}".encode()).hexdigest()
+            session_id = str(uuid.uuid4())
+            payload["metadata"]["user_id"] = json.dumps(
+                {
+                    "device_id": device_id,
+                    "account_uuid": "deerflow",
+                    "session_id": session_id,
+                }
+            )
 
     def _apply_prompt_caching(self, payload: dict) -> None:
         """Apply ephemeral cache_control to system and recent messages."""
@@ -191,6 +244,39 @@ class ClaudeChatModel(ChatAnthropic):
 
         max_tokens = payload.get("max_tokens", 8192)
         thinking["budget_tokens"] = int(max_tokens * THINKING_BUDGET_RATIO)
+
+    @staticmethod
+    def _strip_cache_control(payload: dict) -> None:
+        """Remove cache_control markers before OAuth requests reach Anthropic."""
+        for section in ("system", "messages"):
+            items = payload.get(section)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item.pop("cache_control", None)
+                content = item.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            block.pop("cache_control", None)
+
+        tools = payload.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                if isinstance(tool, dict):
+                    tool.pop("cache_control", None)
+
+    def _create(self, payload: dict) -> Any:
+        if self._is_oauth:
+            self._strip_cache_control(payload)
+        return super()._create(payload)
+
+    async def _acreate(self, payload: dict) -> Any:
+        if self._is_oauth:
+            self._strip_cache_control(payload)
+        return await super()._acreate(payload)
 
     def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None, **kwargs: Any) -> Any:
         """Override with OAuth patching and retry logic."""
