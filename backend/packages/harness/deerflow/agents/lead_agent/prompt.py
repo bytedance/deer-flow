@@ -477,6 +477,28 @@ def _build_acp_section() -> str:
     )
 
 
+def _build_custom_mounts_section() -> str:
+    """Build a prompt section for explicitly configured sandbox mounts."""
+    try:
+        from deerflow.config import get_app_config
+
+        mounts = get_app_config().sandbox.mounts or []
+    except Exception:
+        logger.exception("Failed to load configured sandbox mounts for the lead-agent prompt")
+        return ""
+
+    if not mounts:
+        return ""
+
+    lines = []
+    for mount in mounts:
+        access = "read-only" if mount.read_only else "read-write"
+        lines.append(f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})")
+
+    mounts_list = "\n".join(lines)
+    return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
+
+
 def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
@@ -511,6 +533,8 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
 
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section()
+    custom_mounts_section = _build_custom_mounts_section()
+    acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
 
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -522,7 +546,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
-        acp_section=acp_section,
+        acp_section=acp_and_mounts_section,
     )
 
     return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"
