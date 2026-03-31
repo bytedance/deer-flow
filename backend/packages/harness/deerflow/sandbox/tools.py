@@ -757,6 +757,33 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
     runtime.state["thread_directories_created"] = True
 
 
+def _truncate_bash_output(output: str, max_chars: int) -> str:
+    """Middle-truncate bash output, preserving head and tail (50/50 split).
+
+    bash output may have errors at either end (stderr/stdout ordering is
+    non-deterministic), so both ends are preserved equally.
+    """
+    if max_chars <= 0 or len(output) <= max_chars:
+        return output
+    half = max_chars // 2
+    head = output[:half]
+    tail = output[-half:]
+    skipped = len(output) - max_chars
+    return f"{head}\n... [middle truncated: {skipped} chars skipped] ...\n{tail}"
+
+
+def _truncate_read_file_output(output: str, max_chars: int) -> str:
+    """Head-truncate read_file output, preserving the beginning of the file.
+
+    Source code and documents are read top-to-bottom; the head contains the
+    most context (imports, class definitions, function signatures).
+    """
+    if max_chars <= 0 or len(output) <= max_chars:
+        return output
+    total = len(output)
+    return f"{output[:max_chars]}\n... [truncated: showing first {max_chars} of {total} chars. Use start_line/end_line to read a specific range] ..."
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -781,9 +808,15 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             output = sandbox.execute_command(command)
-            return mask_local_paths_in_output(output, thread_data)
+            from deerflow.config.app_config import get_app_config
+            sandbox_cfg = get_app_config().sandbox
+            max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
+            return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
         ensure_thread_directories_exist(runtime)
-        return sandbox.execute_command(command)
+        from deerflow.config.app_config import get_app_config
+        sandbox_cfg = get_app_config().sandbox
+        max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
+        return _truncate_bash_output(sandbox.execute_command(command), max_chars)
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:
@@ -861,7 +894,10 @@ def read_file_tool(
             return "(empty)"
         if start_line is not None and end_line is not None:
             content = "\n".join(content.splitlines()[start_line - 1 : end_line])
-        return content
+        from deerflow.config.app_config import get_app_config
+        sandbox_cfg = get_app_config().sandbox
+        max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
+        return _truncate_read_file_output(content, max_chars)
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
