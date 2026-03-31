@@ -1,5 +1,8 @@
 import base64
 import logging
+import shlex
+import threading
+import uuid
 
 from agent_sandbox import Sandbox as AioSandboxClient
 
@@ -7,11 +10,15 @@ from deerflow.sandbox.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 
+_ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
+
 
 class AioSandbox(Sandbox):
     """Sandbox implementation using the agent-infra/sandbox Docker container.
 
     This sandbox connects to a running AIO sandbox container via HTTP API.
+    A threading lock serializes shell commands to prevent concurrent requests
+    from corrupting the container's single persistent session (see #1433).
     """
 
     def __init__(self, id: str, base_url: str, home_dir: str | None = None):
@@ -26,6 +33,7 @@ class AioSandbox(Sandbox):
         self._base_url = base_url
         self._client = AioSandboxClient(base_url=base_url, timeout=600)
         self._home_dir = home_dir
+        self._lock = threading.Lock()
 
     @property
     def base_url(self) -> str:
@@ -42,19 +50,34 @@ class AioSandbox(Sandbox):
     def execute_command(self, command: str) -> str:
         """Execute a shell command in the sandbox.
 
+        Uses a lock to serialize concurrent requests. The AIO sandbox
+        container maintains a single persistent shell session that
+        corrupts when hit with concurrent exec_command calls (returns
+        ``ErrorObservation`` instead of real output). If corruption is
+        detected despite the lock (e.g. multiple processes sharing a
+        sandbox), the command is retried on a fresh session.
+
         Args:
             command: The command to execute.
 
         Returns:
             The output of the command.
         """
-        try:
-            result = self._client.shell.exec_command(command=command)
-            output = result.data.output if result.data else ""
-            return output if output else "(no output)"
-        except Exception as e:
-            logger.error(f"Failed to execute command in sandbox: {e}")
-            return f"Error: {e}"
+        with self._lock:
+            try:
+                result = self._client.shell.exec_command(command=command)
+                output = result.data.output if result.data else ""
+
+                if output and _ERROR_OBSERVATION_SIGNATURE in output:
+                    logger.warning("ErrorObservation detected in sandbox output, retrying with a fresh session")
+                    fresh_id = str(uuid.uuid4())
+                    result = self._client.shell.exec_command(command=command, id=fresh_id)
+                    output = result.data.output if result.data else ""
+
+                return output if output else "(no output)"
+            except Exception as e:
+                logger.error(f"Failed to execute command in sandbox: {e}")
+                return f"Error: {e}"
 
     def read_file(self, path: str) -> str:
         """Read the content of a file in the sandbox.
@@ -82,17 +105,16 @@ class AioSandbox(Sandbox):
         Returns:
             The contents of the directory.
         """
-        try:
-            # Use shell command to list directory with depth limit
-            # The -L flag limits the depth for the tree command
-            result = self._client.shell.exec_command(command=f"find {path} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500")
-            output = result.data.output if result.data else ""
-            if output:
-                return [line.strip() for line in output.strip().split("\n") if line.strip()]
-            return []
-        except Exception as e:
-            logger.error(f"Failed to list directory in sandbox: {e}")
-            return []
+        with self._lock:
+            try:
+                result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500")
+                output = result.data.output if result.data else ""
+                if output:
+                    return [line.strip() for line in output.strip().split("\n") if line.strip()]
+                return []
+            except Exception as e:
+                logger.error(f"Failed to list directory in sandbox: {e}")
+                return []
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         """Write content to a file in the sandbox.
