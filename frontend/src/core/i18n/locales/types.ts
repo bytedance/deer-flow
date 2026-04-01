@@ -329,6 +329,8 @@ export interface Translations {
       darkDescription: string;
       languageTitle: string;
       languageDescription: string;
+      autoFollowupTitle: string;
+      autoFollowupDescription: string;
     };
     tools: {
       title: string;

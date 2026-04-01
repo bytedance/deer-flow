@@ -12,6 +12,9 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   layout: {
     sidebar_collapsed: false,
   },
+  behavior: {
+    auto_followup: true,
+  },
 };
 
 const LOCAL_SETTINGS_KEY = "deerflow.local-settings";
@@ -29,6 +32,9 @@ export interface LocalSettings {
   };
   layout: {
     sidebar_collapsed: boolean;
+  };
+  behavior: {
+    auto_followup: boolean;
   };
 }
 
@@ -53,6 +59,10 @@ export function getLocalSettings(): LocalSettings {
         notification: {
           ...DEFAULT_LOCAL_SETTINGS.notification,
           ...settings.notification,
+        },
+        behavior: {
+          ...DEFAULT_LOCAL_SETTINGS.behavior,
+          ...(settings.behavior ?? {}),
         },
       };
       return mergedSettings;

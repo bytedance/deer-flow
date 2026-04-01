@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway desktop-install desktop-dev desktop-start desktop-build desktop-build-mac desktop-build-win desktop-build-linux desktop-pack
 
 PYTHON ?= python
 BASH ?= bash
@@ -34,6 +34,15 @@ help:
 	@echo "  make docker-logs     - View Docker development logs"
 	@echo "  make docker-logs-frontend - View Docker frontend logs"
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
+	@echo ""
+	@echo "Desktop Wrapper Commands (Electron):"
+	@echo "  make desktop-install     - Install Electron wrapper dependencies"
+	@echo "  make desktop-dev         - Start Electron desktop wrapper (requires backend running)"
+	@echo "  make desktop-start       - Start with isolated/local Electron (no system npm install)"
+	@echo "  make desktop-build       - Build Electron app for current platform"
+	@echo "  make desktop-build-mac   - Build macOS DMG/zip"
+	@echo "  make desktop-build-win   - Build Windows installer"
+	@echo "  make desktop-build-linux - Build Linux AppImage/deb"
 
 config:
 	@$(PYTHON) ./scripts/configure.py
@@ -175,3 +184,45 @@ up:
 # Stop and remove production containers
 down:
 	@./scripts/deploy.sh down
+
+# ==========================================
+# Desktop Wrapper Commands (Electron)
+# ==========================================
+
+# Install Electron wrapper dependencies
+desktop-install:
+	@echo "Installing Electron wrapper dependencies..."
+	@cd electron && npm install
+	@echo "✓ Desktop wrapper dependencies installed"
+	@echo ""
+	@echo "To start the desktop app:"
+	@echo "  1. Start backend: make docker-start"
+	@echo "  2. Start desktop: make desktop-dev"
+
+# Start Electron desktop wrapper in development mode
+desktop-dev:
+	@cd electron && npm run dev
+
+# Start Electron desktop wrapper with isolated/local binary (no system npm install)
+desktop-start:
+	@cd electron && ./run-npx.sh
+
+# Build Electron desktop wrapper for current platform
+desktop-build:
+	@cd electron && npm run build
+
+# Build Electron desktop wrapper for macOS
+desktop-build-mac:
+	@cd electron && npm run build:mac
+
+# Build Electron desktop wrapper for Windows
+desktop-build-win:
+	@cd electron && npm run build:win
+
+# Build Electron desktop wrapper for Linux
+desktop-build-linux:
+	@cd electron && npm run build:linux
+
+# Package Electron app without building installer
+desktop-pack:
+	@cd electron && npm run pack
