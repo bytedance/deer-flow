@@ -610,9 +610,12 @@ class WeComChannel(Channel):
 
     async def _prepare_inbound(self, msg_id: str, inbound: InboundMessage) -> None:
         """Kick off WeCom side effects without delaying inbound dispatch."""
-        # Send thinking placeholder immediately when receiving a message
+        # 先发布消息，保证消息能正常处理
+        await self.bus.publish_inbound(inbound)
+
+        # 然后再尝试发送思考占位符（即使失败也不影响）
         chat_id = inbound.chat_id
-        if chat_id and self._ws:
+        if chat_id and self._ws and self._ws_loop:
             try:
                 stream_id = uuid.uuid4().hex
                 self._chatid_to_stream_id[chat_id] = stream_id
@@ -629,7 +632,6 @@ class WeComChannel(Channel):
                 )
             except Exception:
                 logger.exception("[WeCom] Failed to send thinking placeholder")
-        await self.bus.publish_inbound(inbound)
 
     async def stop(self) -> None:
         self._running = False
@@ -712,10 +714,14 @@ class WeComChannel(Channel):
 
     async def _send_frame(self, frame: dict) -> None:
         """Send a frame via WebSocket."""
-        if not self._ws:
+        if not self._ws or not self._ws_loop:
             raise RuntimeError("WebSocket not connected")
 
-        await self._ws.send(json.dumps(frame))
+        frame_json = json.dumps(frame)
+
+        # WebSocket send 只能在 WebSocket 线程的事件循环中调用，必须线程安全
+        future = asyncio.run_coroutine_threadsafe(self._ws.send(frame_json), self._ws_loop)
+        await asyncio.wrap_future(future)
 
     async def _reply_stream(
         self,

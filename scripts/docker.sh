@@ -233,6 +233,11 @@ start() {
 logs() {
     local service=""
     
+    # Set DEER_FLOW_ROOT if not already set to suppress warnings
+    if [ -z "$DEER_FLOW_ROOT" ]; then
+        export DEER_FLOW_ROOT="$PROJECT_ROOT"
+    fi
+    
     case "$1" in
         --frontend)
             service="frontend"

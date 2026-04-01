@@ -6,6 +6,7 @@ import asyncio
 import logging
 import mimetypes
 import posixpath
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -19,6 +20,11 @@ from app.channels.store import ChannelStore
 from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
+
+
+class InvalidChannelSessionConfigError(Exception):
+    """Raised when channel session configuration is invalid."""
+
 
 T = TypeVar("T")
 P = ParamSpec("P")

@@ -12,7 +12,8 @@
         "packageManager": "ms-python.python:pip",
         "workspace": "deer-flow"
       }
-    ]
+    ],
+    "gitlens.telemetry.enabled": false
   },
   "launch": {
     "version": "0.2.0",

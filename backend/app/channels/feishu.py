@@ -142,7 +142,7 @@ class FeishuChannel(Channel):
             # Replace the SDK's module-level loop so Client.start() uses
             # this thread's (non-running) event loop instead of the main
             # thread's uvloop.
-            _ws_client_mod.loop = loop
+            _ws_client_mod.loop = lambda: loop
 
             event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
             ws_client = lark.ws.Client(
