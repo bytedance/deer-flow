@@ -26,6 +26,7 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/opt/homebrew/bin/",
     "/dev/",
 )
+_SHELL_WORD_BOUNDARY_CHARS = " \t\r\n;&|<>()\"'"
 
 _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 _ACP_WORKSPACE_VIRTUAL_PATH = "/mnt/acp-workspace"
@@ -413,6 +414,16 @@ def _reject_path_traversal(path: str) -> None:
             raise PermissionError("Access denied: path traversal detected")
 
 
+def _is_url_match(command: str, start: int) -> bool:
+    """Return True when a path-like match is part of a URL such as https://."""
+    word_start = 0
+    for boundary in _SHELL_WORD_BOUNDARY_CHARS:
+        idx = command.rfind(boundary, 0, start)
+        if idx > word_start - 1:
+            word_start = idx + 1
+    return "://" in command[word_start : start + 1]
+
+
 def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
     """Validate that a virtual path is allowed for local-sandbox access.
 
@@ -518,7 +529,11 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
 
-    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
+    for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
+        if _is_url_match(command, match.start()):
+            continue
+
+        absolute_path = match.group(0)
         # Check for MCP filesystem server allowed paths
         if any(absolute_path.startswith(path) or absolute_path == path.rstrip("/") for path in allowed_paths):
             _reject_path_traversal(absolute_path)
