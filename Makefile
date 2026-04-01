@@ -2,12 +2,14 @@
 
 .PHONY: help config config-upgrade check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
-PYTHON ?= python
 BASH ?= bash
 
 # Detect OS for Windows compatibility
 ifeq ($(OS),Windows_NT)
     SHELL := cmd.exe
+    PYTHON ?= python
+else
+    PYTHON ?= python3
 endif
 
 help:

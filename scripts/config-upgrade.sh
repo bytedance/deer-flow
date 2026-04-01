@@ -35,8 +35,13 @@ if [ -z "$CONFIG" ]; then
 fi
 
 # Use inline Python to do migrations + recursive merge with PyYAML
-CONFIG_WIN="$(cygpath -w "$CONFIG")"
-EXAMPLE_WIN="$(cygpath -w "$EXAMPLE")"
+if command -v cygpath >/dev/null 2>&1; then
+    CONFIG_WIN="$(cygpath -w "$CONFIG")"
+    EXAMPLE_WIN="$(cygpath -w "$EXAMPLE")"
+else
+    CONFIG_WIN="$CONFIG"
+    EXAMPLE_WIN="$EXAMPLE"
+fi
 
 cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python -c "
 import os

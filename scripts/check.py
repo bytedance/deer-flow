@@ -20,7 +20,7 @@ def run_command(command: list[str]) -> Optional[str]:
 
 def find_pnpm_command() -> Optional[list[str]]:
     """Return a pnpm-compatible command that exists on this machine."""
-    candidates = [["pnpm"], ["pnpm.cmd"], ["pnpm.ps1"]]
+    candidates = [["pnpm"], ["pnpm.cmd"]]
     if shutil.which("corepack"):
         candidates.append(["corepack", "pnpm"])
 
