@@ -770,15 +770,16 @@ def _truncate_bash_output(output: str, max_chars: int) -> str:
         return ""
     if len(output) <= max_chars:
         return output
-    # Reserve a fixed budget for the marker. The marker contains a digit count
-    # of at most 7 digits (< 10 million chars), so 80 chars is a safe upper bound.
-    _MARKER_MAX_LEN = 80
-    kept = max(0, max_chars - _MARKER_MAX_LEN)
+    total_len = len(output)
+    # Compute the exact worst-case marker length: skipped chars is at most
+    # total_len, so this is a tight upper bound.
+    marker_max_len = len(f"\n... [middle truncated: {total_len} chars skipped] ...\n")
+    kept = max(0, max_chars - marker_max_len)
     if kept == 0:
         return output[:max_chars]
     head_len = kept // 2
     tail_len = kept - head_len
-    skipped = len(output) - kept
+    skipped = total_len - kept
     marker = f"\n... [middle truncated: {skipped} chars skipped] ...\n"
     return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}"
 
@@ -796,13 +797,13 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
         return ""
     if len(output) <= max_chars:
         return output
-    # Reserve a fixed budget for the marker (two 7-digit char counts +
-    # surrounding text stays well within 120 chars).
-    _MARKER_MAX_LEN = 120
-    kept = max(0, max_chars - _MARKER_MAX_LEN)
+    total = len(output)
+    # Compute the exact worst-case marker length: both numeric fields are at
+    # their maximum (total chars), so this is a tight upper bound.
+    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars. Use start_line/end_line to read a specific range] ...")
+    kept = max(0, max_chars - marker_max_len)
     if kept == 0:
         return output[:max_chars]
-    total = len(output)
     marker = f"\n... [truncated: showing first {kept} of {total} chars. Use start_line/end_line to read a specific range] ..."
     return f"{output[:kept]}{marker}"
 
