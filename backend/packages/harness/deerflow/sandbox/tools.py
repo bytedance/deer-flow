@@ -770,24 +770,17 @@ def _truncate_bash_output(output: str, max_chars: int) -> str:
         return ""
     if len(output) <= max_chars:
         return output
-    total_len = len(output)
-    # Find the largest `kept` such that head + marker + tail fits in max_chars.
-    kept = max_chars
-    while kept > 0:
-        skipped = total_len - kept
-        marker = f"\n... [middle truncated: {skipped} chars skipped] ...\n"
-        if kept + len(marker) <= max_chars:
-            break
-        kept -= 1
-    if kept <= 0:
+    # Reserve a fixed budget for the marker. The marker contains a digit count
+    # of at most 7 digits (< 10 million chars), so 80 chars is a safe upper bound.
+    _MARKER_MAX_LEN = 80
+    kept = max(0, max_chars - _MARKER_MAX_LEN)
+    if kept == 0:
         return output[:max_chars]
     head_len = kept // 2
     tail_len = kept - head_len
-    head = output[:head_len]
-    tail = output[-tail_len:] if tail_len > 0 else ""
-    skipped = total_len - (head_len + tail_len)
+    skipped = len(output) - kept
     marker = f"\n... [middle truncated: {skipped} chars skipped] ...\n"
-    return f"{head}{marker}{tail}"
+    return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}"
 
 
 def _truncate_read_file_output(output: str, max_chars: int) -> str:
@@ -803,14 +796,15 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
         return ""
     if len(output) <= max_chars:
         return output
+    # Reserve a fixed budget for the marker (two 7-digit char counts +
+    # surrounding text stays well within 120 chars).
+    _MARKER_MAX_LEN = 120
+    kept = max(0, max_chars - _MARKER_MAX_LEN)
+    if kept == 0:
+        return output[:max_chars]
     total = len(output)
-    kept = max_chars
-    while kept > 0:
-        marker = f"\n... [truncated: showing first {kept} of {total} chars. Use start_line/end_line to read a specific range] ..."
-        if kept + len(marker) <= max_chars:
-            return f"{output[:kept]}{marker}"
-        kept -= 1
-    return output[:max_chars]
+    marker = f"\n... [truncated: showing first {kept} of {total} chars. Use start_line/end_line to read a specific range] ..."
+    return f"{output[:kept]}{marker}"
 
 
 @tool("bash", parse_docstring=True)

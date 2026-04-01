@@ -51,16 +51,11 @@ class TestTruncateBashOutput:
         assert "chars skipped" in result
 
     def test_skipped_chars_count_is_correct(self):
-        # With strict hard cap the marker itself consumes chars, so the actual
-        # skipped count is slightly more than (len(output) - max_chars).
+        # kept = max_chars - _MARKER_MAX_LEN (80) = 19920; skipped = 25000 - 19920 = 5080
         output = "A" * 25000
         result = _truncate_bash_output(output, 20000)
-        # Extract the skipped count from the marker and verify it is >= 5000
-        import re
-
-        m = re.search(r"(\d+) chars skipped", result)
-        assert m is not None, "skipped count not found in result"
-        assert int(m.group(1)) >= 5000
+        skipped = 25000 - (20000 - 80)
+        assert f"{skipped} chars skipped" in result
 
     def test_max_chars_zero_returns_empty(self):
         output = "A" * 100000
