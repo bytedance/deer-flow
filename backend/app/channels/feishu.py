@@ -9,7 +9,7 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment, is_slash_command
 
 logger = logging.getLogger(__name__)
 
@@ -509,8 +509,8 @@ class FeishuChannel(Channel):
                 logger.info("[Feishu] empty text, ignoring message")
                 return
 
-            # Check if it's a command
-            if text.startswith("/"):
+            # Check if it's a command (only recognised slash commands, not paths like /home/user)
+            if is_slash_command(text):
                 msg_type = InboundMessageType.COMMAND
             else:
                 msg_type = InboundMessageType.CHAT
