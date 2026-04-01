@@ -128,7 +128,7 @@ def test_format_memory_renders_correction_source_error() -> None:
                 "content": "Use make dev for local development.",
                 "category": "correction",
                 "confidence": 0.95,
-                "source_error": "The agent previously suggested npm start.",
+                "sourceError": "The agent previously suggested npm start.",
             }
         ]
     }

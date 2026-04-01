@@ -34,7 +34,7 @@ Before extracting facts, perform a structured reflection on the conversation:
    If yes, record the root cause and correct approach as a high-confidence fact with category "correction".
 2. User Correction Detection: Did the user correct the agent's direction, understanding, or output?
    If yes, record the correct interpretation or approach as a high-confidence fact with category "correction".
-   Include what went wrong in "source_error" when it is explicit in the conversation.
+   Include what went wrong in "sourceError" only when category is "correction" and the mistake is explicit in the conversation.
 3. Project Constraint Discovery: Were any project-specific constraints discovered during the conversation?
    If yes, record them as facts with the most appropriate category and confidence.
 
@@ -106,7 +106,7 @@ Output Format (JSON):
     "longTermBackground": {{ "summary": "...", "shouldUpdate": true/false }}
   }},
   "newFacts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0, "source_error": "..." }}
+    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
   ],
   "factsToRemove": ["fact_id_1", "fact_id_2"]
 }}
@@ -117,6 +117,7 @@ Important Rules:
 - Include specific metrics, version numbers, and proper nouns in facts
 - Only add facts that are clearly stated (0.9+) or strongly implied (0.7+)
 - Use category "correction" for explicit agent mistakes or user corrections; assign confidence >= 0.95 when the correction is explicit
+- Include "sourceError" only for explicit correction facts when the prior mistake or wrong approach is clearly stated; omit it otherwise
 - Remove facts that are contradicted by new information
 - When updating topOfMind, integrate new focus areas while removing completed/abandoned ones
   Keep 3-5 concurrent focus themes that are still active and relevant
@@ -276,7 +277,7 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
                 continue
             category = str(fact.get("category", "context")).strip() or "context"
             confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
-            source_error = fact.get("source_error")
+            source_error = fact.get("sourceError")
             if category == "correction" and isinstance(source_error, str) and source_error.strip():
                 line = f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
             else:

@@ -155,7 +155,7 @@ def test_apply_updates_preserves_source_error() -> None:
                 "content": "Use make dev for local development.",
                 "category": "correction",
                 "confidence": 0.95,
-                "source_error": "The agent previously suggested npm start.",
+                "sourceError": "The agent previously suggested npm start.",
             }
         ]
     }
@@ -166,7 +166,7 @@ def test_apply_updates_preserves_source_error() -> None:
     ):
         result = updater._apply_updates(current_memory, update_data, thread_id="thread-correction")
 
-    assert result["facts"][0]["source_error"] == "The agent previously suggested npm start."
+    assert result["facts"][0]["sourceError"] == "The agent previously suggested npm start."
     assert result["facts"][0]["category"] == "correction"
 
 
@@ -179,7 +179,7 @@ def test_apply_updates_ignores_empty_source_error() -> None:
                 "content": "Use make dev for local development.",
                 "category": "correction",
                 "confidence": 0.95,
-                "source_error": "   ",
+                "sourceError": "   ",
             }
         ]
     }
@@ -190,7 +190,7 @@ def test_apply_updates_ignores_empty_source_error() -> None:
     ):
         result = updater._apply_updates(current_memory, update_data, thread_id="thread-correction")
 
-    assert "source_error" not in result["facts"][0]
+    assert "sourceError" not in result["facts"][0]
 
 
 def test_clear_memory_data_resets_all_sections() -> None:

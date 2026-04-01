@@ -415,11 +415,11 @@ class MemoryUpdater:
                     "createdAt": now,
                     "source": thread_id or "unknown",
                 }
-                source_error = fact.get("source_error")
+                source_error = fact.get("sourceError")
                 if isinstance(source_error, str):
                     normalized_source_error = source_error.strip()
                     if normalized_source_error:
-                        fact_entry["source_error"] = normalized_source_error
+                        fact_entry["sourceError"] = normalized_source_error
                 current_memory["facts"].append(fact_entry)
                 if fact_key is not None:
                     existing_fact_keys.add(fact_key)

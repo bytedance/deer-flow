@@ -84,7 +84,7 @@ def test_export_memory_route_preserves_source_error() -> None:
                 "confidence": 0.95,
                 "createdAt": "2026-03-20T00:00:00Z",
                 "source": "thread-1",
-                "source_error": "The agent previously suggested npm start.",
+                "sourceError": "The agent previously suggested npm start.",
             }
         ]
     )
@@ -94,7 +94,7 @@ def test_export_memory_route_preserves_source_error() -> None:
             response = client.get("/api/memory/export")
 
     assert response.status_code == 200
-    assert response.json()["facts"][0]["source_error"] == "The agent previously suggested npm start."
+    assert response.json()["facts"][0]["sourceError"] == "The agent previously suggested npm start."
 
 
 def test_import_memory_route_preserves_source_error() -> None:
@@ -109,7 +109,7 @@ def test_import_memory_route_preserves_source_error() -> None:
                 "confidence": 0.95,
                 "createdAt": "2026-03-20T00:00:00Z",
                 "source": "thread-1",
-                "source_error": "The agent previously suggested npm start.",
+                "sourceError": "The agent previously suggested npm start.",
             }
         ]
     )
@@ -119,7 +119,7 @@ def test_import_memory_route_preserves_source_error() -> None:
             response = client.post("/api/memory/import", json=imported_memory)
 
     assert response.status_code == 200
-    assert response.json()["facts"][0]["source_error"] == "The agent previously suggested npm start."
+    assert response.json()["facts"][0]["sourceError"] == "The agent previously suggested npm start."
 
 
 def test_clear_memory_route_returns_cleared_memory() -> None:
