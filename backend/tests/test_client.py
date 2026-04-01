@@ -145,6 +145,13 @@ class TestConfigQueries:
             mock_mem.assert_called_once()
         assert result == memory
 
+    def test_export_memory(self, client):
+        memory = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
+            result = client.export_memory()
+            mock_mem.assert_called_once()
+        assert result == memory
+
 
 # ---------------------------------------------------------------------------
 # stream / chat
@@ -661,6 +668,14 @@ class TestSkillsManagement:
 
 
 class TestMemoryManagement:
+    def test_import_memory(self, client):
+        imported = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.import_memory_data", return_value=imported) as mock_import:
+            result = client.import_memory(imported)
+
+        mock_import.assert_called_once_with(imported)
+        assert result == imported
+
     def test_reload_memory(self, client):
         data = {"version": "1.0", "facts": []}
         with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=data):
@@ -673,11 +688,58 @@ class TestMemoryManagement:
             result = client.clear_memory()
         assert result == data
 
+    def test_create_memory_fact(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.create_memory_fact", return_value=data) as create_fact:
+            result = client.create_memory_fact(
+                "User prefers concise code reviews.",
+                category="preference",
+                confidence=0.88,
+            )
+            create_fact.assert_called_once_with(
+                content="User prefers concise code reviews.",
+                category="preference",
+                confidence=0.88,
+            )
+        assert result == data
+
     def test_delete_memory_fact(self, client):
         data = {"version": "1.0", "facts": []}
         with patch("deerflow.agents.memory.updater.delete_memory_fact", return_value=data) as delete_fact:
             result = client.delete_memory_fact("fact_123")
             delete_fact.assert_called_once_with("fact_123")
+        assert result == data
+
+    def test_update_memory_fact(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
+            result = client.update_memory_fact(
+                "fact_123",
+                "User prefers spaces",
+                category="workflow",
+                confidence=0.91,
+            )
+            update_fact.assert_called_once_with(
+                fact_id="fact_123",
+                content="User prefers spaces",
+                category="workflow",
+                confidence=0.91,
+            )
+        assert result == data
+
+    def test_update_memory_fact_preserves_omitted_fields(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
+            result = client.update_memory_fact(
+                "fact_123",
+                "User prefers spaces",
+            )
+            update_fact.assert_called_once_with(
+                fact_id="fact_123",
+                content="User prefers spaces",
+                category=None,
+                confidence=None,
+            )
         assert result == data
 
     def test_get_memory_config(self, client):

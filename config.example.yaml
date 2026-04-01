@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 3
+config_version: 4
 
 # ============================================================================
 # Logging
@@ -188,6 +188,7 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
   # - name: minimax-m2.5-highspeed
   #   display_name: MiniMax M2.5 Highspeed
@@ -200,6 +201,7 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
   # Example: MiniMax (OpenAI-compatible) - CN 中国区用户
   # MiniMax provides high-performance models with 204K context window
@@ -215,11 +217,12 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
-  # - name: minimax-m2.5-highspeed
-  #   display_name: MiniMax M2.5 Highspeed
+  # - name: minimax-m2.7-highspeed
+  #   display_name: MiniMax M2.7 Highspeed
   #   use: langchain_openai:ChatOpenAI
-  #   model: MiniMax-M2.5-highspeed
+  #   model: MiniMax-M2.7-highspeed
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimaxi.com/v1
   #   request_timeout: 600.0
@@ -227,6 +230,7 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
   
   # Example: OpenRouter (OpenAI-compatible)
@@ -330,6 +334,8 @@ tools:
     use: deerflow.sandbox.tools:str_replace_tool
 
   # Bash execution tool
+  # Active only when using an isolated shell sandbox or when
+  # sandbox.allow_host_bash: true explicitly opts into host bash.
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
@@ -355,6 +361,10 @@ tool_search:
 # Executes commands directly on the host machine
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+  # Host bash execution is disabled by default because LocalSandboxProvider is
+  # not a secure isolation boundary for shell access. Enable only for fully
+  # trusted, single-user local workflows.
+  allow_host_bash: false
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
@@ -387,6 +397,9 @@ sandbox:
 #   #   - host_path: /path/on/host
 #   #     container_path: /home/user/shared
 #   #     read_only: false
+#   #
+#   #   # DeerFlow will surface configured container_path values to the agent,
+#   #   # so it can directly read/write mounted directories such as /home/user/shared
 #
 #   # Optional: Environment variables to inject into the sandbox container
 #   # Values starting with $ will be resolved from host environment variables
@@ -607,6 +620,8 @@ checkpointer:
 #     enabled: false
 #     app_id: $FEISHU_APP_ID
 #     app_secret: $FEISHU_APP_SECRET
+#     # domain: https://open.feishu.cn       # China (default)
+#     # domain: https://open.larksuite.com   # International
 #
 #   slack:
 #     enabled: false

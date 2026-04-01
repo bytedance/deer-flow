@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from deerflow.client import DeerFlowClient, StreamEvent
+from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.uploads.manager import PathTraversalError
 
 # Skip entire module in CI or when no config.yaml exists
@@ -100,6 +101,9 @@ class TestLiveStreaming:
 class TestLiveToolUse:
     def test_agent_uses_bash_tool(self, client):
         """Agent uses bash tool when asked to run a command."""
+        if not is_host_bash_allowed():
+            pytest.skip("Host bash is disabled for LocalSandboxProvider in the active config")
+
         events = list(client.stream("Use the bash tool to run: echo 'LIVE_TEST_OK'. Then tell me the output."))
 
         types = [e.type for e in events]
