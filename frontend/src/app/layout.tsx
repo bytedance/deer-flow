@@ -18,7 +18,14 @@ export default async function RootLayout({
   const locale = await detectLocaleServer();
   return (
     <html lang={locale} suppressContentEditableWarning suppressHydrationWarning>
-      <body>
+      <head>
+        {/* Tell Dark Reader this page manages its own color scheme — prevents it from
+            injecting data-darkreader-inline-stroke attrs on SVGs before React hydrates,
+            which caused hydration mismatches that unmounted ChatPage and dropped the
+            LangGraph SSE stream mid-generation. */}
+        <meta name="color-scheme" content="dark light" />
+      </head>
+      <body suppressHydrationWarning>
         <ThemeProvider attribute="class" enableSystem disableTransitionOnChange>
           <I18nProvider initialLocale={locale}>{children}</I18nProvider>
         </ThemeProvider>

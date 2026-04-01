@@ -59,6 +59,25 @@ class TestTitleMiddlewareCoreLogic:
         }
         assert middleware._should_generate_title(titled_state) is False
 
+    def test_generate_title_use_llm_false_skips_model(self, monkeypatch):
+        _set_test_title_config(enabled=True, use_llm=False, max_chars=50)
+        middleware = TitleMiddleware()
+        mock_create = MagicMock()
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.title_middleware.create_chat_model",
+            mock_create,
+        )
+        state = {
+            "messages": [
+                HumanMessage(content="Short user question here"),
+                AIMessage(content="Assistant reply"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+        assert result is not None
+        assert "title" in result
+        mock_create.assert_not_called()
+
     def test_should_not_generate_title_after_second_user_turn(self):
         _set_test_title_config(enabled=True)
         middleware = TitleMiddleware()

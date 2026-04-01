@@ -30,7 +30,7 @@ def _resolve_model_name(requested_model_name: str | None = None) -> str:
     if default_model_name is None:
         raise ValueError("No chat models are configured. Please configure at least one model in config.yaml.")
 
-    if requested_model_name and app_config.get_model_config(requested_model_name):
+    if requested_model_name and app_config.resolve_model_config(requested_model_name):
         return requested_model_name
 
     if requested_model_name and requested_model_name != default_model_name:
@@ -242,7 +242,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
     app_config = get_app_config()
-    model_config = app_config.get_model_config(model_name) if model_name else None
+    model_config = app_config.resolve_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
 
@@ -294,7 +294,7 @@ def make_lead_agent(config: RunnableConfig):
     model_name = requested_model_name or agent_model_name
 
     app_config = get_app_config()
-    model_config = app_config.get_model_config(model_name) if model_name else None
+    model_config = app_config.resolve_model_config(model_name) if model_name else None
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")

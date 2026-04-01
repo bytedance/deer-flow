@@ -24,15 +24,17 @@ class JinaClient:
             if response.status_code != 200:
                 error_message = f"Jina API returned status {response.status_code}: {response.text}"
                 logger.error(error_message)
-                return f"Error: {error_message}"
+                raise RuntimeError(error_message)
 
             if not response.text or not response.text.strip():
                 error_message = "Jina API returned empty response"
                 logger.error(error_message)
-                return f"Error: {error_message}"
+                raise RuntimeError(error_message)
 
             return response.text
+        except RuntimeError:
+            raise
         except Exception as e:
             error_message = f"Request to Jina API failed: {str(e)}"
             logger.error(error_message)
-            return f"Error: {error_message}"
+            raise RuntimeError(error_message) from e

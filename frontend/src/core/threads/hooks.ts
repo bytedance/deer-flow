@@ -362,6 +362,9 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
+            // Default API is "cancel": any SSE drop (tab sleep, network blip) aborts the run.
+            // "continue" keeps the graph running server-side; you can reconnect via streamResumable.
+            onDisconnect: "continue",
             streamSubgraphs: true,
             streamResumable: true,
             config: {

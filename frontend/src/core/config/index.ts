@@ -18,6 +18,16 @@ export function getBackendBaseURL() {
   }
 }
 
+/** When false, skip post-reply follow-up suggestions (avoids a second LM Studio inference per turn). */
+export function areFollowupSuggestionsEnabled(): boolean {
+  const v =
+    env.NEXT_PUBLIC_DISABLE_FOLLOWUP_SUGGESTIONS?.trim().toLowerCase() ?? "";
+  if (v === "1" || v === "true" || v === "yes" || v === "on") {
+    return false;
+  }
+  return true;
+}
+
 export function getLangGraphBaseURL(isMock?: boolean) {
   if (env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
     return new URL(

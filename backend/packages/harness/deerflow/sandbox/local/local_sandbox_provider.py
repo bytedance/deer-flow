@@ -40,6 +40,15 @@ class LocalSandboxProvider(SandboxProvider):
             # Log but don't fail if config loading fails
             logger.warning("Could not setup skills path mapping: %s", e, exc_info=True)
 
+        try:
+            from deerflow.config import get_app_config
+
+            for mount in get_app_config().sandbox.mounts or []:
+                cp = mount.container_path.replace("\\", "/").rstrip("/")
+                mappings[cp] = mount.host_path
+        except Exception as e:
+            logger.warning("Could not setup sandbox.mounts path mappings: %s", e, exc_info=True)
+
         return mappings
 
     def acquire(self, thread_id: str | None = None) -> str:

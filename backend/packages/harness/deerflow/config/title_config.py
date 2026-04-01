@@ -10,6 +10,13 @@ class TitleConfig(BaseModel):
         default=True,
         description="Whether to enable automatic title generation",
     )
+    use_llm: bool = Field(
+        default=True,
+        description=(
+            "If True, call the chat model to produce a title (extra inference after each first reply). "
+            "If False, derive title from the first user message only (no LM call — better for local models)."
+        ),
+    )
     max_words: int = Field(
         default=6,
         ge=1,

@@ -107,6 +107,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         prompt, user_msg = self._build_title_prompt(state)
         config = get_title_config()
+        if not config.use_llm:
+            return {"title": self._fallback_title(user_msg)}
+
         model = create_chat_model(name=config.model_name, thinking_enabled=False)
 
         try:
@@ -127,6 +130,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         prompt, user_msg = self._build_title_prompt(state)
         config = get_title_config()
+        if not config.use_llm:
+            return {"title": self._fallback_title(user_msg)}
+
         model = create_chat_model(name=config.model_name, thinking_enabled=False)
 
         try:

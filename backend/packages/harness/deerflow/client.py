@@ -529,11 +529,11 @@ class DeerFlowClient:
             Model info dict matching the Gateway API ``ModelResponse``
             schema, or None if not found.
         """
-        model = self._app_config.get_model_config(name)
+        model = self._app_config.resolve_model_config(name)
         if model is None:
             return None
         return {
-            "name": model.name,
+            "name": name,
             "model": getattr(model, "model", None),
             "display_name": getattr(model, "display_name", None),
             "description": getattr(model, "description", None),

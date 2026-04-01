@@ -8,6 +8,7 @@ from langgraph.typing import ContextT
 
 from deerflow.agents.thread_state import ThreadDataState, ThreadState
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.config.sandbox_config import VolumeMountConfig
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -255,6 +256,67 @@ def _join_path_preserving_style(base: str, relative: str) -> str:
     return str(Path(base) / relative)
 
 
+def _normalize_mount_container_prefix(container_path: str) -> str:
+    return container_path.replace("\\", "/").rstrip("/")
+
+
+def _get_sandbox_volume_mounts() -> list[VolumeMountConfig]:
+    try:
+        from deerflow.config import get_app_config
+
+        return list(get_app_config().sandbox.mounts or [])
+    except Exception:
+        return []
+
+
+def _match_volume_mount(path: str) -> VolumeMountConfig | None:
+    norm = path.replace("\\", "/")
+    best: VolumeMountConfig | None = None
+    best_len = -1
+    for m in _get_sandbox_volume_mounts():
+        cp = _normalize_mount_container_prefix(m.container_path)
+        if norm == cp or norm.startswith(f"{cp}/"):
+            if len(cp) > best_len:
+                best = m
+                best_len = len(cp)
+    return best
+
+
+def _resolve_volume_mount_path(path: str) -> str:
+    m = _match_volume_mount(path)
+    if m is None:
+        raise FileNotFoundError(f"No volume mount configured for path: {path}")
+    cp = _normalize_mount_container_prefix(m.container_path)
+    norm = path.replace("\\", "/")
+    root = Path(m.host_path).resolve()
+    if norm == cp:
+        return str(root)
+    rel = norm[len(cp) :].lstrip("/")
+    joined = _join_path_preserving_style(str(root), rel)
+    resolved = Path(joined).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise PermissionError("Access denied: path traversal detected") from None
+    return str(resolved)
+
+
+def _resolve_local_sandbox_io_path(
+    path: str,
+    thread_data: ThreadDataState,
+    *,
+    operation_is_read: bool,
+) -> str:
+    validate_local_tool_path(path, thread_data, read_only=operation_is_read)
+    if _is_skills_path(path):
+        return _resolve_skills_path(path)
+    if _is_acp_workspace_path(path):
+        return _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+    if _match_volume_mount(path) is not None:
+        return _resolve_volume_mount_path(path)
+    return _resolve_and_validate_user_data_path(path, thread_data)
+
+
 def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadState] | None" = None) -> str:
     """Sanitize an error message to avoid leaking host filesystem paths.
 
@@ -358,6 +420,26 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
 
             result = pattern.sub(replace_skills, result)
 
+    for mount in _get_sandbox_volume_mounts():
+        virt = _normalize_mount_container_prefix(mount.container_path)
+        try:
+            raw_base = str(Path(mount.host_path))
+            resolved_base = str(Path(mount.host_path).resolve())
+        except OSError:
+            continue
+        for base in _path_variants(raw_base) | _path_variants(resolved_base):
+            escaped = re.escape(base).replace(r"\\", r"[/\\]")
+            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+
+            def replace_vm_out(match: re.Match, _virt: str = virt, _base: str = base) -> str:
+                matched_path = match.group(0)
+                if matched_path == _base:
+                    return _virt
+                relative = matched_path[len(_base) :].lstrip("/\\")
+                return f"{_virt}/{relative}" if relative else _virt
+
+            result = pattern.sub(replace_vm_out, result)
+
     # Mask ACP workspace host paths
     _thread_id = _extract_thread_id_from_thread_data(thread_data)
     acp_host = _get_acp_workspace_host_path(_thread_id)
@@ -425,6 +507,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
       - ``/mnt/user-data/*``  — always allowed (read + write)
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
+      - Paths under ``sandbox.mounts`` ``container_path`` — read/write unless the mount is ``read_only``
 
     Args:
         path: The virtual path to validate.
@@ -452,11 +535,20 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
+    vm = _match_volume_mount(path)
+    if vm is not None:
+        if vm.read_only and not read_only:
+            raise PermissionError(f"Write access to read-only sandbox mount is not allowed: {path}")
+        return
+
     # User-data paths
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
 
-    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, or {_ACP_WORKSPACE_VIRTUAL_PATH}/ are allowed")
+    raise PermissionError(
+        f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, "
+        f"{_ACP_WORKSPACE_VIRTUAL_PATH}/, or sandbox.mounts container_path values are allowed"
+    )
 
 
 def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
@@ -538,6 +630,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
             _reject_path_traversal(absolute_path)
             continue
 
+        if _match_volume_mount(absolute_path):
+            _reject_path_traversal(absolute_path)
+            continue
+
         if any(absolute_path == prefix.rstrip("/") or absolute_path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
             continue
 
@@ -581,6 +677,19 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
             return _resolve_acp_workspace_path(match.group(0), _tid)
 
         result = acp_pattern.sub(replace_acp_match, result)
+
+    for mount in sorted(
+        _get_sandbox_volume_mounts(), key=lambda m: len(_normalize_mount_container_prefix(m.container_path)), reverse=True
+    ):
+        cp = _normalize_mount_container_prefix(mount.container_path)
+        if cp not in result:
+            continue
+        vm_pattern = re.compile(rf"{re.escape(cp)}(/[^\s\"';&|<>()]*)?")
+
+        def replace_vm_match(match: re.Match) -> str:
+            return _resolve_volume_mount_path(match.group(0))
+
+        result = vm_pattern.sub(replace_vm_match, result)
 
     # Replace user-data paths
     if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
@@ -806,13 +915,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path):
-                path = _resolve_skills_path(path)
-            elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-            else:
-                path = _resolve_and_validate_user_data_path(path, thread_data)
+            path = _resolve_local_sandbox_io_path(path, thread_data, operation_is_read=True)
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
@@ -849,13 +952,7 @@ def read_file_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path):
-                path = _resolve_skills_path(path)
-            elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-            else:
-                path = _resolve_and_validate_user_data_path(path, thread_data)
+            path = _resolve_local_sandbox_io_path(path, thread_data, operation_is_read=True)
         content = sandbox.read_file(path)
         if not content:
             return "(empty)"
@@ -895,8 +992,7 @@ def write_file_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data)
-            path = _resolve_and_validate_user_data_path(path, thread_data)
+            path = _resolve_local_sandbox_io_path(path, thread_data, operation_is_read=False)
         sandbox.write_file(path, content, append)
         return "OK"
     except SandboxError as e:
@@ -936,8 +1032,7 @@ def str_replace_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data)
-            path = _resolve_and_validate_user_data_path(path, thread_data)
+            path = _resolve_local_sandbox_io_path(path, thread_data, operation_is_read=False)
         content = sandbox.read_file(path)
         if not content:
             return "OK"

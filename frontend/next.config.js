@@ -37,14 +37,27 @@ const config = {
     }
 
     if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
-      rewrites.push({
-        source: "/api/agents",
-        destination: `${gatewayURL}/api/agents`,
-      });
-      rewrites.push({
-        source: "/api/agents/:path*",
-        destination: `${gatewayURL}/api/agents/:path*`,
-      });
+      // Proxy gateway REST routes when hitting Next directly (e.g. :3000). Nginx on :2026
+      // already routes these; without rewrites, /api/models and similar would 404.
+      const gatewayPrefixes = [
+        "agents",
+        "models",
+        "memory",
+        "mcp",
+        "skills",
+        "threads",
+        "sandboxes",
+      ];
+      for (const prefix of gatewayPrefixes) {
+        rewrites.push({
+          source: `/api/${prefix}`,
+          destination: `${gatewayURL}/api/${prefix}`,
+        });
+        rewrites.push({
+          source: `/api/${prefix}/:path*`,
+          destination: `${gatewayURL}/api/${prefix}/:path*`,
+        });
+      }
     }
 
     return rewrites;

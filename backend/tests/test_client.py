@@ -37,6 +37,16 @@ def mock_app_config():
 
     config = MagicMock()
     config.models = [model]
+
+    def _resolve(name):
+        if name is None:
+            return None
+        for m in config.models:
+            if getattr(m, "name", None) == name:
+                return m
+        return None
+
+    config.resolve_model_config.side_effect = _resolve
     return config
 
 
@@ -492,7 +502,8 @@ class TestGetModel:
         model_cfg.description = "A test model"
         model_cfg.supports_thinking = True
         model_cfg.supports_reasoning_effort = True
-        client._app_config.get_model_config.return_value = model_cfg
+        client._app_config.resolve_model_config.side_effect = None
+        client._app_config.resolve_model_config.return_value = model_cfg
 
         result = client.get_model("test-model")
         assert result == {
@@ -505,7 +516,8 @@ class TestGetModel:
         }
 
     def test_not_found(self, client):
-        client._app_config.get_model_config.return_value = None
+        client._app_config.resolve_model_config.side_effect = None
+        client._app_config.resolve_model_config.return_value = None
         assert client.get_model("nonexistent") is None
 
 
@@ -1177,7 +1189,8 @@ class TestScenarioConfigManagement:
         model_cfg.description = None
         model_cfg.supports_thinking = False
         model_cfg.supports_reasoning_effort = False
-        client._app_config.get_model_config.return_value = model_cfg
+        client._app_config.resolve_model_config.side_effect = None
+        client._app_config.resolve_model_config.return_value = model_cfg
         detail = client.get_model(model_name)
         assert detail["name"] == model_name
 
@@ -1644,7 +1657,8 @@ class TestGatewayConformance:
         model.description = "A test model"
         model.supports_thinking = True
         mock_app_config.models = [model]
-        mock_app_config.get_model_config.return_value = model
+        mock_app_config.resolve_model_config.side_effect = None
+        mock_app_config.resolve_model_config.return_value = model
 
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
             client = DeerFlowClient()

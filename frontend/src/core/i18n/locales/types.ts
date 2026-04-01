@@ -80,6 +80,10 @@ export interface Translations {
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
     searchModels: string;
+    modelPickerHeading: string;
+    modelPickerLoading: string;
+    modelPickerError: string;
+    modelPickerEmpty: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;

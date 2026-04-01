@@ -100,6 +100,10 @@ export const enUS: Translations = {
     reasoningEffortHighDescription:
       "Full-dimensional Logic Deduction + Multi-path Verification + Backward Check",
     searchModels: "Search models...",
+    modelPickerHeading: "Model",
+    modelPickerLoading: "Loading…",
+    modelPickerError: "Could not load models",
+    modelPickerEmpty: "No model — check gateway",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
     followupLoading: "Generating follow-up questions...",

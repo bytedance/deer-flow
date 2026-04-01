@@ -16,6 +16,8 @@ class SandboxConfig(BaseModel):
         use: Class path of the sandbox provider (required)
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
+        mounts: Optional extra host directories mapped to virtual POSIX paths for tools (LocalSandboxProvider
+            and container providers). Lets agents read/write fixed project paths outside the per-thread workspace.
 
     AioSandboxProvider specific options:
         image: Docker image to use (default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest)
@@ -23,7 +25,7 @@ class SandboxConfig(BaseModel):
         replicas: Maximum number of concurrent sandbox containers (default: 3). When the limit is reached the least-recently-used sandbox is evicted to make room.
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
         idle_timeout: Idle timeout in seconds before sandbox is released (default: 600 = 10 minutes). Set to 0 to disable.
-        mounts: List of volume mounts to share directories with the container
+        mounts: List of volume mounts (host_path -> container_path); also honored by LocalSandboxProvider
         environment: Environment variables to inject into the container (values starting with $ are resolved from host env)
     """
 
@@ -57,7 +59,7 @@ class SandboxConfig(BaseModel):
     )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,
-        description="List of volume mounts to share directories between host and container",
+        description="Host directories exposed under virtual paths (container_path) for tools; Docker and local sandbox",
     )
     environment: dict[str, str] = Field(
         default_factory=dict,

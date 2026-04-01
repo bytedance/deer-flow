@@ -28,6 +28,8 @@ export const env = createEnv({
     NEXT_PUBLIC_BACKEND_BASE_URL: z.string().optional(),
     NEXT_PUBLIC_LANGGRAPH_BASE_URL: z.string().optional(),
     NEXT_PUBLIC_STATIC_WEBSITE_ONLY: z.string().optional(),
+    /** "1" / "true" = do not fetch follow-up question suggestions after each reply (no extra LLM call) */
+    NEXT_PUBLIC_DISABLE_FOLLOWUP_SUGGESTIONS: z.string().optional(),
   },
 
   /**
@@ -45,6 +47,8 @@ export const env = createEnv({
     NEXT_PUBLIC_LANGGRAPH_BASE_URL: process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,
     NEXT_PUBLIC_STATIC_WEBSITE_ONLY:
       process.env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY,
+    NEXT_PUBLIC_DISABLE_FOLLOWUP_SUGGESTIONS:
+      process.env.NEXT_PUBLIC_DISABLE_FOLLOWUP_SUGGESTIONS,
     GITHUB_OAUTH_TOKEN: process.env.GITHUB_OAUTH_TOKEN,
   },
   /**

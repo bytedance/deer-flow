@@ -4,6 +4,7 @@ import type { ChatStatus } from "ai";
 import {
   CheckIcon,
   GraduationCapIcon,
+  Layers2Icon,
   LightbulbIcon,
   PaperclipIcon,
   PlusIcon,
@@ -55,8 +56,9 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { getBackendBaseURL } from "@/core/config";
+import { areFollowupSuggestionsEnabled, getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
+import { prepareModel } from "@/core/models/api";
 import { useModels } from "@/core/models/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
@@ -65,6 +67,7 @@ import { cn } from "@/lib/utils";
 import {
   ModelSelector,
   ModelSelectorContent,
+  ModelSelectorEmpty,
   ModelSelectorInput,
   ModelSelectorItem,
   ModelSelectorList,
@@ -142,7 +145,8 @@ export function InputBox({
   const { t } = useI18n();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
-  const { models } = useModels();
+  const [isClient, setIsClient] = useState(false);
+  const { models, isLoading: modelsLoading, error: modelsError } = useModels();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
@@ -157,6 +161,10 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
+
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
 
   useEffect(() => {
     if (models.length === 0) {
@@ -177,6 +185,9 @@ export function InputBox({
       model_name: nextModelName,
       mode: nextMode,
     });
+    if (nextModelName.startsWith("lmstudio-") || nextModelName === "lmstudio-local") {
+      void prepareModel(nextModelName).catch(() => {});
+    }
   }, [context, models, onContextChange]);
 
   const selectedModel = useMemo(() => {
@@ -209,6 +220,7 @@ export function InputBox({
         reasoning_effort: context.reasoning_effort,
       });
       setModelDialogOpen(false);
+      void prepareModel(model_name).catch(() => {});
     },
     [onContextChange, context, models],
   );
@@ -314,6 +326,10 @@ export function InputBox({
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
     if (!wasStreaming || streaming) {
+      return;
+    }
+
+    if (!areFollowupSuggestionsEnabled()) {
       return;
     }
 
@@ -424,6 +440,64 @@ export function InputBox({
             </PromptInputActionMenuContent>
           </PromptInputActionMenu> */}
             <AddAttachmentsButton className="px-2!" />
+            <ModelSelector
+              open={modelDialogOpen}
+              onOpenChange={setModelDialogOpen}
+            >
+              <ModelSelectorTrigger asChild>
+                <PromptInputButton className="max-w-[11rem] gap-1.5! px-2!">
+                  <Layers2Icon className="text-muted-foreground size-3.5 shrink-0" />
+                  <div className="flex min-w-0 flex-1 flex-col items-start text-left">
+                    <span className="text-muted-foreground text-[10px] leading-tight">
+                      {t.inputBox.modelPickerHeading}
+                    </span>
+                    <ModelSelectorName className="text-xs font-normal truncate">
+                      {modelsLoading
+                        ? t.inputBox.modelPickerLoading
+                        : modelsError
+                          ? t.inputBox.modelPickerError
+                          : (selectedModel?.display_name ??
+                            selectedModel?.name ??
+                            t.inputBox.modelPickerEmpty)}
+                    </ModelSelectorName>
+                  </div>
+                </PromptInputButton>
+              </ModelSelectorTrigger>
+              <ModelSelectorContent>
+                <ModelSelectorInput placeholder={t.inputBox.searchModels} />
+                <ModelSelectorList>
+                  {models.length === 0 ? (
+                    <ModelSelectorEmpty>
+                      {modelsLoading
+                        ? t.inputBox.modelPickerLoading
+                        : modelsError
+                          ? t.inputBox.modelPickerError
+                          : t.inputBox.modelPickerEmpty}
+                    </ModelSelectorEmpty>
+                  ) : (
+                    models.map((m) => (
+                      <ModelSelectorItem
+                        key={m.name}
+                        value={m.name}
+                        onSelect={() => handleModelSelect(m.name)}
+                      >
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <ModelSelectorName>{m.display_name}</ModelSelectorName>
+                          <span className="text-muted-foreground truncate text-[10px]">
+                            {m.model}
+                          </span>
+                        </div>
+                        {m.name === context.model_name ? (
+                          <CheckIcon className="ml-auto size-4" />
+                        ) : (
+                          <div className="ml-auto size-4" />
+                        )}
+                      </ModelSelectorItem>
+                    ))
+                  )}
+                </ModelSelectorList>
+              </ModelSelectorContent>
+            </ModelSelector>
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -713,44 +787,6 @@ export function InputBox({
             )}
           </PromptInputTools>
           <PromptInputTools>
-            <ModelSelector
-              open={modelDialogOpen}
-              onOpenChange={setModelDialogOpen}
-            >
-              <ModelSelectorTrigger asChild>
-                <PromptInputButton>
-                  <div className="flex min-w-0 flex-col items-start text-left">
-                    <ModelSelectorName className="text-xs font-normal">
-                      {selectedModel?.display_name}
-                    </ModelSelectorName>
-                  </div>
-                </PromptInputButton>
-              </ModelSelectorTrigger>
-              <ModelSelectorContent>
-                <ModelSelectorInput placeholder={t.inputBox.searchModels} />
-                <ModelSelectorList>
-                  {models.map((m) => (
-                    <ModelSelectorItem
-                      key={m.name}
-                      value={m.name}
-                      onSelect={() => handleModelSelect(m.name)}
-                    >
-                      <div className="flex min-w-0 flex-1 flex-col">
-                        <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                        <span className="text-muted-foreground truncate text-[10px]">
-                          {m.model}
-                        </span>
-                      </div>
-                      {m.name === context.model_name ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </ModelSelectorItem>
-                  ))}
-                </ModelSelectorList>
-              </ModelSelectorContent>
-            </ModelSelector>
             <PromptInputSubmit
               className="rounded-full"
               disabled={disabled}
@@ -759,7 +795,7 @@ export function InputBox({
             />
           </PromptInputTools>
         </PromptInputFooter>
-        {isNewThread && searchParams.get("mode") !== "skill" && (
+        {isClient && isNewThread && searchParams.get("mode") !== "skill" && (
           <div className="absolute right-0 -bottom-20 left-0 z-0 flex items-center justify-center">
             <SuggestionList />
           </div>

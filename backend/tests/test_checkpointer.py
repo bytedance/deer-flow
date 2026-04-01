@@ -212,7 +212,9 @@ class TestClientCheckpointerFallback:
         model_mock = MagicMock()
         config_mock = MagicMock()
         config_mock.models = [model_mock]
-        config_mock.get_model_config.return_value = MagicMock(supports_vision=False)
+        vision = MagicMock(supports_vision=False)
+        config_mock.get_model_config.return_value = vision
+        config_mock.resolve_model_config.return_value = vision
         config_mock.checkpointer = None
 
         with (
@@ -246,7 +248,9 @@ class TestClientCheckpointerFallback:
         model_mock = MagicMock()
         config_mock = MagicMock()
         config_mock.models = [model_mock]
-        config_mock.get_model_config.return_value = MagicMock(supports_vision=False)
+        vision = MagicMock(supports_vision=False)
+        config_mock.get_model_config.return_value = vision
+        config_mock.resolve_model_config.return_value = vision
         config_mock.checkpointer = None
 
         with (

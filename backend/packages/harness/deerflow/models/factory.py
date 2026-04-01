@@ -20,9 +20,13 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     config = get_app_config()
     if name is None:
         name = config.models[0].name
-    model_config = config.get_model_config(name)
+    model_config = config.resolve_model_config(name)
     if model_config is None:
         raise ValueError(f"Model {name} not found in config") from None
+
+    # LM Studio weights are loaded only via gateway POST /api/models/.../prepare (when the user
+    # picks a model in the UI). Calling /api/v1/models/load from here runs on every LangGraph
+    # invocation/worker and forces a full remount in LM Studio each message.
     model_class = resolve_class(model_config.use, BaseChatModel)
     model_settings_from_config = model_config.model_dump(
         exclude_none=True,
@@ -36,6 +40,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_enabled",
             "thinking",
             "supports_vision",
+            "lm_studio_discovery",
         },
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.

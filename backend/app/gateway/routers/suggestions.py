@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -78,6 +79,12 @@ def _extract_response_text(content: object) -> str:
     return str(content)
 
 
+def _followup_suggestions_disabled() -> bool:
+    """When true, skip the extra LLM round-trip (saves local models from post-reply load)."""
+    v = (os.getenv("DEER_FLOW_DISABLE_FOLLOWUP_SUGGESTIONS") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _format_conversation(messages: list[SuggestionMessage]) -> str:
     parts: list[str] = []
     for m in messages:
@@ -98,6 +105,9 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
     description="Generate short follow-up questions a user might ask next, based on recent conversation context.",
 )
 async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> SuggestionsResponse:
+    if _followup_suggestions_disabled():
+        return SuggestionsResponse(suggestions=[])
+
     if not request.messages:
         return SuggestionsResponse(suggestions=[])
 

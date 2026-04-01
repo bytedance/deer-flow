@@ -206,6 +206,28 @@ class AppConfig(BaseModel):
             return [cls.resolve_env_variables(item) for item in config]
         return config
 
+    def get_lm_studio_discovery_template(self) -> ModelConfig | None:
+        """Template row used to clone per-model configs for LM Studio discovery."""
+        for model in self.models:
+            if getattr(model, "lm_studio_discovery", None) is True:
+                return model
+        return None
+
+    def resolve_model_config(self, name: str) -> ModelConfig | None:
+        """Resolve a model config, including dynamically discovered LM Studio models."""
+        from deerflow.lm_studio import clone_lm_studio_model_config, decode_lm_studio_model_name
+
+        direct = self.get_model_config(name)
+        if direct is not None:
+            return direct
+        lm_id = decode_lm_studio_model_name(name)
+        if lm_id is None:
+            return None
+        template = self.get_lm_studio_discovery_template()
+        if template is None:
+            return None
+        return clone_lm_studio_model_config(template, name, lm_id)
+
     def get_model_config(self, name: str) -> ModelConfig | None:
         """Get the model config by name.
 

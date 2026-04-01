@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.config.sandbox_config import VolumeMountConfig
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
@@ -19,6 +20,7 @@ from deerflow.sandbox.tools import (
     replace_virtual_paths_in_command,
     validate_local_bash_command_paths,
     validate_local_tool_path,
+    _resolve_volume_mount_path,
 )
 
 _THREAD_DATA = {
@@ -376,12 +378,54 @@ def test_validate_local_tool_path_blocks_acp_workspace_write() -> None:
         )
 
 
+def test_validate_local_tool_path_allows_sandbox_volume_mount_rw(tmp_path: Path) -> None:
+    host = tmp_path / "infinitytext-local"
+    host.mkdir()
+    mounts = [
+        VolumeMountConfig(
+            host_path=str(host),
+            container_path="/mnt/infinitytext-local",
+            read_only=False,
+        )
+    ]
+    with patch("deerflow.sandbox.tools._get_sandbox_volume_mounts", return_value=mounts):
+        validate_local_tool_path("/mnt/infinitytext-local/notes.md", _THREAD_DATA, read_only=True)
+        validate_local_tool_path("/mnt/infinitytext-local/notes.md", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_blocks_read_only_mount_write(tmp_path: Path) -> None:
+    host = tmp_path / "ro-mount"
+    host.mkdir()
+    mounts = [VolumeMountConfig(host_path=str(host), container_path="/mnt/readonly-proj", read_only=True)]
+    with patch("deerflow.sandbox.tools._get_sandbox_volume_mounts", return_value=mounts):
+        validate_local_tool_path("/mnt/readonly-proj/a.txt", _THREAD_DATA, read_only=True)
+        with pytest.raises(PermissionError, match="read-only sandbox mount"):
+            validate_local_tool_path("/mnt/readonly-proj/a.txt", _THREAD_DATA, read_only=False)
+
+
+def test_resolve_volume_mount_path(tmp_path: Path) -> None:
+    host = tmp_path / "proj"
+    host.mkdir()
+    (host / "file.txt").write_text("hello")
+    mounts = [VolumeMountConfig(host_path=str(host), container_path="/mnt/infinitytext-local", read_only=False)]
+    with patch("deerflow.sandbox.tools._get_sandbox_volume_mounts", return_value=mounts):
+        assert _resolve_volume_mount_path("/mnt/infinitytext-local/file.txt") == str(host / "file.txt")
+
+
 def test_validate_local_bash_command_paths_allows_acp_workspace() -> None:
     """bash commands referencing /mnt/acp-workspace should be allowed."""
     validate_local_bash_command_paths(
         "cp /mnt/acp-workspace/hello_world.py /mnt/user-data/outputs/hello_world.py",
         _THREAD_DATA,
     )
+
+
+def test_validate_local_bash_command_paths_allows_volume_mount(tmp_path: Path) -> None:
+    host = tmp_path / "extra"
+    host.mkdir()
+    mounts = [VolumeMountConfig(host_path=str(host), container_path="/mnt/infinitytext-local", read_only=False)]
+    with patch("deerflow.sandbox.tools._get_sandbox_volume_mounts", return_value=mounts):
+        validate_local_bash_command_paths("ls /mnt/infinitytext-local", _THREAD_DATA)
 
 
 def test_validate_local_bash_command_paths_blocks_traversal_in_acp_workspace() -> None:
