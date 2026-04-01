@@ -89,7 +89,7 @@ export function ArtifactFileDetail({
   const isSupportPreview = useMemo(() => {
     return language === "html" || language === "markdown";
   }, [language]);
-  const { content } = useArtifactContent({
+  const { content, url } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
@@ -246,6 +246,7 @@ export function ArtifactFileDetail({
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
               content={displayContent}
+              isWriteFile={isWriteFile}
               language={language ?? "text"}
               threadId={threadId}
             />
@@ -270,10 +271,12 @@ export function ArtifactFileDetail({
 
 export function ArtifactFilePreview({
   content,
+  isWriteFile,
   language,
   threadId,
 }: {
   content: string;
+  isWriteFile: boolean;
   language: string;
   threadId: string;
 }) {
@@ -300,8 +303,8 @@ export function ArtifactFilePreview({
       <iframe
         className="size-full"
         title="Artifact preview"
-        srcDoc={content}
         sandbox="allow-scripts allow-forms"
+        {...(isWriteFile ? { srcDoc: content } : url ? { src: url } : {})}
       />
     );
   }
