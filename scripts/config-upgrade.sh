@@ -11,6 +11,14 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
+to_python_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$1"
+    else
+        printf '%s' "$1"
+    fi
+}
+
 # Resolve config.yaml location: env var > backend/ > repo root
 if [ -n "$DEER_FLOW_CONFIG_PATH" ] && [ -f "$DEER_FLOW_CONFIG_PATH" ]; then
     CONFIG="$DEER_FLOW_CONFIG_PATH"
@@ -34,15 +42,22 @@ if [ -z "$CONFIG" ]; then
     exit 0
 fi
 
+PY_CONFIG="$(to_python_path "$CONFIG")"
+PY_EXAMPLE="$(to_python_path "$EXAMPLE")"
+
 # Use inline Python to do migrations + recursive merge with PyYAML
-cd "$REPO_ROOT/backend" && uv run python3 -c "
-import sys, shutil, copy, re
+cd "$REPO_ROOT/backend" && \
+PYTHONIOENCODING=utf-8:replace \
+PY_CONFIG="$PY_CONFIG" \
+PY_EXAMPLE="$PY_EXAMPLE" \
+uv run python3 -c "
+import copy, os, shutil, sys
 from pathlib import Path
 
 import yaml
 
-config_path = Path('$CONFIG')
-example_path = Path('$EXAMPLE')
+config_path = Path(os.environ['PY_CONFIG'])
+example_path = Path(os.environ['PY_EXAMPLE'])
 
 with open(config_path, encoding='utf-8') as f:
     raw_text = f.read()
