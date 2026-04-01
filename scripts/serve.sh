@@ -95,7 +95,9 @@ cleanup() {
     trap - INT TERM
     echo ""
     echo "Shutting down services..."
-    pkill -f "langgraph dev" 2>/dev/null || true
+    if [ "${SKIP_LANGGRAPH_SERVER:-0}" != "1" ]; then
+        pkill -f "langgraph dev" 2>/dev/null || true
+    fi
     pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
     pkill -f "next dev" 2>/dev/null || true
     pkill -f "next start" 2>/dev/null || true
@@ -122,27 +124,32 @@ mkdir -p logs
 
 if $DEV_MODE; then
     LANGGRAPH_EXTRA_FLAGS="--no-reload"
-    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env'"
+    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='sandbox/' --reload-exclude='.deer-flow/'"
 else
     LANGGRAPH_EXTRA_FLAGS="--no-reload"
     GATEWAY_EXTRA_FLAGS=""
 fi
 
-echo "Starting LangGraph server..."
-# Read log_level from config.yaml, fallback to env var, then to "info"
-CONFIG_LOG_LEVEL=$(grep -m1 '^log_level:' config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ')
-LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
-(cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --server-log-level $LANGGRAPH_LOG_LEVEL $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1) &
-./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
-    echo "  See logs/langgraph.log for details"
-    tail -20 logs/langgraph.log
-    if grep -qE "config_version|outdated|Environment variable .* not found|KeyError|ValidationError|config\.yaml" logs/langgraph.log 2>/dev/null; then
-        echo ""
-        echo "  Hint: This may be a configuration issue. Try running 'make config-upgrade' to update your config.yaml."
-    fi
-    cleanup
-}
-echo "✓ LangGraph server started on localhost:2024"
+if [ "${SKIP_LANGGRAPH_SERVER:-0}" != "1" ]; then
+    echo "Starting LangGraph server..."
+    # Read log_level from config.yaml, fallback to env var, then to "info"
+    CONFIG_LOG_LEVEL=$(grep -m1 '^log_level:' config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ')
+    LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
+    (cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --server-log-level $LANGGRAPH_LOG_LEVEL $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1) &
+    ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
+        echo "  See logs/langgraph.log for details"
+        tail -20 logs/langgraph.log
+        if grep -qE "config_version|outdated|Environment variable .* not found|KeyError|ValidationError|config\.yaml" logs/langgraph.log 2>/dev/null; then
+            echo ""
+            echo "  Hint: This may be a configuration issue. Try running 'make config-upgrade' to update your config.yaml."
+        fi
+        cleanup
+    }
+    echo "✓ LangGraph server started on localhost:2024"
+else
+    echo "⏩ Skipping LangGraph server (SKIP_LANGGRAPH_SERVER=1)"
+    echo "   Use /api/langgraph-compat/* via Gateway instead"
+fi
 
 echo "Starting Gateway API..."
 (cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1) &
@@ -190,7 +197,16 @@ echo "=========================================="
 echo ""
 echo "  🌐 Application: http://localhost:2026"
 echo "  📡 API Gateway: http://localhost:2026/api/*"
-echo "  🤖 LangGraph:   http://localhost:2026/api/langgraph/*"
+if [ "${SKIP_LANGGRAPH_SERVER:-0}" = "1" ]; then
+    echo "  🤖 LangGraph: skipped (SKIP_LANGGRAPH_SERVER=1)"
+else
+    echo "  🤖 LangGraph: http://localhost:2026/api/langgraph/* (served by langgraph dev)"
+fi
+echo "  🧪 LangGraph Compat (experimental): http://localhost:2026/api/langgraph-compat/* (served by Gateway)"
+if [ "${SKIP_LANGGRAPH_SERVER:-0}" = "1" ]; then
+    echo ""
+    echo "  💡 Set NEXT_PUBLIC_LANGGRAPH_BASE_URL=/api/langgraph-compat in frontend/.env.local"
+fi
 echo ""
 echo "  📋 Logs:"
 echo "     - LangGraph: logs/langgraph.log"

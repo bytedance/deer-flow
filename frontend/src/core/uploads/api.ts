@@ -33,9 +33,7 @@ async function readErrorDetail(
   response: Response,
   fallback: string,
 ): Promise<string> {
-  const error = await response
-    .json()
-    .catch(() => ({ detail: fallback }));
+  const error = await response.json().catch(() => ({ detail: fallback }));
   return error.detail ?? fallback;
 }
 

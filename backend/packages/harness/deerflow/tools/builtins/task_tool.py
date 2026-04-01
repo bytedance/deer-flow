@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import replace
-from typing import Annotated, Literal
+from typing import Annotated
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langgraph.config import get_stream_writer
@@ -12,7 +12,8 @@ from langgraph.typing import ContextT
 
 from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 from deerflow.agents.thread_state import ThreadState
-from deerflow.subagents import SubagentExecutor, get_subagent_config
+from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ async def task_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
     description: str,
     prompt: str,
-    subagent_type: Literal["general-purpose", "bash"],
+    subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
     max_turns: int | None = None,
 ) -> str:
@@ -34,12 +35,13 @@ async def task_tool(
     - Handle complex multi-step tasks autonomously
     - Execute commands or operations in isolated contexts
 
-    Available subagent types:
+    Available subagent types depend on the active sandbox configuration:
     - **general-purpose**: A capable agent for complex, multi-step tasks that require
       both exploration and action. Use when the task requires complex reasoning,
       multiple dependent steps, or would benefit from isolated context.
-    - **bash**: Command execution specialist for running bash commands. Use for
-      git operations, build processes, or when command output would be verbose.
+    - **bash**: Command execution specialist for running bash commands. This is only
+      available when host bash is explicitly allowed or when using an isolated shell
+      sandbox such as `AioSandboxProvider`.
 
     When to use this tool:
     - Complex tasks requiring multiple steps or tools
@@ -57,10 +59,15 @@ async def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
         max_turns: Optional maximum number of agent turns. Defaults to subagent's configured max.
     """
+    available_subagent_names = get_available_subagent_names()
+
     # Get subagent configuration
     config = get_subagent_config(subagent_type)
     if config is None:
-        return f"Error: Unknown subagent type '{subagent_type}'. Available: general-purpose, bash"
+        available = ", ".join(available_subagent_names)
+        return f"Error: Unknown subagent type '{subagent_type}'. Available: {available}"
+    if subagent_type == "bash" and not is_host_bash_allowed():
+        return f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}"
 
     # Build config overrides
     overrides: dict = {}
@@ -197,6 +204,7 @@ async def task_tool(
                 writer({"type": "task_timed_out", "task_id": task_id})
                 return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
     except asyncio.CancelledError:
+
         async def cleanup_when_done() -> None:
             max_cleanup_polls = max_poll_count
             cleanup_poll_count = 0
@@ -211,9 +219,7 @@ async def task_tool(
                     return
 
                 if cleanup_poll_count > max_cleanup_polls:
-                    logger.warning(
-                        f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls"
-                    )
+                    logger.warning(f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls")
                     return
 
                 await asyncio.sleep(5)

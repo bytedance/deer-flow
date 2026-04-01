@@ -1,5 +1,6 @@
 import posixpath
 import re
+import shlex
 from pathlib import Path
 
 from langchain.tools import ToolRuntime, tool
@@ -14,6 +15,7 @@ from deerflow.sandbox.exceptions import (
 )
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s\"'`;&|<>()]+)")
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
@@ -100,7 +102,7 @@ def _resolve_skills_path(path: str) -> str:
     if path == skills_container:
         return skills_host
 
-    relative = path[len(skills_container):].lstrip("/")
+    relative = path[len(skills_container) :].lstrip("/")
     return _join_path_preserving_style(skills_host, relative)
 
 
@@ -210,6 +212,35 @@ def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
         raise PermissionError("Access denied: path traversal detected")
 
     return str(resolved_path)
+
+
+def _get_mcp_allowed_paths() -> list[str]:
+    """Get the list of allowed paths from MCP config for file system server."""
+    allowed_paths = []
+    try:
+        from deerflow.config.extensions_config import get_extensions_config
+
+        extensions_config = get_extensions_config()
+
+        for _, server in extensions_config.mcp_servers.items():
+            if not server.enabled:
+                continue
+
+            # Only check the filesystem server
+            args = server.args or []
+            # Check if args has server-filesystem package
+            has_filesystem = any("server-filesystem" in arg for arg in args)
+            if not has_filesystem:
+                continue
+            # Unpack the allowed file system paths in config
+            for arg in args:
+                if not arg.startswith("-") and arg.startswith("/"):
+                    allowed_paths.append(arg.rstrip("/") + "/")
+
+    except Exception:
+        pass
+
+    return allowed_paths
 
 
 def _path_variants(path: str) -> set[str]:
@@ -470,6 +501,10 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
+    This validation is only a best-effort guard for the explicit
+    ``sandbox.allow_host_bash: true`` opt-in. It is not a secure sandbox
+    boundary and must not be treated as isolation from the host filesystem.
+
     In local mode, commands must use virtual paths under /mnt/user-data for
     user data access. Skills paths under /mnt/skills and ACP workspace paths
     under /mnt/acp-workspace are allowed (path-traversal checks only; write
@@ -481,8 +516,14 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
     unsafe_paths: list[str] = []
+    allowed_paths = _get_mcp_allowed_paths()
 
     for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
+        # Check for MCP filesystem server allowed paths
+        if any(absolute_path.startswith(path) or absolute_path == path.rstrip("/") for path in allowed_paths):
+            _reject_path_traversal(absolute_path)
+            continue
+
         if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
             _reject_path_traversal(absolute_path)
             continue
@@ -551,6 +592,22 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         result = pattern.sub(replace_user_data_match, result)
 
     return result
+
+
+def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
+    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
+
+    Args:
+        command: The bash command to execute.
+        thread_data: The thread data containing the workspace path.
+
+    Returns:
+        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
+        otherwise the original command unchanged.
+    """
+    if thread_data and (workspace := thread_data.get("workspace_path")):
+        return f"cd {shlex.quote(workspace)} && {command}"
+    return command
 
 
 def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> ThreadDataState | None:
@@ -644,6 +701,8 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
     # Lazy acquisition: get thread_id and acquire sandbox
     thread_id = runtime.context.get("thread_id") if runtime.context else None
     if thread_id is None:
+        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
@@ -713,13 +772,17 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
-        thread_data = get_thread_data(runtime)
         if is_local_sandbox(runtime):
+            if not is_host_bash_allowed():
+                return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
+            ensure_thread_directories_exist(runtime)
+            thread_data = get_thread_data(runtime)
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
+            command = _apply_cwd_prefix(command, thread_data)
             output = sandbox.execute_command(command)
             return mask_local_paths_in_output(output, thread_data)
+        ensure_thread_directories_exist(runtime)
         return sandbox.execute_command(command)
     except SandboxError as e:
         return f"Error: {e}"

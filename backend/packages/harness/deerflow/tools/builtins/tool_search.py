@@ -51,6 +51,21 @@ class DeferredToolRegistry:
             )
         )
 
+    def promote(self, names: set[str]) -> None:
+        """Remove tools from the deferred registry so they pass through the filter.
+
+        Called after tool_search returns a tool's schema — the LLM now knows
+        the full definition, so the DeferredToolFilterMiddleware should stop
+        stripping it from bind_tools on subsequent calls.
+        """
+        if not names:
+            return
+        before = len(self._entries)
+        self._entries = [e for e in self._entries if e.name not in names]
+        promoted = before - len(self._entries)
+        if promoted:
+            logger.debug(f"Promoted {promoted} tool(s) from deferred to active: {names}")
+
     def search(self, query: str) -> list[BaseTool]:
         """Search deferred tools by regex pattern against name + description.
 
@@ -118,9 +133,7 @@ def _regex_score(pattern: str, entry: DeferredToolEntry) -> int:
 # loop.run_in_executor, Python copies the current context to the worker thread,
 # so the ContextVar value is correctly inherited there too.
 
-_registry_var: contextvars.ContextVar[DeferredToolRegistry | None] = contextvars.ContextVar(
-    "deferred_tool_registry", default=None
-)
+_registry_var: contextvars.ContextVar[DeferredToolRegistry | None] = contextvars.ContextVar("deferred_tool_registry", default=None)
 
 
 def get_deferred_registry() -> DeferredToolRegistry | None:
@@ -162,7 +175,7 @@ def tool_search(query: str) -> str:
         Matched tool definitions as JSON array.
     """
     registry = get_deferred_registry()
-    if registry is None:
+    if not registry:
         return "No deferred tools available."
 
     matched_tools = registry.search(query)
@@ -172,5 +185,9 @@ def tool_search(query: str) -> str:
     # Use LangChain's built-in serialization to produce OpenAI function format.
     # This is model-agnostic: all LLMs understand this standard schema.
     tool_defs = [convert_to_openai_function(t) for t in matched_tools[:MAX_RESULTS]]
+
+    # Promote matched tools so the DeferredToolFilterMiddleware stops filtering
+    # them from bind_tools — the LLM now has the full schema and can invoke them.
+    registry.promote({t.name for t in matched_tools[:MAX_RESULTS]})
 
     return json.dumps(tool_defs, indent=2, ensure_ascii=False)

@@ -63,7 +63,6 @@ export function CommandPalette() {
 
   useGlobalShortcuts(shortcuts);
 
-
   const isMac =
     typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");
   const metaKey = isMac ? "⌘" : "Ctrl+";
@@ -80,7 +79,10 @@ export function CommandPalette() {
             <CommandItem onSelect={handleNewChat}>
               <MessageSquarePlusIcon className="mr-2 h-4 w-4" />
               {t.sidebar.newChat}
-              <CommandShortcut>{metaKey}{shiftKey}N</CommandShortcut>
+              <CommandShortcut>
+                {metaKey}
+                {shiftKey}N
+              </CommandShortcut>
             </CommandItem>
             <CommandItem onSelect={handleOpenSettings}>
               <SettingsIcon className="mr-2 h-4 w-4" />

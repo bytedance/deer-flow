@@ -1164,7 +1164,8 @@ export const PromptInputSpeechButton = ({
         }
 
         const currentTextareaRef = callbacksRef.current.textareaRef;
-        const currentOnTranscriptionChange = callbacksRef.current.onTranscriptionChange;
+        const currentOnTranscriptionChange =
+          callbacksRef.current.onTranscriptionChange;
 
         if (finalTranscript && currentTextareaRef?.current) {
           const textarea = currentTextareaRef.current;

@@ -1,6 +1,8 @@
 """Tests for ClaudeChatModel._apply_oauth_billing."""
 
+import asyncio
 import json
+from unittest import mock
 
 import pytest
 
@@ -56,10 +58,7 @@ def test_billing_not_duplicated_on_second_call(model):
     payload = {"system": [{"type": "text", "text": "prompt"}]}
     model._apply_oauth_billing(payload)
     model._apply_oauth_billing(payload)
-    billing_count = sum(
-        1 for b in payload["system"]
-        if isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", "")
-    )
+    billing_count = sum(1 for b in payload["system"] if isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", ""))
     assert billing_count == 1
 
 
@@ -111,3 +110,45 @@ def test_metadata_non_dict_replaced_with_dict(model):
         model._apply_oauth_billing(payload)
         assert isinstance(payload["metadata"], dict)
         assert "user_id" in payload["metadata"]
+
+
+def test_sync_create_strips_cache_control_from_oauth_payload(model):
+    payload = {
+        "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}],
+            }
+        ],
+        "tools": [{"name": "demo", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}],
+    }
+
+    with mock.patch.object(model._client.messages, "create", return_value=object()) as create:
+        model._create(payload)
+
+    sent_payload = create.call_args.kwargs
+    assert "cache_control" not in sent_payload["system"][0]
+    assert "cache_control" not in sent_payload["messages"][0]["content"][0]
+    assert "cache_control" not in sent_payload["tools"][0]
+
+
+def test_async_create_strips_cache_control_from_oauth_payload(model):
+    payload = {
+        "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}],
+            }
+        ],
+        "tools": [{"name": "demo", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}],
+    }
+
+    with mock.patch.object(model._async_client.messages, "create", new=mock.AsyncMock(return_value=object())) as create:
+        asyncio.run(model._acreate(payload))
+
+    sent_payload = create.call_args.kwargs
+    assert "cache_control" not in sent_payload["system"][0]
+    assert "cache_control" not in sent_payload["messages"][0]["content"][0]
+    assert "cache_control" not in sent_payload["tools"][0]
