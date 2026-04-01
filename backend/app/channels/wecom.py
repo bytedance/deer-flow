@@ -260,7 +260,8 @@ class WeComChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="wecom", bus=bus, config=config)
         self._thread: threading.Thread | None = None
-        self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._main_loop: asyncio.AbstractEventLoop | None = None  # Gateway's main loop
+        self._ws_loop: asyncio.AbstractEventLoop | None = None  # WebSocket thread's loop
         self._ws: Any = None
         self._background_tasks: set[asyncio.Task] = set()
         self._running_card_ids: dict[str, str] = {}
@@ -348,6 +349,7 @@ class WeComChannel(Channel):
         """Run the WebSocket client in a dedicated thread."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._ws_loop = loop
 
         ws_url = self.config.get("ws_url", "wss://openws.work.weixin.qq.com")
         heartbeat_interval_config = self.config.get("heartbeat_interval", 30)
@@ -371,12 +373,12 @@ class WeComChannel(Channel):
         logger.debug("WeCom heartbeat interval after validation: %.2f seconds", heartbeat_interval)
 
         try:
-            loop.run_until_complete(self._ws_loop(ws_url, bot_id, bot_secret, heartbeat_interval))
+            loop.run_until_complete(self._ws_main_loop(ws_url, bot_id, bot_secret, heartbeat_interval))
         except Exception:
             if self._running:
                 logger.exception("WeCom WebSocket error")
 
-    async def _ws_loop(self, ws_url: str, bot_id: str, bot_secret: str, heartbeat_interval: float) -> None:
+    async def _ws_main_loop(self, ws_url: str, bot_id: str, bot_secret: str, heartbeat_interval: float) -> None:
         """Main WebSocket connection loop."""
         self._heartbeat_interval = heartbeat_interval
         while self._running:
@@ -615,7 +617,7 @@ class WeComChannel(Channel):
 
         # 然后再尝试发送思考占位符（即使失败也不影响）
         chat_id = inbound.chat_id
-        if chat_id and self._ws and self._ws_loop:
+        if chat_id and self._ws:
             try:
                 stream_id = uuid.uuid4().hex
                 self._chatid_to_stream_id[chat_id] = stream_id
@@ -649,8 +651,28 @@ class WeComChannel(Channel):
         logger.info("WeCom channel stopped")
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message back to WeCom."""
-        await self._send_card_message(msg)
+        """Send a message back to WeCom (thread-safe)."""
+        # Since send() is called from gateway's event loop (different thread than WebSocket),
+        # we need to run the actual send logic on the WebSocket thread's event loop.
+        ws_loop = self._ws_loop
+
+        try:
+            # Check if we're already on the WebSocket thread's loop
+            if ws_loop and asyncio.get_running_loop() is ws_loop:
+                await self._send_card_message(msg)
+                return
+        except RuntimeError:
+            pass
+
+        # Otherwise, dispatch to the WebSocket thread
+        if ws_loop and ws_loop.is_running() and not ws_loop.is_closed():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._send_card_message(msg), ws_loop)
+                await asyncio.wrap_future(fut)
+            except Exception:
+                logger.exception("[WeCom] Failed to send message via WebSocket thread")
+        else:
+            logger.warning("[WeCom] No WebSocket loop running, cannot send message")
 
     async def _send_card_message(self, msg: OutboundMessage) -> None:
         """Send or update WeCom message using native streaming format."""
@@ -713,13 +735,19 @@ class WeComChannel(Channel):
         await self._create_message(msg.chat_id, msg.text)
 
     async def _send_frame(self, frame: dict) -> None:
-        """Send a frame via WebSocket."""
+        """Send a frame via WebSocket (thread-safe)."""
         if not self._ws or not self._ws_loop:
             raise RuntimeError("WebSocket not connected")
 
         frame_json = json.dumps(frame)
 
-        # WebSocket send 只能在 WebSocket 线程的事件循环中调用，必须线程安全
+        try:
+            if asyncio.get_running_loop() is self._ws_loop:
+                await self._ws.send(frame_json)
+                return
+        except RuntimeError:
+            pass
+
         future = asyncio.run_coroutine_threadsafe(self._ws.send(frame_json), self._ws_loop)
         await asyncio.wrap_future(future)
 

@@ -685,6 +685,7 @@ class ChannelManager:
             last_publish_at = 0.0
 
             try:
+                logger.info("[Manager] Starting to consume stream for thread_id=%s, assistant_id=%s", current_thread_id, assistant_id)
                 async for chunk in client.runs.stream(
                     current_thread_id,
                     assistant_id,
@@ -695,6 +696,7 @@ class ChannelManager:
                 ):
                     event = getattr(chunk, "event", "")
                     data = getattr(chunk, "data", None)
+                    logger.debug("[Manager] Received stream chunk: event=%s, data_type=%s", event, type(data).__name__)
 
                     if event == "messages-tuple":
                         accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
@@ -725,6 +727,7 @@ class ChannelManager:
                     )
                     last_published_text = latest_text
                     last_publish_at = now
+                logger.info("[Manager] Stream completed successfully, last_values=%s, latest_text=%r", last_values is not None, latest_text[:100])
                 return last_values, latest_text
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404 and "Thread or assistant not found" in str(e.response.content):

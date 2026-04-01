@@ -86,6 +86,8 @@ services:
         read_only: true
         bind:
           create_host_path: true
+      # Google Drive credentials (writeable for token refresh)
+      - ../skills/custom/google-drive:/app/google-drive-credentials
     working_dir: /app
     environment:
       - CI=true
@@ -96,6 +98,8 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Google Drive token path (for write access)
+      - GOOGLE_DRIVE_TOKEN_PATH=/app/google-drive-credentials/token.json
     env_file:
       - ../.env
     extra_hosts:
@@ -103,6 +107,12 @@ services:
     networks:
       - deer-flow
     restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8001/health" ]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
 
   # ── LangGraph Server ───────────────────────────────────────────────────────
   # TODO: switch to langchain/langgraph-api (licensed) once a license key is available.
@@ -137,6 +147,8 @@ services:
         read_only: true
         bind:
           create_host_path: true
+      # Google Drive credentials (writeable for token refresh)
+      - ../skills/custom/google-drive:/app/google-drive-credentials
     environment:
       - CI=true
       - DEER_FLOW_HOME=/app/backend/.deer-flow
@@ -148,6 +160,8 @@ services:
       # Disable LangSmith tracing — LANGSMITH_API_KEY is not required.
       # Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable.
       - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      # Google Drive token path (for write access)
+      - GOOGLE_DRIVE_TOKEN_PATH=/app/google-drive-credentials/token.json
     env_file:
       - ../.env
     extra_hosts:
@@ -155,6 +169,12 @@ services:
     networks:
       - deer-flow
     restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:2024/health" ]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
 
   # ── Sandbox Provisioner (optional, Kubernetes mode) ────────────────────────
   provisioner:
@@ -184,7 +204,7 @@ services:
       - deer-flow
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
       interval: 10s
       timeout: 5s
       retries: 6

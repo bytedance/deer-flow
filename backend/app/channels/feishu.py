@@ -133,28 +133,43 @@ class FeishuChannel(Channel):
         thread and patching the SDK's module-level reference before calling
         ``start()``.
         """
+        logger.info("[Feishu] WebSocket thread starting")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        logger.info("[Feishu] Created new event loop for WS thread")
+
         try:
             import lark_oapi as lark
             import lark_oapi.ws.client as _ws_client_mod
 
+            logger.info("[Feishu] Imported lark_oapi SDK successfully")
+
             # Replace the SDK's module-level loop so Client.start() uses
             # this thread's (non-running) event loop instead of the main
             # thread's uvloop.
-            _ws_client_mod.loop = lambda: loop
+            _ws_client_mod.loop = loop
+            logger.info("[Feishu] Patched SDK module event loop reference")
 
             event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+            logger.info("[Feishu] Created event dispatcher with message handler")
+
             ws_client = lark.ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
                 event_handler=event_handler,
                 log_level=lark.LogLevel.INFO,
             )
+            logger.info("[Feishu] Created WebSocket client instance, starting connection...")
+
             ws_client.start()
-        except Exception:
+            logger.warning("[Feishu] WebSocket client exited normally without error")
+
+        except Exception as e:
+            logger.error("[Feishu] WebSocket thread encountered exception (running=%s): %s", self._running, str(e))
             if self._running:
                 logger.exception("Feishu WebSocket error")
+        finally:
+            logger.info("[Feishu] WebSocket thread exiting")
 
     async def stop(self) -> None:
         self._running = False
