@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -135,7 +136,13 @@ def build_run_config(
     # Inject custom agent name when the caller specified a non-default assistant.
     # Honour an explicit configurable["agent_name"] in the request if already set.
     if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID and "agent_name" not in configurable:
-        configurable["agent_name"] = assistant_id
+        # Normalize the same way ChannelManager does: strip, lowercase,
+        # replace underscores with hyphens, then validate to prevent path
+        # traversal and invalid agent directory lookups.
+        normalized = assistant_id.strip().lower().replace("_", "-")
+        if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
+            raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+        configurable["agent_name"] = normalized
 
     config: dict[str, Any] = {"configurable": configurable, "recursion_limit": 100}
     if request_config:
