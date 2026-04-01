@@ -33,15 +33,47 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
 
         front_matter = front_matter_match.group(1)
 
-        # Parse YAML front matter (simple key-value parsing)
+        # Parse YAML front matter with basic multiline string support
         metadata = {}
-        for line in front_matter.split("\n"):
-            line = line.strip()
-            if not line:
+        lines = front_matter.split("\n")
+        current_key = None
+        current_value = []
+        is_multiline = False
+
+        for line in lines:
+            if not line.strip():
+                if is_multiline:
+                    current_value.append("")
                 continue
+
+            # Check if line is indented (part of multiline string)
+            if is_multiline and (line.startswith("  ") or line.startswith("\t")):
+                current_value.append(line.strip())
+                continue
+
+            # If we reach here, it's a new key or the end of multiline
+            if current_key and is_multiline:
+                metadata[current_key] = " ".join(current_value).strip()
+                current_key = None
+                current_value = []
+                is_multiline = False
+
             if ":" in line:
+                # Handle nested dicts simply by ignoring indentation for now, 
+                # or just extracting top-level keys
                 key, value = line.split(":", 1)
-                metadata[key.strip()] = value.strip()
+                key = key.strip()
+                value = value.strip()
+
+                if value in (">", "|"):
+                    current_key = key
+                    is_multiline = True
+                    current_value = []
+                else:
+                    metadata[key] = value
+
+        if current_key and is_multiline:
+            metadata[current_key] = " ".join(current_value).strip()
 
         # Extract required fields
         name = metadata.get("name")
