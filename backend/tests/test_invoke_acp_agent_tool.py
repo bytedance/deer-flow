@@ -8,6 +8,7 @@ import pytest
 from deerflow.config.acp_config import ACPAgentConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, set_extensions_config
 from deerflow.tools.builtins.invoke_acp_agent_tool import (
+    _build_acp_mcp_servers,
     _build_mcp_servers,
     _build_permission_response,
     _get_work_dir,
@@ -37,6 +38,43 @@ def test_build_mcp_servers_filters_disabled_and_maps_transports():
             "stdio": {"transport": "stdio", "command": "npx", "args": ["srv"]},
             "http": {"transport": "http", "url": "https://example.com/mcp"},
         }
+    finally:
+        monkeypatch.undo()
+        set_extensions_config(ExtensionsConfig(mcp_servers={}, skills={}))
+
+
+def test_build_acp_mcp_servers_formats_list_payload():
+    set_extensions_config(ExtensionsConfig(mcp_servers={"stale": McpServerConfig(enabled=True, type="stdio", command="echo")}, skills={}))
+    fresh_config = ExtensionsConfig(
+        mcp_servers={
+            "stdio": McpServerConfig(enabled=True, type="stdio", command="npx", args=["srv"], env={"FOO": "bar"}),
+            "http": McpServerConfig(enabled=True, type="http", url="https://example.com/mcp", headers={"Authorization": "Bearer token"}),
+            "disabled": McpServerConfig(enabled=False, type="stdio", command="echo"),
+        },
+        skills={},
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: fresh_config),
+    )
+
+    try:
+        assert _build_acp_mcp_servers() == [
+            {
+                "name": "stdio",
+                "type": "stdio",
+                "command": "npx",
+                "args": ["srv"],
+                "env": [{"name": "FOO", "value": "bar"}],
+            },
+            {
+                "name": "http",
+                "type": "http",
+                "url": "https://example.com/mcp",
+                "headers": [{"name": "Authorization", "value": "Bearer token"}],
+            },
+        ]
     finally:
         monkeypatch.undo()
         set_extensions_config(ExtensionsConfig(mcp_servers={}, skills={}))
@@ -251,9 +289,15 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
     assert captured["spawn"] == {"cmd": "codex-acp", "args": ["--json"], "cwd": expected_cwd}
     assert captured["new_session"] == {
         "cwd": expected_cwd,
-        "mcp_servers": {
-            "github": {"transport": "stdio", "command": "npx", "args": ["github-mcp"]},
-        },
+        "mcp_servers": [
+            {
+                "name": "github",
+                "type": "stdio",
+                "command": "npx",
+                "args": ["github-mcp"],
+                "env": [],
+            }
+        ],
         "model": "gpt-5-codex",
     }
     assert captured["prompt"] == {
