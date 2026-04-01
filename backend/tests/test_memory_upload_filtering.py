@@ -10,7 +10,7 @@ persisting in long-term memory:
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.memory.updater import _strip_upload_mentions_from_memory
-from deerflow.agents.middlewares.memory_middleware import _filter_messages_for_memory
+from deerflow.agents.middlewares.memory_middleware import _filter_messages_for_memory, detect_correction
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -132,6 +132,64 @@ class TestFilterMessagesForMemory:
         all_content = " ".join(m.content for m in result if isinstance(m.content, str))
         assert "/mnt/user-data/uploads/" not in all_content
         assert "<uploaded_files>" not in all_content
+
+
+# ===========================================================================
+# detect_correction
+# ===========================================================================
+
+
+class TestDetectCorrection:
+    def test_detects_english_correction_signal(self):
+        msgs = [
+            _human("Please help me run the project."),
+            _ai("Use npm start."),
+            _human("That's wrong, use make dev instead."),
+            _ai("Understood."),
+        ]
+
+        assert detect_correction(msgs) is True
+
+    def test_detects_chinese_correction_signal(self):
+        msgs = [
+            _human("帮我启动项目"),
+            _ai("用 npm start"),
+            _human("不对，改用 make dev"),
+            _ai("明白了"),
+        ]
+
+        assert detect_correction(msgs) is True
+
+    def test_returns_false_without_signal(self):
+        msgs = [
+            _human("Please explain the build setup."),
+            _ai("Here is the build setup."),
+            _human("Thanks, that makes sense."),
+        ]
+
+        assert detect_correction(msgs) is False
+
+    def test_only_checks_recent_messages(self):
+        msgs = [
+            _human("That is wrong, use make dev instead."),
+            _ai("Noted."),
+            _human("Let's discuss tests."),
+            _ai("Sure."),
+            _human("What about linting?"),
+            _ai("Use ruff."),
+            _human("And formatting?"),
+            _ai("Use make format."),
+        ]
+
+        assert detect_correction(msgs) is False
+
+    def test_handles_list_content(self):
+        msgs = [
+            HumanMessage(content=["That is wrong,", {"type": "text", "text": "use make dev instead."}]),
+            _ai("Updated."),
+        ]
+
+        assert detect_correction(msgs) is True
 
 
 # ===========================================================================
