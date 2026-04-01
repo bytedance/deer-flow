@@ -1,10 +1,12 @@
 import json
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import mcp
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, reset_extensions_config, set_extensions_config
+from deerflow.mcp.management import update_mcp_server_enabled_states
 
 
 def _build_client() -> TestClient:
@@ -123,3 +125,40 @@ def test_update_mcp_configuration_rejects_unknown_server(tmp_path, monkeypatch) 
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Unknown MCP server(s): evil"
+
+
+def test_update_mcp_server_enabled_states_skips_noop_write(tmp_path, monkeypatch) -> None:
+    config_file = tmp_path / "extensions_config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "github": {
+                        "enabled": False,
+                        "type": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-github"],
+                        "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"},
+                        "description": "GitHub operations",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
+    reset_extensions_config()
+    original_mtime_ns = config_file.stat().st_mtime_ns
+
+    with (
+        patch("deerflow.mcp.management._atomic_write_json") as mock_write,
+        patch("deerflow.mcp.management.reload_extensions_config") as mock_reload,
+    ):
+        result = update_mcp_server_enabled_states({"github": False})
+
+    assert result.mcp_servers["github"].enabled is False
+    assert result.mcp_servers["github"].description == "GitHub operations"
+    mock_write.assert_not_called()
+    mock_reload.assert_not_called()
+    assert config_file.stat().st_mtime_ns == original_mtime_ns

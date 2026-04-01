@@ -559,6 +559,22 @@ class TestMcpConfig:
         assert client._agent is None
         assert client._agent_config_key is None
 
+    def test_update_mcp_config_preserves_cached_agent_on_failure(self, client):
+        cached_agent = MagicMock()
+        cached_key = ("model", True, False, False)
+        client._agent = cached_agent
+        client._agent_config_key = cached_key
+
+        with patch(
+            "deerflow.client.update_mcp_server_enabled_states",
+            side_effect=KeyError("Unknown MCP server(s): new-server"),
+        ):
+            with pytest.raises(KeyError, match="Unknown MCP server"):
+                client.update_mcp_config({"new-server": {"enabled": True}})
+
+        assert client._agent is cached_agent
+        assert client._agent_config_key == cached_key
+
 
 # ---------------------------------------------------------------------------
 # Skills management

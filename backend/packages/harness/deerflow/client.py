@@ -572,6 +572,8 @@ class DeerFlowClient:
         Raises:
             FileNotFoundError: If the config file cannot be located.
             KeyError: If an unknown MCP server is provided.
+            TypeError: If an MCP server update is not a dict.
+            ValueError: If an MCP server update omits the ``enabled`` field.
         """
         enabled_updates: dict[str, bool] = {}
         for name, server in mcp_servers.items():
@@ -581,9 +583,9 @@ class DeerFlowClient:
                 raise ValueError(f"MCP server update for '{name}' must include 'enabled'")
             enabled_updates[name] = bool(server["enabled"])
 
+        reloaded = update_mcp_server_enabled_states(enabled_updates)
         self._agent = None
         self._agent_config_key = None
-        reloaded = update_mcp_server_enabled_states(enabled_updates)
         return {"mcp_servers": summarize_mcp_servers(reloaded)}
 
     # ------------------------------------------------------------------

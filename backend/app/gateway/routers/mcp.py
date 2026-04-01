@@ -29,11 +29,11 @@ class McpServerConfigUpdateRequest(BaseModel):
 
 
 class McpConfigResponse(BaseModel):
-    """Response model for MCP configuration."""
+    """Response model for the public MCP configuration summary."""
 
     mcp_servers: dict[str, McpServerConfigResponse] = Field(
         default_factory=dict,
-        description="Map of MCP server name to configuration",
+        description="Map of MCP server name to public enabled-state summary",
     )
 
 
@@ -49,8 +49,8 @@ class McpConfigUpdateRequest(BaseModel):
 @router.get(
     "/mcp/config",
     response_model=McpConfigResponse,
-    summary="Get MCP Configuration",
-    description="Retrieve the current Model Context Protocol (MCP) server configurations.",
+    summary="Get MCP Configuration Summary",
+    description="Retrieve the current public Model Context Protocol (MCP) server summary, including enabled state and description only.",
 )
 async def get_mcp_configuration() -> McpConfigResponse:
     """Get the current MCP configuration summary.
@@ -78,8 +78,8 @@ async def get_mcp_configuration() -> McpConfigResponse:
 @router.put(
     "/mcp/config",
     response_model=McpConfigResponse,
-    summary="Update MCP Configuration",
-    description="Update Model Context Protocol (MCP) server configurations and save to file.",
+    summary="Update MCP Enabled States",
+    description="Update Model Context Protocol (MCP) server enabled states and save those toggles to file.",
 )
 async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfigResponse:
     """Update MCP enabled states for existing servers.

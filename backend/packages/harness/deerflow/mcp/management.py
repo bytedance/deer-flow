@@ -94,11 +94,18 @@ def update_mcp_server_enabled_states(
         joined = ", ".join(unknown_servers)
         raise KeyError(f"Unknown MCP server(s): {joined}")
 
+    changed = False
     for server_name, enabled in enabled_updates.items():
         raw_server = raw_servers.get(server_name)
         if not isinstance(raw_server, dict):
             raise ValueError(f"MCP server '{server_name}' must be a JSON object")
-        raw_server["enabled"] = bool(enabled)
+        new_enabled = bool(enabled)
+        if raw_server.get("enabled") != new_enabled:
+            raw_server["enabled"] = new_enabled
+            changed = True
+
+    if not changed:
+        return ExtensionsConfig.model_validate(config_data)
 
     _atomic_write_json(resolved_path, config_data)
     return reload_extensions_config(str(resolved_path))
