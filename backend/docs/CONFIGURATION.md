@@ -257,6 +257,8 @@ sandbox:
       read_only: false
 ```
 
+When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
+
 ### Skills
 
 Configure the skills directory for specialized workflows:

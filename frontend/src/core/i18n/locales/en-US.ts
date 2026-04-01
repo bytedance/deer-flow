@@ -194,8 +194,9 @@ export const enUS: Translations = {
     nameStepInvalidError:
       "Invalid name — use only letters, digits, and hyphens",
     nameStepAlreadyExistsError: "An agent with this name already exists",
-    nameStepCheckError:
-      "Could not reach the DeerFlow backend to verify name availability. Start the backend or set NEXT_PUBLIC_BACKEND_BASE_URL, then try again.",
+    nameStepNetworkError:
+      "Network request failed — check your network or backend connection",
+    nameStepCheckError: "Could not verify name availability — please try again",
     nameStepBootstrapMessage:
       "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
     agentCreated: "Agent created!",
