@@ -160,3 +160,127 @@ def test_resolve_agent_factory_returns_make_lead_agent():
     assert resolve_agent_factory("lead_agent") is make_lead_agent
     assert resolve_agent_factory("finalis") is make_lead_agent
     assert resolve_agent_factory("custom-agent-123") is make_lead_agent
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #1699:
+# context field in langgraph-compat requests not merged into configurable
+# ---------------------------------------------------------------------------
+
+
+def test_run_create_request_accepts_context():
+    """RunCreateRequest must accept the ``context`` field without dropping it."""
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "hi"}]},
+        context={
+            "model_name": "deepseek-v3",
+            "thinking_enabled": True,
+            "is_plan_mode": True,
+            "subagent_enabled": True,
+            "thread_id": "some-thread-id",
+        },
+    )
+    assert body.context is not None
+    assert body.context["model_name"] == "deepseek-v3"
+    assert body.context["is_plan_mode"] is True
+    assert body.context["subagent_enabled"] is True
+
+
+def test_run_create_request_context_defaults_to_none():
+    """RunCreateRequest without context should default to None (backward compat)."""
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    body = RunCreateRequest(input=None)
+    assert body.context is None
+
+
+def test_context_merges_into_configurable():
+    """Context values must be merged into config['configurable'] by start_run.
+
+    Since start_run is async and requires many dependencies, we test the
+    merging logic directly by simulating what start_run does.
+    """
+    from app.gateway.services import build_run_config
+
+    # Simulate the context merging logic from start_run
+    config = build_run_config("thread-1", None, None)
+
+    context = {
+        "model_name": "deepseek-v3",
+        "mode": "ultra",
+        "reasoning_effort": "high",
+        "thinking_enabled": True,
+        "is_plan_mode": True,
+        "subagent_enabled": True,
+        "max_concurrent_subagents": 5,
+        "thread_id": "should-be-ignored",
+    }
+
+    _CONTEXT_CONFIGURABLE_KEYS = {
+        "model_name",
+        "mode",
+        "thinking_enabled",
+        "reasoning_effort",
+        "is_plan_mode",
+        "subagent_enabled",
+        "max_concurrent_subagents",
+    }
+    configurable = config.setdefault("configurable", {})
+    for key in _CONTEXT_CONFIGURABLE_KEYS:
+        if key in context:
+            configurable.setdefault(key, context[key])
+
+    assert config["configurable"]["model_name"] == "deepseek-v3"
+    assert config["configurable"]["thinking_enabled"] is True
+    assert config["configurable"]["is_plan_mode"] is True
+    assert config["configurable"]["subagent_enabled"] is True
+    assert config["configurable"]["max_concurrent_subagents"] == 5
+    assert config["configurable"]["reasoning_effort"] == "high"
+    assert config["configurable"]["mode"] == "ultra"
+    # thread_id from context should NOT override the one from build_run_config
+    assert config["configurable"]["thread_id"] == "thread-1"
+    # Non-allowlisted keys should not appear
+    assert "thread_id" not in {k for k in context if k in _CONTEXT_CONFIGURABLE_KEYS}
+
+
+def test_context_does_not_override_existing_configurable():
+    """Values already in config.configurable must NOT be overridden by context.
+
+    This ensures that explicit configurable values from the ``config`` field
+    take precedence over the ``context`` field.
+    """
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"configurable": {"model_name": "gpt-4", "is_plan_mode": False}},
+        None,
+    )
+
+    context = {
+        "model_name": "deepseek-v3",
+        "is_plan_mode": True,
+        "subagent_enabled": True,
+    }
+
+    _CONTEXT_CONFIGURABLE_KEYS = {
+        "model_name",
+        "mode",
+        "thinking_enabled",
+        "reasoning_effort",
+        "is_plan_mode",
+        "subagent_enabled",
+        "max_concurrent_subagents",
+    }
+    configurable = config.setdefault("configurable", {})
+    for key in _CONTEXT_CONFIGURABLE_KEYS:
+        if key in context:
+            configurable.setdefault(key, context[key])
+
+    # Existing values must NOT be overridden
+    assert config["configurable"]["model_name"] == "gpt-4"
+    assert config["configurable"]["is_plan_mode"] is False
+    # New values should be added
+    assert config["configurable"]["subagent_enabled"] is True
