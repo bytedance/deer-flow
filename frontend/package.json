@@ -69,7 +69,7 @@
     "nanoid": "^5.1.6",
     "next": "^16.1.7",
     "next-themes": "^0.4.6",
-    "nuxt-og-image": "^5.1.13",
+    "nuxt-og-image": "^6.2.5",
     "ogl": "^1.0.11",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
