@@ -68,6 +68,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - **Server Components by default**, `"use client"` only for interactive components
 - **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
 - **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
+- **Streaming markdown rendering** should avoid token-by-token word splitting while a response is still loading; `core/rehype/index.ts` only animates settled natural-language text and skips URLs, commands, code-like snippets, and paths
+- **Message grouping** in `core/messages/utils.ts` must tolerate orphaned `tool` messages from streaming/reconnect/middleware-injected states by rendering them in a standalone assistant tool group instead of logging hard errors
 - **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
 
 ## Code Style

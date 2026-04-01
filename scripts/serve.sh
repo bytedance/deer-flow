@@ -36,16 +36,7 @@ fi
 # ── Stop existing services ────────────────────────────────────────────────────
 
 echo "Stopping existing services if any..."
-pkill -f "langgraph dev" 2>/dev/null || true
-pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
-pkill -f "next dev" 2>/dev/null || true
-pkill -f "next-server" 2>/dev/null || true
-nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
-sleep 1
-pkill -9 nginx 2>/dev/null || true
-killall -9 nginx 2>/dev/null || true
-./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
-sleep 1
+./scripts/stop-local-services.sh
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 
@@ -95,24 +86,7 @@ cleanup() {
     trap - INT TERM
     echo ""
     echo "Shutting down services..."
-    if [ "${SKIP_LANGGRAPH_SERVER:-0}" != "1" ]; then
-        pkill -f "langgraph dev" 2>/dev/null || true
-    fi
-    pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
-    pkill -f "next dev" 2>/dev/null || true
-    pkill -f "next start" 2>/dev/null || true
-    pkill -f "next-server" 2>/dev/null || true
-    # Kill nginx using the captured PID first (most reliable),
-    # then fall back to pkill/killall for any stray nginx workers.
-    if [ -n "${NGINX_PID:-}" ] && kill -0 "$NGINX_PID" 2>/dev/null; then
-        kill -TERM "$NGINX_PID" 2>/dev/null || true
-        sleep 1
-        kill -9 "$NGINX_PID" 2>/dev/null || true
-    fi
-    pkill -9 nginx 2>/dev/null || true
-    killall -9 nginx 2>/dev/null || true
-    echo "Cleaning up sandbox containers..."
-    ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
+    ./scripts/stop-local-services.sh
     echo "✓ All services stopped"
     exit 0
 }
@@ -120,7 +94,7 @@ trap cleanup INT TERM
 
 # ── Start services ────────────────────────────────────────────────────────────
 
-mkdir -p logs
+mkdir -p logs logs/client_body_temp
 
 if $DEV_MODE; then
     LANGGRAPH_EXTRA_FLAGS="--no-reload"
@@ -136,7 +110,8 @@ if [ "${SKIP_LANGGRAPH_SERVER:-0}" != "1" ]; then
     CONFIG_LOG_LEVEL=$(grep -m1 '^log_level:' config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ')
     LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
     (cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --server-log-level $LANGGRAPH_LOG_LEVEL $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1) &
-    ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
+    LANGGRAPH_PID=$!
+    WAIT_FOR_PORT_PID=$LANGGRAPH_PID ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
         echo "  See logs/langgraph.log for details"
         tail -20 logs/langgraph.log
         if grep -qE "config_version|outdated|Environment variable .* not found|KeyError|ValidationError|config\.yaml" logs/langgraph.log 2>/dev/null; then
@@ -153,7 +128,8 @@ fi
 
 echo "Starting Gateway API..."
 (cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1) &
-./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
+GATEWAY_PID=$!
+WAIT_FOR_PORT_PID=$GATEWAY_PID ./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log
     echo ""
@@ -167,7 +143,8 @@ echo "✓ Gateway API started on localhost:8001"
 
 echo "Starting Frontend..."
 (cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1) &
-./scripts/wait-for-port.sh 3000 120 "Frontend" || {
+FRONTEND_PID=$!
+WAIT_FOR_PORT_PID=$FRONTEND_PID ./scripts/wait-for-port.sh 3000 120 "Frontend" || {
     echo "  See logs/frontend.log for details"
     tail -20 logs/frontend.log
     cleanup
@@ -177,7 +154,7 @@ echo "✓ Frontend started on localhost:3000"
 echo "Starting Nginx reverse proxy..."
 nginx -g 'daemon off;' -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" > logs/nginx.log 2>&1 &
 NGINX_PID=$!
-./scripts/wait-for-port.sh 2026 10 "Nginx" || {
+WAIT_FOR_PORT_PID=$NGINX_PID ./scripts/wait-for-port.sh 2026 10 "Nginx" || {
     echo "  See logs/nginx.log for details"
     tail -10 logs/nginx.log
     cleanup

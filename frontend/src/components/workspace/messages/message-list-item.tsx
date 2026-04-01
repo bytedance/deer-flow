@@ -116,7 +116,7 @@ function MessageContent_({
   message: Message;
   isLoading?: boolean;
 }) {
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(!isLoading);
   const isHuman = message.type === "human";
   const { thread_id } = useParams<{ thread_id: string }>();
   const components = useMemo(

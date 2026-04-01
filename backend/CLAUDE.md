@@ -435,6 +435,7 @@ make dev
 ```
 
 This starts all services and makes the application available at `http://localhost:2026`.
+Local development uses `docker/nginx/nginx.local.conf`, and the startup scripts create `logs/client_body_temp/` so nginx can buffer request bodies without writing to system directories.
 
 **Nginx routing**:
 - `/api/langgraph/*` → LangGraph Server (2024)

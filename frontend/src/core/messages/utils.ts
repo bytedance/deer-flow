@@ -18,13 +18,16 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
+interface AssistantToolGroup extends GenericMessageGroup<"assistant:tool"> {}
+
 type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
-  | AssistantSubagentGroup;
+  | AssistantSubagentGroup
+  | AssistantToolGroup;
 
 export function groupMessages<T>(
   messages: Message[],
@@ -76,10 +79,11 @@ export function groupMessages<T>(
         if (open) {
           open.messages.push(message);
         } else {
-          console.error(
-            "Unexpected tool message outside a processing group",
-            message,
-          );
+          groups.push({
+            id: message.id,
+            type: "assistant:tool",
+            messages: [message],
+          });
         }
       }
       continue;

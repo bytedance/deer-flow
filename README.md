@@ -271,6 +271,7 @@ Prerequisite: complete the "Configuration" steps above first (`make config` and 
    ```bash
    make dev
    ```
+   Local nginx stores request-body temp files under `logs/client_body_temp/` so streaming POST requests do not depend on system nginx directories.
 
 6. **Access**: http://localhost:2026
 
@@ -449,6 +450,10 @@ Skills are loaded progressively — only when the task needs them, not all at on
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
+
+The frontend chat renderer now keeps word-splitting animations off while assistant messages are still streaming, and only applies them to settled natural-language text after skipping URLs, commands, code-like snippets, and filesystem paths. This avoids transient markdown corruption during live output while preserving the final animated reading experience.
+
+Frontend message grouping also treats orphaned `tool` messages as a standalone assistant tool group instead of hard-failing when streaming, reconnects, or middleware-injected tool results arrive without a visible preceding processing group.
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
