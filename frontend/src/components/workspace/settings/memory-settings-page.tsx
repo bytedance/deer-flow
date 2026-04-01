@@ -13,11 +13,7 @@ import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 
-import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
-} from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -588,9 +584,7 @@ export function MemorySettingsPage() {
           <Alert>
             <TriangleAlertIcon />
             <AlertTitle>{managementDisabledTitle}</AlertTitle>
-            <AlertDescription>
-              {managementDisabledDescription}
-            </AlertDescription>
+            <AlertDescription>{managementDisabledDescription}</AlertDescription>
           </Alert>
         ) : error ? (
           <div>Error: {error.message}</div>
