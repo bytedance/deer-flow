@@ -9,6 +9,17 @@ import sys
 from typing import Optional
 
 
+def configure_stdio() -> None:
+    """Prefer UTF-8 output so Unicode status markers render on Windows."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                continue
+
+
 def run_command(command: list[str]) -> Optional[str]:
     """Run a command and return trimmed stdout, or None on failure."""
     try:
@@ -29,6 +40,7 @@ def parse_node_major(version_text: str) -> Optional[int]:
 
 
 def main() -> int:
+    configure_stdio()
     print("==========================================")
     print("  Checking Required Dependencies")
     print("==========================================")
@@ -61,8 +73,9 @@ def main() -> int:
 
     print()
     print("Checking pnpm...")
-    if shutil.which("pnpm"):
-        pnpm_version = run_command(["pnpm", "-v"])
+    pnpm_executable = shutil.which("pnpm.cmd") or shutil.which("pnpm")
+    if pnpm_executable:
+        pnpm_version = run_command([pnpm_executable, "-v"])
         if pnpm_version:
             print(f"  ✓ pnpm {pnpm_version}")
         else:

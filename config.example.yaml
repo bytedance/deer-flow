@@ -397,6 +397,9 @@ sandbox:
 #   #   - host_path: /path/on/host
 #   #     container_path: /home/user/shared
 #   #     read_only: false
+#   #
+#   #   # DeerFlow will surface configured container_path values to the agent,
+#   #   # so it can directly read/write mounted directories such as /home/user/shared
 #
 #   # Optional: Environment variables to inject into the sandbox container
 #   # Values starting with $ will be resolved from host environment variables
