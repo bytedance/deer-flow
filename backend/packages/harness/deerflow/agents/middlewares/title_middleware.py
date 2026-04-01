@@ -17,6 +17,7 @@ class TitleMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
     title: NotRequired[str | None]
+    agent_name: NotRequired[str | None]
 
 
 class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
@@ -100,7 +101,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             return user_msg[:fallback_chars].rstrip() + "..."
         return user_msg if user_msg else "New Conversation"
 
-    def _generate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+    def _generate_title_result(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
         """Synchronously generate a title. Returns state update or None."""
         if not self._should_generate_title(state):
             return None
@@ -118,9 +119,15 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             logger.exception("Failed to generate title (sync)")
             title = self._fallback_title(user_msg)
 
-        return {"title": title}
+        # Get agent_name from runtime context and save it to state if present
+        updates = {"title": title}
+        agent_name = runtime.context.get("agent_name") if runtime.context else None
+        if agent_name and "agent_name" not in state:
+            updates["agent_name"] = agent_name
 
-    async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+        return updates
+
+    async def _agenerate_title_result(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
         """Asynchronously generate a title. Returns state update or None."""
         if not self._should_generate_title(state):
             return None
@@ -138,12 +145,18 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             logger.exception("Failed to generate title (async)")
             title = self._fallback_title(user_msg)
 
-        return {"title": title}
+        # Get agent_name from runtime context and save it to state if present
+        updates = {"title": title}
+        agent_name = runtime.context.get("agent_name") if runtime.context else None
+        if agent_name and "agent_name" not in state:
+            updates["agent_name"] = agent_name
+
+        return updates
 
     @override
     def after_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        return self._generate_title_result(state)
+        return self._generate_title_result(state, runtime)
 
     @override
     async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        return await self._agenerate_title_result(state)
+        return await self._agenerate_title_result(state, runtime)
