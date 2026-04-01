@@ -26,7 +26,7 @@ def _sample_memory(facts: list[dict] | None = None) -> dict:
 
 
 def _management_enabled_config() -> MemoryConfig:
-    return MemoryConfig(management_api_enabled=True)
+    return MemoryConfig(enabled=True, management_api_enabled=True)
 
 
 def test_memory_management_routes_disabled_by_default() -> None:
@@ -59,6 +59,21 @@ def test_memory_config_route_returns_safe_gate_state() -> None:
     assert response.status_code == 200
     assert response.json()["management_api_enabled"] is False
     assert "storage_path" not in response.json()
+
+
+def test_memory_management_routes_require_memory_feature_to_be_enabled() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+
+    with patch(
+        "app.gateway.routers.memory.get_memory_config",
+        return_value=MemoryConfig(enabled=False, management_api_enabled=True),
+    ):
+        with TestClient(app) as client:
+            response = client.get("/api/memory")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == memory.MEMORY_MANAGEMENT_DISABLED_DETAIL
 
 
 def test_get_memory_route_returns_current_memory_when_enabled() -> None:

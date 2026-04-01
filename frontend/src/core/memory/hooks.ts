@@ -29,7 +29,11 @@ export function useMemory(enabled = true) {
     queryFn: () => loadMemory(),
     enabled,
   });
-  return { memory: data ?? null, isLoading: enabled ? isLoading : false, error };
+  return {
+    memory: data ?? null,
+    isLoading: enabled ? isLoading : false,
+    error: enabled ? error : null,
+  };
 }
 
 export function useClearMemory() {

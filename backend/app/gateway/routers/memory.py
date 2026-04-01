@@ -15,7 +15,7 @@ from deerflow.agents.memory.updater import (
 from deerflow.config.memory_config import get_memory_config
 
 router = APIRouter(prefix="/api", tags=["memory"])
-MEMORY_MANAGEMENT_DISABLED_DETAIL = "Memory management API is disabled. Set memory.management_api_enabled to true to enable it."
+MEMORY_MANAGEMENT_DISABLED_DETAIL = "Memory HTTP API is disabled. Set memory.enabled and memory.management_api_enabled to true to enable it."
 
 
 class ContextSection(BaseModel):
@@ -108,7 +108,8 @@ class MemoryStatusResponse(BaseModel):
 
 def _require_memory_management_api_enabled() -> None:
     """Block the public memory management surface unless explicitly enabled."""
-    if not get_memory_config().management_api_enabled:
+    config = get_memory_config()
+    if not config.enabled or not config.management_api_enabled:
         raise HTTPException(status_code=403, detail=MEMORY_MANAGEMENT_DISABLED_DETAIL)
 
 

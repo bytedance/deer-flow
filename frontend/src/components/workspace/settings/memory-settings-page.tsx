@@ -578,8 +578,6 @@ export function MemorySettingsPage() {
           <div className="text-muted-foreground text-sm">
             {t.common.loading}
           </div>
-        ) : error ? (
-          <div>Error: {error.message}</div>
         ) : isMemoryFeatureDisabled ? (
           <Alert>
             <TriangleAlertIcon />
@@ -594,6 +592,8 @@ export function MemorySettingsPage() {
               {managementDisabledDescription}
             </AlertDescription>
           </Alert>
+        ) : error ? (
+          <div>Error: {error.message}</div>
         ) : !memory ? (
           <div className="text-muted-foreground text-sm">
             {t.settings.memory.empty}
