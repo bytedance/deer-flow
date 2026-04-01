@@ -207,15 +207,24 @@ class AppConfig(BaseModel):
         return config
 
     def get_model_config(self, name: str) -> ModelConfig | None:
-        """Get the model config by name.
+        """Get a model config by identifier.
 
         Args:
-            name: The name of the model to get the config for.
+            name: The model identifier to look up. This matches against the
+                configured `name` first, then falls back to the provider
+                `model` field and `display_name` for convenience.
 
         Returns:
             The model config if found, otherwise None.
         """
-        return next((model for model in self.models if model.name == name), None)
+        return next(
+            (
+                model
+                for model in self.models
+                if model.name == name or model.model == name or model.display_name == name
+            ),
+            None,
+        )
 
     def get_tool_config(self, name: str) -> ToolConfig | None:
         """Get the tool config by name.
