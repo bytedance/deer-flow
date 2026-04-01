@@ -26,6 +26,12 @@ class TestTruncateBashOutput:
         result = _truncate_bash_output(output, 20000)
         assert len(result) < len(output)
 
+    def test_result_never_exceeds_max_chars(self):
+        output = "A" * 30000
+        max_chars = 20000
+        result = _truncate_bash_output(output, max_chars)
+        assert len(result) <= max_chars
+
     def test_head_is_preserved(self):
         head = "HEAD_CONTENT"
         output = head + "M" * 30000
@@ -45,21 +51,38 @@ class TestTruncateBashOutput:
         assert "chars skipped" in result
 
     def test_skipped_chars_count_is_correct(self):
+        # With strict hard cap the marker itself consumes chars, so the actual
+        # skipped count is slightly more than (len(output) - max_chars).
         output = "A" * 25000
         result = _truncate_bash_output(output, 20000)
-        assert "5000 chars skipped" in result
+        # Extract the skipped count from the marker and verify it is >= 5000
+        import re
 
-    def test_max_chars_zero_disables_truncation(self):
+        m = re.search(r"(\d+) chars skipped", result)
+        assert m is not None, "skipped count not found in result"
+        assert int(m.group(1)) >= 5000
+
+    def test_max_chars_zero_returns_empty(self):
         output = "A" * 100000
-        assert _truncate_bash_output(output, 0) == output
+        assert _truncate_bash_output(output, 0) == ""
 
     def test_50_50_split(self):
-        # head and tail should each be max_chars // 2
+        # head and tail should each be roughly max_chars // 2
         output = "H" * 20000 + "M" * 10000 + "T" * 20000
         result = _truncate_bash_output(output, 20000)
-        half = 20000 // 2
-        assert result[:half] == "H" * half
-        assert result[-(half):] == "T" * half
+        assert result[:100] == "H" * 100
+        assert result[-100:] == "T" * 100
+
+    def test_small_max_chars_does_not_crash(self):
+        output = "A" * 1000
+        result = _truncate_bash_output(output, 10)
+        assert len(result) <= 10
+
+    def test_result_never_exceeds_max_chars_various_sizes(self):
+        output = "X" * 50000
+        for max_chars in [100, 1000, 5000, 20000, 49999]:
+            result = _truncate_bash_output(output, max_chars)
+            assert len(result) <= max_chars, f"failed for max_chars={max_chars}"
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +103,12 @@ class TestTruncateReadFileOutput:
         output = "X" * 60000
         result = _truncate_read_file_output(output, 50000)
         assert len(result) < len(output)
+
+    def test_result_never_exceeds_max_chars(self):
+        output = "X" * 60000
+        max_chars = 50000
+        result = _truncate_read_file_output(output, max_chars)
+        assert len(result) <= max_chars
 
     def test_head_is_preserved(self):
         head = "import os\nimport sys\n"
@@ -104,12 +133,23 @@ class TestTruncateReadFileOutput:
         assert "start_line" in result
         assert "end_line" in result
 
-    def test_max_chars_zero_disables_truncation(self):
+    def test_max_chars_zero_returns_empty(self):
         output = "X" * 100000
-        assert _truncate_read_file_output(output, 0) == output
+        assert _truncate_read_file_output(output, 0) == ""
 
     def test_tail_is_not_preserved(self):
         # head-truncation: tail should be cut off
         output = "H" * 50000 + "TAIL_SHOULD_NOT_APPEAR"
         result = _truncate_read_file_output(output, 50000)
         assert "TAIL_SHOULD_NOT_APPEAR" not in result
+
+    def test_small_max_chars_does_not_crash(self):
+        output = "X" * 1000
+        result = _truncate_read_file_output(output, 10)
+        assert len(result) <= 10
+
+    def test_result_never_exceeds_max_chars_various_sizes(self):
+        output = "X" * 50000
+        for max_chars in [100, 1000, 5000, 20000, 49999]:
+            result = _truncate_read_file_output(output, max_chars)
+            assert len(result) <= max_chars, f"failed for max_chars={max_chars}"

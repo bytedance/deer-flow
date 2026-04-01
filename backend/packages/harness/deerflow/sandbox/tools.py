@@ -762,14 +762,32 @@ def _truncate_bash_output(output: str, max_chars: int) -> str:
 
     bash output may have errors at either end (stderr/stdout ordering is
     non-deterministic), so both ends are preserved equally.
+
+    The returned string (including the truncation marker) is guaranteed to be
+    no longer than max_chars characters.
     """
-    if max_chars <= 0 or len(output) <= max_chars:
+    if max_chars <= 0:
+        return ""
+    if len(output) <= max_chars:
         return output
-    half = max_chars // 2
-    head = output[:half]
-    tail = output[-half:]
-    skipped = len(output) - max_chars
-    return f"{head}\n... [middle truncated: {skipped} chars skipped] ...\n{tail}"
+    total_len = len(output)
+    # Find the largest `kept` such that head + marker + tail fits in max_chars.
+    kept = max_chars
+    while kept > 0:
+        skipped = total_len - kept
+        marker = f"\n... [middle truncated: {skipped} chars skipped] ...\n"
+        if kept + len(marker) <= max_chars:
+            break
+        kept -= 1
+    if kept <= 0:
+        return output[:max_chars]
+    head_len = kept // 2
+    tail_len = kept - head_len
+    head = output[:head_len]
+    tail = output[-tail_len:] if tail_len > 0 else ""
+    skipped = total_len - (head_len + tail_len)
+    marker = f"\n... [middle truncated: {skipped} chars skipped] ...\n"
+    return f"{head}{marker}{tail}"
 
 
 def _truncate_read_file_output(output: str, max_chars: int) -> str:
@@ -777,11 +795,22 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
 
     Source code and documents are read top-to-bottom; the head contains the
     most context (imports, class definitions, function signatures).
+
+    The returned string (including the truncation marker) is guaranteed to be
+    no longer than max_chars characters.
     """
-    if max_chars <= 0 or len(output) <= max_chars:
+    if max_chars <= 0:
+        return ""
+    if len(output) <= max_chars:
         return output
     total = len(output)
-    return f"{output[:max_chars]}\n... [truncated: showing first {max_chars} of {total} chars. Use start_line/end_line to read a specific range] ..."
+    kept = max_chars
+    while kept > 0:
+        marker = f"\n... [truncated: showing first {kept} of {total} chars. Use start_line/end_line to read a specific range] ..."
+        if kept + len(marker) <= max_chars:
+            return f"{output[:kept]}{marker}"
+        kept -= 1
+    return output[:max_chars]
 
 
 @tool("bash", parse_docstring=True)
@@ -808,16 +837,22 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             output = sandbox.execute_command(command)
+            try:
+                from deerflow.config.app_config import get_app_config
+
+                sandbox_cfg = get_app_config().sandbox
+                max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
+            except Exception:
+                max_chars = 20000
+            return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
+        ensure_thread_directories_exist(runtime)
+        try:
             from deerflow.config.app_config import get_app_config
 
             sandbox_cfg = get_app_config().sandbox
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
-            return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
-        ensure_thread_directories_exist(runtime)
-        from deerflow.config.app_config import get_app_config
-
-        sandbox_cfg = get_app_config().sandbox
-        max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
+        except Exception:
+            max_chars = 20000
         return _truncate_bash_output(sandbox.execute_command(command), max_chars)
     except SandboxError as e:
         return f"Error: {e}"
@@ -896,10 +931,13 @@ def read_file_tool(
             return "(empty)"
         if start_line is not None and end_line is not None:
             content = "\n".join(content.splitlines()[start_line - 1 : end_line])
-        from deerflow.config.app_config import get_app_config
+        try:
+            from deerflow.config.app_config import get_app_config
 
-        sandbox_cfg = get_app_config().sandbox
-        max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
+            sandbox_cfg = get_app_config().sandbox
+            max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
+        except Exception:
+            max_chars = 50000
         return _truncate_read_file_output(content, max_chars)
     except SandboxError as e:
         return f"Error: {e}"
