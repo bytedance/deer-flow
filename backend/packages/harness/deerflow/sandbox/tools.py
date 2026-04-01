@@ -1,6 +1,7 @@
 import posixpath
 import re
 import shlex
+import threading
 from pathlib import Path
 
 from langchain.tools import ToolRuntime, tool
@@ -29,6 +30,17 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
 
 _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 _ACP_WORKSPACE_VIRTUAL_PATH = "/mnt/acp-workspace"
+_FILE_OPERATION_LOCKS: dict[str, threading.Lock] = {}
+_FILE_OPERATION_LOCKS_GUARD = threading.Lock()
+
+
+def _get_file_operation_lock(path: str) -> threading.Lock:
+    with _FILE_OPERATION_LOCKS_GUARD:
+        lock = _FILE_OPERATION_LOCKS.get(path)
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_OPERATION_LOCKS[path] = lock
+        return lock
 
 
 def _get_skills_container_path() -> str:
@@ -938,16 +950,17 @@ def str_replace_tool(
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             path = _resolve_and_validate_user_data_path(path, thread_data)
-        content = sandbox.read_file(path)
-        if not content:
-            return "OK"
-        if old_str not in content:
-            return f"Error: String to replace not found in file: {requested_path}"
-        if replace_all:
-            content = content.replace(old_str, new_str)
-        else:
-            content = content.replace(old_str, new_str, 1)
-        sandbox.write_file(path, content)
+        with _get_file_operation_lock(path):
+            content = sandbox.read_file(path)
+            if not content:
+                return "OK"
+            if old_str not in content:
+                return f"Error: String to replace not found in file: {requested_path}"
+            if replace_all:
+                content = content.replace(old_str, new_str)
+            else:
+                content = content.replace(old_str, new_str, 1)
+            sandbox.write_file(path, content)
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"

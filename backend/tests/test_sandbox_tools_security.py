@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +18,7 @@ from deerflow.sandbox.tools import (
     mask_local_paths_in_output,
     replace_virtual_path,
     replace_virtual_paths_in_command,
+    str_replace_tool,
     validate_local_bash_command_paths,
     validate_local_tool_path,
 )
@@ -512,3 +514,67 @@ def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None
         with patch("deerflow.config.extensions_config.get_extensions_config", return_value=disabled_config):
             with pytest.raises(PermissionError, match="Unsafe absolute paths"):
                 validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
+
+
+def test_str_replace_parallel_updates_should_preserve_both_edits(monkeypatch) -> None:
+    class SharedSandbox:
+        def __init__(self) -> None:
+            self.content = "alpha\nbeta\n"
+            self._active_reads = 0
+            self._state_lock = threading.Lock()
+            self._overlap_detected = threading.Event()
+
+        def read_file(self, path: str) -> str:
+            with self._state_lock:
+                self._active_reads += 1
+                snapshot = self.content
+                if self._active_reads == 2:
+                    self._overlap_detected.set()
+
+            self._overlap_detected.wait(0.05)
+
+            with self._state_lock:
+                self._active_reads -= 1
+
+            return snapshot
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            self.content = content
+
+    sandbox = SharedSandbox()
+    runtimes = [
+        SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={}),
+        SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={}),
+    ]
+    failures: list[BaseException] = []
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    def worker(runtime: SimpleNamespace, old_str: str, new_str: str) -> None:
+        try:
+            result = str_replace_tool.func(
+                runtime=runtime,
+                description="并发替换同一文件",
+                path="/mnt/user-data/workspace/shared.txt",
+                old_str=old_str,
+                new_str=new_str,
+            )
+            assert result == "OK"
+        except BaseException as exc:  # pragma: no cover - failure is asserted below
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(runtimes[0], "alpha", "ALPHA")),
+        threading.Thread(target=worker, args=(runtimes[1], "beta", "BETA")),
+    ]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert "ALPHA" in sandbox.content
+    assert "BETA" in sandbox.content
