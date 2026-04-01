@@ -601,15 +601,24 @@ def test_validate_local_bash_command_paths_still_blocks_non_mount_paths() -> Non
             validate_local_bash_command_paths("cat /etc/shadow", _THREAD_DATA)
 
 
-def test_get_custom_mounts_caching(monkeypatch) -> None:
+def test_get_custom_mounts_caching(monkeypatch, tmp_path) -> None:
     """_get_custom_mounts should cache after first successful load."""
     # Clear any existing cache
     if hasattr(_get_custom_mounts, "_cached"):
         monkeypatch.delattr(_get_custom_mounts, "_cached")
 
-    mounts = _mock_custom_mounts()
-    from deerflow.config.sandbox_config import SandboxConfig
+    # Use real directories so host_path.exists() filtering passes
+    dir_a = tmp_path / "code-read"
+    dir_a.mkdir()
+    dir_b = tmp_path / "data"
+    dir_b.mkdir()
 
+    from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+
+    mounts = [
+        VolumeMountConfig(host_path=str(dir_a), container_path="/mnt/code-read", read_only=True),
+        VolumeMountConfig(host_path=str(dir_b), container_path="/mnt/data", read_only=False),
+    ]
     mock_sandbox = SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", mounts=mounts)
     mock_config = SimpleNamespace(sandbox=mock_sandbox)
 

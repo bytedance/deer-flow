@@ -122,9 +122,9 @@ def _get_custom_mounts():
     if cached is not None:
         return cached
     try:
-        from deerflow.config import get_app_config
-
         from pathlib import Path
+
+        from deerflow.config import get_app_config
 
         config = get_app_config()
         mounts = []
