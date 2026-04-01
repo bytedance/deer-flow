@@ -174,7 +174,10 @@ def test_export_memory_route_preserves_source_error() -> None:
         ]
     )
 
-    with patch("app.gateway.routers.memory.get_memory_data", return_value=exported_memory):
+    with (
+        patch("app.gateway.routers.memory.get_memory_config", return_value=_management_enabled_config()),
+        patch("app.gateway.routers.memory.get_memory_data", return_value=exported_memory),
+    ):
         with TestClient(app) as client:
             response = client.get("/api/memory/export")
 
@@ -199,7 +202,10 @@ def test_import_memory_route_preserves_source_error() -> None:
         ]
     )
 
-    with patch("app.gateway.routers.memory.import_memory_data", return_value=imported_memory):
+    with (
+        patch("app.gateway.routers.memory.get_memory_config", return_value=_management_enabled_config()),
+        patch("app.gateway.routers.memory.import_memory_data", return_value=imported_memory),
+    ):
         with TestClient(app) as client:
             response = client.post("/api/memory/import", json=imported_memory)
 
