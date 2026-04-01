@@ -96,8 +96,10 @@ setup-sandbox:
 
 # Start all services in development mode (with hot-reloading)
 dev:
+	@$(PYTHON) ./scripts/check.py
 ifeq ($(OS),Windows_NT)
 	@echo "Detected Windows - using Git Bash..."
+	@where $(BASH) >NUL 2>&1 || (echo Git Bash was not found in PATH. Install Git for Windows, or use WSL/Docker for local development.& exit /b 1)
 	@$(BASH) ./scripts/serve.sh --dev
 else
 	@./scripts/serve.sh --dev
@@ -105,8 +107,10 @@ endif
 
 # Start all services in production mode (with optimizations)
 start:
+	@$(PYTHON) ./scripts/check.py
 ifeq ($(OS),Windows_NT)
 	@echo "Detected Windows - using Git Bash..."
+	@where $(BASH) >NUL 2>&1 || (echo Git Bash was not found in PATH. Install Git for Windows, or use WSL/Docker for local development.& exit /b 1)
 	@$(BASH) ./scripts/serve.sh --prod
 else
 	@./scripts/serve.sh --prod
@@ -114,7 +118,14 @@ endif
 
 # Start all services in daemon mode (background)
 dev-daemon:
+	@$(PYTHON) ./scripts/check.py
+ifeq ($(OS),Windows_NT)
+	@echo "Detected Windows - using Git Bash..."
+	@where $(BASH) >NUL 2>&1 || (echo Git Bash was not found in PATH. Install Git for Windows, or use WSL/Docker for local development.& exit /b 1)
+	@$(BASH) ./scripts/start-daemon.sh
+else
 	@./scripts/start-daemon.sh
+endif
 
 # Stop all services
 stop:
