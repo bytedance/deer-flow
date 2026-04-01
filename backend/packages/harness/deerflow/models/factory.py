@@ -68,7 +68,12 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
 
     # OpenAI-compatible streaming models only emit usage metadata when stream_usage is enabled.
     # Keep user-specified values intact, but default to True for ChatOpenAI-based providers.
-    if ChatOpenAI is not None and issubclass(model_class, ChatOpenAI) and "stream_usage" not in model_settings_from_config:
+    if (
+        ChatOpenAI is not None
+        and issubclass(model_class, ChatOpenAI)
+        and "stream_usage" not in model_settings_from_config
+        and "stream_usage" not in kwargs
+    ):
         model_settings_from_config["stream_usage"] = True
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
