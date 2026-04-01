@@ -68,9 +68,9 @@ class TestTruncateBashOutput:
         head_and_tail = len(output) - reported_skipped
         assert result.startswith(output[: head_and_tail // 2])
 
-    def test_max_chars_zero_returns_empty(self):
+    def test_max_chars_zero_disables_truncation(self):
         output = "A" * 100000
-        assert _truncate_bash_output(output, 0) == ""
+        assert _truncate_bash_output(output, 0) == output
 
     def test_50_50_split(self):
         # head and tail should each be roughly max_chars // 2
@@ -139,9 +139,9 @@ class TestTruncateReadFileOutput:
         assert "start_line" in result
         assert "end_line" in result
 
-    def test_max_chars_zero_returns_empty(self):
+    def test_max_chars_zero_disables_truncation(self):
         output = "X" * 100000
-        assert _truncate_read_file_output(output, 0) == ""
+        assert _truncate_read_file_output(output, 0) == output
 
     def test_tail_is_not_preserved(self):
         # head-truncation: tail should be cut off

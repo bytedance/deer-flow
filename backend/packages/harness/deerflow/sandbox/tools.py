@@ -764,10 +764,11 @@ def _truncate_bash_output(output: str, max_chars: int) -> str:
     non-deterministic), so both ends are preserved equally.
 
     The returned string (including the truncation marker) is guaranteed to be
-    no longer than max_chars characters.
+    no longer than max_chars characters. Pass max_chars=0 to disable truncation
+    and return the full output unchanged.
     """
-    if max_chars <= 0:
-        return ""
+    if max_chars == 0:
+        return output
     if len(output) <= max_chars:
         return output
     total_len = len(output)
@@ -791,10 +792,11 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
     most context (imports, class definitions, function signatures).
 
     The returned string (including the truncation marker) is guaranteed to be
-    no longer than max_chars characters.
+    no longer than max_chars characters. Pass max_chars=0 to disable truncation
+    and return the full output unchanged.
     """
-    if max_chars <= 0:
-        return ""
+    if max_chars == 0:
+        return output
     if len(output) <= max_chars:
         return output
     total = len(output)
