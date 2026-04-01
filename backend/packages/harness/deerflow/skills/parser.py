@@ -39,27 +39,46 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
         current_key = None
         current_value = []
         is_multiline = False
+        multiline_style = None
+        indent_level = None
 
         for line in lines:
-            if not line.strip():
-                if is_multiline:
+            if is_multiline:
+                if not line.strip():
                     current_value.append("")
-                continue
+                    continue
 
-            # Check if line is indented (part of multiline string)
-            if is_multiline and (line.startswith("  ") or line.startswith("\t")):
-                current_value.append(line.strip())
-                continue
+                current_indent = len(line) - len(line.lstrip())
 
-            # If we reach here, it's a new key or the end of multiline
+                if indent_level is None:
+                    if current_indent > 0:
+                        indent_level = current_indent
+                        current_value.append(line[indent_level:])
+                        continue
+                elif current_indent >= indent_level:
+                    current_value.append(line[indent_level:])
+                    continue
+
+            # If we reach here, it's either a new key or the end of multiline
             if current_key and is_multiline:
-                metadata[current_key] = " ".join(current_value).strip()
+                if multiline_style == "|":
+                    metadata[current_key] = "\n".join(current_value).rstrip()
+                else:
+                    text = "\n".join(current_value).rstrip()
+                    # Replace single newlines with spaces for folded blocks
+                    metadata[current_key] = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+
                 current_key = None
                 current_value = []
                 is_multiline = False
+                multiline_style = None
+                indent_level = None
+
+            if not line.strip():
+                continue
 
             if ":" in line:
-                # Handle nested dicts simply by ignoring indentation for now, 
+                # Handle nested dicts simply by ignoring indentation for now,
                 # or just extracting top-level keys
                 key, value = line.split(":", 1)
                 key = key.strip()
@@ -68,12 +87,18 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
                 if value in (">", "|"):
                     current_key = key
                     is_multiline = True
+                    multiline_style = value
                     current_value = []
+                    indent_level = None
                 else:
                     metadata[key] = value
 
         if current_key and is_multiline:
-            metadata[current_key] = " ".join(current_value).strip()
+            if multiline_style == "|":
+                metadata[current_key] = "\n".join(current_value).rstrip()
+            else:
+                text = "\n".join(current_value).rstrip()
+                metadata[current_key] = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
 
         # Extract required fields
         name = metadata.get("name")
