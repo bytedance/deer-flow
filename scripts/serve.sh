@@ -30,7 +30,7 @@ done
 if $DEV_MODE; then
     FRONTEND_CMD="pnpm run dev"
 else
-    FRONTEND_CMD="env BETTER_AUTH_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
+    FRONTEND_CMD="env BETTER_AUTH_SECRET=$(python -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
 fi
 
 # ── Stop existing services ────────────────────────────────────────────────────
@@ -119,6 +119,7 @@ trap cleanup INT TERM
 # ── Start services ────────────────────────────────────────────────────────────
 
 mkdir -p logs
+mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
 
 if $DEV_MODE; then
     LANGGRAPH_EXTRA_FLAGS="--no-reload"
