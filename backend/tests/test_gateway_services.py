@@ -119,10 +119,7 @@ def test_build_run_config_custom_agent_injects_agent_name():
     from app.gateway.services import build_run_config
 
     config = build_run_config("thread-1", None, None, assistant_id="finalis")
-    assert config["configurable"]["agent_name"] == "finalis", (
-        "Custom assistant_id must be forwarded as configurable['agent_name'] "
-        "so that make_lead_agent loads the correct SOUL.md"
-    )
+    assert config["configurable"]["agent_name"] == "finalis", "Custom assistant_id must be forwarded as configurable['agent_name'] so that make_lead_agent loads the correct SOUL.md"
 
 
 def test_build_run_config_lead_agent_no_agent_name():
@@ -151,10 +148,7 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
         None,
         assistant_id="other-agent",
     )
-    assert config["configurable"]["agent_name"] == "explicit-agent", (
-        "An explicit configurable['agent_name'] in the request body must not be "
-        "overwritten by the assistant_id mapping"
-    )
+    assert config["configurable"]["agent_name"] == "explicit-agent", "An explicit configurable['agent_name'] in the request body must not be overwritten by the assistant_id mapping"
 
 
 def test_resolve_agent_factory_returns_make_lead_agent():
