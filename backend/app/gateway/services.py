@@ -129,26 +129,38 @@ def build_run_config(
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
     identically.
     """
-    configurable: dict[str, Any] = {"thread_id": thread_id}
+    config: dict[str, Any] = {"recursion_limit": 100}
     if request_config:
-        configurable.update(request_config.get("configurable", {}))
+        # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
+        # pass thread-level data and rejects requests that include both
+        # ``configurable`` and ``context``.  If the caller already sends
+        # ``context``, honour it and skip our own ``configurable`` dict.
+        if "context" in request_config:
+            if "configurable" in request_config:
+                logger.warning(
+                    "build_run_config: client sent both 'context' and 'configurable'; preferring 'context' (LangGraph >= 0.6.0). thread_id=%s, caller_configurable keys=%s",
+                    thread_id,
+                    list(request_config.get("configurable", {}).keys()),
+                )
+            config["context"] = request_config["context"]
+        else:
+            configurable = {"thread_id": thread_id}
+            configurable.update(request_config.get("configurable", {}))
+            config["configurable"] = configurable
+        for k, v in request_config.items():
+            if k not in ("configurable", "context"):
+                config[k] = v
+    else:
+        config["configurable"] = {"thread_id": thread_id}
 
     # Inject custom agent name when the caller specified a non-default assistant.
     # Honour an explicit configurable["agent_name"] in the request if already set.
-    if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID and "agent_name" not in configurable:
-        # Normalize the same way ChannelManager does: strip, lowercase,
-        # replace underscores with hyphens, then validate to prevent path
-        # traversal and invalid agent directory lookups.
-        normalized = assistant_id.strip().lower().replace("_", "-")
-        if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-            raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
-        configurable["agent_name"] = normalized
-
-    config: dict[str, Any] = {"configurable": configurable, "recursion_limit": 100}
-    if request_config:
-        for k, v in request_config.items():
-            if k != "configurable":
-                config[k] = v
+    if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID and "configurable" in config:
+        if "agent_name" not in config["configurable"]:
+            normalized = assistant_id.strip().lower().replace("_", "-")
+            if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
+                raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+            config["configurable"]["agent_name"] = normalized
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config
@@ -271,6 +283,27 @@ async def start_run(
     agent_factory = resolve_agent_factory(body.assistant_id)
     graph_input = normalize_input(body.input)
     config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+
+    # Merge DeerFlow-specific context overrides into configurable.
+    # The ``context`` field is a custom extension for the langgraph-compat layer
+    # that carries agent configuration (model_name, thinking_enabled, etc.).
+    # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
+    context = getattr(body, "context", None)
+    if context:
+        _CONTEXT_CONFIGURABLE_KEYS = {
+            "model_name",
+            "mode",
+            "thinking_enabled",
+            "reasoning_effort",
+            "is_plan_mode",
+            "subagent_enabled",
+            "max_concurrent_subagents",
+        }
+        configurable = config.setdefault("configurable", {})
+        for key in _CONTEXT_CONFIGURABLE_KEYS:
+            if key in context:
+                configurable.setdefault(key, context[key])
+
     stream_modes = normalize_stream_modes(body.stream_mode)
 
     task = asyncio.create_task(
