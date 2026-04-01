@@ -178,10 +178,12 @@ export function useThreadStream({
         event !== null &&
         "type" in event &&
         event.type === "llm_retry" &&
+        "message" in event &&
         typeof event.message === "string" &&
         event.message.trim()
       ) {
-        toast(event.message);
+        const e = event as { type: "llm_retry"; message: string };
+        toast(e.message);
       }
     },
     onError(error) {

@@ -17,6 +17,7 @@ from langchain.agents.middleware.types import (
     ModelResponse,
 )
 from langchain_core.messages import AIMessage
+from langgraph.errors import GraphBubbleUp
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +73,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         error_code = _extract_error_code(exc)
         status_code = _extract_status_code(exc)
 
-        if _matches_any(lowered, _QUOTA_PATTERNS) or _matches_any(
-            str(error_code).lower(), _QUOTA_PATTERNS
-        ):
+        if _matches_any(lowered, _QUOTA_PATTERNS) or _matches_any(str(error_code).lower(), _QUOTA_PATTERNS):
             return False, "quota"
         if _matches_any(lowered, _AUTH_PATTERNS):
             return False, "auth"
@@ -102,36 +101,17 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
     def _build_retry_message(self, attempt: int, wait_ms: int, reason: str) -> str:
         seconds = max(1, round(wait_ms / 1000))
-        reason_text = (
-            "provider is busy"
-            if reason == "busy"
-            else "provider request failed temporarily"
-        )
-        return (
-            f"LLM request retry {attempt}/{self.retry_max_attempts}: "
-            f"{reason_text}. Retrying in {seconds}s."
-        )
+        reason_text = "provider is busy" if reason == "busy" else "provider request failed temporarily"
+        return f"LLM request retry {attempt}/{self.retry_max_attempts}: {reason_text}. Retrying in {seconds}s."
 
     def _build_user_message(self, exc: BaseException, reason: str) -> str:
         detail = _extract_error_detail(exc)
         if reason == "quota":
-            return (
-                "The configured LLM provider rejected the request because "
-                "the account is out of quota, billing is unavailable, or "
-                "usage is restricted. Please fix the provider account and try again."
-            )
+            return "The configured LLM provider rejected the request because the account is out of quota, billing is unavailable, or usage is restricted. Please fix the provider account and try again."
         if reason == "auth":
-            return (
-                "The configured LLM provider rejected the request because "
-                "authentication or access is invalid. Please check the "
-                "provider credentials and try again."
-            )
+            return "The configured LLM provider rejected the request because authentication or access is invalid. Please check the provider credentials and try again."
         if reason in {"busy", "transient"}:
-            return (
-                "The configured LLM provider is temporarily unavailable "
-                "after multiple retries. Please wait a moment and continue "
-                "the conversation."
-            )
+            return "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation."
         return f"LLM request failed: {detail}"
 
     def _emit_retry_event(self, attempt: int, wait_ms: int, reason: str) -> None:
@@ -162,6 +142,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         while True:
             try:
                 return handler(request)
+            except GraphBubbleUp:
+                # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+                raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
                 if retriable and attempt < self.retry_max_attempts:
@@ -195,6 +178,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         while True:
             try:
                 return await handler(request)
+            except GraphBubbleUp:
+                # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+                raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
                 if retriable and attempt < self.retry_max_attempts:
