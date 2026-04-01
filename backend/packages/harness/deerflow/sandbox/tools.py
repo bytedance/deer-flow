@@ -809,11 +809,13 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             command = _apply_cwd_prefix(command, thread_data)
             output = sandbox.execute_command(command)
             from deerflow.config.app_config import get_app_config
+
             sandbox_cfg = get_app_config().sandbox
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
             return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
         ensure_thread_directories_exist(runtime)
         from deerflow.config.app_config import get_app_config
+
         sandbox_cfg = get_app_config().sandbox
         max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         return _truncate_bash_output(sandbox.execute_command(command), max_chars)
@@ -895,6 +897,7 @@ def read_file_tool(
         if start_line is not None and end_line is not None:
             content = "\n".join(content.splitlines()[start_line - 1 : end_line])
         from deerflow.config.app_config import get_app_config
+
         sandbox_cfg = get_app_config().sandbox
         max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
         return _truncate_read_file_output(content, max_chars)
