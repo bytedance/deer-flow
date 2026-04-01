@@ -578,3 +578,83 @@ def test_str_replace_parallel_updates_should_preserve_both_edits(monkeypatch) ->
     assert failures == []
     assert "ALPHA" in sandbox.content
     assert "BETA" in sandbox.content
+
+
+def test_str_replace_parallel_updates_in_isolated_sandboxes_should_not_share_path_lock(monkeypatch) -> None:
+    class IsolatedSandbox:
+        def __init__(self, sandbox_id: str, shared_state: dict[str, object]) -> None:
+            self.id = sandbox_id
+            self.content = "alpha\nbeta\n"
+            self._shared_state = shared_state
+
+        def read_file(self, path: str) -> str:
+            state_lock = self._shared_state["state_lock"]
+            with state_lock:
+                active_reads = self._shared_state["active_reads"]
+                self._shared_state["active_reads"] = active_reads + 1
+                snapshot = self.content
+                if self._shared_state["active_reads"] == 2:
+                    overlap_detected = self._shared_state["overlap_detected"]
+                    overlap_detected.set()
+
+            overlap_detected = self._shared_state["overlap_detected"]
+            overlap_detected.wait(0.05)
+
+            with state_lock:
+                active_reads = self._shared_state["active_reads"]
+                self._shared_state["active_reads"] = active_reads - 1
+
+            return snapshot
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            self.content = content
+
+    shared_state: dict[str, object] = {
+        "active_reads": 0,
+        "state_lock": threading.Lock(),
+        "overlap_detected": threading.Event(),
+    }
+    sandboxes = {
+        "sandbox-a": IsolatedSandbox("sandbox-a", shared_state),
+        "sandbox-b": IsolatedSandbox("sandbox-b", shared_state),
+    }
+    runtimes = [
+        SimpleNamespace(state={}, context={"thread_id": "thread-1", "sandbox_key": "sandbox-a"}, config={}),
+        SimpleNamespace(state={}, context={"thread_id": "thread-2", "sandbox_key": "sandbox-b"}, config={}),
+    ]
+    failures: list[BaseException] = []
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: sandboxes[runtime.context["sandbox_key"]],
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    def worker(runtime: SimpleNamespace, old_str: str, new_str: str) -> None:
+        try:
+            result = str_replace_tool.func(
+                runtime=runtime,
+                description="隔离 sandbox 并发替换同一路径",
+                path="/mnt/user-data/workspace/shared.txt",
+                old_str=old_str,
+                new_str=new_str,
+            )
+            assert result == "OK"
+        except BaseException as exc:  # pragma: no cover - failure is asserted below
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(runtimes[0], "alpha", "ALPHA")),
+        threading.Thread(target=worker, args=(runtimes[1], "beta", "BETA")),
+    ]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert sandboxes["sandbox-a"].content == "ALPHA\nbeta\n"
+    assert sandboxes["sandbox-b"].content == "alpha\nBETA\n"
+    assert shared_state["overlap_detected"].is_set()

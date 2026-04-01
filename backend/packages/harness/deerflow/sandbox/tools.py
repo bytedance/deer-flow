@@ -30,16 +30,23 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
 
 _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 _ACP_WORKSPACE_VIRTUAL_PATH = "/mnt/acp-workspace"
-_FILE_OPERATION_LOCKS: dict[str, threading.Lock] = {}
+_FILE_OPERATION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _FILE_OPERATION_LOCKS_GUARD = threading.Lock()
 
 
-def _get_file_operation_lock(path: str) -> threading.Lock:
+def _get_file_operation_lock_key(sandbox: Sandbox, path: str) -> tuple[str, str]:
+    sandbox_id = getattr(sandbox, "id", None)
+    if not sandbox_id:
+        sandbox_id = f"instance:{id(sandbox)}"
+    return sandbox_id, path
+
+
+def _get_file_operation_lock(lock_key: tuple[str, str]) -> threading.Lock:
     with _FILE_OPERATION_LOCKS_GUARD:
-        lock = _FILE_OPERATION_LOCKS.get(path)
+        lock = _FILE_OPERATION_LOCKS.get(lock_key)
         if lock is None:
             lock = threading.Lock()
-            _FILE_OPERATION_LOCKS[path] = lock
+            _FILE_OPERATION_LOCKS[lock_key] = lock
         return lock
 
 
@@ -950,7 +957,7 @@ def str_replace_tool(
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             path = _resolve_and_validate_user_data_path(path, thread_data)
-        with _get_file_operation_lock(path):
+        with _get_file_operation_lock(_get_file_operation_lock_key(sandbox, path)):
             content = sandbox.read_file(path)
             if not content:
                 return "OK"
