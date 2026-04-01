@@ -666,13 +666,10 @@ class WeComChannel(Channel):
 
         # Otherwise, dispatch to the WebSocket thread
         if ws_loop and ws_loop.is_running() and not ws_loop.is_closed():
-            try:
-                fut = asyncio.run_coroutine_threadsafe(self._send_card_message(msg), ws_loop)
-                await asyncio.wrap_future(fut)
-            except Exception:
-                logger.exception("[WeCom] Failed to send message via WebSocket thread")
+            fut = asyncio.run_coroutine_threadsafe(self._send_card_message(msg), ws_loop)
+            await asyncio.wrap_future(fut)
         else:
-            logger.warning("[WeCom] No WebSocket loop running, cannot send message")
+            raise RuntimeError("[WeCom] No WebSocket loop running, cannot send message")
 
     async def _send_card_message(self, msg: OutboundMessage) -> None:
         """Send or update WeCom message using native streaming format."""
