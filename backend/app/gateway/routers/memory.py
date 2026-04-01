@@ -8,6 +8,7 @@ from deerflow.agents.memory.updater import (
     create_memory_fact,
     delete_memory_fact,
     get_memory_data,
+    import_memory_data,
     reload_memory_data,
     update_memory_fact,
 )
@@ -48,6 +49,7 @@ class Fact(BaseModel):
     confidence: float = Field(default=0.5, description="Confidence score (0-1)")
     createdAt: str = Field(default="", description="Creation timestamp")
     source: str = Field(default="unknown", description="Source thread ID")
+    sourceError: str | None = Field(default=None, description="Optional description of the prior mistake or wrong approach")
 
 
 class MemoryResponse(BaseModel):
@@ -107,6 +109,7 @@ class MemoryStatusResponse(BaseModel):
 @router.get(
     "/memory",
     response_model=MemoryResponse,
+    response_model_exclude_none=True,
     summary="Get Memory Data",
     description="Retrieve the current global memory data including user context, history, and facts.",
 )
@@ -151,6 +154,7 @@ async def get_memory() -> MemoryResponse:
 @router.post(
     "/memory/reload",
     response_model=MemoryResponse,
+    response_model_exclude_none=True,
     summary="Reload Memory Data",
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
 )
@@ -170,6 +174,7 @@ async def reload_memory() -> MemoryResponse:
 @router.delete(
     "/memory",
     response_model=MemoryResponse,
+    response_model_exclude_none=True,
     summary="Clear All Memory Data",
     description="Delete all saved memory data and reset the memory structure to an empty state.",
 )
@@ -186,6 +191,7 @@ async def clear_memory() -> MemoryResponse:
 @router.post(
     "/memory/facts",
     response_model=MemoryResponse,
+    response_model_exclude_none=True,
     summary="Create Memory Fact",
     description="Create a single saved memory fact manually.",
 )
@@ -208,6 +214,7 @@ async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryRespo
 @router.delete(
     "/memory/facts/{fact_id}",
     response_model=MemoryResponse,
+    response_model_exclude_none=True,
     summary="Delete Memory Fact",
     description="Delete a single saved memory fact by its fact id.",
 )
@@ -226,6 +233,7 @@ async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
 @router.patch(
     "/memory/facts/{fact_id}",
     response_model=MemoryResponse,
+    response_model_exclude_none=True,
     summary="Patch Memory Fact",
     description="Partially update a single saved memory fact by its fact id while preserving omitted fields.",
 )
@@ -244,6 +252,36 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to update memory fact.") from exc
+
+    return MemoryResponse(**memory_data)
+
+
+@router.get(
+    "/memory/export",
+    response_model=MemoryResponse,
+    response_model_exclude_none=True,
+    summary="Export Memory Data",
+    description="Export the current global memory data as JSON for backup or transfer.",
+)
+async def export_memory() -> MemoryResponse:
+    """Export the current memory data."""
+    memory_data = get_memory_data()
+    return MemoryResponse(**memory_data)
+
+
+@router.post(
+    "/memory/import",
+    response_model=MemoryResponse,
+    response_model_exclude_none=True,
+    summary="Import Memory Data",
+    description="Import and overwrite the current global memory data from a JSON payload.",
+)
+async def import_memory(request: MemoryResponse) -> MemoryResponse:
+    """Import and persist memory data."""
+    try:
+        memory_data = import_memory_data(request.model_dump())
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
     return MemoryResponse(**memory_data)
 
@@ -288,6 +326,7 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
 @router.get(
     "/memory/status",
     response_model=MemoryStatusResponse,
+    response_model_exclude_none=True,
     summary="Get Memory Status",
     description="Retrieve both memory configuration and current data in a single request.",
 )

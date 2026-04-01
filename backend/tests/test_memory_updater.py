@@ -7,6 +7,7 @@ from deerflow.agents.memory.updater import (
     clear_memory_data,
     create_memory_fact,
     delete_memory_fact,
+    import_memory_data,
     update_memory_fact,
 )
 from deerflow.config.memory_config import MemoryConfig
@@ -145,6 +146,53 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
     assert result["facts"][1]["source"] == "thread-9"
 
 
+def test_apply_updates_preserves_source_error() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "newFacts": [
+            {
+                "content": "Use make dev for local development.",
+                "category": "correction",
+                "confidence": 0.95,
+                "sourceError": "The agent previously suggested npm start.",
+            }
+        ]
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-correction")
+
+    assert result["facts"][0]["sourceError"] == "The agent previously suggested npm start."
+    assert result["facts"][0]["category"] == "correction"
+
+
+def test_apply_updates_ignores_empty_source_error() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "newFacts": [
+            {
+                "content": "Use make dev for local development.",
+                "category": "correction",
+                "confidence": 0.95,
+                "sourceError": "   ",
+            }
+        ]
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-correction")
+
+    assert "sourceError" not in result["facts"][0]
+
+
 def test_clear_memory_data_resets_all_sections() -> None:
     with patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True):
         result = clear_memory_data()
@@ -231,6 +279,31 @@ def test_delete_memory_fact_raises_for_unknown_id() -> None:
             assert exc.args == ("fact_missing",)
         else:
             raise AssertionError("Expected KeyError for missing fact id")
+
+
+def test_import_memory_data_saves_and_returns_imported_memory() -> None:
+    imported_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_import",
+                "content": "User works on DeerFlow.",
+                "category": "context",
+                "confidence": 0.87,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+    mock_storage = MagicMock()
+    mock_storage.save.return_value = True
+    mock_storage.load.return_value = imported_memory
+
+    with patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage):
+        result = import_memory_data(imported_memory)
+
+    mock_storage.save.assert_called_once_with(imported_memory, None)
+    mock_storage.load.assert_called_once_with(None)
+    assert result == imported_memory
 
 
 def test_update_memory_fact_updates_only_matching_fact() -> None:
@@ -349,7 +422,7 @@ def test_update_memory_fact_rejects_invalid_confidence() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _extract_text — LLM response content normalization
+# _extract_text - LLM response content normalization
 # ---------------------------------------------------------------------------
 
 
@@ -409,7 +482,7 @@ class TestExtractText:
 
 
 # ---------------------------------------------------------------------------
-# format_conversation_for_update — handles mixed list content
+# format_conversation_for_update - handles mixed list content
 # ---------------------------------------------------------------------------
 
 
@@ -439,7 +512,7 @@ class TestFormatConversationForUpdate:
 
 
 # ---------------------------------------------------------------------------
-# update_memory — structured LLM response handling
+# update_memory - structured LLM response handling
 # ---------------------------------------------------------------------------
 
 
@@ -496,3 +569,53 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg])
 
         assert result is True
+
+    def test_correction_hint_injected_when_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "No, that's wrong."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Understood"
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], correction_detected=True)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Explicit correction signals were detected" in prompt
+
+    def test_correction_hint_empty_when_not_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Let's talk about memory."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Sure"
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], correction_detected=False)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Explicit correction signals were detected" not in prompt

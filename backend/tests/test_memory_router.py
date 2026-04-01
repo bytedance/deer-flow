@@ -24,6 +24,104 @@ def _sample_memory(facts: list[dict] | None = None) -> dict:
     }
 
 
+def test_export_memory_route_returns_current_memory() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    exported_memory = _sample_memory(
+        facts=[
+            {
+                "id": "fact_export",
+                "content": "User prefers concise responses.",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "thread-1",
+            }
+        ]
+    )
+
+    with patch("app.gateway.routers.memory.get_memory_data", return_value=exported_memory):
+        with TestClient(app) as client:
+            response = client.get("/api/memory/export")
+
+    assert response.status_code == 200
+    assert response.json()["facts"] == exported_memory["facts"]
+
+
+def test_import_memory_route_returns_imported_memory() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    imported_memory = _sample_memory(
+        facts=[
+            {
+                "id": "fact_import",
+                "content": "User works on DeerFlow.",
+                "category": "context",
+                "confidence": 0.87,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+
+    with patch("app.gateway.routers.memory.import_memory_data", return_value=imported_memory):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/import", json=imported_memory)
+
+    assert response.status_code == 200
+    assert response.json()["facts"] == imported_memory["facts"]
+
+
+def test_export_memory_route_preserves_source_error() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    exported_memory = _sample_memory(
+        facts=[
+            {
+                "id": "fact_correction",
+                "content": "Use make dev for local development.",
+                "category": "correction",
+                "confidence": 0.95,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "thread-1",
+                "sourceError": "The agent previously suggested npm start.",
+            }
+        ]
+    )
+
+    with patch("app.gateway.routers.memory.get_memory_data", return_value=exported_memory):
+        with TestClient(app) as client:
+            response = client.get("/api/memory/export")
+
+    assert response.status_code == 200
+    assert response.json()["facts"][0]["sourceError"] == "The agent previously suggested npm start."
+
+
+def test_import_memory_route_preserves_source_error() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    imported_memory = _sample_memory(
+        facts=[
+            {
+                "id": "fact_correction",
+                "content": "Use make dev for local development.",
+                "category": "correction",
+                "confidence": 0.95,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "thread-1",
+                "sourceError": "The agent previously suggested npm start.",
+            }
+        ]
+    )
+
+    with patch("app.gateway.routers.memory.import_memory_data", return_value=imported_memory):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/import", json=imported_memory)
+
+    assert response.status_code == 200
+    assert response.json()["facts"][0]["sourceError"] == "The agent previously suggested npm start."
+
+
 def test_clear_memory_route_returns_cleared_memory() -> None:
     app = FastAPI()
     app.include_router(memory.router)
