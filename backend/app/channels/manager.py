@@ -12,6 +12,7 @@ from typing import Any
 
 from langgraph_sdk.errors import ConflictError
 
+from app.channels.i18n import channel_text, resolve_message_locale
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
 
@@ -29,8 +30,7 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "subagent_enabled": False,
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
-THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
-
+THREAD_BUSY_MESSAGE = channel_text("en-US", "thread.busy")
 CHANNEL_CAPABILITIES = {
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
@@ -62,13 +62,13 @@ def _merge_dicts(*layers: Any) -> dict[str, Any]:
     return merged
 
 
-def _normalize_custom_agent_name(raw_value: str) -> str:
+def _normalize_custom_agent_name(raw_value: str, *, locale: str) -> str:
     """Normalize legacy channel assistant IDs into valid custom agent names."""
     normalized = raw_value.strip().lower().replace("_", "-")
     if not normalized:
-        raise InvalidChannelSessionConfigError("Channel session assistant_id is empty. Use 'lead_agent' or a valid custom agent name.")
+        raise InvalidChannelSessionConfigError(channel_text(locale, "session.assistant_id_empty"))
     if not CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
-        raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
+        raise InvalidChannelSessionConfigError(channel_text(locale, "session.assistant_id_invalid", raw_value=raw_value))
     return normalized
 
 
@@ -252,14 +252,14 @@ def _extract_artifacts(result: dict | list) -> list[str]:
     return artifacts
 
 
-def _format_artifact_text(artifacts: list[str]) -> str:
+def _format_artifact_text(artifacts: list[str], locale: str = "en-US") -> str:
     """Format artifact paths into a human-readable text block listing filenames."""
     import posixpath
 
     filenames = [posixpath.basename(p) for p in artifacts]
     if len(filenames) == 1:
-        return f"Created File: 📎 {filenames[0]}"
-    return "Created Files: 📎 " + "、".join(filenames)
+        return channel_text(locale, "artifact.created_file", filename=filenames[0])
+    return channel_text(locale, "artifact.created_files", filenames="、".join(filenames))
 
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
@@ -318,6 +318,7 @@ def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
+    locale: str,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response."""
     attachments: list[ResolvedAttachment] = []
@@ -329,13 +330,13 @@ def _prepare_artifact_delivery(
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
     if unresolved:
-        artifact_text = _format_artifact_text(unresolved)
+        artifact_text = _format_artifact_text(unresolved, locale)
         response_text = (response_text + "\n\n" + artifact_text) if response_text else artifact_text
 
     # Always include resolved attachment filenames as a text fallback so files
     # remain discoverable even when the upload is skipped or fails.
     if attachments:
-        resolved_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+        resolved_text = _format_artifact_text([attachment.virtual_path for attachment in attachments], locale)
         response_text = (response_text + "\n\n" + resolved_text) if response_text else resolved_text
 
     return response_text, attachments
@@ -378,6 +379,10 @@ class ChannelManager:
     def _channel_supports_streaming(channel_name: str) -> bool:
         return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
 
+    @staticmethod
+    def _message_locale(msg: InboundMessage) -> str:
+        return resolve_message_locale(msg.metadata)
+
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
         channel_layer = _as_dict(self._channel_sessions.get(msg.channel_name))
         users_layer = _as_dict(channel_layer.get("users"))
@@ -386,6 +391,7 @@ class ChannelManager:
 
     def _resolve_run_params(self, msg: InboundMessage, thread_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
         channel_layer, user_layer = self._resolve_session_layer(msg)
+        locale = self._message_locale(msg)
 
         assistant_id = user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
         if not isinstance(assistant_id, str) or not assistant_id.strip():
@@ -410,7 +416,7 @@ class ChannelManager:
         # Keep backward compatibility for channel configs that set
         # assistant_id: <custom-agent-name> by routing through lead_agent.
         if assistant_id != DEFAULT_ASSISTANT_ID:
-            run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id))
+            run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id, locale=locale))
             assistant_id = DEFAULT_ASSISTANT_ID
 
         return assistant_id, run_config, run_context
@@ -500,7 +506,7 @@ class ChannelManager:
                     msg.channel_name,
                     msg.chat_id,
                 )
-                await self._send_error(msg, "An internal error occurred. Please try again.")
+                await self._send_error(msg, channel_text(self._message_locale(msg), "error.internal"))
 
     # -- chat handling -----------------------------------------------------
 
@@ -520,6 +526,7 @@ class ChannelManager:
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
         client = self._get_client()
+        locale = self._message_locale(msg)
 
         # Look up existing DeerFlow thread.
         # topic_id may be None (e.g. Telegram private chats) — the store
@@ -565,13 +572,13 @@ class ChannelManager:
             len(artifacts),
         )
 
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, locale)
 
         if not response_text:
             if attachments:
-                response_text = _format_artifact_text([a.virtual_path for a in attachments])
+                response_text = _format_artifact_text([a.virtual_path for a in attachments], locale)
             else:
-                response_text = "(No response from agent)"
+                response_text = channel_text(locale, "response.none")
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
@@ -595,6 +602,7 @@ class ChannelManager:
         run_context: dict[str, Any],
     ) -> None:
         logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        locale = self._message_locale(msg)
 
         last_values: dict[str, Any] | list | None = None
         streamed_buffers: dict[str, str] = {}
@@ -656,18 +664,18 @@ class ChannelManager:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
             artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, locale)
 
             if not response_text:
                 if attachments:
-                    response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+                    response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments], locale)
                 elif stream_error:
                     if _is_thread_busy_error(stream_error):
-                        response_text = THREAD_BUSY_MESSAGE
+                        response_text = channel_text(locale, "thread.busy")
                     else:
-                        response_text = "An error occurred while processing your request. Please try again."
+                        response_text = channel_text(locale, "error.internal")
                 else:
-                    response_text = latest_text or "(No response from agent)"
+                    response_text = latest_text or channel_text(locale, "response.none")
 
             logger.info(
                 "[Manager] streaming response completed: thread_id=%s, response_len=%d, artifacts=%d, error=%s",
@@ -695,11 +703,12 @@ class ChannelManager:
         text = msg.text.strip()
         parts = text.split(maxsplit=1)
         command = parts[0].lower().lstrip("/")
+        locale = self._message_locale(msg)
 
         if command == "bootstrap":
             from dataclasses import replace as _dc_replace
 
-            chat_text = parts[1] if len(parts) > 1 else "Initialize workspace"
+            chat_text = parts[1] if len(parts) > 1 else channel_text(locale, "command.bootstrap_default")
             chat_msg = _dc_replace(msg, text=chat_text, msg_type=InboundMessageType.CHAT)
             await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True})
             return
@@ -716,26 +725,18 @@ class ChannelManager:
                 topic_id=msg.topic_id,
                 user_id=msg.user_id,
             )
-            reply = "New conversation started."
+            reply = channel_text(locale, "command.new.started")
         elif command == "status":
             thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
-            reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
+            reply = channel_text(locale, "command.status.active", thread_id=thread_id) if thread_id else channel_text(locale, "command.status.none")
         elif command == "models":
-            reply = await self._fetch_gateway("/api/models", "models")
+            reply = await self._fetch_gateway("/api/models", "models", locale)
         elif command == "memory":
-            reply = await self._fetch_gateway("/api/memory", "memory")
+            reply = await self._fetch_gateway("/api/memory", "memory", locale)
         elif command == "help":
-            reply = (
-                "Available commands:\n"
-                "/bootstrap — Start a bootstrap session (enables agent setup)\n"
-                "/new — Start a new conversation\n"
-                "/status — Show current thread info\n"
-                "/models — List available models\n"
-                "/memory — Show memory status\n"
-                "/help — Show this help"
-            )
+            reply = channel_text(locale, "command.help")
         else:
-            reply = f"Unknown command: /{command}. Type /help for available commands."
+            reply = channel_text(locale, "command.unknown", command=command)
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
@@ -746,7 +747,7 @@ class ChannelManager:
         )
         await self.bus.publish_outbound(outbound)
 
-    async def _fetch_gateway(self, path: str, kind: str) -> str:
+    async def _fetch_gateway(self, path: str, kind: str, locale: str) -> str:
         """Fetch data from the Gateway API for command responses."""
         import httpx
 
@@ -757,14 +758,15 @@ class ChannelManager:
                 data = resp.json()
         except Exception:
             logger.exception("Failed to fetch %s from gateway", kind)
-            return f"Failed to fetch {kind} information."
+            return channel_text(locale, "gateway.fetch_failed", kind=channel_text(locale, f"gateway.kind.{kind}"))
 
         if kind == "models":
             names = [m["name"] for m in data.get("models", [])]
-            return ("Available models:\n" + "\n".join(f"• {n}" for n in names)) if names else "No models configured."
+            items = "\n".join(f"• {n}" for n in names)
+            return channel_text(locale, "gateway.models.available", items=items) if names else channel_text(locale, "gateway.models.empty")
         elif kind == "memory":
             facts = data.get("facts", [])
-            return f"Memory contains {len(facts)} fact(s)."
+            return channel_text(locale, "gateway.memory.status", count=len(facts))
         return str(data)
 
     # -- error helper ------------------------------------------------------

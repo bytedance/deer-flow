@@ -9,6 +9,7 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
+from app.channels.i18n import channel_text, normalize_channel_locale
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,8 @@ class FeishuChannel(Channel):
         self._CreateFileRequestBody = None
         self._CreateImageRequest = None
         self._CreateImageRequestBody = None
+        self._default_locale = normalize_channel_locale(config.get("default_locale"))
+        self._message_locales: dict[str, str] = {}
 
     async def start(self) -> None:
         if self._running:
@@ -342,7 +345,7 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] running card creation returned no message_id for source=%s, subsequent updates will fall back to new replies", source_message_id)
         return running_card_id
 
-    def _ensure_running_card_started(self, source_message_id: str, text: str = "Working on it...") -> asyncio.Task | None:
+    def _ensure_running_card_started(self, source_message_id: str, text: str | None = None) -> asyncio.Task | None:
         """Start running-card creation once per source message."""
         running_card_id = self._running_card_ids.get(source_message_id)
         if running_card_id:
@@ -352,7 +355,9 @@ class FeishuChannel(Channel):
         if running_card_task:
             return running_card_task
 
-        running_card_task = asyncio.create_task(self._create_running_card(source_message_id, text))
+        locale = self._message_locales.get(source_message_id, self._default_locale)
+        running_card_text = text or channel_text(locale, "channel.running")
+        running_card_task = asyncio.create_task(self._create_running_card(source_message_id, running_card_text))
         self._running_card_tasks[source_message_id] = running_card_task
         running_card_task.add_done_callback(lambda done_task, mid=source_message_id: self._finalize_running_card_task(mid, done_task))
         return running_card_task
@@ -362,7 +367,7 @@ class FeishuChannel(Channel):
             self._running_card_tasks.pop(source_message_id, None)
         self._log_task_error(task, "create_running_card", source_message_id)
 
-    async def _ensure_running_card(self, source_message_id: str, text: str = "Working on it...") -> str | None:
+    async def _ensure_running_card(self, source_message_id: str, text: str | None = None) -> str | None:
         """Ensure the in-thread running card exists and track its message ID."""
         running_card_id = self._running_card_ids.get(source_message_id)
         if running_card_id:
@@ -514,6 +519,8 @@ class FeishuChannel(Channel):
                 msg_type = InboundMessageType.COMMAND
             else:
                 msg_type = InboundMessageType.CHAT
+            locale = self._default_locale
+            self._message_locales[msg_id] = locale
 
             # topic_id: use root_id for replies (same topic), msg_id for new messages (new topic)
             topic_id = root_id or msg_id
@@ -524,7 +531,7 @@ class FeishuChannel(Channel):
                 text=text,
                 msg_type=msg_type,
                 thread_ts=msg_id,
-                metadata={"message_id": msg_id, "root_id": root_id},
+                metadata={"message_id": msg_id, "root_id": root_id, "locale": locale},
             )
             inbound.topic_id = topic_id
 

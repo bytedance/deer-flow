@@ -9,6 +9,7 @@ from typing import Any
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
 from app.channels.base import Channel
+from app.channels.i18n import channel_text, normalize_channel_locale
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,8 @@ class SlackChannel(Channel):
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._allowed_users: set[str] = set(config.get("allowed_users", []))
+        self._default_locale = normalize_channel_locale(config.get("default_locale"))
+        self._thread_locales: dict[str, str] = {}
 
     async def start(self) -> None:
         if self._running:
@@ -170,9 +173,10 @@ class SlackChannel(Channel):
         if not self._web_client:
             return
         try:
+            locale = self._thread_locales.get(thread_ts, self._default_locale)
             self._web_client.chat_postMessage(
                 channel=channel_id,
-                text=":hourglass_flowing_sand: Working on it...",
+                text=f":hourglass_flowing_sand: {channel_text(locale, 'channel.running')}",
                 thread_ts=thread_ts,
             )
             logger.info("[Slack] 'Working on it...' reply sent in channel=%s, thread_ts=%s", channel_id, thread_ts)
@@ -227,12 +231,15 @@ class SlackChannel(Channel):
         # topic_id: use thread_ts as the topic identifier.
         # For threaded messages, thread_ts is the root message ts (shared topic).
         # For non-threaded messages, thread_ts is the message's own ts (new topic).
+        locale = self._default_locale
+        self._thread_locales[thread_ts] = locale
         inbound = self._make_inbound(
             chat_id=channel_id,
             user_id=user_id,
             text=text,
             msg_type=msg_type,
             thread_ts=thread_ts,
+            metadata={"locale": locale},
         )
         inbound.topic_id = thread_ts
 
