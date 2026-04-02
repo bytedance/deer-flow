@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useTheme } from "next-themes";
 
 import { cn } from "@/lib/utils";
 
@@ -22,9 +23,12 @@ export function VisualizeViewer({
   onProgress,
   onReady,
 }: VisualizeViewerProps) {
+  const { resolvedTheme } = useTheme();
+  const viewerRootRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLCanvasElement | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [progress, setProgress] = useState(0);
+  const [viewerInstance, setViewerInstance] = useState<Viewer | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -73,6 +77,7 @@ export function VisualizeViewer({
         }
 
         setIsLoading(false);
+        setViewerInstance(viewer);
         onReady?.(viewer);
       }
       catch (error) {
@@ -80,6 +85,7 @@ export function VisualizeViewer({
           return;
         }
         setIsLoading(false);
+        setViewerInstance(null);
         onError?.(error);
       }
     };
@@ -88,19 +94,53 @@ export function VisualizeViewer({
 
     return () => {
       active = false;
+      setViewerInstance(null);
       window.setTimeout(() => {
         viewer.dispose();
       }, 0);
     };
   }, [onError, onProgress, onReady]);
 
+  useEffect(() => {
+    if (!viewerInstance || !viewerRootRef.current) {
+      return;
+    }
+
+    const applyBackgroundColor = () => {
+      viewerInstance.setBackgroundColor(resolveViewerBackgroundColor(resolvedTheme));
+    };
+
+    applyBackgroundColor();
+
+    const disposeOpenListener = viewerInstance.on("open", () => {
+      applyBackgroundColor();
+    });
+    const disposeGeometryEndListener = viewerInstance.on("geometryend", () => {
+      applyBackgroundColor();
+    });
+
+    return () => {
+      disposeOpenListener();
+      disposeGeometryEndListener();
+    };
+  }, [resolvedTheme, viewerInstance]);
+
   return (
     <div
-      className={cn("relative h-full min-h-64 w-full overflow-hidden", className)}
+      className={cn("bg-background relative h-full min-h-64 w-full overflow-hidden", className)}
       data-testid="vsfx-visualize-viewer"
+      ref={viewerRootRef}
     >
       <canvas className="h-full w-full" data-testid="vsfx-canvas" id="canvas" ref={containerRef} />
       <VisualizeProgress loading={isLoading} value={progress} />
     </div>
   );
+}
+
+function resolveViewerBackgroundColor(theme: string | undefined) {
+  if (theme === "dark") {
+    return 0x18181b;
+  }
+
+  return 0xffffff;
 }

@@ -60,6 +60,12 @@ export type VisualizeBackend = {
   zoomToSelected?: () => void;
 };
 
+type VisualizeDevice = {
+  delete?: () => void;
+  invalidate?: () => void;
+  setBackgroundColor?: (backgroundColor: number) => void;
+};
+
 export type CreateVisualizeViewerInput = {
   container: HTMLElement;
   visualizeLibrary: unknown;
@@ -259,7 +265,7 @@ export class Viewer implements IViewer {
   async open(input: ViewerBinarySource) {
     const loader = LoaderFactory.create(input.filename, {
       emit: (eventName, payload) => {
-        this.emit(eventName, payload);
+        this.emit(eventName, payload as never);
       },
       getVisualizeViewer: () => this.visualizeBackend as Record<string, unknown> | null,
     });
@@ -281,6 +287,19 @@ export class Viewer implements IViewer {
       height: bounds.height,
       width: bounds.width,
     });
+  }
+
+  setBackgroundColor(backgroundColor: number) {
+    const device = this.visualizeBackend?.getActiveDevice?.() as VisualizeDevice | null | undefined;
+
+    if (!device?.setBackgroundColor) {
+      return;
+    }
+
+    device.setBackgroundColor(backgroundColor);
+    device.delete?.();
+    this.update();
+    this.render();
   }
 
   setActiveDragger(name = "orbit-pan") {

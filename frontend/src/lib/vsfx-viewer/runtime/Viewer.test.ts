@@ -513,6 +513,42 @@ describe("Viewer", () => {
     expect(updateListener).toHaveBeenCalledWith(undefined);
   });
 
+  test("applies background colors through the active visualize device and redraws immediately", async () => {
+    const setBackgroundColor = vi.fn();
+    const invalidate = vi.fn(() => {
+      throw new Error("invalidate should not be called without a screen rect");
+    });
+    const deleteSpy = vi.fn();
+    const backend = {
+      ...createVisualizeBackend(),
+      getActiveDevice: vi.fn(() => ({
+        delete: deleteSpy,
+        invalidate,
+        setBackgroundColor,
+      })),
+    };
+    const viewer = new Viewer({
+      container: document.createElement("div"),
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    backend.update.mockClear();
+    backend.render.mockClear();
+
+    viewer.setBackgroundColor(0x112233);
+
+    expect(backend.getActiveDevice).toHaveBeenCalledTimes(1);
+    expect(setBackgroundColor).toHaveBeenCalledWith(0x112233);
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(backend.update).toHaveBeenCalledTimes(1);
+    expect(backend.render).toHaveBeenCalledTimes(1);
+  });
+
   test("forces a backend update and redraw after resize so the canvas stays valid", async () => {
     const backend = createVisualizeBackend();
     const canvas = document.createElement("canvas");
