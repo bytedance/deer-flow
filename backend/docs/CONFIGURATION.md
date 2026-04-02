@@ -278,6 +278,12 @@ skills:
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
 
+**Per-Agent Skill Filtering**:
+Custom agents can restrict which skills they load by defining a `skills` field in their `config.yaml` (located at `workspace/agents/<agent_name>/config.yaml`):
+- **Omitted or `null`**: Loads all globally enabled skills (default fallback).
+- **`[]` (empty list)**: Disables all skills for this specific agent.
+- **`["skill-name"]`**: Loads only the explicitly specified skills.
+
 ### Title Generation
 
 Automatic conversation title generation:

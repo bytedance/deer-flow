@@ -170,6 +170,20 @@ export function useThreadStream({
           message: AIMessage;
         };
         updateSubtask({ id: e.task_id, latestMessage: e.message });
+        return;
+      }
+
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "llm_retry" &&
+        "message" in event &&
+        typeof event.message === "string" &&
+        event.message.trim()
+      ) {
+        const e = event as { type: "llm_retry"; message: string };
+        toast(e.message);
       }
     },
     onError(error) {
