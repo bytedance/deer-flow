@@ -23,6 +23,7 @@ type VsfxPanelStateInput<T> = {
 };
 
 export type VsfxSharedState = {
+  activeDragger: string | null;
   cdaError: VsfxArtifactPanelError | null;
   cdaLoading: boolean;
   cdaTree: unknown | null;
@@ -242,6 +243,12 @@ export function VsfxContextProvider({
       }
 
       const unsubscribeListeners = [
+        viewer.on("changeactivedragger", (activeDragger) => {
+          updateState((currentState) => ({
+            ...currentState,
+            activeDragger,
+          }));
+        }),
         viewer.on("select", (handles) => {
           setSelectedHandles(handles);
         }),
@@ -277,6 +284,7 @@ export function VsfxContextProvider({
 
       updateState((currentState) => ({
         ...currentState,
+        activeDragger: "orbit-pan",
         ready: true,
         viewer,
       }));
@@ -477,6 +485,7 @@ export function useVsfxContext() {
 
 function createDefaultState(): VsfxSharedState {
   return {
+    activeDragger: null,
     cdaError: null,
     cdaLoading: false,
     cdaTree: null,

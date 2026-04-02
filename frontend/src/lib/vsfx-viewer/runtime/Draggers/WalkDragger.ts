@@ -7,6 +7,7 @@ import { OdBaseDragger } from "./Common/OdBaseDragger";
 export class WalkDragger extends OdBaseDragger {
   constructor(viewer: IViewer) {
     super(viewer, "walk");
+    this.canvasEvents = [];
   }
 
   activate() {

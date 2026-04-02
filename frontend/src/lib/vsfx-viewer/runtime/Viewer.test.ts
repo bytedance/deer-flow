@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 
+import { viewerDraggers } from "@/lib/vsfx-viewer/runtime/Draggers";
 import { Viewer } from "@/lib/vsfx-viewer/runtime/Viewer";
 
 const APPROVED_COMMANDS = [
@@ -62,6 +63,138 @@ function createVisualizeBackend() {
     zoomToExtents: vi.fn(),
     zoomToSelected: vi.fn(),
   };
+}
+
+function createInteractionBackend() {
+  const backend = createVisualizeBackend() as ReturnType<typeof createVisualizeBackend> & {
+    readonly activeView: {
+      beginInteractivity: ReturnType<typeof vi.fn>;
+      delete: ReturnType<typeof vi.fn>;
+      endInteractivity: ReturnType<typeof vi.fn>;
+      perspective: boolean;
+      upVector: number[];
+      viewFieldHeight: number;
+      viewFieldWidth: number;
+      viewPosition: number[];
+      viewTarget: number[];
+      vportRect: [number, number, number, number];
+    };
+    getActiveDevice: ReturnType<typeof vi.fn>;
+    getActiveTvExtendedView: ReturnType<typeof vi.fn>;
+    screenToWorld: ReturnType<typeof vi.fn>;
+    setActiveDragger: ReturnType<typeof vi.fn>;
+    setView: ReturnType<typeof vi.fn>;
+    zoomAt: ReturnType<typeof vi.fn>;
+  };
+  const viewState = {
+    perspective: true,
+    upVector: [0, 1, 0],
+    viewFieldHeight: 10,
+    viewFieldWidth: 10,
+    viewPosition: [0, 0, 10],
+    viewTarget: [0, 0, 0],
+    vportRect: [0, 0, 100, 100] as [number, number, number, number],
+  };
+  const beginInteractivity = vi.fn();
+  const endInteractivity = vi.fn();
+  const setView = vi.fn(
+    (
+      position: number[],
+      target: number[],
+      upVector: number[],
+      viewFieldWidth: number,
+      viewFieldHeight: number,
+      perspective: boolean,
+    ) => {
+      viewState.viewPosition = [...position];
+      viewState.viewTarget = [...target];
+      viewState.upVector = [...upVector];
+      viewState.viewFieldWidth = viewFieldWidth;
+      viewState.viewFieldHeight = viewFieldHeight;
+      viewState.perspective = perspective;
+    },
+  );
+
+  Object.defineProperty(backend, "activeView", {
+    configurable: true,
+    get: () => ({
+      beginInteractivity,
+      delete: vi.fn(),
+      endInteractivity,
+      perspective: viewState.perspective,
+      upVector: [...viewState.upVector],
+      viewFieldHeight: viewState.viewFieldHeight,
+      viewFieldWidth: viewState.viewFieldWidth,
+      viewPosition: [...viewState.viewPosition],
+      viewTarget: [...viewState.viewTarget],
+      vportRect: [...viewState.vportRect] as [number, number, number, number],
+    }),
+  });
+
+  backend.getActiveDevice = vi.fn(() => ({
+    delete: vi.fn(),
+    invalidate: vi.fn(),
+  }));
+  backend.getActiveTvExtendedView = vi.fn(() => ({
+    delete: vi.fn(),
+    setView,
+  }));
+  backend.screenToWorld = vi.fn((x: number, y: number) => [x / 10, y / 10, 0]);
+  backend.setActiveDragger = vi.fn();
+  backend.setView = setView;
+  backend.zoomAt = vi.fn();
+
+  return backend;
+}
+
+function dispatchCanvasPointerEvent(
+  target: HTMLCanvasElement,
+  type: string,
+  init: PointerEventInit & { offsetX?: number; offsetY?: number },
+) {
+  const event = new PointerEvent(type, {
+    bubbles: true,
+    isPrimary: true,
+    pointerId: 1,
+    pointerType: "mouse",
+    ...init,
+  });
+
+  Object.defineProperties(event, {
+    offsetX: {
+      configurable: true,
+      value: init.offsetX ?? init.clientX ?? 0,
+    },
+    offsetY: {
+      configurable: true,
+      value: init.offsetY ?? init.clientY ?? 0,
+    },
+  });
+
+  target.dispatchEvent(event);
+}
+
+function dispatchCanvasWheelEvent(
+  target: HTMLCanvasElement,
+  init: WheelEventInit & { offsetX?: number; offsetY?: number },
+) {
+  const event = new WheelEvent("wheel", {
+    bubbles: true,
+    ...init,
+  });
+
+  Object.defineProperties(event, {
+    offsetX: {
+      configurable: true,
+      value: init.offsetX ?? 0,
+    },
+    offsetY: {
+      configurable: true,
+      value: init.offsetY ?? 0,
+    },
+  });
+
+  target.dispatchEvent(event);
 }
 
 describe("Viewer", () => {
@@ -349,5 +482,280 @@ describe("Viewer", () => {
       height: 180,
       width: 320,
     });
+  });
+
+  test("forwards pointer events from the canvas DOM into viewer listeners", async () => {
+    const canvas = document.createElement("canvas");
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => createVisualizeBackend(),
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+    const pointerDown = vi.fn();
+
+    await viewer.initialize();
+    (
+      viewer as unknown as {
+        on: (eventName: string, listener: (payload: unknown) => void) => () => void;
+      }
+    ).on("pointerdown", pointerDown);
+
+    canvas.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+
+    expect(pointerDown).toHaveBeenCalledTimes(1);
+  });
+
+  test("reuses the active dragger when the same dragger is selected repeatedly", async () => {
+    const provider = vi.fn(() => ({
+      activate: vi.fn(),
+      deactivate: vi.fn(),
+      dispose: vi.fn(),
+      id: "test-persistent",
+    }));
+    viewerDraggers.registerDragger("test-persistent", provider);
+
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => createVisualizeBackend(),
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    provider.mockClear();
+
+    viewer.setActiveDragger("test-persistent");
+    viewer.setActiveDragger("test-persistent");
+
+    expect(provider).toHaveBeenCalledTimes(1);
+  });
+
+  test("initializes lifecycle-aware draggers when they become active", async () => {
+    const activate = vi.fn();
+    const dispose = vi.fn();
+    const initialize = vi.fn();
+    const provider = vi.fn(() => ({
+      activate,
+      deactivate: vi.fn(),
+      dispose,
+      id: "test-lifecycle",
+      initialize,
+    }));
+    viewerDraggers.registerDragger("test-lifecycle", provider);
+
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => createVisualizeBackend(),
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    provider.mockClear();
+    activate.mockClear();
+    initialize.mockClear();
+    dispose.mockClear();
+
+    viewer.setActiveDragger("test-lifecycle");
+    viewer.dispose();
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("registers zoom-wheel and gesture helpers through viewer event subscriptions", async () => {
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => createVisualizeBackend(),
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+    const onSpy = vi.spyOn(viewer, "on");
+    const offSpy = vi.spyOn(viewer, "off");
+
+    await viewer.initialize();
+    viewer.dispose();
+
+    expect(onSpy).toHaveBeenCalledWith("wheel", expect.any(Function));
+    expect(onSpy).toHaveBeenCalledWith("pointerdown", expect.any(Function));
+    expect(offSpy).toHaveBeenCalledWith("wheel", expect.any(Function));
+    expect(offSpy).toHaveBeenCalledWith("pointerdown", expect.any(Function));
+  });
+
+  test("zoom wheel converts wheel input into backend zoomAt calls", async () => {
+    const backend = createInteractionBackend();
+    const canvas = document.createElement("canvas");
+    vi.spyOn(window, "devicePixelRatio", "get").mockReturnValue(1);
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    backend.zoomAt.mockClear();
+
+    dispatchCanvasWheelEvent(canvas, { deltaY: -120, offsetX: 12, offsetY: 18 });
+
+    expect(backend.zoomAt).toHaveBeenCalledTimes(1);
+    expect(backend.zoomAt).toHaveBeenCalledWith(expect.any(Number), 12, 18);
+  });
+
+  test("orbit-pan maps left button drag to orbit and middle button drag to pan", async () => {
+    const backend = createInteractionBackend();
+    const canvas = document.createElement("canvas");
+    canvas.setPointerCapture = vi.fn();
+    canvas.releasePointerCapture = vi.fn();
+
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    viewer.setActiveDragger("orbit-pan");
+    backend.setView.mockClear();
+    backend.screenToWorld.mockClear();
+
+    dispatchCanvasPointerEvent(canvas, "pointerdown", {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      offsetX: 10,
+      offsetY: 10,
+    });
+    dispatchCanvasPointerEvent(canvas, "pointermove", {
+      button: 0,
+      clientX: 24,
+      clientY: 26,
+      offsetX: 24,
+      offsetY: 26,
+    });
+    dispatchCanvasPointerEvent(canvas, "pointerup", {
+      button: 0,
+      clientX: 24,
+      clientY: 26,
+      offsetX: 24,
+      offsetY: 26,
+    });
+
+    expect(backend.setView).toHaveBeenCalled();
+    expect(backend.screenToWorld).not.toHaveBeenCalled();
+
+    backend.setView.mockClear();
+    backend.screenToWorld.mockClear();
+
+    dispatchCanvasPointerEvent(canvas, "pointerdown", {
+      button: 1,
+      clientX: 18,
+      clientY: 18,
+      offsetX: 18,
+      offsetY: 18,
+    });
+    dispatchCanvasPointerEvent(canvas, "pointermove", {
+      button: 1,
+      clientX: 28,
+      clientY: 30,
+      offsetX: 28,
+      offsetY: 30,
+    });
+    dispatchCanvasPointerEvent(canvas, "pointerup", {
+      button: 1,
+      clientX: 28,
+      clientY: 30,
+      offsetX: 28,
+      offsetY: 30,
+    });
+
+    expect(backend.screenToWorld).toHaveBeenCalled();
+    expect(backend.setView).toHaveBeenCalled();
+  });
+
+  test("hideSelected clears the runtime selection after hiding the current handles", async () => {
+    const backend = createVisualizeBackend();
+    backend.getSelected.mockReturnValue([101, 202]);
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+    const hideListener = vi.fn();
+    const selectListener = vi.fn();
+
+    viewer.on("hide", hideListener);
+    viewer.on("select", selectListener);
+    await viewer.initialize();
+    hideListener.mockClear();
+    selectListener.mockClear();
+
+    viewer.executeCommand("hideSelected");
+
+    expect(backend.hideSelected).toHaveBeenCalledTimes(1);
+    expect(hideListener).toHaveBeenCalledWith([101, 202]);
+    expect(selectListener).toHaveBeenLastCalledWith([]);
+  });
+
+  test("clearSlices restores the default SW view after removing plane cuts", async () => {
+    const backend = createVisualizeBackend();
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    backend.clearSlices.mockClear();
+    backend.k3DViewSW.mockClear();
+
+    viewer.executeCommand("clearSlices");
+
+    expect(backend.clearSlices).toHaveBeenCalledTimes(1);
+    expect(backend.k3DViewSW).toHaveBeenCalledTimes(1);
+  });
+
+  test("resetView restores the scene and camera to the SW baseline", async () => {
+    const backend = createVisualizeBackend();
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    backend.clearSlices.mockClear();
+    backend.clearSelected.mockClear();
+    backend.showAll.mockClear();
+    backend.collect.mockClear();
+    backend.zoomToExtents.mockClear();
+    backend.k3DViewSW.mockClear();
+    backend.resetView.mockClear();
+
+    viewer.executeCommand("resetView");
+
+    expect(backend.clearSlices).toHaveBeenCalledTimes(1);
+    expect(backend.clearSelected).toHaveBeenCalledTimes(1);
+    expect(backend.showAll).toHaveBeenCalledTimes(1);
+    expect(backend.collect).toHaveBeenCalledTimes(1);
+    expect(backend.zoomToExtents).toHaveBeenCalledTimes(1);
+    expect(backend.k3DViewSW).toHaveBeenCalledTimes(2);
+    expect(backend.resetView).toHaveBeenCalledTimes(1);
   });
 });

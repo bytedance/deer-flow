@@ -1,8 +1,10 @@
 import {
+  CANVAS_EVENTS,
   Options,
+  type IDragger,
+  type ViewerInteractionEventMap,
   type IViewer,
   type ViewerBinarySource,
-  type ViewerEventMap,
 } from "@/lib/vsfx-viewer/viewer-core";
 
 import { getVisualizeAssetPaths, type VisualizeAssetPaths } from "./asset-paths";
@@ -76,15 +78,20 @@ export type ViewerOptions = {
 };
 
 export class Viewer implements IViewer {
+  private activeDragger: IDragger | null = null;
   private activeDraggerName = "orbit-pan";
   private readonly assetPaths: VisualizeAssetPaths;
+  private readonly canvasEventListener = (event: Event) => {
+    this.emit(event.type as keyof ViewerInteractionEventMap, event as never);
+  };
+  private readonly canvasEvents = [...CANVAS_EVENTS];
   private readonly componentDisposers: Array<() => void> = [];
   private readonly container: HTMLElement;
   private readonly dependencies: ViewerDependencies;
   private initialized = false;
   private readonly listeners = new Map<
-    keyof ViewerEventMap,
-    Set<EventListener<ViewerEventMap[keyof ViewerEventMap]>>
+    keyof ViewerInteractionEventMap,
+    Set<EventListener<ViewerInteractionEventMap[keyof ViewerInteractionEventMap]>>
   >();
   private readonly options: Options;
   private visualizeBackend: VisualizeBackend | null = null;
@@ -102,6 +109,11 @@ export class Viewer implements IViewer {
   }
 
   dispose() {
+    this.detachCanvasEvents();
+    this.activeDragger?.deactivate();
+    this.activeDragger?.dispose();
+    this.activeDragger = null;
+
     for (const dispose of this.componentDisposers.splice(0)) {
       dispose();
     }
@@ -112,9 +124,9 @@ export class Viewer implements IViewer {
     this.emit("dispose", undefined);
   }
 
-  emit<TName extends keyof ViewerEventMap>(
+  emit<TName extends keyof ViewerInteractionEventMap>(
     eventName: TName,
-    payload: ViewerEventMap[TName],
+    payload: ViewerInteractionEventMap[TName],
   ) {
     const listeners = this.listeners.get(eventName);
 
@@ -187,6 +199,7 @@ export class Viewer implements IViewer {
       wasmUrl: this.assetPaths.wasmUrl,
     });
     this.primeVisualizeBackend();
+    this.attachCanvasEvents();
 
     this.installComponents();
     this.setActiveDragger(this.activeDraggerName);
@@ -196,19 +209,42 @@ export class Viewer implements IViewer {
     return this;
   }
 
-  on<TName extends keyof ViewerEventMap>(
+  on<TName extends keyof ViewerInteractionEventMap>(
     eventName: TName,
-    listener: (payload: ViewerEventMap[TName]) => void,
+    listener: (payload: ViewerInteractionEventMap[TName]) => void,
   ) {
     const existing = this.listeners.get(eventName) ?? new Set();
-    existing.add(listener as EventListener<ViewerEventMap[keyof ViewerEventMap]>);
+    existing.add(
+      listener as EventListener<
+        ViewerInteractionEventMap[keyof ViewerInteractionEventMap]
+      >,
+    );
     this.listeners.set(eventName, existing);
 
     return () => {
-      existing.delete(
-        listener as EventListener<ViewerEventMap[keyof ViewerEventMap]>,
-      );
+      this.off(eventName, listener);
     };
+  }
+
+  off<TName extends keyof ViewerInteractionEventMap>(
+    eventName: TName,
+    listener: (payload: ViewerInteractionEventMap[TName]) => void,
+  ) {
+    const existing = this.listeners.get(eventName);
+
+    if (!existing) {
+      return;
+    }
+
+    existing.delete(
+      listener as EventListener<
+        ViewerInteractionEventMap[keyof ViewerInteractionEventMap]
+      >,
+    );
+
+    if (existing.size === 0) {
+      this.listeners.delete(eventName);
+    }
   }
 
   async open(input: ViewerBinarySource) {
@@ -239,13 +275,22 @@ export class Viewer implements IViewer {
   }
 
   setActiveDragger(name = "orbit-pan") {
+    if (this.activeDraggerName === name && this.activeDragger) {
+      return;
+    }
+
     const provider = viewerDraggers.getProvider(name);
 
     if (!provider) {
       throw new Error(`Unknown dragger: ${name}`);
     }
 
-    provider(this).activate();
+    this.activeDragger?.deactivate();
+    this.activeDragger?.dispose();
+    const nextDragger = provider(this);
+    nextDragger.initialize?.();
+    nextDragger.activate();
+    this.activeDragger = nextDragger;
     this.activeDraggerName = name;
     this.emit("changeactivedragger", name);
   }
@@ -276,6 +321,36 @@ export class Viewer implements IViewer {
       if (typeof dispose === "function") {
         this.componentDisposers.push(dispose);
       }
+    }
+  }
+
+  private attachCanvasEvents() {
+    const target = this.container;
+    const needsActiveListener = [
+      "wheel",
+      "pointerdown",
+      "mousedown",
+      "contextmenu",
+      "auxclick",
+    ];
+
+    target.parentElement?.style.setProperty("touch-action", "none");
+    target.style.setProperty("touch-action", "none");
+
+    for (const eventName of this.canvasEvents) {
+      target.addEventListener(
+        eventName,
+        this.canvasEventListener,
+        needsActiveListener.includes(eventName) ? { passive: false } : { passive: true },
+      );
+    }
+  }
+
+  private detachCanvasEvents() {
+    const target = this.container;
+
+    for (const eventName of this.canvasEvents) {
+      target.removeEventListener(eventName, this.canvasEventListener);
     }
   }
 

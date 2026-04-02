@@ -8,10 +8,28 @@ export class OdOrbitDragger extends OdBaseDragger {
 
   constructor(viewer: IViewer) {
     super(viewer, "orbit");
-    this.action = new OrbitAction(viewer);
+    this.autoSelect = true;
+    this.action = new OrbitAction(viewer, {
+      beginInteractivity: this.beginInteractivity,
+      endInteractivity: this.endInteractivity,
+    });
   }
 
-  activate() {
-    this.action.orbit({ dx: 0, dy: 0 });
+  protected start(x: number, y: number) {
+    this.press = true;
+    this.action.beginAction(x, y);
+  }
+
+  protected drag(x: number, y: number) {
+    if (!this.press) {
+      return;
+    }
+
+    this.action.action(x, y);
+  }
+
+  protected end() {
+    this.press = false;
+    this.action.endAction();
   }
 }

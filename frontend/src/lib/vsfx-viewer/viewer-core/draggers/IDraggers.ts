@@ -2,6 +2,7 @@ export interface IDragger {
   activate(): void;
   deactivate(): void;
   dispose(): void;
+  initialize?(): void;
   readonly id: string;
 }
 
