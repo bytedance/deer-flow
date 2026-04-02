@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -20,6 +20,10 @@ type MockViewerListenerMap = {
 type MockViewerListener = (...args: unknown[]) => void;
 
 class MockVsfxViewer {
+  constructor(
+    private readonly onOpen?: (payload: { data: ArrayBuffer; filename: string }) => void,
+  ) {}
+
   readonly executeCommand = vi.fn((commandName: string, ...args: unknown[]) => {
     if (commandName === "clearSelected") {
       this.emit("clear");
@@ -76,7 +80,13 @@ class MockVsfxViewer {
     };
   }
 
-  open() {
+  open(payload?: { data: ArrayBuffer; filename: string }) {
+    if (payload) {
+      this.onOpen?.(payload);
+      this.emit("databasechunk", payload);
+      this.emit("geometryend", { filename: payload.filename });
+    }
+
     return Promise.resolve();
   }
 
@@ -261,34 +271,28 @@ vi.mock("@/components/ui/select", () => {
 });
 
 vi.mock("@/lib/vsfx-viewer/components/VisualizeViewer", () => ({
-  VisualizeViewer: ({
-    data,
-    filename,
-    onReady,
-  }: {
-    data: ArrayBuffer;
-    filename: string;
-    onReady?: (viewer: MockVsfxViewer) => void;
-  }) => {
+  VisualizeViewer: ({ onReady }: { onReady?: (viewer: MockVsfxViewer) => void }) => {
+    const [openPayload, setOpenPayload] = useState<{ data: ArrayBuffer; filename: string } | null>(null);
+
     useEffect(() => {
-      const viewer = new MockVsfxViewer();
+      const viewer = new MockVsfxViewer((payload) => {
+        setOpenPayload(payload);
+      });
       currentViewer = viewer;
       onReady?.(viewer);
-      viewer.emit("databasechunk", { data, filename });
-      viewer.emit("geometryend", { filename });
 
       return () => {
         if (currentViewer === viewer) {
           currentViewer = null;
         }
       };
-    }, [data, filename, onReady]);
+    }, [onReady]);
 
     return (
       <div
         className="min-h-0 flex-1"
-        data-byte-length={data.byteLength}
-        data-filename={filename}
+        data-byte-length={openPayload?.data.byteLength ?? 0}
+        data-filename={openPayload?.filename ?? ""}
         data-testid="vsfx-canvas"
       />
     );
