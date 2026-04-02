@@ -111,6 +111,7 @@ export function ArtifactFileList({
                   download: true,
                 })}
                 target="_blank"
+                rel="noopener noreferrer"
                 onClick={(e) => e.stopPropagation()}
               >
                 <Button variant="ghost">
