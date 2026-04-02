@@ -22,6 +22,11 @@ class AgentConfig(BaseModel):
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None
+    # skills controls which skills are loaded into the agent's prompt:
+    # - None (or omitted): load all enabled skills (default fallback behavior)
+    # - [] (explicit empty list): disable all skills
+    # - ["skill1", "skill2"]: load only the specified skills
+    skills: list[str] | None = None
 
 
 def load_agent_config(name: str | None) -> AgentConfig | None:

@@ -73,7 +73,7 @@ def _patch_factory(monkeypatch, app_config: AppConfig, model_class=FakeChatModel
     """Patch get_app_config, resolve_class, and tracing for isolated unit tests."""
     monkeypatch.setattr(factory_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: model_class)
-    monkeypatch.setattr(factory_module, "is_tracing_enabled", lambda: False)
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +95,21 @@ def test_uses_first_model_when_name_is_none(monkeypatch):
 def test_raises_when_model_not_found(monkeypatch):
     cfg = _make_app_config([_make_model("only-model")])
     monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
-    monkeypatch.setattr(factory_module, "is_tracing_enabled", lambda: False)
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
 
     with pytest.raises(ValueError, match="ghost-model"):
         factory_module.create_chat_model(name="ghost-model")
+
+
+def test_appends_all_tracing_callbacks(monkeypatch):
+    cfg = _make_app_config([_make_model("alpha")])
+    _patch_factory(monkeypatch, cfg)
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: ["smith-callback", "langfuse-callback"])
+
+    FakeChatModel.captured_kwargs = {}
+    model = factory_module.create_chat_model(name="alpha")
+
+    assert model.callbacks == ["smith-callback", "langfuse-callback"]
 
 
 # ---------------------------------------------------------------------------
