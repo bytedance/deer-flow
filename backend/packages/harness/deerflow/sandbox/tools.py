@@ -978,6 +978,21 @@ def write_file_tool(
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             path = _resolve_and_validate_user_data_path(path, thread_data)
+        if not append:
+            try:
+                existing_content = sandbox.read_file(path)
+            except FileNotFoundError:
+                existing_content = None
+            if existing_content == content:
+                if requested_path.startswith("/mnt/user-data/outputs/"):
+                    return "No-op: file already contains identical content. Do not call write_file again for the same content. If this is the final deliverable, call present_files now."
+                return (
+                    "No-op: file already contains identical content. "
+                    "Do not call write_file again for the same content. "
+                    "Continue with the next step instead. "
+                    "If this file is part of the final deliverable, move or copy it to "
+                    "/mnt/user-data/outputs and call present_files."
+                )
         with get_file_operation_lock(sandbox, path):
             sandbox.write_file(path, content, append)
         return "OK"
