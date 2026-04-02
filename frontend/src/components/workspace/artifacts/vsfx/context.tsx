@@ -115,10 +115,17 @@ export function VsfxContextProvider({
 
   const setSelectedHandles = useCallback(
     (handles: VsfxHandle[]) => {
+      const nextHandles = Array.isArray(handles)
+        ? handles.filter(
+            (handle): handle is VsfxHandle =>
+              typeof handle === "string" || typeof handle === "number",
+          )
+        : [];
+
       updateState((currentState) => ({
         ...currentState,
-        primaryHandle: handles[0] ?? null,
-        selectedHandles: [...handles],
+        primaryHandle: nextHandles[0] ?? null,
+        selectedHandles: [...nextHandles],
       }));
     },
     [updateState],

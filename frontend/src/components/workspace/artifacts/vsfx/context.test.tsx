@@ -200,6 +200,40 @@ describe("VsfxContextProvider", () => {
     );
   });
 
+  test("guards against malformed selection payloads from the runtime bridge", async () => {
+    const viewer = new MockViewer();
+    let actions!: VsfxContextValue["actions"];
+    let latestSnapshot: VsfxContextSnapshot | undefined;
+
+    render(
+      <VsfxContextProvider artifactKey="assembly-a">
+        <Probe
+          onActionsReady={(nextActions) => {
+            actions = nextActions;
+          }}
+          onStateChange={(snapshot) => {
+            latestSnapshot = snapshot;
+          }}
+        />
+      </VsfxContextProvider>,
+    );
+
+    act(() => {
+      actions.setViewer(viewer);
+    });
+
+    act(() => {
+      viewer.emit("select", undefined as never);
+    });
+
+    await waitFor(() => {
+      expect(latestSnapshot).toMatchObject({
+        primaryHandle: null,
+        selectedHandles: [],
+      });
+    });
+  });
+
   test("tracks viewer readiness and lifecycle flags from bridge events", async () => {
     const viewer = new MockViewer();
     let actions!: VsfxContextValue["actions"];

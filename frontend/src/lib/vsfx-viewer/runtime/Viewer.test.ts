@@ -147,6 +147,33 @@ function createInteractionBackend() {
   return backend;
 }
 
+function createSelectionSet(handles: string[]) {
+  let index = 0;
+  const entities = handles.map((handle) => ({
+    delete: vi.fn(),
+    getNativeDatabaseHandle: vi.fn(() => handle),
+  }));
+  const entityIds = entities.map((entity) => ({
+    delete: vi.fn(),
+    getType: vi.fn(() => 1),
+    openObject: vi.fn(() => entity),
+    openObjectAsInsert: vi.fn(() => entity),
+  }));
+
+  return {
+    isNull: vi.fn(() => false),
+    numItems: vi.fn(() => entityIds.length),
+    getIterator: vi.fn(() => ({
+      delete: vi.fn(),
+      done: vi.fn(() => index >= entityIds.length),
+      getEntity: vi.fn(() => entityIds[index]),
+      step: vi.fn(() => {
+        index += 1;
+      }),
+    })),
+  };
+}
+
 function dispatchCanvasPointerEvent(
   target: HTMLCanvasElement,
   type: string,
@@ -707,6 +734,50 @@ describe("Viewer", () => {
     expect(backend.hideSelected).toHaveBeenCalledTimes(1);
     expect(hideListener).toHaveBeenCalledWith([101, 202]);
     expect(selectListener).toHaveBeenLastCalledWith([]);
+  });
+
+  test("normalizes visualize selection sets into handle arrays before emitting selection", async () => {
+    const backend = createVisualizeBackend();
+    const selectionSet = createSelectionSet(["A1", "B2"]);
+    backend.getSelected.mockReturnValue(selectionSet);
+    const canvas = document.createElement("canvas");
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+    const selectListener = vi.fn();
+
+    await viewer.initialize();
+    viewer.on("select", selectListener);
+
+    backend.select = vi.fn();
+    backend.unselect = vi.fn();
+
+    const clickEvent = new MouseEvent("click", { bubbles: true });
+    Object.defineProperties(clickEvent, {
+      offsetX: {
+        configurable: true,
+        value: 16,
+      },
+      offsetY: {
+        configurable: true,
+        value: 24,
+      },
+    });
+
+    dispatchCanvasPointerEvent(canvas, "pointerdown", {
+      button: 0,
+      clientX: 16,
+      clientY: 24,
+      offsetX: 16,
+      offsetY: 24,
+    });
+    canvas.dispatchEvent(clickEvent);
+
+    expect(selectListener).toHaveBeenLastCalledWith(["A1", "B2"]);
   });
 
   test("clearSlices restores the default SW view after removing plane cuts", async () => {
