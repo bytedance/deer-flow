@@ -1,26 +1,34 @@
 """CRUD API for custom agents."""
 
 import logging
-import re
 import shutil
 
 import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from deerflow.config.agents_config import (
+    AGENT_NAME_PATTERN,
+    AgentConfig,
+    display_name_key,
+    get_unique_agent_name,
+    list_custom_agents,
+    load_agent_config,
+    load_agent_soul,
+    normalize_agent_name,
+    normalize_display_name,
+)
 from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
-
-AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 class AgentResponse(BaseModel):
     """Response model for a custom agent."""
 
     name: str = Field(..., description="Agent name (hyphen-case)")
+    display_name: str = Field(..., description="Human-readable agent name")
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -36,7 +44,8 @@ class AgentsListResponse(BaseModel):
 class AgentCreateRequest(BaseModel):
     """Request body for creating a custom agent."""
 
-    name: str = Field(..., description="Agent name (must match ^[A-Za-z0-9-]+$, stored as lowercase)")
+    name: str | None = Field(default=None, description="Stable agent identifier (ASCII slug, stored as lowercase)")
+    display_name: str | None = Field(default=None, description="Human-readable name shown in the UI")
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -46,6 +55,7 @@ class AgentCreateRequest(BaseModel):
 class AgentUpdateRequest(BaseModel):
     """Request body for updating a custom agent."""
 
+    display_name: str | None = Field(default=None, description="Updated human-readable name")
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
@@ -68,9 +78,50 @@ def _validate_agent_name(name: str) -> None:
         )
 
 
-def _normalize_agent_name(name: str) -> str:
-    """Normalize agent name to lowercase for filesystem storage."""
-    return name.lower()
+def _validate_display_name(display_name: str) -> str:
+    """Validate and normalize a user-facing display name."""
+    try:
+        return normalize_display_name(display_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _resolve_display_name(agent_cfg: AgentConfig) -> str:
+    return agent_cfg.display_name or agent_cfg.name
+
+
+def _find_agent_by_display_name(display_name: str) -> AgentConfig | None:
+    normalized_key = display_name_key(display_name)
+    for agent_cfg in list_custom_agents():
+        if display_name_key(_resolve_display_name(agent_cfg)) == normalized_key:
+            return agent_cfg
+    return None
+
+
+def _resolve_create_names(request: AgentCreateRequest) -> tuple[str, str]:
+    raw_name = request.name.strip() if request.name else ""
+    raw_display_name = request.display_name.strip() if request.display_name else ""
+
+    if not raw_name and not raw_display_name:
+        raise HTTPException(
+            status_code=422,
+            detail="Either 'name' or 'display_name' must be provided.",
+        )
+
+    normalized_display_name = (
+        _validate_display_name(raw_display_name)
+        if raw_display_name
+        else normalize_agent_name(raw_name)
+    )
+
+    if raw_name:
+        _validate_agent_name(raw_name)
+        normalized_name = normalize_agent_name(raw_name)
+    else:
+        existing_names = {agent_cfg.name for agent_cfg in list_custom_agents()}
+        normalized_name = get_unique_agent_name(normalized_display_name, existing_names)
+
+    return normalized_name, normalized_display_name
 
 
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False) -> AgentResponse:
@@ -81,6 +132,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
 
     return AgentResponse(
         name=agent_cfg.name,
+        display_name=_resolve_display_name(agent_cfg),
         description=agent_cfg.description,
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
@@ -111,24 +163,35 @@ async def list_agents() -> AgentsListResponse:
 @router.get(
     "/agents/check",
     summary="Check Agent Name",
-    description="Validate an agent name and check if it is available (case-insensitive).",
+    description="Validate an agent identifier or display name and return the normalized creation payload.",
 )
-async def check_agent_name(name: str) -> dict:
-    """Check whether an agent name is valid and not yet taken.
+async def check_agent_name(
+    name: str | None = None,
+    display_name: str | None = None,
+) -> dict:
+    """Check whether an agent identity payload is valid and available.
 
     Args:
-        name: The agent name to check.
+        name: Optional stable slug to validate.
+        display_name: Optional user-facing display name to validate.
 
     Returns:
-        ``{"available": true/false, "name": "<normalized>"}``
+        ``{"available": true/false, "name": "<normalized>", "display_name": "<normalized>"}``
 
     Raises:
-        HTTPException: 422 if the name is invalid.
+        HTTPException: 422 if the payload is invalid.
     """
-    _validate_agent_name(name)
-    normalized = _normalize_agent_name(name)
-    available = not get_paths().agent_dir(normalized).exists()
-    return {"available": available, "name": normalized}
+    request = AgentCreateRequest(name=name, display_name=display_name)
+    normalized_name, normalized_display_name = _resolve_create_names(request)
+    available = (
+        _find_agent_by_display_name(normalized_display_name) is None
+        and not get_paths().agent_dir(normalized_name).exists()
+    )
+    return {
+        "available": available,
+        "name": normalized_name,
+        "display_name": normalized_display_name,
+    }
 
 
 @router.get(
@@ -150,7 +213,7 @@ async def get_agent(name: str) -> AgentResponse:
         HTTPException: 404 if agent not found.
     """
     _validate_agent_name(name)
-    name = _normalize_agent_name(name)
+    name = normalize_agent_name(name)
 
     try:
         agent_cfg = load_agent_config(name)
@@ -181,19 +244,25 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     Raises:
         HTTPException: 409 if agent already exists, 422 if name is invalid.
     """
-    _validate_agent_name(request.name)
-    normalized_name = _normalize_agent_name(request.name)
+    normalized_name, normalized_display_name = _resolve_create_names(request)
 
     agent_dir = get_paths().agent_dir(normalized_name)
 
     if agent_dir.exists():
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
+    existing_with_display_name = _find_agent_by_display_name(normalized_display_name)
+    if existing_with_display_name is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Agent display name '{normalized_display_name}' already exists",
+        )
 
     try:
         agent_dir.mkdir(parents=True, exist_ok=True)
 
         # Write config.yaml
         config_data: dict = {"name": normalized_name}
+        config_data["display_name"] = normalized_display_name
         if request.description:
             config_data["description"] = request.description
         if request.model is not None:
@@ -244,7 +313,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         HTTPException: 404 if agent not found.
     """
     _validate_agent_name(name)
-    name = _normalize_agent_name(name)
+    name = normalize_agent_name(name)
 
     try:
         agent_cfg = load_agent_config(name)
@@ -254,12 +323,33 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     agent_dir = get_paths().agent_dir(name)
 
     try:
+        new_display_name = (
+            _validate_display_name(request.display_name)
+            if request.display_name is not None
+            else _resolve_display_name(agent_cfg)
+        )
+        existing_with_display_name = _find_agent_by_display_name(new_display_name)
+        if existing_with_display_name is not None and existing_with_display_name.name != name:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Agent display name '{new_display_name}' already exists",
+            )
+
         # Update config if any config fields changed
-        config_changed = any(v is not None for v in [request.description, request.model, request.tool_groups])
+        config_changed = any(
+            v is not None
+            for v in [
+                request.display_name,
+                request.description,
+                request.model,
+                request.tool_groups,
+            ]
+        )
 
         if config_changed:
             updated: dict = {
                 "name": agent_cfg.name,
+                "display_name": new_display_name,
                 "description": request.description if request.description is not None else agent_cfg.description,
             }
             new_model = request.model if request.model is not None else agent_cfg.model
@@ -368,7 +458,7 @@ async def delete_agent(name: str) -> None:
         HTTPException: 404 if agent not found.
     """
     _validate_agent_name(name)
-    name = _normalize_agent_name(name)
+    name = normalize_agent_name(name)
 
     agent_dir = get_paths().agent_dir(name)
 

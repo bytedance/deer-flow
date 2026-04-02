@@ -63,14 +63,31 @@ export async function deleteAgent(name: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to delete agent: ${res.statusText}`);
 }
 
+export interface CheckAgentNameRequest {
+  name?: string;
+  displayName?: string;
+}
+
+export interface CheckAgentNameResponse {
+  available: boolean;
+  name: string;
+  display_name: string;
+}
+
 export async function checkAgentName(
-  name: string,
-): Promise<{ available: boolean; name: string }> {
+  request: CheckAgentNameRequest,
+): Promise<CheckAgentNameResponse> {
+  const params = new URLSearchParams();
+  if (request.name) {
+    params.set("name", request.name);
+  }
+  if (request.displayName) {
+    params.set("display_name", request.displayName);
+  }
+
   let res: Response;
   try {
-    res = await fetch(
-      `${getBackendBaseURL()}/api/agents/check?name=${encodeURIComponent(name)}`,
-    );
+    res = await fetch(`${getBackendBaseURL()}/api/agents/check?${params}`);
   } catch {
     throw new AgentNameCheckError(
       "Could not reach the DeerFlow backend.",
@@ -91,5 +108,5 @@ export async function checkAgentName(
       "request_failed",
     );
   }
-  return res.json() as Promise<{ available: boolean; name: string }>;
+  return res.json() as Promise<CheckAgentNameResponse>;
 }

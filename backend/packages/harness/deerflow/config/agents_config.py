@@ -2,6 +2,7 @@
 
 import logging
 import re
+import unicodedata
 from typing import Any
 
 import yaml
@@ -13,12 +14,14 @@ logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+AGENT_SLUG_FALLBACK = "agent"
 
 
 class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
     name: str
+    display_name: str | None = None
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None
@@ -27,6 +30,54 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+
+
+def normalize_agent_name(name: str) -> str:
+    """Normalize the stable agent identifier for storage and routing."""
+    return name.lower()
+
+
+def normalize_display_name(display_name: str) -> str:
+    """Normalize a user-facing display name without constraining its script."""
+    normalized = " ".join(display_name.strip().split())
+    if not normalized:
+        raise ValueError("Display name must be a non-empty string.")
+    return normalized
+
+
+def display_name_key(display_name: str) -> str:
+    """Build a comparison key for display-name uniqueness checks."""
+    return normalize_display_name(display_name).casefold()
+
+
+def derive_agent_name(display_name: str) -> str:
+    """Derive an ASCII slug from a display name for filesystem-safe identity."""
+    normalized = unicodedata.normalize("NFKD", display_name)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", ascii_only).strip("-").lower()
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug or AGENT_SLUG_FALLBACK
+
+
+def get_unique_agent_name(display_name: str, existing_names: set[str]) -> str:
+    """Generate a unique ASCII slug for a new agent."""
+    base_slug = derive_agent_name(display_name)
+    candidate = base_slug
+    suffix = 2
+    while candidate in existing_names:
+        candidate = f"{base_slug}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def get_agent_display_name(agent_name: str | None) -> str | None:
+    """Return the user-facing display name for an agent, falling back to slug."""
+    if agent_name is None:
+        return None
+    config = load_agent_config(agent_name)
+    if config is None:
+        return None
+    return config.display_name or config.name
 
 
 def load_agent_config(name: str | None) -> AgentConfig | None:
@@ -48,7 +99,8 @@ def load_agent_config(name: str | None) -> AgentConfig | None:
 
     if not AGENT_NAME_PATTERN.match(name):
         raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
-    agent_dir = get_paths().agent_dir(name)
+    normalized_name = normalize_agent_name(name)
+    agent_dir = get_paths().agent_dir(normalized_name)
     config_file = agent_dir / "config.yaml"
 
     if not agent_dir.exists():
@@ -65,7 +117,12 @@ def load_agent_config(name: str | None) -> AgentConfig | None:
 
     # Ensure name is set from directory name if not in file
     if "name" not in data:
-        data["name"] = name
+        data["name"] = normalized_name
+    else:
+        data["name"] = normalize_agent_name(str(data["name"]))
+
+    if "display_name" in data and data["display_name"] is not None:
+        data["display_name"] = normalize_display_name(str(data["display_name"]))
 
     # Strip unknown fields before passing to Pydantic (e.g. legacy prompt_file)
     known_fields = set(AgentConfig.model_fields.keys())

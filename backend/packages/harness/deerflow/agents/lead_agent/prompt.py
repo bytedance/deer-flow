@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
 
-from deerflow.config.agents_config import load_agent_soul
+from deerflow.config.agents_config import get_agent_display_name, load_agent_soul
 from deerflow.skills import load_skills
 from deerflow.subagents import get_available_subagent_names
 
@@ -542,7 +542,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
 
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        agent_name=agent_name or "DeerFlow 2.0",
+        agent_name=get_agent_display_name(agent_name) or agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,

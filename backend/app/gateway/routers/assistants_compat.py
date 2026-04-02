@@ -70,7 +70,7 @@ def _list_assistants() -> list[AssistantResponse]:
                 AssistantResponse(
                     assistant_id=agent_cfg.name,
                     graph_id="lead_agent",  # All agents use the same graph
-                    name=agent_cfg.name,
+                    name=agent_cfg.display_name or agent_cfg.name,
                     config={},
                     metadata={"created_by": "user"},
                     description=agent_cfg.description or "",

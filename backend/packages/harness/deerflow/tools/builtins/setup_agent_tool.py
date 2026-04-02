@@ -25,6 +25,7 @@ def setup_agent(
     """
 
     agent_name: str | None = runtime.context.get("agent_name") if runtime.context else None
+    agent_display_name: str | None = runtime.context.get("agent_display_name") if runtime.context else None
 
     try:
         paths = get_paths()
@@ -34,6 +35,8 @@ def setup_agent(
         if agent_name:
             # If agent_name is provided, we are creating a custom agent in the agents/ directory
             config_data: dict = {"name": agent_name}
+            if agent_display_name:
+                config_data["display_name"] = agent_display_name
             if description:
                 config_data["description"] = description
 

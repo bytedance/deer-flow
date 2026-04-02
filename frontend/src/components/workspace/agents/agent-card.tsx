@@ -23,7 +23,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useDeleteAgent } from "@/core/agents";
+import { getAgentDisplayName, useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -62,7 +62,7 @@ export function AgentCard({ agent }: AgentCardProps) {
               </div>
               <div className="min-w-0">
                 <CardTitle className="truncate text-base">
-                  {agent.name}
+                  {getAgentDisplayName(agent)}
                 </CardTitle>
                 {agent.model && (
                   <Badge variant="secondary" className="mt-0.5 text-xs">

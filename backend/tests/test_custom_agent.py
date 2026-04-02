@@ -93,6 +93,18 @@ class TestAgentConfig:
         assert cfg.model == "deepseek-v3"
         assert cfg.tool_groups == ["file:read", "bash"]
 
+    def test_full_config_with_display_name(self):
+        from deerflow.config.agents_config import AgentConfig
+
+        cfg = AgentConfig(
+            name="code-reviewer",
+            display_name="代码审查",
+            description="Specialized for code review",
+        )
+        assert cfg.name == "code-reviewer"
+        assert cfg.display_name == "代码审查"
+        assert cfg.description == "Specialized for code review"
+
     def test_config_from_dict(self):
         from deerflow.config.agents_config import AgentConfig
 
@@ -121,6 +133,23 @@ class TestLoadAgentConfig:
         assert cfg.name == "code-reviewer"
         assert cfg.description == "Code review agent"
         assert cfg.model == "deepseek-v3"
+
+    def test_load_valid_config_with_display_name(self, tmp_path):
+        config_dict = {
+            "name": "code-reviewer",
+            "display_name": "代码审查",
+            "description": "Code review agent",
+        }
+        _write_agent(tmp_path, "code-reviewer", config_dict)
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("code-reviewer")
+
+        assert cfg.name == "code-reviewer"
+        assert cfg.display_name == "代码审查"
+        assert cfg.description == "Code review agent"
 
     def test_load_missing_agent_raises(self, tmp_path):
         with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
@@ -415,6 +444,32 @@ class TestAgentsAPI:
         assert data["name"] == "code-reviewer"
         assert data["description"] == "Reviews code"
         assert data["soul"] == "You are a code reviewer."
+        assert data["display_name"] == "code-reviewer"
+
+    def test_check_agent_display_name_generates_slug(self, agent_client):
+        response = agent_client.get("/api/agents/check", params={"display_name": "代码助手"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["available"] is True
+        assert data["display_name"] == "代码助手"
+        assert data["name"] == "agent"
+
+    def test_create_agent_with_display_name_only(self, agent_client, tmp_path):
+        payload = {
+            "display_name": "代码助手",
+            "description": "中文展示名",
+            "soul": "You are a helpful assistant.",
+        }
+        response = agent_client.post("/api/agents", json=payload)
+        assert response.status_code == 201
+        data = response.json()
+        assert data["name"] == "agent"
+        assert data["display_name"] == "代码助手"
+        assert data["description"] == "中文展示名"
+
+        config_data = yaml.safe_load((tmp_path / "agents" / "agent" / "config.yaml").read_text(encoding="utf-8"))
+        assert config_data["name"] == "agent"
+        assert config_data["display_name"] == "代码助手"
 
     def test_create_agent_invalid_name(self, agent_client):
         payload = {"name": "Code Reviewer!", "soul": "test"}
@@ -427,6 +482,11 @@ class TestAgentsAPI:
 
         # Second create should fail
         response = agent_client.post("/api/agents", json=payload)
+        assert response.status_code == 409
+
+    def test_create_duplicate_agent_display_name_409(self, agent_client):
+        agent_client.post("/api/agents", json={"display_name": "代码助手", "soul": "first"})
+        response = agent_client.post("/api/agents", json={"display_name": "代码助手", "soul": "second"})
         assert response.status_code == 409
 
     def test_list_agents_after_create(self, agent_client):
@@ -447,6 +507,7 @@ class TestAgentsAPI:
         data = response.json()
         assert data["name"] == "test-agent"
         assert data["soul"] == "Hello world"
+        assert data["display_name"] == "test-agent"
 
     def test_get_missing_agent_404(self, agent_client):
         response = agent_client.get("/api/agents/nonexistent")
@@ -465,6 +526,13 @@ class TestAgentsAPI:
         response = agent_client.put("/api/agents/desc-agent", json={"description": "new desc"})
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
+
+    def test_update_agent_display_name(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "desc-agent", "soul": "p"})
+
+        response = agent_client.put("/api/agents/desc-agent", json={"display_name": "代码审查"})
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "代码审查"
 
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})
@@ -497,6 +565,7 @@ class TestAgentsAPI:
         data = response.json()
         assert data["model"] == "deepseek-v3"
         assert data["tool_groups"] == ["file:read", "bash"]
+        assert data["display_name"] == "specialized"
 
     def test_create_persists_files_on_disk(self, agent_client, tmp_path):
         agent_client.post("/api/agents", json={"name": "disk-check", "soul": "disk soul"})
@@ -514,6 +583,29 @@ class TestAgentsAPI:
 
         agent_client.delete("/api/agents/remove-me")
         assert not agent_dir.exists()
+
+
+class TestAssistantsCompat:
+    def test_custom_agent_uses_display_name_for_assistant_name(self, tmp_path):
+        _write_agent(
+            tmp_path,
+            "code-reviewer",
+            {
+                "name": "code-reviewer",
+                "display_name": "代码审查",
+                "description": "Reviews code",
+            },
+        )
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from app.gateway.routers.assistants_compat import _list_assistants
+
+            assistants = _list_assistants()
+
+        assistant = next(item for item in assistants if item.assistant_id == "code-reviewer")
+        assert assistant.assistant_id == "code-reviewer"
+        assert assistant.name == "代码审查"
+        assert assistant.description == "Reviews code"
 
 
 # ===========================================================================
