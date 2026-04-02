@@ -313,6 +313,60 @@ describe("VsfxContextProvider", () => {
     });
   });
 
+  test("syncs hidden handles when isolate is triggered from context actions", async () => {
+    const viewer = new MockViewer();
+    let actions!: VsfxContextValue["actions"];
+    let latestSnapshot: VsfxContextSnapshot | undefined;
+
+    render(
+      <VsfxContextProvider artifactKey="assembly-a">
+        <Probe
+          onActionsReady={(nextActions) => {
+            actions = nextActions;
+          }}
+          onStateChange={(snapshot) => {
+            latestSnapshot = snapshot;
+          }}
+        />
+      </VsfxContextProvider>,
+    );
+
+    act(() => {
+      actions.setViewer(viewer);
+      actions.setCdaTreeState({
+        data: {
+          nodes: [
+            {
+              children: [
+                { children: [], handle: 202, name: "Rafter" },
+                { children: [], handle: 303, name: "Brace" },
+              ],
+              handle: 0,
+              name: "Model",
+            },
+          ],
+        },
+        error: null,
+        loading: false,
+      });
+      actions.setSelectedHandles([202]);
+    });
+
+    await waitFor(() => {
+      expect(latestSnapshot).toMatchObject({ selectedHandles: [202] });
+    });
+
+    act(() => {
+      actions.isolateSelected();
+    });
+
+    await waitFor(() => {
+      expect(latestSnapshot).toMatchObject({ hiddenHandles: [303] });
+    });
+
+    expect(viewer.executeCommand).toHaveBeenCalledWith("isolateSelected");
+  });
+
   test("resets model-scoped state on artifact replacement", async () => {
     const viewer = new MockViewer();
     let actions!: VsfxContextValue["actions"];

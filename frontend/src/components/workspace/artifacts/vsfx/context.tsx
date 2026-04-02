@@ -312,8 +312,30 @@ export function VsfxContextProvider({
   }, [runViewerCommand, setHandlesHidden]);
 
   const isolateSelected = useCallback(() => {
+    const selectedHandles = stateRef.current.selectedHandles;
+
+    if (selectedHandles.length === 0) {
+      return;
+    }
+
+    const selectedHandleKeys = new Set(selectedHandles.map((handle) => String(handle)));
+    const nextHiddenHandles = new Set<VsfxHandle>();
+    const cdaTree = stateRef.current.cdaTree;
+
+    if (typeof cdaTree === "object" && cdaTree !== null && "nodes" in cdaTree) {
+      for (const handle of collectTreeHandles((cdaTree as { nodes?: unknown }).nodes)) {
+        if (!selectedHandleKeys.has(String(handle))) {
+          nextHiddenHandles.add(handle);
+        }
+      }
+    }
+
+    updateState((currentState) => ({
+      ...currentState,
+      hiddenHandles: nextHiddenHandles,
+    }));
     runViewerCommand("isolateSelected");
-  }, [runViewerCommand]);
+  }, [runViewerCommand, updateState]);
 
   const showAll = useCallback(() => {
     clearHiddenHandles();
@@ -469,4 +491,34 @@ function createDefaultState(): VsfxSharedState {
     selectedHandles: [],
     viewer: null,
   };
+}
+
+function collectTreeHandles(input: unknown): VsfxHandle[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input.flatMap((node) => collectTreeNodeHandles(node));
+}
+
+function collectTreeNodeHandles(input: unknown): VsfxHandle[] {
+  if (typeof input !== "object" || input === null) {
+    return [];
+  }
+
+  const record = input as {
+    children?: unknown;
+    handle?: unknown;
+  };
+  const currentHandle =
+    typeof record.handle === "string" || typeof record.handle === "number"
+      ? String(record.handle) === "0"
+        ? []
+        : [record.handle]
+      : [];
+  const childHandles = Array.isArray(record.children)
+    ? record.children.flatMap((child) => collectTreeNodeHandles(child))
+    : [];
+
+  return [...currentHandle, ...childHandles];
 }
