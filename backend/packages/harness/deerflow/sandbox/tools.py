@@ -13,11 +13,13 @@ from deerflow.sandbox.exceptions import (
     SandboxNotFoundError,
     SandboxRuntimeError,
 )
+from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 
-_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s\"'`;&|<>()]+)")
+_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+_FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -515,6 +517,11 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
+    # Block file:// URLs which bypass the absolute-path regex but allow local file exfiltration
+    file_url_match = _FILE_URL_PATTERN.search(command)
+    if file_url_match:
+        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}")
+
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
 
@@ -971,7 +978,8 @@ def write_file_tool(
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             path = _resolve_and_validate_user_data_path(path, thread_data)
-        sandbox.write_file(path, content, append)
+        with get_file_operation_lock(sandbox, path):
+            sandbox.write_file(path, content, append)
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"
@@ -1012,16 +1020,17 @@ def str_replace_tool(
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             path = _resolve_and_validate_user_data_path(path, thread_data)
-        content = sandbox.read_file(path)
-        if not content:
-            return "OK"
-        if old_str not in content:
-            return f"Error: String to replace not found in file: {requested_path}"
-        if replace_all:
-            content = content.replace(old_str, new_str)
-        else:
-            content = content.replace(old_str, new_str, 1)
-        sandbox.write_file(path, content)
+        with get_file_operation_lock(sandbox, path):
+            content = sandbox.read_file(path)
+            if not content:
+                return "OK"
+            if old_str not in content:
+                return f"Error: String to replace not found in file: {requested_path}"
+            if replace_all:
+                content = content.replace(old_str, new_str)
+            else:
+                content = content.replace(old_str, new_str, 1)
+            sandbox.write_file(path, content)
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"
