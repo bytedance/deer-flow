@@ -8,6 +8,7 @@ from langgraph.typing import ContextT
 
 from deerflow.agents.thread_state import ThreadDataState, ThreadState
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.bash_path_validation import extract_absolute_path_candidates
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -17,7 +18,6 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 
-_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s\"'`;&|<>()]+)")
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -518,7 +518,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
 
-    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
+    for absolute_path in extract_absolute_path_candidates(command):
         # Check for MCP filesystem server allowed paths
         if any(absolute_path.startswith(path) or absolute_path == path.rstrip("/") for path in allowed_paths):
             _reject_path_traversal(absolute_path)
