@@ -48,6 +48,61 @@ The upgraded VSFX runtime becomes responsible for:
 - VisualizeJS command execution
 - emitting normalized viewer events back into DeerFlow
 
+## cad-web reference files
+
+The implementation should explicitly use the following cad-web files as the source reference set for behavior parity within the approved scope.
+
+### Viewer and event pipeline
+
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Viewer.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-core/viewer/IViewer.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-core/viewer/ViewerEvents.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-core/viewer/CanvasEvents.ts`
+
+### Draggers and interaction actions
+
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Common/OdBaseDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Common/GestureManager.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdOrbitPanDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdOrbitDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdPanDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdZoomDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdZoomWheelDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdaWalkDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/MeasureLineDragger/index.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Actions/OrbitAction.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Actions/PanAction.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Actions/ZoomAction.ts`
+
+### Components and loader chain
+
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/components/VisualizeViewer/VisualizeViewer.jsx`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Components/index.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Components/RenderLoopComponent.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Components/ResizeCanvasComponent.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Components/ZoomWheelComponent.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Components/GestureManagerComponent.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Loaders/VsfXLoader.ts`
+
+### Commands and toolbar behavior
+
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/index.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/SetActiveDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ZoomToSelected.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ZoomToExtents.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/HideSelected.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/IsolateSelected.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ShowAll.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ClearSelected.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ClearSlices.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/PlaneView.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/Explode.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/RegenerateAll.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ResetView.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/contributes/Contributes.jsx`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/components/Toolbar/Toolbar.jsx`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/index.tsx`
+
 ## Architecture
 
 ### Shell boundary
@@ -102,6 +157,13 @@ Required changes:
 - On dragger switches, dispose the previous dragger, initialize the next dragger, emit `changeactivedragger`, and trigger a viewer update.
 - Preserve the existing DeerFlow-friendly command and event APIs where possible so the outer shell does not need to know about VisualizeJS internals.
 
+Reference source files in cad-web:
+
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Viewer.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-core/viewer/IViewer.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-core/viewer/ViewerEvents.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-core/viewer/CanvasEvents.ts`
+
 ### 2. Draggers and action classes
 
 Primary files:
@@ -123,6 +185,21 @@ Required changes:
 - Implement real orbit, pan, zoom, and walk actions against the VisualizeJS viewer instead of placeholder `update()` calls.
 - Keep `zoom-wheel` available as an always-on component, as in cad-web, without preventing the active dragger from handling its own pointer input.
 - Keep gesture support aligned with cad-web's current runtime structure so touch and multi-pointer support can be extended later without redesigning the event model.
+
+Reference source files in cad-web:
+
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Common/OdBaseDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Common/GestureManager.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdOrbitPanDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdOrbitDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdPanDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdZoomDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdZoomWheelDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/OdaWalkDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/MeasureLineDragger/index.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Actions/OrbitAction.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Actions/PanAction.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Draggers/Actions/ZoomAction.ts`
 
 ### 3. Commands
 
@@ -150,6 +227,22 @@ Required command coverage for this scope:
 
 Commands remain the stable interface consumed by DeerFlow context actions and the toolbar. The outer DeerFlow layer should not call raw VisualizeJS APIs directly.
 
+Reference source files in cad-web:
+
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/index.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/SetActiveDragger.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ZoomToSelected.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ZoomToExtents.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/HideSelected.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/IsolateSelected.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ShowAll.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ClearSelected.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ClearSlices.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/PlaneView.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/Explode.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/RegenerateAll.ts`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/viewer-visualize/Viewer/Commands/ResetView.ts`
+
 ### 4. Toolbar
 
 Primary files:
@@ -170,6 +263,12 @@ Required behavior:
   - current dragger mode
   - model capability such as 3D-only controls
 - Add parity for explode state display if needed for the DeerFlow toolbar treatment, but do not import cad-web's exact dropdown UI unless it materially improves the DeerFlow experience.
+
+Reference source files in cad-web:
+
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/contributes/Contributes.jsx`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/components/Toolbar/Toolbar.jsx`
+- `/Users/zhou/Code/iCAD/cad-web/app/components/visualize/index.tsx`
 
 ## State and data flow
 
