@@ -2,16 +2,11 @@
 
 import { useMemo } from "react";
 
-import {
-  Artifact,
-  ArtifactDescription,
-  ArtifactHeader,
-  ArtifactTitle,
-} from "@/components/ai-elements/artifact";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
 import { useVsfxContext, type VsfxHandle } from "../context";
+import { VsfxFloatingWindow } from "../VsfxFloatingWindow";
 
 type PropertyRow = {
   label: string;
@@ -103,21 +98,15 @@ export function VsfxPropertiesWindow() {
   }, [state.primaryHandle, state.properties, state.propertiesError, state.propertiesLoading]);
 
   return (
-    <Artifact
-      className="bg-background/95 absolute inset-y-4 top-4 right-4 z-20 flex w-96 min-h-0 max-w-full flex-col overflow-hidden border shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/85"
+    <VsfxFloatingWindow
+      className="w-96 max-w-full"
+      contentClassName="min-h-0 flex-1"
       data-testid="vsfx-properties-window"
+      description={content.kind === "ready"
+        ? content.handleLabel
+        : "Selected part details stay scoped to this panel."}
+      title="Selected properties"
     >
-      <ArtifactHeader className="items-start px-4 py-3">
-        <div className="min-w-0">
-          <ArtifactTitle>Selected properties</ArtifactTitle>
-          <ArtifactDescription>
-            {content.kind === "ready"
-              ? content.handleLabel
-              : "Selected part details stay scoped to this panel."}
-          </ArtifactDescription>
-        </div>
-      </ArtifactHeader>
-
       {content.kind === "ready" ? (
         <ScrollArea
           className="min-h-0 flex-1"
@@ -164,7 +153,7 @@ export function VsfxPropertiesWindow() {
           </div>
         </div>
       )}
-    </Artifact>
+    </VsfxFloatingWindow>
   );
 }
 
