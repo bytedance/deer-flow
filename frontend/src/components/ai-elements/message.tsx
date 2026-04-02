@@ -20,6 +20,8 @@ import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
 import { createContext, memo, useContext, useEffect, useState } from "react";
 import { Streamdown } from "streamdown";
 
+import { useI18n } from "@/core/i18n/hooks";
+
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"];
 };
@@ -331,11 +333,13 @@ export function MessageAttachment({
   onRemove,
   ...props
 }: MessageAttachmentProps) {
+  const { t } = useI18n();
   const filename = data.filename || "";
   const mediaType =
     data.mediaType?.startsWith("image/") && data.url ? "image" : "file";
   const isImage = mediaType === "image";
-  const attachmentLabel = filename || (isImage ? "Image" : "Attachment");
+  const attachmentLabel =
+    filename || (isImage ? t.common.image : t.common.attachment);
 
   return (
     <div
@@ -348,7 +352,7 @@ export function MessageAttachment({
       {isImage ? (
         <>
           <img
-            alt={filename || "attachment"}
+            alt={filename || t.common.attachment}
             className="size-full object-cover"
             height={100}
             src={data.url}
@@ -356,7 +360,7 @@ export function MessageAttachment({
           />
           {onRemove && (
             <Button
-              aria-label="Remove attachment"
+              aria-label={t.common.removeAttachment}
               className="bg-background/80 hover:bg-background absolute top-2 right-2 size-6 rounded-full p-0 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 [&>svg]:size-3"
               onClick={(e) => {
                 e.stopPropagation();
@@ -366,7 +370,7 @@ export function MessageAttachment({
               variant="ghost"
             >
               <XIcon />
-              <span className="sr-only">Remove</span>
+              <span className="sr-only">{t.common.removeAttachment}</span>
             </Button>
           )}
         </>
@@ -384,7 +388,7 @@ export function MessageAttachment({
           </Tooltip>
           {onRemove && (
             <Button
-              aria-label="Remove attachment"
+              aria-label={t.common.removeAttachment}
               className="hover:bg-accent size-6 shrink-0 rounded-full p-0 opacity-0 transition-opacity group-hover:opacity-100 [&>svg]:size-3"
               onClick={(e) => {
                 e.stopPropagation();
@@ -394,7 +398,7 @@ export function MessageAttachment({
               variant="ghost"
             >
               <XIcon />
-              <span className="sr-only">Remove</span>
+              <span className="sr-only">{t.common.removeAttachment}</span>
             </Button>
           )}
         </>

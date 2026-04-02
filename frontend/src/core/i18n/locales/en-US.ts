@@ -49,6 +49,10 @@ export const enUS: Translations = {
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
+    image: "Image",
+    attachment: "Attachment",
+    removeAttachment: "Remove attachment",
+    submit: "Submit",
   },
 
   // Welcome
@@ -284,6 +288,9 @@ export const enUS: Translations = {
     input: "Input",
     output: "Output",
     total: "Total",
+    reasoning: "Reasoning",
+    cache: "Cache",
+    totalCost: "Total cost",
   },
 
   // Shortcuts

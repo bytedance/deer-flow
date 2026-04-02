@@ -34,6 +34,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useI18n } from "@/core/i18n/hooks";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 import type { ChatStatus, FileUIPart } from "ai";
@@ -288,6 +289,7 @@ export function PromptInputAttachment({
   className,
   ...props
 }: PromptInputAttachmentProps) {
+  const { t } = useI18n();
   const attachments = usePromptInputAttachments();
 
   const filename = data.filename || "";
@@ -296,7 +298,8 @@ export function PromptInputAttachment({
     data.mediaType?.startsWith("image/") && data.url ? "image" : "file";
   const isImage = mediaType === "image";
 
-  const attachmentLabel = filename || (isImage ? "Image" : "Attachment");
+  const attachmentLabel =
+    filename || (isImage ? t.common.image : t.common.attachment);
 
   return (
     <PromptInputHoverCard>
@@ -313,7 +316,7 @@ export function PromptInputAttachment({
             <div className="bg-background absolute inset-0 flex size-5 items-center justify-center overflow-hidden rounded transition-opacity group-hover:opacity-0">
               {isImage ? (
                 <img
-                  alt={filename || "attachment"}
+                  alt={filename || t.common.attachment}
                   className="size-5 object-cover"
                   height={20}
                   src={data.url}
@@ -326,7 +329,7 @@ export function PromptInputAttachment({
               )}
             </div>
             <Button
-              aria-label="Remove attachment"
+              aria-label={t.common.removeAttachment}
               className="absolute inset-0 size-5 cursor-pointer rounded p-0 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 [&>svg]:size-2.5"
               onClick={(e) => {
                 e.stopPropagation();
@@ -336,7 +339,7 @@ export function PromptInputAttachment({
               variant="ghost"
             >
               <XIcon />
-              <span className="sr-only">Remove</span>
+              <span className="sr-only">{t.common.removeAttachment}</span>
             </Button>
           </div>
 
@@ -348,7 +351,7 @@ export function PromptInputAttachment({
           {isImage && (
             <div className="flex max-h-96 w-96 items-center justify-center overflow-hidden rounded-md border">
               <img
-                alt={filename || "attachment preview"}
+                alt={filename || `${t.common.attachment} preview`}
                 className="max-h-full max-w-full object-contain"
                 height={384}
                 src={data.url}
@@ -358,9 +361,9 @@ export function PromptInputAttachment({
           )}
           <div className="flex items-center gap-2.5">
             <div className="min-w-0 flex-1 space-y-1 px-0.5">
-              <h4 className="truncate text-sm leading-none font-semibold">
-                {filename || (isImage ? "Image" : "Attachment")}
-              </h4>
+                <h4 className="truncate text-sm leading-none font-semibold">
+                  {filename || (isImage ? t.common.image : t.common.attachment)}
+                </h4>
               {data.mediaType && (
                 <p className="text-muted-foreground truncate font-mono text-xs">
                   {data.mediaType}
@@ -413,9 +416,10 @@ export type PromptInputActionAddAttachmentsProps = ComponentProps<
 };
 
 export const PromptInputActionAddAttachments = ({
-  label = "Add photos or files",
+  label,
   ...props
 }: PromptInputActionAddAttachmentsProps) => {
+  const { t } = useI18n();
   const attachments = usePromptInputAttachments();
 
   return (
@@ -426,7 +430,7 @@ export const PromptInputActionAddAttachments = ({
         attachments.openFileDialog();
       }}
     >
-      <PaperclipIcon className="mr-2 size-4" /> {label}
+      <PaperclipIcon className="mr-2 size-4" /> {label ?? t.inputBox.addAttachments}
     </DropdownMenuItem>
   );
 };
@@ -825,9 +829,10 @@ export type PromptInputTextareaProps = ComponentProps<
 export const PromptInputTextarea = ({
   onChange,
   className,
-  placeholder = "What would you like to know?",
+  placeholder,
   ...props
 }: PromptInputTextareaProps) => {
+  const { t } = useI18n();
   const controller = useOptionalPromptInputController();
   const attachments = usePromptInputAttachments();
   const [isComposing, setIsComposing] = useState(false);
@@ -912,7 +917,7 @@ export const PromptInputTextarea = ({
       onCompositionStart={() => setIsComposing(true)}
       onKeyDown={handleKeyDown}
       onPaste={handlePaste}
-      placeholder={placeholder}
+      placeholder={placeholder ?? t.inputBox.placeholder}
       {...props}
       {...controlledProps}
     />
@@ -1033,6 +1038,7 @@ export const PromptInputSubmit = ({
   children,
   ...props
 }: PromptInputSubmitProps) => {
+  const { t } = useI18n();
   let Icon = <ArrowUpIcon className="size-4" />;
 
   if (status === "submitted") {
@@ -1045,7 +1051,7 @@ export const PromptInputSubmit = ({
 
   return (
     <InputGroupButton
-      aria-label="Submit"
+      aria-label={t.common.submit}
       className={cn(className)}
       size={size}
       type="submit"
@@ -1124,6 +1130,7 @@ export const PromptInputSpeechButton = ({
   onTranscriptionChange,
   ...props
 }: PromptInputSpeechButtonProps) => {
+  const { locale, t } = useI18n();
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState<SpeechRecognition | null>(
     null,
@@ -1143,7 +1150,7 @@ export const PromptInputSpeechButton = ({
 
       speechRecognition.continuous = true;
       speechRecognition.interimResults = true;
-      speechRecognition.lang = "en-US";
+      speechRecognition.lang = locale;
 
       speechRecognition.onstart = () => {
         setIsListening(true);
@@ -1193,7 +1200,7 @@ export const PromptInputSpeechButton = ({
         recognitionRef.current.stop();
       }
     };
-  }, []);
+  }, [locale]);
 
   const toggleListening = useCallback(() => {
     if (!recognition) {

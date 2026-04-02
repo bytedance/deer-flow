@@ -49,6 +49,10 @@ export const zhCN: Translations = {
     exportAsMarkdown: "导出为 Markdown",
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
+    image: "图片",
+    attachment: "附件",
+    removeAttachment: "移除附件",
+    submit: "提交",
   },
 
   // Welcome
@@ -270,6 +274,9 @@ export const zhCN: Translations = {
     input: "输入",
     output: "输出",
     total: "总计",
+    reasoning: "推理",
+    cache: "缓存",
+    totalCost: "总成本",
   },
 
   // Shortcuts

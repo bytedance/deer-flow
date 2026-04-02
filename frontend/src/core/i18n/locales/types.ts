@@ -38,6 +38,10 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+    image: string;
+    attachment: string;
+    removeAttachment: string;
+    submit: string;
   };
 
   // Welcome
@@ -220,6 +224,9 @@ export interface Translations {
     input: string;
     output: string;
     total: string;
+    reasoning: string;
+    cache: string;
+    totalCost: string;
   };
 
   // Shortcuts
