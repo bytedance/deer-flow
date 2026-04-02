@@ -54,7 +54,7 @@ services:
       - deer-flow-dev
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -113,8 +113,6 @@ services:
       - NODE_ENV=development
       - WATCHPACK_POLLING=true
       - CI=true
-      - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
-      - DEER_FLOW_INTERNAL_LANGGRAPH_BASE_URL=http://langgraph:2024
     env_file:
       - ../frontend/.env
     networks:
@@ -131,7 +129,6 @@ services:
       args:
         APT_MIRROR: ${APT_MIRROR:-}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
-        UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
     container_name: deer-flow-gateway
     command: sh -c "{ cd backend && (uv sync || (echo '[startup] uv sync failed; recreating .venv and retrying once' && uv venv --allow-existing .venv && uv sync)) && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env'; } > /app/logs/gateway.log 2>&1"
     volumes:
@@ -162,6 +159,8 @@ services:
         read_only: true
         bind:
           create_host_path: true
+      # Google Drive credentials (writeable for token refresh)
+      - ../skills/custom/google-drive:/app/google-drive-credentials
     working_dir: /app
     environment:
       - CI=true
@@ -171,6 +170,8 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Google Drive token path (for write access)
+      - GOOGLE_DRIVE_TOKEN_PATH=/app/google-drive-credentials/token.json
     env_file:
       - ../.env
     extra_hosts:
@@ -190,7 +191,6 @@ services:
       args:
         APT_MIRROR: ${APT_MIRROR:-}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
-        UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
     container_name: deer-flow-langgraph
     command: sh -c "cd backend && { (uv sync || (echo '[startup] uv sync failed; recreating .venv and retrying once' && uv venv --allow-existing .venv && uv sync)) && allow_blocking='' && if [ \"\${LANGGRAPH_ALLOW_BLOCKING:-0}\" = '1' ]; then allow_blocking='--allow-blocking'; fi && uv run langgraph dev --no-browser \${allow_blocking} --host 0.0.0.0 --port 2024 --n-jobs-per-worker \${LANGGRAPH_JOBS_PER_WORKER:-10}; } > /app/logs/langgraph.log 2>&1"
     volumes:
@@ -221,6 +221,8 @@ services:
         read_only: true
         bind:
           create_host_path: true
+      # Google Drive credentials (writeable for token refresh)
+      - ../skills/custom/google-drive:/app/google-drive-credentials
     working_dir: /app
     environment:
       - CI=true
@@ -228,6 +230,8 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Google Drive token path (for write access)
+      - GOOGLE_DRIVE_TOKEN_PATH=/app/google-drive-credentials/token.json
     env_file:
       - ../.env
     extra_hosts:
@@ -244,6 +248,7 @@ volumes:
   langgraph-venv:
   gateway-uv-cache:
   langgraph-uv-cache:
+
 
 networks:
   deer-flow-dev:
