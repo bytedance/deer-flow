@@ -7,11 +7,35 @@ description: Use this skill when the user wants DeerFlow to build and visualize 
 
 Follow this workflow when building a steel-structure model:
 
-1. Understand the user's structural requirements.
-2. Load the `steel-structure-json-authoring` skill and write a complete `originData` JSON file in `/mnt/user-data/workspace/`.
-3. Call `visualize_steel_structure` with the JSON string.
-4. The tool writes `.vsfx`, `.cda.json`, and `.properties.json` into `/mnt/user-data/outputs/`.
-5. Present those files to the user with `present_files`.
+1. Understand and complete the user's requirements.
+2. Validate the completed requirements for modeling legality.
+3. Load the `steel-structure-json-authoring` skill and write a complete `originData` JSON file in `/mnt/user-data/workspace/`.
+4. Call `visualize_steel_structure` with the JSON string.
+5. The tool writes `.vsfx`, `.cda.json`, and `.properties.json` into `/mnt/user-data/outputs/`.
+6. Present those files to the user with `present_files`.
+
+## Requirement Understanding
+
+Treat requirement understanding as two explicit stages before JSON authoring.
+
+### Stage 1: Understand and complete the user's requirements
+
+- Read the bundled reference `/mnt/skills/public/steel-structure-visualization-workflow/references/column-spacing-inference.md` before inferring column spacing.
+- First summarize the user's stated constraints and complete any missing but inferable requirements.
+- If the user does not specify column spacing or spans, infer them before authoring the JSON.
+- For column spacing inference, follow the bundled symmetric distribution guidance, prioritizing integers or 0.5m increments.
+- For span inference, default to a left-right symmetric layout along the building width and prefer integer spans whenever practical.
+- When the user requests multi-ridge roofs, use an even span count of `4` or more, keep the spans as equal as possible, and allow decimal spans when needed.
+- No single span may exceed `36m`; if it would, increase the span count and recalculate.
+- If some values still cannot be inferred reliably, keep the confirmed requirements and avoid inventing unsupported details.
+
+### Stage 2: Validate the completed requirements for modeling legality
+
+- Check openings against the eave height before writing JSON.
+- Door tops and window tops must be at least `0.3m` below the eave height.
+- If a window is above a door, keep at least `0.2m` between the window bottom and the door top.
+- Automatically adjust door/window heights or window positions when the correction is reliable.
+- If a compliant correction cannot be inferred with confidence, preserve only the values that can be determined confidently and leave the uncertain field unset rather than guessing.
 
 ## Tool Usage
 
