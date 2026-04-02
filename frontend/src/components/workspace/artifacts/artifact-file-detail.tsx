@@ -31,6 +31,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { CodeEditor } from "@/components/workspace/code-editor";
 import { useArtifactContent } from "@/core/artifacts/hooks";
 import { urlOfArtifact } from "@/core/artifacts/utils";
+import { classifyVsfxArtifactPath } from "@/core/artifacts/vsfx/classify";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
@@ -43,6 +44,7 @@ import { useThread } from "../messages/context";
 import { Tooltip } from "../tooltip";
 
 import { useArtifacts } from "./context";
+import { VsfxArtifactViewer } from "./vsfx/VsfxArtifactViewer";
 
 export function ArtifactFileDetail({
   className,
@@ -68,6 +70,9 @@ export function ArtifactFileDetail({
   const isSkillFile = useMemo(() => {
     return filepath.endsWith(".skill");
   }, [filepath]);
+  const isVsfxArtifact = useMemo(() => {
+    return !isWriteFile && classifyVsfxArtifactPath(filepath).kind === "vsfx";
+  }, [filepath, isWriteFile]);
   const { isCodeFile, language } = useMemo(() => {
     if (isWriteFile) {
       let language = checkCodeFile(filepath).language;
@@ -252,12 +257,19 @@ export function ArtifactFileDetail({
             readonly
           />
         )}
-        {!isCodeFile && (
+        {isVsfxArtifact ? (
+          <VsfxArtifactViewer
+            artifacts={artifacts ?? []}
+            filepath={filepath}
+            isMock={isMock}
+            threadId={threadId}
+          />
+        ) : !isCodeFile ? (
           <iframe
             className="size-full"
             src={urlOfArtifact({ filepath, threadId, isMock })}
           />
-        )}
+        ) : null}
       </ArtifactContent>
     </Artifact>
   );

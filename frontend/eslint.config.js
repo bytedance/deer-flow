@@ -9,6 +9,7 @@ export default tseslint.config(
   {
     ignores: [
       ".next",
+      "public/visualizejs/Visualize.js",
       "src/components/ui/**",
       "src/components/ai-elements/**",
       "*.js",
