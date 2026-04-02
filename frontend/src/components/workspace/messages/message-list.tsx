@@ -1,4 +1,5 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
+import { useMemo } from "react";
 
 import {
   Conversation,
@@ -41,9 +42,23 @@ export function MessageList({
   paddingBottom?: number;
 }) {
   const { t } = useI18n();
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
+  const streamingRehypePlugins = useRehypeSplitWordsIntoSpans(true);
+  const staticRehypePlugins = useRehypeSplitWordsIntoSpans(false);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
+  const groups = useMemo(
+    () => groupMessages(messages, (group) => group),
+    [messages],
+  );
+  const lastStreamingGroupIndex = useMemo(() => {
+    for (let i = groups.length - 1; i >= 0; i -= 1) {
+      if (groups[i]?.type !== "human") {
+        return i;
+      }
+    }
+    return -1;
+  }, [groups]);
+
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
@@ -52,14 +67,22 @@ export function MessageList({
       className={cn("flex size-full flex-col justify-center", className)}
     >
       <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-12">
-        {groupMessages(messages, (group) => {
+        {groups.map((group, index) => {
+          // Only animate the newest non-human group so remount/reconnect does not
+          // replay fade-in effects across the entire conversation history.
+          const isStreamingGroup =
+            thread.isLoading && index === lastStreamingGroupIndex;
+          const rehypePlugins = isStreamingGroup
+            ? streamingRehypePlugins
+            : staticRehypePlugins;
+
           if (group.type === "human" || group.type === "assistant") {
             return group.messages.map((msg) => {
               return (
                 <MessageListItem
                   key={`${group.id}/${msg.id}`}
                   message={msg}
-                  isLoading={thread.isLoading}
+                  isLoading={isStreamingGroup}
                 />
               );
             });
@@ -70,7 +93,7 @@ export function MessageList({
                 <MarkdownContent
                   key={group.id}
                   content={extractContentFromMessage(message)}
-                  isLoading={thread.isLoading}
+                  isLoading={isStreamingGroup}
                   rehypePlugins={rehypePlugins}
                 />
               );
@@ -89,7 +112,7 @@ export function MessageList({
                 {group.messages[0] && hasContent(group.messages[0]) && (
                   <MarkdownContent
                     content={extractContentFromMessage(group.messages[0])}
-                    isLoading={thread.isLoading}
+                    isLoading={isStreamingGroup}
                     rehypePlugins={rehypePlugins}
                     className="mb-4"
                   />
@@ -156,7 +179,7 @@ export function MessageList({
                   <MessageGroup
                     key={"thinking-group-" + message.id}
                     messages={[message]}
-                    isLoading={thread.isLoading}
+                    isLoading={isStreamingGroup}
                   />,
                 );
               }
@@ -176,7 +199,7 @@ export function MessageList({
                   <SubtaskCard
                     key={"task-group-" + taskId}
                     taskId={taskId!}
-                    isLoading={thread.isLoading}
+                    isLoading={isStreamingGroup}
                   />,
                 );
               }
@@ -194,7 +217,7 @@ export function MessageList({
             <MessageGroup
               key={"group-" + group.id}
               messages={group.messages}
-              isLoading={thread.isLoading}
+              isLoading={isStreamingGroup}
             />
           );
         })}
