@@ -103,12 +103,22 @@ describe("VsfxToolbar", () => {
       expect(screen.getByRole("radio", { name: label })).toBeInTheDocument();
     }
 
+    expect(screen.getByRole("radio", { name: "Walk" })).toBeInTheDocument();
+
     for (const label of [
+      "Measure line",
+      "SW",
+      "Top",
+      "Bottom",
+      "Left",
+      "Right",
+      "Front",
+      "Back",
+      "Fit",
       "X Slice",
       "Y Slice",
       "Z Slice",
       "Clear cuts",
-      "Fit",
       "Fit selected",
       "Isolate",
       "Hide",
@@ -142,6 +152,7 @@ describe("VsfxToolbar", () => {
       ["Pan", "pan"],
       ["Orbit", "orbit"],
       ["Orbit/Pan", "orbit-pan"],
+      ["Walk", "walk"],
       ["Zoom", "zoom"],
     ] as const) {
       fireEvent.click(screen.getByRole("radio", { name: label }));
@@ -155,6 +166,14 @@ describe("VsfxToolbar", () => {
       ["Y Slice", "planeViewY"],
       ["Z Slice", "planeViewZ"],
       ["Clear cuts", "clearSlices"],
+      ["Measure line", "measureLine"],
+      ["SW", "k3DViewSW"],
+      ["Top", "k3DViewTop"],
+      ["Bottom", "k3DViewBottom"],
+      ["Left", "k3DViewLeft"],
+      ["Right", "k3DViewRight"],
+      ["Front", "k3DViewFront"],
+      ["Back", "k3DViewBack"],
       ["Fit", "zoomToExtents"],
       ["Fit selected", "zoomToSelected"],
       ["Isolate", "isolateSelected"],

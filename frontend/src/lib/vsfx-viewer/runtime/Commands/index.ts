@@ -17,9 +17,17 @@ import { zoomToExtents } from "./ZoomToExtents";
 import { zoomToSelected } from "./ZoomToSelected";
 
 export const approvedCommandNames = [
+  "measureLine",
   "setSelected",
   "getSelected",
   "clearSelected",
+  "k3DViewSW",
+  "k3DViewTop",
+  "k3DViewBottom",
+  "k3DViewLeft",
+  "k3DViewRight",
+  "k3DViewFront",
+  "k3DViewBack",
   "zoomToSelected",
   "zoomToExtents",
   "hideSelected",
@@ -37,9 +45,33 @@ export const approvedCommandNames = [
 
 export const viewerCommands: ICommandsRegistry<Viewer> = commandsRegistry<Viewer>();
 
+viewerCommands.registerCommand("measureLine", (viewer) => {
+  viewer.getVisualizeViewer()?.measureLine?.();
+});
 viewerCommands.registerCommand("setSelected", setSelected);
 viewerCommands.registerCommand("getSelected", getSelected);
 viewerCommands.registerCommand("clearSelected", clearSelected);
+viewerCommands.registerCommand("k3DViewSW", (viewer) => {
+  viewer.getVisualizeViewer()?.k3DViewSW?.();
+});
+viewerCommands.registerCommand("k3DViewTop", (viewer) => {
+  viewer.getVisualizeViewer()?.k3DViewTop?.();
+});
+viewerCommands.registerCommand("k3DViewBottom", (viewer) => {
+  viewer.getVisualizeViewer()?.k3DViewBottom?.();
+});
+viewerCommands.registerCommand("k3DViewLeft", (viewer) => {
+  viewer.getVisualizeViewer()?.k3DViewLeft?.();
+});
+viewerCommands.registerCommand("k3DViewRight", (viewer) => {
+  viewer.getVisualizeViewer()?.k3DViewRight?.();
+});
+viewerCommands.registerCommand("k3DViewFront", (viewer) => {
+  viewer.getVisualizeViewer()?.k3DViewFront?.();
+});
+viewerCommands.registerCommand("k3DViewBack", (viewer) => {
+  viewer.getVisualizeViewer()?.k3DViewBack?.();
+});
 viewerCommands.registerCommand("zoomToSelected", zoomToSelected);
 viewerCommands.registerCommand("zoomToExtents", zoomToExtents);
 viewerCommands.registerCommand("hideSelected", hideSelected);

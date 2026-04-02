@@ -3,9 +3,17 @@ import { describe, expect, test, vi } from "vitest";
 import { Viewer } from "@/lib/vsfx-viewer/runtime/Viewer";
 
 const APPROVED_COMMANDS = [
+  "measureLine",
   "setSelected",
   "getSelected",
   "clearSelected",
+  "k3DViewSW",
+  "k3DViewTop",
+  "k3DViewBottom",
+  "k3DViewLeft",
+  "k3DViewRight",
+  "k3DViewFront",
+  "k3DViewBack",
   "zoomToSelected",
   "zoomToExtents",
   "hideSelected",
@@ -31,6 +39,14 @@ function createVisualizeBackend() {
     getSelected: vi.fn(() => [101]),
     hideSelected: vi.fn(),
     isolateSelected: vi.fn(),
+    k3DViewBack: vi.fn(),
+    k3DViewBottom: vi.fn(),
+    k3DViewFront: vi.fn(),
+    k3DViewLeft: vi.fn(),
+    k3DViewRight: vi.fn(),
+    k3DViewSW: vi.fn(),
+    k3DViewTop: vi.fn(),
+    measureLine: vi.fn(),
     parseVsfx: vi.fn(),
     planeViewX: vi.fn(),
     planeViewY: vi.fn(),
@@ -76,6 +92,7 @@ describe("Viewer", () => {
       "pan",
       "orbit",
       "orbit-pan",
+      "walk",
       "zoom",
       "zoom-wheel",
     ]);
@@ -100,6 +117,8 @@ describe("Viewer", () => {
     const data = new Uint8Array([1, 2, 3]).buffer;
     await viewer.open({ data, filename: "sample.vsfx" });
     viewer.executeCommand("setSelected", [10, 20]);
+    viewer.executeCommand("measureLine");
+    viewer.executeCommand("k3DViewTop");
     viewer.executeCommand("zoomToSelected");
     viewer.executeCommand("planeViewX");
     viewer.executeCommand("collect");
@@ -108,6 +127,8 @@ describe("Viewer", () => {
 
     expect(backend.parseVsfx).toHaveBeenCalledWith(new Uint8Array(data));
     expect(backend.setSelected).toHaveBeenCalledWith([10, 20]);
+    expect(backend.measureLine).toHaveBeenCalledTimes(1);
+    expect(backend.k3DViewTop).toHaveBeenCalledTimes(1);
     expect(backend.zoomToSelected).toHaveBeenCalledTimes(1);
     expect(backend.planeViewX).toHaveBeenCalledTimes(1);
     expect(backend.collect).toHaveBeenCalledTimes(2);

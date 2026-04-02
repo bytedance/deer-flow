@@ -4,15 +4,23 @@ type VsfxRuntimeViewer = VsfxContextValue["state"]["viewer"] & {
   setActiveDragger?: (name: string) => void;
 };
 
-export type VsfxToolbarDraggerName = "pan" | "orbit" | "orbit-pan" | "zoom";
+export type VsfxToolbarDraggerName = "pan" | "orbit" | "orbit-pan" | "walk" | "zoom";
 
 export type VsfxToolbarCommandName =
+  | "k3DViewBack"
+  | "k3DViewBottom"
+  | "k3DViewFront"
+  | "k3DViewLeft"
+  | "k3DViewRight"
+  | "k3DViewSW"
+  | "k3DViewTop"
   | "clearSelected"
   | "clearSlices"
   | "collect"
   | "explode"
   | "hideSelected"
   | "isolateSelected"
+  | "measureLine"
   | "planeViewX"
   | "planeViewY"
   | "planeViewZ"
@@ -47,7 +55,49 @@ export const VSFX_TOOLBAR_GROUPS: VsfxToolbarGroup[] = [
       createDraggerItem("pan", "Pan"),
       createDraggerItem("orbit", "Orbit"),
       createDraggerItem("orbit-pan", "Orbit/Pan"),
+      createDraggerItem("walk", "Walk"),
       createDraggerItem("zoom", "Zoom"),
+    ],
+  },
+  {
+    id: "measure",
+    label: "Measure",
+    type: "buttons",
+    items: [
+      createCommandItem("measureLine", "Measure line", ({ state }) => {
+        state.viewer?.executeCommand("measureLine");
+      }),
+    ],
+  },
+  {
+    id: "views",
+    label: "3D views",
+    type: "buttons",
+    items: [
+      createCommandItem("k3DViewSW", "SW", ({ state }) => {
+        state.viewer?.executeCommand("k3DViewSW");
+      }),
+      createCommandItem("k3DViewTop", "Top", ({ state }) => {
+        state.viewer?.executeCommand("k3DViewTop");
+      }),
+      createCommandItem("k3DViewBottom", "Bottom", ({ state }) => {
+        state.viewer?.executeCommand("k3DViewBottom");
+      }),
+      createCommandItem("k3DViewLeft", "Left", ({ state }) => {
+        state.viewer?.executeCommand("k3DViewLeft");
+      }),
+      createCommandItem("k3DViewRight", "Right", ({ state }) => {
+        state.viewer?.executeCommand("k3DViewRight");
+      }),
+      createCommandItem("k3DViewFront", "Front", ({ state }) => {
+        state.viewer?.executeCommand("k3DViewFront");
+      }),
+      createCommandItem("k3DViewBack", "Back", ({ state }) => {
+        state.viewer?.executeCommand("k3DViewBack");
+      }),
+      createCommandItem("zoomToExtents", "Fit", ({ actions }) => {
+        actions.zoomToExtents();
+      }),
     ],
   },
   {
@@ -74,9 +124,6 @@ export const VSFX_TOOLBAR_GROUPS: VsfxToolbarGroup[] = [
     label: "Selection",
     type: "buttons",
     items: [
-      createCommandItem("zoomToExtents", "Fit", ({ actions }) => {
-        actions.zoomToExtents();
-      }),
       createCommandItem(
         "zoomToSelected",
         "Fit selected",
