@@ -10,6 +10,7 @@ type PanCallbacks = {
 export class PanAction extends OdaGeAction {
   private readonly beginInteractivity: () => void;
   private readonly endInteractivity: () => void;
+  private deltaScreenPosition = { x: 0, y: 0 };
   private startWorld = [0, 0, 0];
 
   constructor(viewer: IViewer, callbacks: PanCallbacks) {
@@ -18,12 +19,13 @@ export class PanAction extends OdaGeAction {
     this.endInteractivity = callbacks.endInteractivity;
   }
 
-  beginAction(x: number, y: number) {
+  beginAction(x: number, y: number, absoluteX: number, absoluteY: number) {
     this.startWorld = this.screenToWorld(x, y);
+    this.deltaScreenPosition = { x: absoluteX, y: absoluteY };
     this.beginInteractivity();
   }
 
-  action(x: number, y: number) {
+  action(x: number, y: number, absoluteX: number, absoluteY: number) {
     const params = this.getViewParams();
 
     if (!params) {
@@ -37,6 +39,7 @@ export class PanAction extends OdaGeAction {
     params.target = params.target.map((value, index) => value + (delta[index] ?? 0));
 
     this.setViewParams(params);
+    this.deltaScreenPosition = { x: absoluteX, y: absoluteY };
   }
 
   endAction() {

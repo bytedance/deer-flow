@@ -17,6 +17,7 @@ import { loadVisualizeLibrary, type VisualizeProgressState } from "./utils";
 type EventListener<TPayload> = (payload: TPayload) => void;
 
 export type VisualizeBackend = {
+  activeView?: unknown;
   clearSelected?: () => void;
   clearSlices?: () => void;
   clear?: () => void;
@@ -30,6 +31,10 @@ export type VisualizeBackend = {
   k3DViewRight?: () => void;
   k3DViewSW?: () => void;
   k3DViewTop?: () => void;
+  getActiveDevice?: () => unknown;
+  getActiveExtents?: () => unknown;
+  getActiveTvExtendedView?: () => unknown;
+  getEnableAutoSelect?: () => boolean;
   getSelected?: () => Array<string | number>;
   hideSelected?: () => void;
   isolateSelected?: () => void;
@@ -42,11 +47,15 @@ export type VisualizeBackend = {
   render?: () => void;
   resetView?: () => void;
   resize?: () => void;
+  select?: (x1: number, y1: number, x2: number, y2: number) => void;
   setActiveDragger?: (name: string) => void;
+  setEnableAutoSelect?: (enabled: boolean) => void;
   setSelected?: (handles: Array<string | number>) => void;
   showAll?: () => void;
   syncView?: () => void;
+  unselect?: () => void;
   update?: () => void;
+  zoomToEntity?: (entity: unknown) => void;
   zoomToExtents?: () => void;
   zoomToSelected?: () => void;
 };

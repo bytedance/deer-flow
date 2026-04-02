@@ -57,6 +57,9 @@ export abstract class OdBaseDragger implements IDragger {
       );
     }
 
+    const runtime = this.viewer as Viewer;
+
+    runtime.getVisualizeViewer()?.setEnableAutoSelect?.(!!this.autoSelect);
     this.initialized = true;
   }
 
@@ -91,9 +94,14 @@ export abstract class OdBaseDragger implements IDragger {
 
     const runtime = this.viewer as Viewer;
     const runtimeViewer = runtime.getVisualizeViewer() as {
+      getEnableAutoSelect?: () => boolean;
       select?: (x1: number, y1: number, x2: number, y2: number) => void;
       unselect?: () => void;
     } | null;
+
+    if (!(runtimeViewer?.getEnableAutoSelect?.() ?? this.autoSelect)) {
+      return;
+    }
 
     runtimeViewer?.unselect?.();
     runtimeViewer?.select?.(relCoord.x, relCoord.y, relCoord.x, relCoord.y);
@@ -110,6 +118,13 @@ export abstract class OdBaseDragger implements IDragger {
 
   protected pointercancel(event: PointerEvent) {
     if (!event.isPrimary) {
+      return;
+    }
+
+    const target = this.viewer.getContainer();
+
+    if (target instanceof HTMLCanvasElement) {
+      target.dispatchEvent(new PointerEvent("pointerup", event));
       return;
     }
 

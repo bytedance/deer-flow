@@ -80,8 +80,11 @@ function createInteractionBackend() {
       vportRect: [number, number, number, number];
     };
     getActiveDevice: ReturnType<typeof vi.fn>;
+    getActiveExtents: ReturnType<typeof vi.fn>;
     getActiveTvExtendedView: ReturnType<typeof vi.fn>;
+    getEnableAutoSelect: ReturnType<typeof vi.fn>;
     screenToWorld: ReturnType<typeof vi.fn>;
+    setEnableAutoSelect: ReturnType<typeof vi.fn>;
     setActiveDragger: ReturnType<typeof vi.fn>;
     setView: ReturnType<typeof vi.fn>;
     zoomAt: ReturnType<typeof vi.fn>;
@@ -134,12 +137,19 @@ function createInteractionBackend() {
   backend.getActiveDevice = vi.fn(() => ({
     delete: vi.fn(),
     invalidate: vi.fn(),
+    viewAt: vi.fn(() => null),
+  }));
+  backend.getActiveExtents = vi.fn(() => ({
+    center: vi.fn(() => [0, 0, 0]),
+    delete: vi.fn(),
   }));
   backend.getActiveTvExtendedView = vi.fn(() => ({
     delete: vi.fn(),
     setView,
   }));
+  backend.getEnableAutoSelect = vi.fn(() => true);
   backend.screenToWorld = vi.fn((x: number, y: number) => [x / 10, y / 10, 0]);
+  backend.setEnableAutoSelect = vi.fn();
   backend.setActiveDragger = vi.fn();
   backend.setView = setView;
   backend.zoomAt = vi.fn();
@@ -148,7 +158,6 @@ function createInteractionBackend() {
 }
 
 function createSelectionSet(handles: string[]) {
-  let index = 0;
   const entities = handles.map((handle) => ({
     delete: vi.fn(),
     getNativeDatabaseHandle: vi.fn(() => handle),
@@ -163,14 +172,50 @@ function createSelectionSet(handles: string[]) {
   return {
     isNull: vi.fn(() => false),
     numItems: vi.fn(() => entityIds.length),
-    getIterator: vi.fn(() => ({
-      delete: vi.fn(),
-      done: vi.fn(() => index >= entityIds.length),
-      getEntity: vi.fn(() => entityIds[index]),
-      step: vi.fn(() => {
-        index += 1;
-      }),
-    })),
+    getIterator: vi.fn(() => {
+      let index = 0;
+
+      return {
+        delete: vi.fn(),
+        done: vi.fn(() => index >= entityIds.length),
+        getEntity: vi.fn(() => entityIds[index]),
+        step: vi.fn(() => {
+          index += 1;
+        }),
+      };
+    }),
+  };
+}
+
+function createExtent(center: [number, number, number]) {
+  return {
+    addExt: vi.fn(),
+    center: vi.fn(() => [...center]),
+    delete: vi.fn(),
+  };
+}
+
+function createOrbitSelectionSet(extentCenters: Array<[number, number, number]>) {
+  const entities = extentCenters.map((center) => ({
+    delete: vi.fn(),
+    getWCSExtents: vi.fn(() => createExtent(center)),
+  }));
+
+  return {
+    isNull: vi.fn(() => false),
+    numItems: vi.fn(() => entities.length),
+    getIterator: vi.fn(() => {
+      let index = 0;
+
+      return {
+        delete: vi.fn(),
+        done: vi.fn(() => index >= entities.length),
+        getEntity: vi.fn(() => entities[index]),
+        step: vi.fn(() => {
+          index += 1;
+        }),
+      };
+    }),
   };
 }
 
@@ -708,6 +753,69 @@ describe("Viewer", () => {
 
     expect(backend.screenToWorld).toHaveBeenCalled();
     expect(backend.setView).toHaveBeenCalled();
+  });
+
+  test("orbits around the selected extents center like cad-web when objects are selected", async () => {
+    const backend = createInteractionBackend();
+    const canvas = document.createElement("canvas");
+    canvas.setPointerCapture = vi.fn();
+    canvas.releasePointerCapture = vi.fn();
+    backend.getSelected.mockReturnValue(createOrbitSelectionSet([[5, 0, 0]]));
+
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    viewer.setActiveDragger("orbit-pan");
+    backend.setView.mockClear();
+
+    dispatchCanvasPointerEvent(canvas, "pointerdown", {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      offsetX: 10,
+      offsetY: 10,
+    });
+    dispatchCanvasPointerEvent(canvas, "pointermove", {
+      button: 0,
+      clientX: 20,
+      clientY: 16,
+      offsetX: 20,
+      offsetY: 16,
+    });
+
+    expect(backend.setView).toHaveBeenCalled();
+    expect(backend.setView.mock.lastCall?.[1]).not.toEqual([0, 0, 0]);
+  });
+
+  test("prevents the browser middle-button default behavior on mousedown like cad-web", async () => {
+    const backend = createInteractionBackend();
+    const canvas = document.createElement("canvas");
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    viewer.setActiveDragger("orbit-pan");
+
+    const event = new MouseEvent("mousedown", {
+      bubbles: true,
+      button: 1,
+      cancelable: true,
+    });
+
+    canvas.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
   });
 
   test("hideSelected clears the runtime selection after hiding the current handles", async () => {

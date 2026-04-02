@@ -15,6 +15,7 @@ export class OdOrbitPanDragger extends OdBaseDragger {
   constructor(viewer: IViewer) {
     super(viewer, "orbit-pan");
     this.autoSelect = true;
+    this.canvasEvents.push("contextmenu", "auxclick");
     this.orbitAction = new OrbitAction(viewer, {
       beginInteractivity: this.beginInteractivity,
       endInteractivity: this.endInteractivity,
@@ -27,6 +28,34 @@ export class OdOrbitPanDragger extends OdBaseDragger {
 
   protected contextmenu(event: MouseEvent) {
     if (this.activeMode !== "pan") {
+      return;
+    }
+
+    try {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    catch {
+      // noop
+    }
+  }
+
+  protected auxclick(event: MouseEvent) {
+    if (event.button !== 1) {
+      return;
+    }
+
+    try {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    catch {
+      // noop
+    }
+  }
+
+  protected mousedown(event: MouseEvent) {
+    if (event.button !== 1) {
       return;
     }
 
@@ -102,7 +131,7 @@ export class OdOrbitPanDragger extends OdBaseDragger {
     this.viewer.update();
   }
 
-  protected start(x: number, y: number) {
+  protected start(x: number, y: number, absoluteX: number, absoluteY: number) {
     this.press = true;
 
     if (this.activeMode === "orbit") {
@@ -111,11 +140,11 @@ export class OdOrbitPanDragger extends OdBaseDragger {
     }
 
     if (this.activeMode === "pan") {
-      this.panAction.beginAction(x, y);
+      this.panAction.beginAction(x, y, absoluteX, absoluteY);
     }
   }
 
-  protected drag(x: number, y: number) {
+  protected drag(x: number, y: number, absoluteX: number, absoluteY: number) {
     if (!this.press) {
       return;
     }
@@ -126,7 +155,7 @@ export class OdOrbitPanDragger extends OdBaseDragger {
     }
 
     if (this.activeMode === "pan") {
-      this.panAction.action(x, y);
+      this.panAction.action(x, y, absoluteX, absoluteY);
     }
   }
 
