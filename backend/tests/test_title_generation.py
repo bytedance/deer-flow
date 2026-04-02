@@ -10,9 +10,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
 
-
-def _clone_title_config(config: TitleConfig) -> TitleConfig:
-    return TitleConfig(**config.model_dump())
+from backend.tests.title_config_test_utils import clone_title_config
 
 
 class TestTitleConfig:
@@ -73,7 +71,7 @@ class TestTitleMiddleware:
     """Tests for TitleMiddleware."""
 
     def setup_method(self):
-        self._original_config = _clone_title_config(get_title_config())
+        self._original_config = clone_title_config(get_title_config())
 
     def teardown_method(self):
         set_title_config(self._original_config)
@@ -149,13 +147,14 @@ class TestTitleMiddleware:
         result = asyncio.run(middleware.aafter_model(state, runtime))
 
         assert result is not None
-        assert result["title"].startswith("This is a long discussion")
+        assert result["title"].startswith(user_message[: get_title_config().max_chars])
+        assert len(result["title"]) <= get_title_config().max_chars
         fake_model.ainvoke.assert_called_once()
 
     def test_aafter_model_respects_disabled_config(self, monkeypatch):
         middleware = TitleMiddleware()
         runtime = Runtime(context={"thread_id": "thread-disabled"})
-        disabled_config = _clone_title_config(get_title_config())
+        disabled_config = clone_title_config(get_title_config())
         disabled_config.enabled = False
         set_title_config(disabled_config)
 

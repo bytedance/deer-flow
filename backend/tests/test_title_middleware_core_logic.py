@@ -6,16 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
+from deerflow.config.title_config import get_title_config, set_title_config
+
+from backend.tests.title_config_test_utils import clone_title_config
 
 
-def _clone_title_config(config: TitleConfig) -> TitleConfig:
-    # Avoid mutating shared global config objects across tests.
-    return TitleConfig(**config.model_dump())
-
-
-def _set_test_title_config(**overrides) -> TitleConfig:
-    config = _clone_title_config(get_title_config())
+def _set_test_title_config(**overrides):
+    config = clone_title_config(get_title_config())
     for key, value in overrides.items():
         setattr(config, key, value)
     set_title_config(config)
@@ -25,7 +22,7 @@ def _set_test_title_config(**overrides) -> TitleConfig:
 class TestTitleMiddlewareCoreLogic:
     def setup_method(self):
         # Title config is a global singleton; snapshot and restore for test isolation.
-        self._original = _clone_title_config(get_title_config())
+        self._original = clone_title_config(get_title_config())
 
     def teardown_method(self):
         set_title_config(self._original)
