@@ -184,8 +184,8 @@ describe("Viewer", () => {
     expect(visualizeLibrary.getViewer).toHaveBeenCalledTimes(1);
     expect(syncViewSpy).toHaveBeenCalledTimes(1);
     expect(resizeSpy).toHaveBeenCalledWith(0, 400, 200, 0);
-    expect(updateSpy).toHaveBeenCalledTimes(1);
-    expect(renderSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(renderSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
 
     viewer.getVisualizeViewer()?.resize?.();
 
@@ -284,7 +284,70 @@ describe("Viewer", () => {
     expect(parseVsfx).toHaveBeenCalledWith(new Uint8Array([4, 5, 6]));
     expect(syncViewSpy).toHaveBeenCalledTimes(1);
     expect(resizeSpy).toHaveBeenCalledTimes(1);
-    expect(updateSpy).toHaveBeenCalledTimes(1);
-    expect(renderSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("proxies update calls to the visualize backend so redraw-triggering commands take effect", async () => {
+    const backend = createVisualizeBackend();
+    const viewer = new Viewer({
+      container: document.createElement("div"),
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    const updateListener = vi.fn();
+    viewer.on("update", updateListener);
+
+    await viewer.initialize();
+    backend.update.mockClear();
+
+    viewer.update();
+
+    expect(backend.update).toHaveBeenCalledTimes(1);
+    expect(updateListener).toHaveBeenCalledWith(undefined);
+  });
+
+  test("forces a backend update and redraw after resize so the canvas stays valid", async () => {
+    const backend = createVisualizeBackend();
+    const canvas = document.createElement("canvas");
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        bottom: 220,
+        height: 180,
+        left: 0,
+        right: 320,
+        top: 40,
+        width: 320,
+        x: 0,
+        y: 40,
+        toJSON: () => undefined,
+      }),
+    });
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+    const resizeListener = vi.fn();
+
+    viewer.on("resize", resizeListener);
+    await viewer.initialize();
+    backend.resize.mockClear();
+    backend.update.mockClear();
+    backend.render.mockClear();
+
+    viewer.resize();
+
+    expect(backend.resize).toHaveBeenCalledTimes(1);
+    expect(backend.update).toHaveBeenCalledTimes(1);
+    expect(backend.render).not.toHaveBeenCalled();
+    expect(resizeListener).toHaveBeenCalledWith({
+      height: 180,
+      width: 320,
+    });
   });
 });

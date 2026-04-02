@@ -231,6 +231,7 @@ export class Viewer implements IViewer {
   resize() {
     const bounds = this.container.getBoundingClientRect();
     this.visualizeBackend?.resize?.();
+    this.update();
     this.emit("resize", {
       height: bounds.height,
       width: bounds.width,
@@ -250,6 +251,7 @@ export class Viewer implements IViewer {
   }
 
   update() {
+    this.visualizeBackend?.update?.();
     this.emit("update", undefined);
   }
 
