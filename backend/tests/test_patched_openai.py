@@ -8,9 +8,11 @@ fallback, camelCase keys, and several edge-cases.
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_openai import ChatOpenAI
 
-from deerflow.models.patched_openai import _restore_tool_call_signatures
+from deerflow.models.patched_openai import PatchedChatOpenAI, _restore_tool_call_signatures
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -44,6 +46,23 @@ PAYLOAD_TC_2 = {
 
 def _ai_msg_with_raw_tool_calls(raw_tool_calls: list[dict]) -> AIMessage:
     return AIMessage(content="", additional_kwargs={"tool_calls": raw_tool_calls})
+
+
+class _FakeInput:
+    def __init__(self, messages: list[AIMessage | HumanMessage]):
+        self._messages = messages
+
+    def to_messages(self) -> list[AIMessage | HumanMessage]:
+        return self._messages
+
+
+@pytest.fixture
+def patched_openai() -> PatchedChatOpenAI:
+    return PatchedChatOpenAI(
+        model="google/gemini-2.5-pro-preview",
+        api_key="test-key",
+        base_url="https://example.com/v1",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -172,5 +191,40 @@ def test_tool_call_multiple_sequential_signatures():
     assert payload_tc_b["thought_signature"] == "SIG_STEP2=="
 
 
-# Integration behavior for PatchedChatOpenAI is validated indirectly via
-# _restore_tool_call_signatures unit coverage above.
+def test_get_request_payload_restores_signatures(monkeypatch: pytest.MonkeyPatch, patched_openai: PatchedChatOpenAI):
+    ai_message = _ai_msg_with_raw_tool_calls([RAW_TC_SIGNED])
+    input_messages = [HumanMessage(content="hello"), ai_message]
+    payload = {
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_1.copy()]},
+        ]
+    }
+
+    monkeypatch.setattr(patched_openai, "_convert_input", lambda _: _FakeInput(input_messages))
+    monkeypatch.setattr(ChatOpenAI, "_get_request_payload", lambda self, *args, **kwargs: payload)
+
+    result = patched_openai._get_request_payload(input_messages)
+
+    assert result["messages"][1]["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+
+def test_get_request_payload_falls_back_when_payload_message_count_differs(
+    monkeypatch: pytest.MonkeyPatch, patched_openai: PatchedChatOpenAI
+):
+    ai_message = _ai_msg_with_raw_tool_calls([RAW_TC_SIGNED])
+    input_messages = [HumanMessage(content="hello"), ai_message]
+    payload = {
+        "messages": [
+            {"role": "system", "content": "preface"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_1.copy()]},
+        ]
+    }
+
+    monkeypatch.setattr(patched_openai, "_convert_input", lambda _: _FakeInput(input_messages))
+    monkeypatch.setattr(ChatOpenAI, "_get_request_payload", lambda self, *args, **kwargs: payload)
+
+    result = patched_openai._get_request_payload(input_messages)
+
+    assert result["messages"][2]["tool_calls"][0]["thought_signature"] == "SIG_A=="
