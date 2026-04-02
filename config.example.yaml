@@ -484,6 +484,12 @@ skills:
   # Default: /mnt/skills
   container_path: /mnt/skills
 
+# Note: To restrict which skills are loaded for a specific custom agent,
+# define a `skills` list in that agent's `config.yaml` (e.g. `agents/my-agent/config.yaml`):
+# - Omitted or null: load all globally enabled skills (default)
+# - []: disable all skills for this agent
+# - ["skill-name"]: load only specific skills
+
 # ============================================================================
 # Title Generation Configuration
 # ============================================================================

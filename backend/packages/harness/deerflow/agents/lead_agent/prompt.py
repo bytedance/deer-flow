@@ -402,6 +402,10 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
     if available_skills is not None:
         skills = [skill for skill in skills if skill.name in available_skills]
 
+    # Check again after filtering
+    if not skills:
+        return ""
+
     skill_items = "\n".join(
         f"    <skill>\n        <name>{skill.name}</name>\n        <description>{skill.description}</description>\n        <location>{skill.get_container_file_path(container_base_path)}</location>\n    </skill>" for skill in skills
     )
