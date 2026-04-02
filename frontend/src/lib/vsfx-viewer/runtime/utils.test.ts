@@ -1,6 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { loadVisualizeLibrary } from "./utils";
+import { ensureVisualizeScript, loadVisualizeLibrary } from "./utils";
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+function createFactory<T extends VisualizeLibraryInstance>(
+  library: T,
+  script: HTMLScriptElement,
+): VisualizeLibraryFactory {
+  const factory: VisualizeLibraryFactory = () => library;
+  factory.script = script;
+  return vi.fn(factory);
+}
 
 describe("loadVisualizeLibrary", () => {
   const originalFactory = window.getVisualizeLibInst;
@@ -28,14 +42,15 @@ describe("loadVisualizeLibrary", () => {
       postRun: [] as Array<() => void>,
     };
 
-    window.getVisualizeLibInst = vi.fn(() => library);
+    const factory = createFactory(library, script);
+    window.getVisualizeLibInst = factory;
 
     let resolved = false;
     const loadPromise = loadVisualizeLibrary().then(() => {
       resolved = true;
     });
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(resolved).toBe(false);
     expect(library.postRun).toHaveLength(1);
@@ -64,14 +79,15 @@ describe("loadVisualizeLibrary", () => {
       postRun: [] as Array<() => void>,
     };
 
-    window.getVisualizeLibInst = vi.fn(() => library);
+    const factory = createFactory(library, script);
+    window.getVisualizeLibInst = factory;
 
     let resolved = false;
     const loadPromise = loadVisualizeLibrary().then(() => {
       resolved = true;
     });
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(resolved).toBe(false);
     expect(library.postRun).toHaveLength(1);
@@ -95,14 +111,15 @@ describe("loadVisualizeLibrary", () => {
       postRun: [] as Array<() => void>,
     };
 
-    window.getVisualizeLibInst = vi.fn(() => library);
+    const factory = createFactory(library, script);
+    window.getVisualizeLibInst = factory;
 
     let resolved = false;
     const loadPromise = loadVisualizeLibrary().then(() => {
       resolved = true;
     });
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(resolved).toBe(false);
     expect(library.postRun).toHaveLength(1);
@@ -111,5 +128,47 @@ describe("loadVisualizeLibrary", () => {
     await loadPromise;
 
     expect(resolved).toBe(true);
+  });
+
+  test("passes cad-web style factory options including TOTAL_MEMORY and loadWasmError", async () => {
+    const script = document.createElement("script");
+    script.dataset.visualizeScript = "true";
+    script.dataset.loaded = "true";
+    script.src = "/visualizejs/Visualize.js";
+    document.body.append(script);
+
+    const library = {
+      loadWasmError: undefined,
+      postRun: [] as Array<() => void>,
+    };
+
+    const factory = createFactory(library, script);
+    window.getVisualizeLibInst = factory;
+
+    const loadPromise = loadVisualizeLibrary({ wasmUrl: "/custom.wasm" });
+
+    await flushMicrotasks();
+
+    expect(factory).toHaveBeenCalledWith({
+      TOTAL_MEMORY: 134217728,
+      onprogress: expect.any(Function),
+      urlMemFile: "/custom.wasm",
+    });
+    expect(typeof library.loadWasmError).toBe("function");
+
+    library.postRun[0]?.();
+    await expect(loadPromise).resolves.toBe(library);
+  });
+
+  test("reuses the existing factory script when the script url matches", async () => {
+    const existingScript = document.createElement("script");
+    existingScript.dataset.loaded = "true";
+    existingScript.src = "/visualizejs/Visualize.js";
+    const factory = createFactory({ postRun: [] }, existingScript);
+    window.getVisualizeLibInst = factory;
+
+    await ensureVisualizeScript("/visualizejs/Visualize.js");
+
+    expect(document.querySelectorAll('script[data-visualize-script="true"]')).toHaveLength(0);
   });
 });
