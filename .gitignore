@@ -57,5 +57,6 @@ config.yaml.bak
 
 # Local session/debug artifacts
 .sisyphus/
+.worktrees/
 docs/superpowers/
 test-results/
