@@ -125,9 +125,7 @@ def test_format_timestamp_ms_uses_utc_for_non_cron_schedule(monkeypatch):
 def test_normalize_cron_schedule_timezone_uses_configured_default_timezone(monkeypatch):
     monkeypatch.setattr(cron_timezones_module, "get_default_timezone_name", lambda: "Asia/Tokyo")
 
-    schedule = cron_timezones_module.normalize_cron_schedule_timezone(
-        CronSchedule(kind="cron", expr="30 17 * * *")
-    )
+    schedule = cron_timezones_module.normalize_cron_schedule_timezone(CronSchedule(kind="cron", expr="30 17 * * *"))
 
     assert schedule.tz == "Asia/Tokyo"
 
@@ -812,7 +810,6 @@ def test_timer_triggered_execution_causes_manual_run_to_be_ignored(tmp_path: Pat
         store_path=_make_store_path(tmp_path),
         on_job=slow_job,
     )
-    original_sleep = asyncio.sleep
 
     async def run():
         job = await service.add_job(

@@ -145,11 +145,7 @@ async def handle_cron_job(job: CronJob) -> str | None:
             logger.info("[CronHandler] using existing thread: %s", thread_id)
 
         assistant_id, run_config, run_context = _build_run_settings(job, thread_id)
-        scheduled_prompt = (
-            "[Scheduled Task] Timer finished.\n\n"
-            f"Task '{job.name}' has been triggered.\n"
-            f"Scheduled instruction: {payload.message}"
-        )
+        scheduled_prompt = f"[Scheduled Task] Timer finished.\n\nTask '{job.name}' has been triggered.\nScheduled instruction: {payload.message}"
 
         # Invoke the agent
         result = await client.runs.wait(

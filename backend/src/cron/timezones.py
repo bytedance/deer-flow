@@ -76,6 +76,7 @@ def resolve_timezone(tz_name: str | None) -> tzinfo:
         return _local_timezone()
     return resolve_timezone_name(tz_name)
 
+
 def normalize_cron_schedule_timezone(schedule: CronSchedule) -> CronSchedule:
     """Backfill a cron schedule timezone using the configured default."""
     if schedule.kind == "cron" and not schedule.tz:

@@ -313,11 +313,7 @@ class CronService:
             return set()
 
         current_loop = asyncio.get_running_loop()
-        waitable_tasks = [
-            task
-            for task in tasks
-            if not task.done() and task.get_loop() is current_loop
-        ]
+        waitable_tasks = [task for task in tasks if not task.done() and task.get_loop() is current_loop]
         if not waitable_tasks:
             return set()
 
@@ -505,11 +501,7 @@ class CronService:
 
     def _can_merge_into_pending_store_locked(self) -> bool:
         """Return whether a save-failed in-memory snapshot can accept more completed results."""
-        return (
-            self._store_sync_pending
-            and self._store is not None
-            and self._store_error_action == "save"
-        )
+        return self._store_sync_pending and self._store is not None and self._store_error_action == "save"
 
     async def _ensure_store_writable_locked(self) -> None:
         """Retry pending persistence before allowing new writes or executions."""
@@ -613,11 +605,7 @@ class CronService:
         if active_store is None:
             return None
 
-        times = [
-            job.state.next_run_at_ms
-            for job in active_store.jobs
-            if job.id not in self._executing_job_ids and job.enabled and job.state.next_run_at_ms
-        ]
+        times = [job.state.next_run_at_ms for job in active_store.jobs if job.id not in self._executing_job_ids and job.enabled and job.state.next_run_at_ms]
         return min(times) if times else None
 
     def _copy_job(self, job: CronJob) -> CronJob:
@@ -655,11 +643,7 @@ class CronService:
         if job.schedule.kind == "at":
             next_run_at_ms = None
         else:
-            cadence_anchor_ms = (
-                scheduled_run_at_ms
-                if scheduled_run_at_ms is not None and scheduled_run_at_ms <= start_ms
-                else start_ms
-            )
+            cadence_anchor_ms = scheduled_run_at_ms if scheduled_run_at_ms is not None and scheduled_run_at_ms <= start_ms else start_ms
             next_run_at_ms = _compute_next_run(
                 job.schedule,
                 _now_ms(),
@@ -739,11 +723,7 @@ class CronService:
                 return
             self._raise_if_store_quarantined()
             self._prune_background_processors()
-            if self._shutting_down and (
-                self._worker_tasks
-                or self._result_writer_task is not None
-                or self._store_sync_pending
-            ):
+            if self._shutting_down and (self._worker_tasks or self._result_writer_task is not None or self._store_sync_pending):
                 raise RuntimeError("CronService shutdown is still in progress")
 
             self._shutting_down = False
@@ -781,10 +761,7 @@ class CronService:
         self._result_queue = None
         self._abort_reserved_runs("CronService stopped before queued work could finish")
         if should_quarantine_store:
-            self._quarantine_store(
-                f"Cron store at {self.store_path} is quarantined after a hard stop during result persistence; "
-                "restart the process before starting cron again for this store"
-            )
+            self._quarantine_store(f"Cron store at {self.store_path} is quarantined after a hard stop during result persistence; restart the process before starting cron again for this store")
         logger.info("CronService stopped")
 
     async def shutdown(self, *, drain_timeout_s: float = 5.0) -> None:
@@ -813,9 +790,7 @@ class CronService:
                 drain_timeout_s,
             )
             self.stop()
-            raise CronServiceShutdownTimeoutError(
-                f"CronService shutdown timed out after {drain_timeout_s:.1f}s"
-            ) from None
+            raise CronServiceShutdownTimeoutError(f"CronService shutdown timed out after {drain_timeout_s:.1f}s") from None
         finally:
             if queues_drained:
                 await self._cancel_background_processors(timeout_s=None)
@@ -878,25 +853,13 @@ class CronService:
                 working_store = self._copy_store(store)
                 self._recompute_next_runs_locked(working_store, preserve_existing=True)
                 now = _now_ms()
-                due_jobs = [
-                    self._copy_job(job)
-                    for job in working_store.jobs
-                    if (
-                        job.id not in self._executing_job_ids
-                        and job.enabled
-                        and job.state.next_run_at_ms
-                        and now >= job.state.next_run_at_ms
-                    )
-                ]
+                due_jobs = [self._copy_job(job) for job in working_store.jobs if (job.id not in self._executing_job_ids and job.enabled and job.state.next_run_at_ms and now >= job.state.next_run_at_ms)]
                 if not due_jobs:
                     await self._commit_store_locked(working_store, keep_memory_on_failure=True)
                     return
 
                 self._ensure_background_processors_locked()
-                queued_runs = [
-                    _QueuedRun(job=job, source="timer", generation=self._background_generation)
-                    for job in due_jobs
-                ]
+                queued_runs = [_QueuedRun(job=job, source="timer", generation=self._background_generation) for job in due_jobs]
                 for queued_run in queued_runs:
                     self._reserve_run_locked(queued_run)
 
@@ -936,11 +899,7 @@ class CronService:
             job.state.next_run_at_ms = None
         else:
             # Recurring tasks: compute next run
-            cadence_anchor_ms = (
-                scheduled_run_at_ms
-                if scheduled_run_at_ms is not None and scheduled_run_at_ms <= start_ms
-                else start_ms
-            )
+            cadence_anchor_ms = scheduled_run_at_ms if scheduled_run_at_ms is not None and scheduled_run_at_ms <= start_ms else start_ms
             job.state.next_run_at_ms = _compute_next_run(
                 job.schedule,
                 _now_ms(),
@@ -1059,9 +1018,7 @@ class CronService:
                     if enabled:
                         next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
                         if next_run_at_ms is None:
-                            raise NoFutureRunTimeError(
-                                f"Job {job_id} cannot be enabled because its schedule has no future run time"
-                            )
+                            raise NoFutureRunTimeError(f"Job {job_id} cannot be enabled because its schedule has no future run time")
                         job.enabled = True
                         job.state.next_run_at_ms = next_run_at_ms
                     else:
@@ -1113,12 +1070,7 @@ class CronService:
             else:
                 return None
 
-        if (
-            run_queue is None
-            or queued_run.generation != self._background_generation
-            or self._shutting_down
-            or self._hard_stop_requested
-        ):
+        if run_queue is None or queued_run.generation != self._background_generation or self._shutting_down or self._hard_stop_requested:
             stop_error = CronServiceStoppingError("CronService is shutting down")
             if not queued_run.completion_future.done():
                 queued_run.completion_future.set_exception(stop_error)

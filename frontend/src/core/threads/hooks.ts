@@ -67,7 +67,9 @@ function hasSameLastMessage(previous: Message[], next: Message[]) {
     return previousId === nextId;
   }
 
-  return JSON.stringify(previousLast.content) === JSON.stringify(nextLast.content);
+  return (
+    JSON.stringify(previousLast.content) === JSON.stringify(nextLast.content)
+  );
 }
 
 function getNewMessages(previous: Message[], next: Message[]) {
@@ -429,9 +431,8 @@ export function useThreadStream({
 
       inFlight = true;
       try {
-        const latest = await client.threads.getState<AgentThreadState>(
-          onStreamThreadId,
-        );
+        const latest =
+          await client.threads.getState<AgentThreadState>(onStreamThreadId);
         if (disposed) {
           return;
         }
@@ -447,10 +448,14 @@ export function useThreadStream({
           nextValues.messages,
         );
 
-        if (shouldReplaceThreadState(syncedThreadStateRef.current, nextValues)) {
+        if (
+          shouldReplaceThreadState(syncedThreadStateRef.current, nextValues)
+        ) {
           setSyncedThreadState(nextValues);
           syncedThreadStateRef.current = nextValues;
-          void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+          void queryClient.invalidateQueries({
+            queryKey: ["threads", "search"],
+          });
         }
 
         if (!backgroundSyncReadyRef.current) {
