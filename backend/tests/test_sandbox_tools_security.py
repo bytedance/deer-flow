@@ -324,6 +324,56 @@ def test_validate_local_bash_command_paths_allows_skills_path() -> None:
         )
 
 
+def test_validate_local_bash_command_paths_allows_urls() -> None:
+    """URLs in bash commands should not be mistaken for absolute paths (issue #1385)."""
+    # HTTPS URLs
+    validate_local_bash_command_paths(
+        "curl -X POST https://example.com/api/v1/risk/check",
+        _THREAD_DATA,
+    )
+    # HTTP URLs
+    validate_local_bash_command_paths(
+        "curl http://localhost:8080/health",
+        _THREAD_DATA,
+    )
+    # URLs with query strings
+    validate_local_bash_command_paths(
+        "curl https://api.example.com/v2/search?q=test",
+        _THREAD_DATA,
+    )
+    # FTP URLs
+    validate_local_bash_command_paths(
+        "curl ftp://ftp.example.com/pub/file.tar.gz",
+        _THREAD_DATA,
+    )
+    # URL mixed with valid virtual path
+    validate_local_bash_command_paths(
+        "curl https://example.com/data -o /mnt/user-data/workspace/data.json",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_blocks_file_urls() -> None:
+    """file:// URLs should be treated as unsafe and blocked."""
+    with pytest.raises(PermissionError):
+        validate_local_bash_command_paths("curl file:///etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_file_urls_case_insensitive() -> None:
+    """file:// URL detection should be case-insensitive."""
+    with pytest.raises(PermissionError):
+        validate_local_bash_command_paths("curl FILE:///etc/shadow", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_file_urls_mixed_with_valid() -> None:
+    """file:// URLs should be blocked even when mixed with valid paths."""
+    with pytest.raises(PermissionError):
+        validate_local_bash_command_paths(
+            "curl file:///etc/passwd -o /mnt/user-data/workspace/out.txt",
+            _THREAD_DATA,
+        )
+
+
 def test_validate_local_bash_command_paths_still_blocks_other_paths() -> None:
     """Paths outside virtual and system prefixes must still be blocked."""
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
