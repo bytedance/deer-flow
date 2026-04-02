@@ -109,17 +109,11 @@ def test_build_run_config_with_overrides():
 
 
 def test_build_run_config_custom_agent_injects_agent_name():
-    """Custom assistant_id must be forwarded as configurable['agent_name'].
-
-    Regression test for #1644: when the LangGraph Platform-compatible
-    /runs endpoint receives a custom assistant_id (e.g. 'finalis'), the
-    Gateway must inject configurable['agent_name'] so that make_lead_agent
-    loads the correct agents/finalis/SOUL.md.
-    """
+    """Custom assistant_id must be forwarded as configurable['agent_name']."""
     from app.gateway.services import build_run_config
 
     config = build_run_config("thread-1", None, None, assistant_id="finalis")
-    assert config["configurable"]["agent_name"] == "finalis", "Custom assistant_id must be forwarded as configurable['agent_name'] so that make_lead_agent loads the correct SOUL.md"
+    assert config["configurable"]["agent_name"] == "finalis"
 
 
 def test_build_run_config_lead_agent_no_agent_name():
@@ -148,7 +142,7 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
         None,
         assistant_id="other-agent",
     )
-    assert config["configurable"]["agent_name"] == "explicit-agent", "An explicit configurable['agent_name'] in the request body must not be overwritten by the assistant_id mapping"
+    assert config["configurable"]["agent_name"] == "explicit-agent"
 
 
 def test_resolve_agent_factory_returns_make_lead_agent():
@@ -161,6 +155,8 @@ def test_resolve_agent_factory_returns_make_lead_agent():
     assert resolve_agent_factory("finalis") is make_lead_agent
     assert resolve_agent_factory("custom-agent-123") is make_lead_agent
 
+
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Regression tests for issue #1699:
@@ -246,11 +242,7 @@ def test_context_merges_into_configurable():
 
 
 def test_context_does_not_override_existing_configurable():
-    """Values already in config.configurable must NOT be overridden by context.
-
-    This ensures that explicit configurable values from the ``config`` field
-    take precedence over the ``context`` field.
-    """
+    """Values already in config.configurable must NOT be overridden by context."""
     from app.gateway.services import build_run_config
 
     config = build_run_config(
@@ -284,3 +276,67 @@ def test_context_does_not_override_existing_configurable():
     assert config["configurable"]["is_plan_mode"] is False
     # New values should be added
     assert config["configurable"]["subagent_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
+# ---------------------------------------------------------------------------
+
+
+def test_build_run_config_with_context():
+    """When caller sends 'context', prefer it over 'configurable'."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"user_id": "u-42", "thread_id": "thread-1"}},
+        None,
+    )
+    assert "context" in config
+    assert config["context"]["user_id"] == "u-42"
+    assert "configurable" not in config
+    assert config["recursion_limit"] == 100
+
+
+def test_build_run_config_context_plus_configurable_warns(caplog):
+    """When caller sends both 'context' and 'configurable', prefer 'context' and log a warning."""
+    import logging
+
+    from app.gateway.services import build_run_config
+
+    with caplog.at_level(logging.WARNING, logger="app.gateway.services"):
+        config = build_run_config(
+            "thread-1",
+            {
+                "context": {"user_id": "u-42"},
+                "configurable": {"model_name": "gpt-4"},
+            },
+            None,
+        )
+    assert "context" in config
+    assert config["context"]["user_id"] == "u-42"
+    assert "configurable" not in config
+    assert any("both 'context' and 'configurable'" in r.message for r in caplog.records)
+
+
+def test_build_run_config_context_passthrough_other_keys():
+    """Non-conflicting keys from request_config are still passed through when context is used."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"thread_id": "thread-1"}, "tags": ["prod"]},
+        None,
+    )
+    assert config["context"]["thread_id"] == "thread-1"
+    assert "configurable" not in config
+    assert config["tags"] == ["prod"]
+
+
+def test_build_run_config_no_request_config():
+    """When request_config is None, fall back to basic configurable with thread_id."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-abc", None, None)
+    assert config["configurable"] == {"thread_id": "thread-abc"}
+    assert "context" not in config
