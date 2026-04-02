@@ -2,8 +2,9 @@ import logging
 
 from langchain.chat_models import BaseChatModel
 
-from deerflow.config import get_app_config, get_tracing_config, is_tracing_enabled
+from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
+from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
 
@@ -79,17 +80,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
 
-    if is_tracing_enabled():
-        try:
-            from langchain_core.tracers.langchain import LangChainTracer
-
-            tracing_config = get_tracing_config()
-            tracer = LangChainTracer(
-                project_name=tracing_config.project,
-            )
-            existing_callbacks = model_instance.callbacks or []
-            model_instance.callbacks = [*existing_callbacks, tracer]
-            logger.debug(f"LangSmith tracing attached to model '{name}' (project='{tracing_config.project}')")
-        except Exception as e:
-            logger.warning(f"Failed to attach LangSmith tracing to model '{name}': {e}")
+    callbacks = build_tracing_callbacks()
+    if callbacks:
+        existing_callbacks = model_instance.callbacks or []
+        model_instance.callbacks = [*existing_callbacks, *callbacks]
+        logger.debug(f"Tracing attached to model '{name}' with providers={len(callbacks)}")
     return model_instance
