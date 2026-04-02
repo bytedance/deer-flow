@@ -5,18 +5,29 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import posixpath
 import re
 import time
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from dataclasses import replace as _dc_replace
+from typing import Any, ParamSpec, TypeVar
 
-from langgraph_sdk.errors import ConflictError
+import httpx
 
-from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
+from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
+
+
+class InvalidChannelSessionConfigError(Exception):
+    """Raised when channel session configuration is invalid."""
+
+
+T = TypeVar("T")
+P = ParamSpec("P")
 
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
@@ -30,25 +41,73 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "subagent_enabled": False,
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
-THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BASE_DELAY = 2
 
 CHANNEL_CAPABILITIES = {
     "feishu": {"supports_streaming": True},
+    "wecom": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
     "telegram": {"supports_streaming": False},
 }
 
 
-class InvalidChannelSessionConfigError(ValueError):
-    """Raised when IM channel session overrides contain invalid agent config."""
+@dataclass
+class RetryConfig:
+    """Configuration for retry behavior."""
+
+    max_retries: int = DEFAULT_MAX_RETRIES
+    base_delay: float = DEFAULT_RETRY_BASE_DELAY
+    retryable_exceptions: tuple[type[BaseException], ...] = (
+        httpx.TransportError,
+        httpx.TimeoutException,
+        httpx.HTTPStatusError,
+    )
 
 
-def _is_thread_busy_error(exc: BaseException | None) -> bool:
-    if exc is None:
-        return False
-    if isinstance(exc, ConflictError):
-        return True
-    return "already running a task" in str(exc)
+def is_retryable_exception(exc: BaseException) -> bool:
+    """Check if an exception should trigger a retry."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        # Retry on 404 (thread not found), 429 (rate limit), 5xx (server errors)
+        status_code = exc.response.status_code
+        return status_code in (404, 429) or status_code >= 500
+    return isinstance(exc, (httpx.TransportError, httpx.TimeoutException))
+
+
+async def retry_async(
+    func: Callable[P, Awaitable[T]],
+    config: RetryConfig | None = None,
+    on_retry: Callable[[int, BaseException, float], Awaitable[None]] | None = None,
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
+    """Async retry decorator with exponential backoff."""
+    config = config or RetryConfig()
+
+    for attempt in range(config.max_retries + 1):
+        try:
+            return await func(*args, **kwargs)
+        except BaseException as exc:
+            if not is_retryable_exception(exc) or attempt >= config.max_retries:
+                raise
+
+            wait_time = config.base_delay ** (attempt + 1)
+            logger.warning(
+                "[Manager] Operation failed (attempt %d/%d), retrying in %.1fs: %s",
+                attempt + 1,
+                config.max_retries + 1,
+                wait_time,
+                str(exc),
+            )
+
+            if on_retry:
+                await on_retry(attempt, exc, wait_time)
+
+            await asyncio.sleep(wait_time)
+
+    # The loop should always return or raise, so this line is unreachable
+    # Kept for type safety
+    raise RuntimeError("Retry loop completed unexpectedly")
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -255,8 +314,6 @@ def _extract_artifacts(result: dict | list) -> list[str]:
 
 def _format_artifact_text(artifacts: list[str]) -> str:
     """Format artifact paths into a human-readable text block listing filenames."""
-    import posixpath
-
     filenames = [posixpath.basename(p) for p in artifacts]
     if len(filenames) == 1:
         return f"Created File: 📎 {filenames[0]}"
@@ -276,8 +333,6 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
     Skips artifacts that cannot be resolved (missing files, invalid paths)
     and logs warnings for them.
     """
-    from deerflow.config.paths import get_paths
-
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
     outputs_dir = paths.sandbox_outputs_dir(thread_id).resolve()
@@ -481,43 +536,46 @@ class ChannelManager:
             logger.error("[Manager] unhandled error in message task: %s", exc, exc_info=exc)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
-        async with self._semaphore:
-            try:
-                if msg.msg_type == InboundMessageType.COMMAND:
-                    await self._handle_command(msg)
-                else:
-                    await self._handle_chat(msg)
-            except InvalidChannelSessionConfigError as exc:
-                logger.warning(
-                    "Invalid channel session config for %s (chat=%s): %s",
-                    msg.channel_name,
-                    msg.chat_id,
-                    exc,
-                )
-                await self._send_error(msg, str(exc))
-            except Exception:
-                logger.exception(
-                    "Error handling message from %s (chat=%s)",
-                    msg.channel_name,
-                    msg.chat_id,
-                )
-                await self._send_error(msg, "An internal error occurred. Please try again.")
+        if self._semaphore:
+            async with self._semaphore:
+                await self._process_message(msg)
+        else:
+            await self._process_message(msg)
+
+    async def _process_message(self, msg: InboundMessage) -> None:
+        try:
+            if msg.msg_type == InboundMessageType.COMMAND:
+                await self._handle_command(msg)
+            else:
+                await self._handle_chat(msg)
+        except Exception:
+            logger.exception(
+                "Error handling message from %s (chat=%s)",
+                msg.channel_name,
+                msg.chat_id,
+            )
+            await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
 
-    async def _create_thread(self, client, msg: InboundMessage) -> str:
-        """Create a new thread on the LangGraph Server and store the mapping."""
-        thread = await client.threads.create()
-        thread_id = thread["thread_id"]
-        self.store.set_thread_id(
-            msg.channel_name,
-            msg.chat_id,
-            thread_id,
-            topic_id=msg.topic_id,
-            user_id=msg.user_id,
-        )
-        logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
-        return thread_id
+    async def _create_thread(self, client, msg: InboundMessage, max_retries: int = DEFAULT_MAX_RETRIES) -> str:
+        """Create a new thread on the LangGraph Server and store the mapping with retries on failure."""
+
+        async def _create() -> str:
+            thread = await client.threads.create()
+            thread_id = thread["thread_id"]
+            self.store.set_thread_id(
+                msg.channel_name,
+                msg.chat_id,
+                thread_id,
+                topic_id=msg.topic_id,
+                user_id=msg.user_id,
+            )
+            logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
+            return thread_id
+
+        config = RetryConfig(max_retries=max_retries) if max_retries != DEFAULT_MAX_RETRIES else None
+        return await retry_async(_create, config=config)
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
         client = self._get_client()
@@ -548,13 +606,29 @@ class ChannelManager:
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
-        result = await client.runs.wait(
-            thread_id,
-            assistant_id,
-            input={"messages": [{"role": "human", "content": msg.text}]},
-            config=run_config,
-            context=run_context,
-        )
+
+        current_thread_id = thread_id
+
+        async def _run_with_thread_recreation() -> Any:
+            nonlocal current_thread_id
+            try:
+                return await client.runs.wait(
+                    current_thread_id,
+                    assistant_id,
+                    input={"messages": [{"role": "human", "content": msg.text}]},
+                    config=run_config,
+                    context=run_context,
+                )
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404 and "Thread or assistant not found" in str(e.response.content):
+                    logger.warning("[Manager] Thread %s not found on server, recreating thread", current_thread_id)
+                    self.store.remove(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+                    current_thread_id = await self._create_thread(client, msg)
+                    logger.info("[Manager] Retrying request with new thread %s", current_thread_id)
+                raise
+
+        result = await retry_async(_run_with_thread_recreation)
+        thread_id = current_thread_id
 
         response_text = _extract_response_text(result)
         artifacts = _extract_artifacts(result)
@@ -597,98 +671,104 @@ class ChannelManager:
     ) -> None:
         logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
 
+        current_thread_id = thread_id
         last_values: dict[str, Any] | list | None = None
-        streamed_buffers: dict[str, str] = {}
-        current_message_id: str | None = None
         latest_text = ""
-        last_published_text = ""
-        last_publish_at = 0.0
-        stream_error: BaseException | None = None
 
-        try:
-            async for chunk in client.runs.stream(
-                thread_id,
-                assistant_id,
-                input={"messages": [{"role": "human", "content": msg.text}]},
-                config=run_config,
-                context=run_context,
-                stream_mode=["messages-tuple", "values"],
-                multitask_strategy="reject",
-            ):
-                event = getattr(chunk, "event", "")
-                data = getattr(chunk, "data", None)
+        async def _stream_with_thread_recreation() -> tuple[dict[str, Any] | list | None, str]:
+            nonlocal current_thread_id, last_values, latest_text
+            last_values = None
+            latest_text = ""
+            streamed_buffers: dict[str, str] = {}
+            current_message_id: str | None = None
+            last_published_text = ""
+            last_publish_at = 0.0
 
-                if event == "messages-tuple":
-                    accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
-                    if accumulated_text:
-                        latest_text = accumulated_text
-                elif event == "values" and isinstance(data, (dict, list)):
-                    last_values = data
-                    snapshot_text = _extract_response_text(data)
-                    if snapshot_text:
-                        latest_text = snapshot_text
+            try:
+                logger.info("[Manager] Starting to consume stream for thread_id=%s, assistant_id=%s", current_thread_id, assistant_id)
+                async for chunk in client.runs.stream(
+                    current_thread_id,
+                    assistant_id,
+                    input={"messages": [{"role": "human", "content": msg.text}]},
+                    config=run_config,
+                    context=run_context,
+                    stream_mode=["messages-tuple", "values"],
+                ):
+                    event = getattr(chunk, "event", "")
+                    data = getattr(chunk, "data", None)
+                    logger.debug("[Manager] Received stream chunk: event=%s, data_type=%s", event, type(data).__name__)
 
-                if not latest_text or latest_text == last_published_text:
-                    continue
+                    if event == "messages-tuple":
+                        accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
+                        if accumulated_text:
+                            latest_text = accumulated_text
+                    elif event == "values" and isinstance(data, (dict, list)):
+                        last_values = data
+                        snapshot_text = _extract_response_text(data)
+                        if snapshot_text:
+                            latest_text = snapshot_text
 
-                now = time.monotonic()
-                if last_published_text and now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS:
-                    continue
+                    if not latest_text or latest_text == last_published_text:
+                        continue
 
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel_name=msg.channel_name,
-                        chat_id=msg.chat_id,
-                        thread_id=thread_id,
-                        text=latest_text,
-                        is_final=False,
-                        thread_ts=msg.thread_ts,
+                    now = time.monotonic()
+                    if last_published_text and now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS:
+                        continue
+
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel_name=msg.channel_name,
+                            chat_id=msg.chat_id,
+                            thread_id=current_thread_id,
+                            text=latest_text,
+                            is_final=False,
+                            thread_ts=msg.thread_ts,
+                        )
                     )
-                )
-                last_published_text = latest_text
-                last_publish_at = now
-        except Exception as exc:
-            stream_error = exc
-            if _is_thread_busy_error(exc):
-                logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                    last_published_text = latest_text
+                    last_publish_at = now
+                logger.info("[Manager] Stream completed successfully, last_values=%s, latest_text=%r", last_values is not None, latest_text[:100])
+                return last_values, latest_text
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404 and "Thread or assistant not found" in str(e.response.content):
+                    logger.warning("[Manager] Thread %s not found on server, recreating thread", current_thread_id)
+                    self.store.remove(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+                    current_thread_id = await self._create_thread(client, msg)
+                    logger.info("[Manager] Retrying streaming with new thread %s", current_thread_id)
+                raise
+
+        last_values, latest_text = await retry_async(_stream_with_thread_recreation)
+        thread_id = current_thread_id
+
+        result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
+        response_text = _extract_response_text(result)
+        artifacts = _extract_artifacts(result)
+        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+
+        if not response_text:
+            if attachments:
+                response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
             else:
-                logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
-        finally:
-            result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
-            response_text = _extract_response_text(result)
-            artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+                response_text = latest_text or "(No response from agent)"
 
-            if not response_text:
-                if attachments:
-                    response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
-                elif stream_error:
-                    if _is_thread_busy_error(stream_error):
-                        response_text = THREAD_BUSY_MESSAGE
-                    else:
-                        response_text = "An error occurred while processing your request. Please try again."
-                else:
-                    response_text = latest_text or "(No response from agent)"
-
-            logger.info(
-                "[Manager] streaming response completed: thread_id=%s, response_len=%d, artifacts=%d, error=%s",
-                thread_id,
-                len(response_text),
-                len(artifacts),
-                stream_error,
+        logger.info(
+            "[Manager] streaming response completed: thread_id=%s, response_len=%d, artifacts=%d",
+            thread_id,
+            len(response_text),
+            len(artifacts),
+        )
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=thread_id,
+                text=response_text,
+                artifacts=artifacts,
+                attachments=attachments,
+                is_final=True,
+                thread_ts=msg.thread_ts,
             )
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel_name=msg.channel_name,
-                    chat_id=msg.chat_id,
-                    thread_id=thread_id,
-                    text=response_text,
-                    artifacts=artifacts,
-                    attachments=attachments,
-                    is_final=True,
-                    thread_ts=msg.thread_ts,
-                )
-            )
+        )
 
     # -- command handling --------------------------------------------------
 
@@ -698,8 +778,6 @@ class ChannelManager:
         command = parts[0].lower().lstrip("/")
 
         if command == "bootstrap":
-            from dataclasses import replace as _dc_replace
-
             chat_text = parts[1] if len(parts) > 1 else "Initialize workspace"
             chat_msg = _dc_replace(msg, text=chat_text, msg_type=InboundMessageType.CHAT)
             await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True})
@@ -736,8 +814,7 @@ class ChannelManager:
                 "/help — Show this help"
             )
         else:
-            available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
-            reply = f"Unknown command: /{command}. Available commands: {available}"
+            reply = f"Unknown command: /{command}. Type /help for available commands."
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
@@ -750,8 +827,6 @@ class ChannelManager:
 
     async def _fetch_gateway(self, path: str, kind: str) -> str:
         """Fetch data from the Gateway API for command responses."""
-        import httpx
-
         try:
             async with httpx.AsyncClient() as http:
                 resp = await http.get(f"{self._gateway_url}{path}", timeout=10)

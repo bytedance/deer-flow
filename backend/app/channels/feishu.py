@@ -9,16 +9,9 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
-from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
-
-
-def _is_feishu_command(text: str) -> bool:
-    if not text.startswith("/"):
-        return False
-    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
 
 
 class FeishuChannel(Channel):
@@ -59,7 +52,10 @@ class FeishuChannel(Channel):
 
     async def start(self) -> None:
         if self._running:
+            logger.warning("Feishu channel already running, skipping start()")
             return
+
+        self._running = True  # Set early to prevent race conditions
 
         try:
             import lark_oapi as lark
@@ -80,6 +76,7 @@ class FeishuChannel(Channel):
             )
         except ImportError:
             logger.error("lark-oapi is not installed. Install it with: uv add lark-oapi")
+            self._running = False
             return
 
         self._lark = lark
@@ -99,18 +96,17 @@ class FeishuChannel(Channel):
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
-        domain = self.config.get("domain", "https://open.feishu.cn")
 
         if not app_id or not app_secret:
             logger.error("Feishu channel requires app_id and app_secret")
+            self._running = False
             return
 
-        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
-        logger.info("[Feishu] using domain: %s", domain)
+        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
         self._main_loop = asyncio.get_event_loop()
 
-        self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
+        logger.info("Feishu channel subscribed to message bus")
 
         # Both ws.Client construction and start() must happen in a dedicated
         # thread with its own event loop.  lark-oapi caches the running loop
@@ -118,13 +114,13 @@ class FeishuChannel(Channel):
         # which conflicts with an already-running uvloop.
         self._thread = threading.Thread(
             target=self._run_ws,
-            args=(app_id, app_secret, domain),
+            args=(app_id, app_secret),
             daemon=True,
         )
         self._thread.start()
         logger.info("Feishu channel started")
 
-    def _run_ws(self, app_id: str, app_secret: str, domain: str) -> None:
+    def _run_ws(self, app_id: str, app_secret: str) -> None:
         """Construct and run the lark WS client in a thread with a fresh event loop.
 
         The lark-oapi SDK captures a module-level event loop at import time
@@ -137,29 +133,43 @@ class FeishuChannel(Channel):
         thread and patching the SDK's module-level reference before calling
         ``start()``.
         """
+        logger.info("[Feishu] WebSocket thread starting")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        logger.info("[Feishu] Created new event loop for WS thread")
+
         try:
             import lark_oapi as lark
             import lark_oapi.ws.client as _ws_client_mod
+
+            logger.info("[Feishu] Imported lark_oapi SDK successfully")
 
             # Replace the SDK's module-level loop so Client.start() uses
             # this thread's (non-running) event loop instead of the main
             # thread's uvloop.
             _ws_client_mod.loop = loop
+            logger.info("[Feishu] Patched SDK module event loop reference")
 
             event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+            logger.info("[Feishu] Created event dispatcher with message handler")
+
             ws_client = lark.ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
                 event_handler=event_handler,
                 log_level=lark.LogLevel.INFO,
-                domain=domain,
             )
+            logger.info("[Feishu] Created WebSocket client instance, starting connection...")
+
             ws_client.start()
-        except Exception:
+            logger.warning("[Feishu] WebSocket client exited normally without error")
+
+        except Exception as e:
+            logger.error("[Feishu] WebSocket thread encountered exception (running=%s): %s", self._running, str(e))
             if self._running:
                 logger.exception("Feishu WebSocket error")
+        finally:
+            logger.info("[Feishu] WebSocket thread exiting")
 
     async def stop(self) -> None:
         self._running = False
@@ -516,9 +526,8 @@ class FeishuChannel(Channel):
                 logger.info("[Feishu] empty text, ignoring message")
                 return
 
-            # Only treat known slash commands as commands; absolute paths and
-            # other slash-prefixed text should be handled as normal chat.
-            if _is_feishu_command(text):
+            # Check if it's a command
+            if text.startswith("/"):
                 msg_type = InboundMessageType.COMMAND
             else:
                 msg_type = InboundMessageType.CHAT
