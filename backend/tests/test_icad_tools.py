@@ -123,10 +123,11 @@ def test_visualize_service_writes_inline_worker_artifacts(tmp_path, monkeypatch)
     assert result["artifacts"]["vsfx_path"] == str(output_dir / "demo.vsfx")
 
 
-def test_project_config_exposes_visualize_tool():
-    config_path = Path(__file__).resolve().parents[2] / "config.yaml"
+def test_project_config_template_exposes_visualize_tool():
+    config_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
+    assert any(group.get("name") == "icad" for group in config["tool_groups"])
     assert any(
         tool.get("name") == "visualize_steel_structure"
         and tool.get("use") == "icad.tools:visualize_steel_structure"
