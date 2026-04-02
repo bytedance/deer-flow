@@ -215,7 +215,7 @@ function ToolCall({
           <ChainOfThoughtSearchResults>
             {result.map((item) => (
               <ChainOfThoughtSearchResult key={item.url}>
-                <a href={item.url} target="_blank" rel="noreferrer">
+                <a href={item.url} target="_blank" rel="noopener noreferrer">
                   {item.title}
                 </a>
               </ChainOfThoughtSearchResult>
@@ -250,7 +250,7 @@ function ToolCall({
                     className="size-24 overflow-hidden rounded-lg object-cover"
                     href={item.source_url}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer"
                   >
                     <div className="bg-accent size-24">
                       <img
@@ -289,7 +289,7 @@ function ToolCall({
       >
         <ChainOfThoughtSearchResult>
           {url && (
-            <a href={url} target="_blank" rel="noreferrer">
+            <a href={url} target="_blank" rel="noopener noreferrer">
               {title}
             </a>
           )}
