@@ -11,6 +11,7 @@ from typing import Any
 from app.channels.base import Channel
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.utils import FEISHU_MAX_LENGTH, split_message
 
 logger = logging.getLogger(__name__)
 
@@ -180,33 +181,49 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] send called but no api_client available")
             return
 
-        logger.info(
-            "[Feishu] sending reply: chat_id=%s, thread_ts=%s, text_len=%d",
-            msg.chat_id,
-            msg.thread_ts,
-            len(msg.text),
-        )
+        # Split long messages to stay within Feishu's character limit.
+        chunks = split_message(msg.text, max_length=FEISHU_MAX_LENGTH)
+        if not chunks:
+            return
 
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                await self._send_card_message(msg)
-                return  # success
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt  # 1s, 2s
-                    logger.warning(
-                        "[Feishu] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
+        for chunk in chunks:
+            chunk_msg = OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=msg.thread_id,
+                text=chunk,
+                artifacts=msg.artifacts,
+                attachments=msg.attachments,
+                thread_ts=msg.thread_ts,
+            )
 
-        logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+            logger.info(
+                "[Feishu] sending reply: chat_id=%s, thread_ts=%s, text_len=%d",
+                chunk_msg.chat_id,
+                chunk_msg.thread_ts,
+                len(chunk_msg.text),
+            )
+
+            last_exc: Exception | None = None
+            for attempt in range(_max_retries):
+                try:
+                    await self._send_card_message(chunk_msg)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < _max_retries - 1:
+                        delay = 2**attempt  # 1s, 2s
+                        logger.warning(
+                            "[Feishu] send failed (attempt %d/%d), retrying in %ds: %s",
+                            attempt + 1,
+                            _max_retries,
+                            delay,
+                            exc,
+                        )
+                        await asyncio.sleep(delay)
+            else:
+                logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
+                raise last_exc  # type: ignore[misc]
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
