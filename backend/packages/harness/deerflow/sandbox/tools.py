@@ -1,7 +1,6 @@
 import posixpath
 import re
 import shlex
-import threading
 from pathlib import Path
 
 from langchain.tools import ToolRuntime, tool
@@ -14,6 +13,7 @@ from deerflow.sandbox.exceptions import (
     SandboxNotFoundError,
     SandboxRuntimeError,
 )
+from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
@@ -30,24 +30,6 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
 
 _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 _ACP_WORKSPACE_VIRTUAL_PATH = "/mnt/acp-workspace"
-_FILE_OPERATION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
-_FILE_OPERATION_LOCKS_GUARD = threading.Lock()
-
-
-def _get_file_operation_lock_key(sandbox: Sandbox, path: str) -> tuple[str, str]:
-    sandbox_id = getattr(sandbox, "id", None)
-    if not sandbox_id:
-        sandbox_id = f"instance:{id(sandbox)}"
-    return sandbox_id, path
-
-
-def _get_file_operation_lock(lock_key: tuple[str, str]) -> threading.Lock:
-    with _FILE_OPERATION_LOCKS_GUARD:
-        lock = _FILE_OPERATION_LOCKS.get(lock_key)
-        if lock is None:
-            lock = threading.Lock()
-            _FILE_OPERATION_LOCKS[lock_key] = lock
-        return lock
 
 
 def _get_skills_container_path() -> str:
@@ -990,7 +972,8 @@ def write_file_tool(
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             path = _resolve_and_validate_user_data_path(path, thread_data)
-        sandbox.write_file(path, content, append)
+        with get_file_operation_lock(sandbox, path):
+            sandbox.write_file(path, content, append)
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"
@@ -1031,7 +1014,7 @@ def str_replace_tool(
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             path = _resolve_and_validate_user_data_path(path, thread_data)
-        with _get_file_operation_lock(_get_file_operation_lock_key(sandbox, path)):
+        with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
             if not content:
                 return "OK"
