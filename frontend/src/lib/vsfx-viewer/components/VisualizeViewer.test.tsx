@@ -18,28 +18,25 @@ describe("VisualizeViewer", () => {
     viewerState.dispose.mockReset();
     viewerState.initialize.mockReset();
     viewerState.open.mockReset();
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
   });
 
   afterEach(() => {
     vi.clearAllMocks();
   });
 
-  test("initializes a mocked viewer, reports progress, and disposes on unmount", async () => {
-    let resolveOpen: (() => void) | undefined;
+  test("initializes a mocked viewer, reports progress, signals readiness, and disposes on unmount", async () => {
+    const onReady = vi.fn();
+    const onProgress = vi.fn();
 
     viewerState.initialize.mockImplementation(async ({ onProgress }) => {
       onProgress?.({ loaded: 25, percent: 25, total: 100 });
     });
-    viewerState.open.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveOpen = resolve;
-        }),
-    );
-
-    const data = new Uint8Array([1, 2, 3]).buffer;
     const { unmount } = render(
-      <VisualizeViewer data={data} filename="sample.vsfx" />,
+      <VisualizeViewer onProgress={onProgress} onReady={onReady} />,
     );
 
     expect(screen.getByTestId("vsfx-visualize-viewer")).toBeInTheDocument();
@@ -48,19 +45,22 @@ describe("VisualizeViewer", () => {
       expect(viewerState.initialize).toHaveBeenCalledTimes(1);
     });
 
-    expect(screen.getByText("25%")).toBeInTheDocument();
+    expect(onProgress).toHaveBeenCalledWith({ loaded: 25, percent: 25, total: 100 });
 
-    resolveOpen?.();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 200);
+    });
 
     await waitFor(() => {
-      expect(viewerState.open).toHaveBeenCalledWith({
-        data,
-        filename: "sample.vsfx",
-      });
+      expect(onReady).toHaveBeenCalledWith(viewerState);
     });
+
+    expect(viewerState.open).not.toHaveBeenCalled();
 
     unmount();
 
-    expect(viewerState.dispose).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(viewerState.dispose).toHaveBeenCalledTimes(1);
+    });
   });
 });

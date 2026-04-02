@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { render, screen, waitFor } from "@/test/render";
@@ -5,15 +6,24 @@ import { render, screen, waitFor } from "@/test/render";
 import { VsfxArtifactViewer } from "./VsfxArtifactViewer";
 
 const visualizeViewerSpy = vi.fn();
+const openSpy = vi.fn();
+const disposeSpy = vi.fn();
+const onSpy = vi.fn(() => () => undefined);
 
 vi.mock("@/lib/vsfx-viewer/components/VisualizeViewer", () => ({
-  VisualizeViewer: (props: { data: ArrayBuffer; filename: string }) => {
+  VisualizeViewer: (props: { onReady?: (viewer: { dispose: typeof disposeSpy; on: typeof onSpy; open: typeof openSpy }) => void }) => {
     visualizeViewerSpy(props);
+
+    useEffect(() => {
+      props.onReady?.({
+        dispose: disposeSpy,
+        on: onSpy,
+        open: openSpy,
+      });
+    }, [props]);
 
     return (
       <div
-        data-byte-length={props.data.byteLength}
-        data-filename={props.filename}
         data-testid="vsfx-visualize-viewer-mock"
       />
     );
@@ -64,6 +74,10 @@ describe("VsfxArtifactViewer", () => {
 
   beforeEach(() => {
     fetchMock.mockReset();
+    openSpy.mockReset();
+    onSpy.mockReset();
+    onSpy.mockImplementation(() => () => undefined);
+    disposeSpy.mockReset();
     visualizeViewerSpy.mockClear();
     vi.stubGlobal("fetch", fetchMock);
   });
@@ -107,10 +121,11 @@ describe("VsfxArtifactViewer", () => {
     expect(screen.getByTestId("vsfx-loading")).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(screen.getByTestId("vsfx-visualize-viewer-mock")).toHaveAttribute(
-        "data-filename",
-        "widget.vsfx",
-      );
+      expect(screen.getByTestId("vsfx-visualize-viewer-mock")).toBeInTheDocument();
+      expect(openSpy).toHaveBeenCalledWith({
+        data: expect.any(ArrayBuffer),
+        filename: "widget.vsfx",
+      });
     });
 
     expect(screen.queryByTestId("vsfx-loading")).not.toBeInTheDocument();
@@ -180,19 +195,20 @@ describe("VsfxArtifactViewer", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByTestId("vsfx-visualize-viewer-mock")).toHaveAttribute(
-        "data-filename",
-        "second.vsfx",
-      );
+      expect(screen.getByTestId("vsfx-visualize-viewer-mock")).toBeInTheDocument();
+      expect(openSpy).toHaveBeenCalledWith({
+        data: expect.any(ArrayBuffer),
+        filename: "second.vsfx",
+      });
     });
 
     firstPrimary.resolve(createBinaryResponse([1, 2, 3]));
 
     await waitFor(() => {
-      expect(screen.getByTestId("vsfx-visualize-viewer-mock")).toHaveAttribute(
-        "data-filename",
-        "second.vsfx",
-      );
+      expect(openSpy).toHaveBeenLastCalledWith({
+        data: expect.any(ArrayBuffer),
+        filename: "second.vsfx",
+      });
     });
   });
 });

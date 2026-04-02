@@ -199,7 +199,8 @@ function VsfxArtifactViewerSurface({
   properties,
   propertiesError,
 }: VsfxArtifactViewerRuntimeProps) {
-  const { actions } = useVsfxContext();
+  const { actions, state } = useVsfxContext();
+  const openedArtifactRef = useRef<string | null>(null);
 
   useEffect(() => {
     actions.setCdaTreeState({
@@ -214,6 +215,44 @@ function VsfxArtifactViewerSurface({
     });
   }, [actions, cdaTree, cdaTreeError, properties, propertiesError]);
 
+  useEffect(() => {
+    const viewer = state.viewer;
+
+    if (!viewer) {
+      openedArtifactRef.current = null;
+      return;
+    }
+
+    if (openedArtifactRef.current === filepath) {
+      return;
+    }
+
+    let active = true;
+    openedArtifactRef.current = filepath;
+
+    const openArtifact = async () => {
+      try {
+        await viewer.open({
+          data: primaryData,
+          filename: getFilename(filepath),
+        });
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        openedArtifactRef.current = null;
+        onPrimaryError(error);
+      }
+    };
+
+    void openArtifact();
+
+    return () => {
+      active = false;
+    };
+  }, [filepath, onPrimaryError, primaryData, state.viewer]);
+
   return (
     <div className="flex h-full min-h-0 w-full flex-col overflow-hidden">
       <div className="border-b p-2">
@@ -222,8 +261,6 @@ function VsfxArtifactViewerSurface({
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <VisualizeViewer
           className="size-full"
-          data={primaryData}
-          filename={getFilename(filepath)}
           onError={onPrimaryError}
           onReady={actions.setViewer}
         />

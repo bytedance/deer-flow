@@ -11,8 +11,6 @@ import { VisualizeProgress } from "./VisualizeProgress";
 
 type VisualizeViewerProps = {
   className?: string;
-  data: ArrayBuffer;
-  filename: string;
   onError?: (error: unknown) => void;
   onProgress?: (progress: VisualizeProgressState) => void;
   onReady?: (viewer: Viewer) => void;
@@ -20,8 +18,6 @@ type VisualizeViewerProps = {
 
 export function VisualizeViewer({
   className,
-  data,
-  filename,
   onError,
   onProgress,
   onReady,
@@ -56,13 +52,26 @@ export function VisualizeViewer({
           return;
         }
 
-        await viewer.open({ data, filename });
+        setProgress(100);
+
+        await new Promise<void>((resolve) => {
+          window.requestAnimationFrame(() => {
+            resolve();
+          });
+        });
 
         if (!active) {
           return;
         }
 
-        setProgress(100);
+        await new Promise<void>((resolve) => {
+          window.setTimeout(resolve, 150);
+        });
+
+        if (!active) {
+          return;
+        }
+
         setIsLoading(false);
         onReady?.(viewer);
       }
@@ -79,16 +88,18 @@ export function VisualizeViewer({
 
     return () => {
       active = false;
-      viewer.dispose();
+      window.setTimeout(() => {
+        viewer.dispose();
+      }, 0);
     };
-  }, [data, filename, onError, onProgress, onReady]);
+  }, [onError, onProgress, onReady]);
 
   return (
     <div
       className={cn("relative h-full min-h-64 w-full overflow-hidden", className)}
       data-testid="vsfx-visualize-viewer"
     >
-      <canvas className="h-full w-full" data-testid="vsfx-canvas" ref={containerRef} />
+      <canvas className="h-full w-full" data-testid="vsfx-canvas" id="canvas" ref={containerRef} />
       <VisualizeProgress loading={isLoading} value={progress} />
     </div>
   );
