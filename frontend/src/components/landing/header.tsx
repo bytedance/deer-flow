@@ -8,7 +8,11 @@ export function Header() {
   return (
     <header className="container-md fixed top-0 right-0 left-0 z-20 mx-auto flex h-16 items-center justify-between backdrop-blur-xs">
       <div className="flex items-center gap-2">
-        <a href="https://github.com/bytedance/deer-flow" target="_blank">
+        <a
+          href="https://github.com/bytedance/deer-flow"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
           <h1 className="font-serif text-xl">DeerFlow</h1>
         </a>
       </div>
@@ -26,7 +30,11 @@ export function Header() {
           asChild
           className="group relative z-10"
         >
-          <a href="https://github.com/bytedance/deer-flow" target="_blank">
+          <a
+            href="https://github.com/bytedance/deer-flow"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             <GitHubLogoIcon className="size-4" />
             Star on GitHub
             {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
