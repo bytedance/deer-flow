@@ -190,6 +190,7 @@ vi.mock("@/core/i18n/hooks", () => ({
 }));
 
 vi.mock("@/core/artifacts/utils", () => ({
+  normalizeArtifactFilepath: (filepath: string) => filepath,
   urlOfArtifact: ({
     download = false,
     filepath,

@@ -1,4 +1,4 @@
-import { urlOfArtifact } from "../utils";
+import { normalizeArtifactFilepath, urlOfArtifact } from "../utils";
 
 import { classifyVsfxArtifactPath } from "./classify";
 import { pairVsfxSiblingMetadata } from "./pairing";
@@ -37,7 +37,8 @@ export function createInitialVsfxArtifactBundle(
   filepath: string,
   isMock = false,
 ): VsfxArtifactBundle {
-  const classification = classifyVsfxArtifactPath(filepath);
+  const normalizedFilepath = normalizeArtifactFilepath(filepath, threadId);
+  const classification = classifyVsfxArtifactPath(normalizedFilepath);
 
   if (classification.kind !== "vsfx") {
     return {
@@ -48,9 +49,9 @@ export function createInitialVsfxArtifactBundle(
       errors: {
         primary: createPanelError(
           "primary",
-          filepath,
+          normalizedFilepath,
           "load-failed",
-          `Expected a .vsfx artifact path, received: ${filepath}`,
+          `Expected a .vsfx artifact path, received: ${normalizedFilepath}`,
         ),
         cdaTree: null,
         properties: null,
@@ -59,7 +60,7 @@ export function createInitialVsfxArtifactBundle(
   }
 
   return {
-    primaryUrl: urlOfArtifact({ filepath, threadId, isMock }),
+    primaryUrl: urlOfArtifact({ filepath: normalizedFilepath, threadId, isMock }),
     cdaTree: null,
     properties: null,
     loading: true,
@@ -78,7 +79,11 @@ export function createVsfxArtifactBundleRequest(
   isMock = false,
   fetchImpl: FetchLike = fetch,
 ): VsfxArtifactBundleRequest {
-  const initial = createInitialVsfxArtifactBundle(threadId, filepath, isMock);
+  const normalizedFilepath = normalizeArtifactFilepath(filepath, threadId);
+  const normalizedArtifacts = artifacts.map((artifactPath) =>
+    normalizeArtifactFilepath(artifactPath, threadId),
+  );
+  const initial = createInitialVsfxArtifactBundle(threadId, normalizedFilepath, isMock);
 
   if (!initial.primaryUrl || initial.errors.primary) {
     return {
@@ -90,10 +95,10 @@ export function createVsfxArtifactBundleRequest(
 
   const controller = new AbortController();
   const pairing = pairVsfxSiblingMetadata({
-    openedPath: filepath,
-    artifactPaths: artifacts,
+    openedPath: normalizedFilepath,
+    artifactPaths: normalizedArtifacts,
   });
-  const expectedSiblingPaths = createExpectedSiblingPaths(filepath);
+  const expectedSiblingPaths = createExpectedSiblingPaths(normalizedFilepath);
 
   const promise = Promise.all([
     loadOptionalJson({

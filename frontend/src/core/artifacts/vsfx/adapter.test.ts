@@ -163,4 +163,45 @@ describe("createVsfxArtifactBundleRequest", () => {
     });
     expect(result.errors.properties).toBeNull();
   });
+
+  test("normalizes absolute local thread paths before resolving sibling metadata", async () => {
+    const absoluteVsfxPath = "/Users/zhou/Code/deer-flow/backend/.deer-flow/threads/thread-123/user-data/outputs/factory_122x45x8_retry.vsfx";
+    const normalizedCdaPath = "/mnt/user-data/outputs/factory_122x45x8_retry.cda.json";
+    const normalizedPropertiesPath = "/mnt/user-data/outputs/factory_122x45x8_retry.properties.json";
+
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+
+      if (url.endsWith(normalizedCdaPath)) {
+        return createJsonResponse({ nodes: [{ id: "root" }] });
+      }
+
+      if (url.endsWith(normalizedPropertiesPath)) {
+        return createJsonResponse({ parts: [{ handle: 42, name: "Column" }] });
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    const request = createBundleRequest({
+      artifacts: [
+        absoluteVsfxPath,
+        normalizedCdaPath,
+        normalizedPropertiesPath,
+      ],
+      fetchImpl,
+      filepath: absoluteVsfxPath,
+    });
+
+    expect(request.initial.primaryUrl).toContain(
+      "/api/threads/thread-123/artifacts/mnt/user-data/outputs/factory_122x45x8_retry.vsfx",
+    );
+
+    const result = await request.promise;
+
+    expect(result.cdaTree).toEqual({ nodes: [{ id: "root" }] });
+    expect(result.properties).toEqual({ parts: [{ handle: 42, name: "Column" }] });
+    expect(result.errors.cdaTree).toBeNull();
+    expect(result.errors.properties).toBeNull();
+  });
 });
