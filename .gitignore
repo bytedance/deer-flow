@@ -54,3 +54,8 @@ web/
 # Deployment artifacts
 backend/Dockerfile.langgraph
 config.yaml.bak
+
+# Local session/debug artifacts
+.sisyphus/
+docs/superpowers/
+test-results/
