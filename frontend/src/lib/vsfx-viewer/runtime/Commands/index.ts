@@ -53,24 +53,31 @@ viewerCommands.registerCommand("getSelected", getSelected);
 viewerCommands.registerCommand("clearSelected", clearSelected);
 viewerCommands.registerCommand("k3DViewSW", (viewer) => {
   viewer.getVisualizeViewer()?.k3DViewSW?.();
+  viewer.update();
 });
 viewerCommands.registerCommand("k3DViewTop", (viewer) => {
   viewer.getVisualizeViewer()?.k3DViewTop?.();
+  viewer.update();
 });
 viewerCommands.registerCommand("k3DViewBottom", (viewer) => {
   viewer.getVisualizeViewer()?.k3DViewBottom?.();
+  viewer.update();
 });
 viewerCommands.registerCommand("k3DViewLeft", (viewer) => {
   viewer.getVisualizeViewer()?.k3DViewLeft?.();
+  viewer.update();
 });
 viewerCommands.registerCommand("k3DViewRight", (viewer) => {
   viewer.getVisualizeViewer()?.k3DViewRight?.();
+  viewer.update();
 });
 viewerCommands.registerCommand("k3DViewFront", (viewer) => {
   viewer.getVisualizeViewer()?.k3DViewFront?.();
+  viewer.update();
 });
 viewerCommands.registerCommand("k3DViewBack", (viewer) => {
   viewer.getVisualizeViewer()?.k3DViewBack?.();
+  viewer.update();
 });
 viewerCommands.registerCommand("zoomToSelected", zoomToSelected);
 viewerCommands.registerCommand("zoomToExtents", zoomToExtents);

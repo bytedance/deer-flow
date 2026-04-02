@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
@@ -8,15 +8,17 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
 
 import { useVsfxContext } from "./context";
-import { VSFX_TOOLBAR_GROUPS } from "./vsfx-toolbar-config";
+import { getVsfxToolbarDraggerValue, VSFX_TOOLBAR_GROUPS } from "./vsfx-toolbar-config";
 
 export function VsfxToolbar({ className }: { className?: string }) {
   const context = useVsfxContext();
-  const [activeDragger, setActiveDragger] = useState("orbit-pan");
-
   const hasSelection = context.state.selectedHandles.length > 0;
   const hasViewer = context.state.viewer !== null;
   const groups = useMemo(() => VSFX_TOOLBAR_GROUPS, []);
+  const activeDragger
+    = context.state.activeDragger
+      ?? getVsfxToolbarDraggerValue(context.state.viewer)
+      ?? "orbit-pan";
 
   return (
     <div
@@ -44,7 +46,6 @@ export function VsfxToolbar({ className }: { className?: string }) {
                 }
 
                 nextItem.run(context);
-                setActiveDragger(nextValue);
               }}
               size="sm"
               type="single"

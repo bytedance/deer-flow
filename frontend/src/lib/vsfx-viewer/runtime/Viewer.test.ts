@@ -682,4 +682,80 @@ describe("Viewer", () => {
     expect(backend.screenToWorld).toHaveBeenCalled();
     expect(backend.setView).toHaveBeenCalled();
   });
+
+  test("hideSelected clears the runtime selection after hiding the current handles", async () => {
+    const backend = createVisualizeBackend();
+    backend.getSelected.mockReturnValue([101, 202]);
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+    const hideListener = vi.fn();
+    const selectListener = vi.fn();
+
+    viewer.on("hide", hideListener);
+    viewer.on("select", selectListener);
+    await viewer.initialize();
+    hideListener.mockClear();
+    selectListener.mockClear();
+
+    viewer.executeCommand("hideSelected");
+
+    expect(backend.hideSelected).toHaveBeenCalledTimes(1);
+    expect(hideListener).toHaveBeenCalledWith([101, 202]);
+    expect(selectListener).toHaveBeenLastCalledWith([]);
+  });
+
+  test("clearSlices restores the default SW view after removing plane cuts", async () => {
+    const backend = createVisualizeBackend();
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    backend.clearSlices.mockClear();
+    backend.k3DViewSW.mockClear();
+
+    viewer.executeCommand("clearSlices");
+
+    expect(backend.clearSlices).toHaveBeenCalledTimes(1);
+    expect(backend.k3DViewSW).toHaveBeenCalledTimes(1);
+  });
+
+  test("resetView restores the scene and camera to the SW baseline", async () => {
+    const backend = createVisualizeBackend();
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    backend.clearSlices.mockClear();
+    backend.clearSelected.mockClear();
+    backend.showAll.mockClear();
+    backend.collect.mockClear();
+    backend.zoomToExtents.mockClear();
+    backend.k3DViewSW.mockClear();
+    backend.resetView.mockClear();
+
+    viewer.executeCommand("resetView");
+
+    expect(backend.clearSlices).toHaveBeenCalledTimes(1);
+    expect(backend.clearSelected).toHaveBeenCalledTimes(1);
+    expect(backend.showAll).toHaveBeenCalledTimes(1);
+    expect(backend.collect).toHaveBeenCalledTimes(1);
+    expect(backend.zoomToExtents).toHaveBeenCalledTimes(1);
+    expect(backend.k3DViewSW).toHaveBeenCalledTimes(2);
+    expect(backend.resetView).toHaveBeenCalledTimes(1);
+  });
 });

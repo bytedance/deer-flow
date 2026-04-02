@@ -1,9 +1,9 @@
 import { useEffect } from "react";
 import { describe, expect, test, vi } from "vitest";
 
-import type { IViewer, ViewerEventMap } from "@/lib/vsfx-viewer/viewer-core";
+import type { IViewer, ViewerInteractionEventMap } from "@/lib/vsfx-viewer/viewer-core";
 import { defaultOptions } from "@/lib/vsfx-viewer/viewer-core/options/IOptions";
-import { fireEvent, render, screen } from "@/test/render";
+import { act, fireEvent, render, screen, waitFor } from "@/test/render";
 
 import { VsfxContextProvider, useVsfxContext } from "./context";
 import { VsfxToolbar } from "./VsfxToolbar";
@@ -16,6 +16,17 @@ class MockViewer implements RuntimeViewer {
   readonly executeCommand = vi.fn<(name: string, ...args: unknown[]) => unknown>();
 
   readonly setActiveDragger = vi.fn<(name: string) => void>();
+
+  private readonly listeners = new Map<
+    keyof ViewerInteractionEventMap,
+    Set<(payload: ViewerInteractionEventMap[keyof ViewerInteractionEventMap]) => void>
+  >();
+
+  constructor() {
+    this.setActiveDragger.mockImplementation((name) => {
+      this.emit("changeactivedragger", name);
+    });
+  }
 
   clearSlices() {
     void 0;
@@ -37,11 +48,49 @@ class MockViewer implements RuntimeViewer {
     return [];
   }
 
-  on<TName extends keyof ViewerEventMap>(
-    _eventName: TName,
-    _listener: (payload: ViewerEventMap[TName]) => void,
+  emit<TName extends keyof ViewerInteractionEventMap>(
+    eventName: TName,
+    payload: ViewerInteractionEventMap[TName],
   ) {
-    return () => undefined;
+    const listeners = this.listeners.get(eventName);
+
+    if (!listeners) {
+      return;
+    }
+
+    for (const listener of listeners) {
+      listener(payload);
+    }
+  }
+
+  off<TName extends keyof ViewerInteractionEventMap>(
+    eventName: TName,
+    listener: (payload: ViewerInteractionEventMap[TName]) => void,
+  ) {
+    const existing = this.listeners.get(eventName);
+
+    if (!existing) {
+      return;
+    }
+
+    existing.delete(
+      listener as (payload: ViewerInteractionEventMap[keyof ViewerInteractionEventMap]) => void,
+    );
+  }
+
+  on<TName extends keyof ViewerInteractionEventMap>(
+    _eventName: TName,
+    listener: (payload: ViewerInteractionEventMap[TName]) => void,
+  ) {
+    const existing = this.listeners.get(_eventName) ?? new Set();
+    existing.add(
+      listener as (payload: ViewerInteractionEventMap[keyof ViewerInteractionEventMap]) => void,
+    );
+    this.listeners.set(_eventName, existing);
+
+    return () => {
+      this.off(_eventName, listener);
+    };
   }
 
   open() {
@@ -198,5 +247,21 @@ describe("VsfxToolbar", () => {
     for (const label of ["Markup", "Preview", "Save", "Viewpoints"]) {
       expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
     }
+  });
+
+  test("reflects runtime dragger changes coming from the viewer", async () => {
+    const viewer = new MockViewer();
+
+    render(<ToolbarHarness viewer={viewer} />);
+
+    act(() => {
+      viewer.emit("changeactivedragger", "zoom");
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("radio", { name: "Zoom" })).toHaveAttribute("data-state", "on");
+    });
+
+    expect(screen.getByRole("radio", { name: "Orbit/Pan" })).toHaveAttribute("data-state", "off");
   });
 });
