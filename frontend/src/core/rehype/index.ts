@@ -3,6 +3,9 @@ import { useMemo } from "react";
 import { visit } from "unist-util-visit";
 import type { BuildVisitor } from "unist-util-visit";
 
+const CJK_TEXT_RE =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
 export function rehypeSplitWordsIntoSpans() {
   return (tree: Root) => {
     visit(tree, "element", ((node: Element) => {
@@ -15,6 +18,10 @@ export function rehypeSplitWordsIntoSpans() {
         const newChildren: Array<ElementContent> = [];
         node.children.forEach((child) => {
           if (child.type === "text") {
+            if (CJK_TEXT_RE.test(child.value)) {
+              newChildren.push(child);
+              return;
+            }
             const segmenter = new Intl.Segmenter("zh", { granularity: "word" });
             const segments = segmenter.segment(child.value);
             const words = Array.from(segments)
