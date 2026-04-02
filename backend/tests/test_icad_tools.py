@@ -128,8 +128,4 @@ def test_project_config_template_exposes_visualize_tool():
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
     assert any(group.get("name") == "icad" for group in config["tool_groups"])
-    assert any(
-        tool.get("name") == "visualize_steel_structure"
-        and tool.get("use") == "icad.tools:visualize_steel_structure"
-        for tool in config["tools"]
-    )
+    assert any(tool.get("name") == "visualize_steel_structure" and tool.get("use") == "icad.tools:visualize_steel_structure" for tool in config["tools"])
