@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { render, screen, waitFor } from "@/test/render";
+import { fireEvent, render, screen, waitFor } from "@/test/render";
 
 import { VsfxArtifactViewer } from "./VsfxArtifactViewer";
 
@@ -9,18 +9,19 @@ const visualizeViewerSpy = vi.fn();
 const openSpy = vi.fn();
 const disposeSpy = vi.fn();
 const onSpy = vi.fn(() => () => undefined);
+const viewerMock = {
+  dispose: disposeSpy,
+  on: onSpy,
+  open: openSpy,
+};
 
 vi.mock("@/lib/vsfx-viewer/components/VisualizeViewer", () => ({
-  VisualizeViewer: (props: { onReady?: (viewer: { dispose: typeof disposeSpy; on: typeof onSpy; open: typeof openSpy }) => void }) => {
+  VisualizeViewer: (props: { onReady?: (viewer: typeof viewerMock) => void }) => {
     visualizeViewerSpy(props);
 
     useEffect(() => {
-      props.onReady?.({
-        dispose: disposeSpy,
-        on: onSpy,
-        open: openSpy,
-      });
-    }, [props]);
+      props.onReady?.(viewerMock);
+    }, [props.onReady]);
 
     return (
       <div
@@ -67,6 +68,53 @@ function readFetchInputUrl(input: Parameters<typeof fetch>[0]) {
   }
 
   return input;
+}
+
+function readTranslateOffset(transform: string) {
+  const match = /^translate\((-?\d+)px, (-?\d+)px\)$/.exec(transform);
+
+  if (!match) {
+    return { x: 0, y: 0 };
+  }
+
+  return {
+    x: Number(match[1]),
+    y: Number(match[2]),
+  };
+}
+
+function mockSuccessfulVsfxArtifactFetches(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>) {
+  fetchMock.mockImplementation(async (input) => {
+    const url = readFetchInputUrl(input);
+
+    if (url.endsWith("/artifacts/widget.cda.json")) {
+      return createJsonResponse({
+        nodes: [
+          {
+            children: [],
+            handle: 42,
+            name: "Bolt",
+          },
+        ],
+      });
+    }
+
+    if (url.endsWith("/artifacts/widget.Properties.json")) {
+      return createJsonResponse({
+        byHandle: {
+          42: {
+            Name: "Bolt",
+          },
+        },
+      });
+    }
+
+    if (url.endsWith("/artifacts/widget.vsfx")) {
+      return createBinaryResponse([1, 2, 3, 4]);
+    }
+
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  });
 }
 
 describe("VsfxArtifactViewer", () => {
@@ -257,5 +305,127 @@ describe("VsfxArtifactViewer", () => {
         filename: "widget.vsfx",
       });
     });
+  });
+
+  test("renders the construct tree and selected properties windows minimized by default, then restores and re-minimizes them", async () => {
+    mockSuccessfulVsfxArtifactFetches(fetchMock);
+
+    render(
+      <VsfxArtifactViewer
+        artifacts={[
+          "/artifacts/widget.vsfx",
+          "/artifacts/widget.cda.json",
+          "/artifacts/widget.Properties.json",
+        ]}
+        filepath="/artifacts/widget.vsfx"
+        threadId="thread-123"
+      />,
+    );
+
+    const treeWindow = await screen.findByTestId("vsfx-tree-window");
+    const propertiesWindow = screen.getByTestId("vsfx-properties-window");
+
+    expect(screen.getByText("Construct tree")).toBeInTheDocument();
+    expect(screen.getByText("Selected properties")).toBeInTheDocument();
+    expect(screen.queryByText("Bolt")).not.toBeInTheDocument();
+    expect(screen.queryByText("Select a part to inspect its properties.")).not.toBeInTheDocument();
+    expect(treeWindow).toHaveAttribute("data-state", "minimized");
+    expect(propertiesWindow).toHaveAttribute("data-state", "minimized");
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore Construct tree" }));
+
+    await waitFor(() => {
+      expect(treeWindow).toHaveAttribute("data-state", "expanded");
+    });
+
+    expect(treeWindow).toHaveClass("h-auto", "max-h-[calc(100%-2rem)]");
+    expect(treeWindow).not.toHaveClass("h-[calc(100%-2rem)]", "max-h-[40rem]");
+
+    expect(screen.getByRole("button", { name: "Hide Bolt" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Minimize Construct tree" }));
+
+    await waitFor(() => {
+      expect(treeWindow).toHaveAttribute("data-state", "minimized");
+    });
+
+    expect(screen.queryByRole("button", { name: "Hide Bolt" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore Selected properties" }));
+
+    await waitFor(() => {
+      expect(propertiesWindow).toHaveAttribute("data-state", "expanded");
+    });
+
+    expect(propertiesWindow).toHaveClass("h-auto", "max-h-[calc(100%-2rem)]");
+    expect(propertiesWindow).not.toHaveClass("h-[calc(100%-2rem)]", "max-h-[40rem]");
+
+    expect(screen.getByText("Select a part to inspect its properties.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Minimize Selected properties" }));
+
+    await waitFor(() => {
+      expect(propertiesWindow).toHaveAttribute("data-state", "minimized");
+    });
+
+    expect(screen.queryByText("Select a part to inspect its properties.")).not.toBeInTheDocument();
+  });
+
+  test("drags floating windows by the title bar within the viewer container and ignores drag starts from the minimize button", async () => {
+    mockSuccessfulVsfxArtifactFetches(fetchMock);
+
+    render(
+      <VsfxArtifactViewer
+        artifacts={[
+          "/artifacts/widget.vsfx",
+          "/artifacts/widget.cda.json",
+          "/artifacts/widget.Properties.json",
+        ]}
+        filepath="/artifacts/widget.vsfx"
+        threadId="thread-123"
+      />,
+    );
+
+    const viewerRoot = await screen.findByTestId("vsfx-viewer-root");
+    const treeWindow = screen.getByTestId("vsfx-tree-window");
+
+    Object.defineProperty(viewerRoot, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 900, 700),
+    });
+
+    Object.defineProperty(treeWindow, "getBoundingClientRect", {
+      configurable: true,
+      value: () => {
+        const { x, y } = readTranslateOffset(treeWindow.style.transform);
+
+        return new DOMRect(16 + x, 16 + y, 320, 240);
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore Construct tree" }));
+
+    await waitFor(() => {
+      expect(treeWindow).toHaveAttribute("data-state", "expanded");
+    });
+
+    const treeTitleBar = screen.getByTestId("vsfx-tree-window-titlebar");
+
+    fireEvent.mouseDown(treeTitleBar, { button: 0, clientX: 40, clientY: 40 });
+    fireEvent.mouseMove(window, { clientX: 280, clientY: 220 });
+    fireEvent.mouseMove(window, { clientX: 320, clientY: 260 });
+    fireEvent.mouseUp(window);
+
+    await waitFor(() => {
+      expect(treeWindow.style.transform).toBe("translate(280px, 220px)");
+    });
+
+    const minimizeButton = screen.getByRole("button", { name: "Minimize Construct tree" });
+
+    fireEvent.mouseDown(minimizeButton, { button: 0, clientX: 150, clientY: 30 });
+    fireEvent.mouseMove(window, { clientX: 700, clientY: 500 });
+    fireEvent.mouseUp(window);
+
+    expect(treeWindow.style.transform).toBe("translate(280px, 220px)");
   });
 });

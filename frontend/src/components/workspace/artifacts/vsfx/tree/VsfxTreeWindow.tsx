@@ -9,7 +9,21 @@ import { VsfxFloatingWindow } from "../VsfxFloatingWindow";
 
 import { VsfxTreeView, type VsfxTreeNodeData } from "./VsfxTreeView";
 
-export function VsfxTreeWindow() {
+type VsfxTreeWindowProps = {
+  containerElement: HTMLDivElement | null;
+  minimized: boolean;
+  offset: { x: number; y: number };
+  onOffsetChange: (offset: { x: number; y: number }) => void;
+  onToggleMinimized: () => void;
+};
+
+export function VsfxTreeWindow({
+  containerElement,
+  minimized,
+  offset,
+  onOffsetChange,
+  onToggleMinimized,
+}: VsfxTreeWindowProps) {
   const { actions, state } = useVsfxContext();
   const treeNodes = useMemo(() => normalizeTreeNodes(state.cdaTree), [state.cdaTree]);
 
@@ -71,9 +85,14 @@ export function VsfxTreeWindow() {
   return (
     <VsfxFloatingWindow
       className="left-4 right-auto"
+      containerElement={containerElement}
       contentClassName="min-h-0 flex-1"
       data-testid="vsfx-tree-window"
       description="Select parts, zoom to them, and toggle their visibility."
+      minimized={minimized}
+      offset={offset}
+      onOffsetChange={onOffsetChange}
+      onToggleMinimized={onToggleMinimized}
       title="Construct tree"
     >
       {content}

@@ -33,6 +33,7 @@ export function VsfxArtifactViewer({
   threadId,
 }: VsfxArtifactViewerProps) {
   const requestIdRef = useRef(0);
+  const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   const initialBundle = useMemo(
     () => createInitialVsfxArtifactBundle(threadId, filepath, isMock),
     [filepath, isMock, threadId],
@@ -144,6 +145,7 @@ export function VsfxArtifactViewer({
           className,
         )}
         data-testid="vsfx-viewer-root"
+        ref={viewerContainerRef}
       >
       {isLoading ? (
         <div
@@ -172,6 +174,7 @@ export function VsfxArtifactViewer({
           primaryData={primaryData}
           properties={bundle.properties}
           propertiesError={bundle.errors.properties}
+          viewerContainerElement={viewerContainerRef.current}
         />
       ) : (
         <div
@@ -195,6 +198,7 @@ type VsfxArtifactViewerRuntimeProps = {
   primaryData: ArrayBuffer;
   properties: unknown | null;
   propertiesError: VsfxArtifactPanelError | null;
+  viewerContainerElement: HTMLDivElement | null;
 };
 
 function VsfxArtifactViewerRuntime(props: VsfxArtifactViewerRuntimeProps) {
@@ -213,12 +217,15 @@ function VsfxArtifactViewerSurface({
   primaryData,
   properties,
   propertiesError,
+  viewerContainerElement,
 }: VsfxArtifactViewerRuntimeProps) {
   const { actions, state } = useVsfxContext();
   const openedArtifactRef = useRef<{
     data: ArrayBuffer;
     filepath: string;
   } | null>(null);
+  const [treeWindowState, setTreeWindowState] = useState(() => createInitialFloatingWindowState());
+  const [propertiesWindowState, setPropertiesWindowState] = useState(() => createInitialFloatingWindowState());
 
   useEffect(() => {
     actions.setCdaTreeState({
@@ -285,11 +292,44 @@ function VsfxArtifactViewerSurface({
           onError={onPrimaryError}
           onReady={actions.setViewer}
         />
-        <VsfxTreeWindow />
-        <VsfxPropertiesWindow />
+        <VsfxTreeWindow
+          containerElement={viewerContainerElement}
+          minimized={treeWindowState.minimized}
+          offset={treeWindowState.offset}
+          onOffsetChange={(offset) => {
+            setTreeWindowState((current) => ({ ...current, offset }));
+          }}
+          onToggleMinimized={() => {
+            setTreeWindowState((current) => ({
+              ...current,
+              minimized: !current.minimized,
+            }));
+          }}
+        />
+        <VsfxPropertiesWindow
+          containerElement={viewerContainerElement}
+          minimized={propertiesWindowState.minimized}
+          offset={propertiesWindowState.offset}
+          onOffsetChange={(offset) => {
+            setPropertiesWindowState((current) => ({ ...current, offset }));
+          }}
+          onToggleMinimized={() => {
+            setPropertiesWindowState((current) => ({
+              ...current,
+              minimized: !current.minimized,
+            }));
+          }}
+        />
       </div>
     </div>
   );
+}
+
+function createInitialFloatingWindowState() {
+  return {
+    minimized: true,
+    offset: { x: 0, y: 0 },
+  };
 }
 
 function createLoadFailedError(filepath: string, message: string): VsfxArtifactPanelError {

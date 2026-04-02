@@ -46,7 +46,13 @@ function renderPropertiesWindow(props?: HarnessProps) {
     <VsfxContextProvider artifactKey="assembly-a">
       <div data-testid="vsfx-viewer-root">Viewer root</div>
       <StateHarness {...props} />
-      <VsfxPropertiesWindow />
+      <VsfxPropertiesWindow
+        containerElement={null}
+        minimized={false}
+        offset={{ x: 0, y: 0 }}
+        onOffsetChange={() => undefined}
+        onToggleMinimized={() => undefined}
+      />
     </VsfxContextProvider>,
   );
 }
@@ -97,7 +103,13 @@ describe("VsfxPropertiesWindow", () => {
       <VsfxContextProvider artifactKey="assembly-a">
         <div data-testid="vsfx-viewer-root">Viewer root</div>
         <StateHarness primaryHandle={null} properties={null} />
-        <VsfxPropertiesWindow />
+        <VsfxPropertiesWindow
+          containerElement={null}
+          minimized={false}
+          offset={{ x: 0, y: 0 }}
+          onOffsetChange={() => undefined}
+          onToggleMinimized={() => undefined}
+        />
       </VsfxContextProvider>,
     );
 
@@ -111,7 +123,13 @@ describe("VsfxPropertiesWindow", () => {
           primaryHandle={42}
           properties={{ byHandle: {} }}
         />
-        <VsfxPropertiesWindow />
+        <VsfxPropertiesWindow
+          containerElement={null}
+          minimized={false}
+          offset={{ x: 0, y: 0 }}
+          onOffsetChange={() => undefined}
+          onToggleMinimized={() => undefined}
+        />
       </VsfxContextProvider>,
     );
 

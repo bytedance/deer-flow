@@ -115,7 +115,13 @@ function renderTreeWindow(props?: HarnessProps) {
     <VsfxContextProvider artifactKey="assembly-a">
       <div data-testid="vsfx-viewer-root">Viewer root</div>
       <StateHarness {...props} />
-      <VsfxTreeWindow />
+      <VsfxTreeWindow
+        containerElement={null}
+        minimized={false}
+        offset={{ x: 0, y: 0 }}
+        onOffsetChange={() => undefined}
+        onToggleMinimized={() => undefined}
+      />
     </VsfxContextProvider>,
   );
 }
@@ -140,7 +146,13 @@ describe("VsfxTreeWindow", () => {
       <VsfxContextProvider artifactKey="assembly-a">
         <div data-testid="vsfx-viewer-root">Viewer root</div>
         <StateHarness cdaLoading />
-        <VsfxTreeWindow />
+        <VsfxTreeWindow
+          containerElement={null}
+          minimized={false}
+          offset={{ x: 0, y: 0 }}
+          onOffsetChange={() => undefined}
+          onToggleMinimized={() => undefined}
+        />
       </VsfxContextProvider>,
     );
 
@@ -150,7 +162,13 @@ describe("VsfxTreeWindow", () => {
       <VsfxContextProvider artifactKey="assembly-a">
         <div data-testid="vsfx-viewer-root">Viewer root</div>
         <StateHarness cdaTree={{ nodes: [] }} />
-        <VsfxTreeWindow />
+        <VsfxTreeWindow
+          containerElement={null}
+          minimized={false}
+          offset={{ x: 0, y: 0 }}
+          onOffsetChange={() => undefined}
+          onToggleMinimized={() => undefined}
+        />
       </VsfxContextProvider>,
     );
 

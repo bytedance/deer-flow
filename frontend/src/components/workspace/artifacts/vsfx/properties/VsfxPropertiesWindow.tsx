@@ -28,7 +28,21 @@ type PanelContent =
     kind: "ready";
   };
 
-export function VsfxPropertiesWindow() {
+type VsfxPropertiesWindowProps = {
+  containerElement: HTMLDivElement | null;
+  minimized: boolean;
+  offset: { x: number; y: number };
+  onOffsetChange: (offset: { x: number; y: number }) => void;
+  onToggleMinimized: () => void;
+};
+
+export function VsfxPropertiesWindow({
+  containerElement,
+  minimized,
+  offset,
+  onOffsetChange,
+  onToggleMinimized,
+}: VsfxPropertiesWindowProps) {
   const { state } = useVsfxContext();
 
   const content = useMemo<PanelContent>(() => {
@@ -100,11 +114,16 @@ export function VsfxPropertiesWindow() {
   return (
     <VsfxFloatingWindow
       className="w-96 max-w-full"
+      containerElement={containerElement}
       contentClassName="min-h-0 flex-1"
       data-testid="vsfx-properties-window"
       description={content.kind === "ready"
         ? content.handleLabel
         : "Selected part details stay scoped to this panel."}
+      minimized={minimized}
+      offset={offset}
+      onOffsetChange={onOffsetChange}
+      onToggleMinimized={onToggleMinimized}
       title="Selected properties"
     >
       {content.kind === "ready" ? (
