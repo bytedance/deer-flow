@@ -17,7 +17,6 @@ import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
 import {
-  AgentNameCheckError,
   checkAgentName,
   getAgent,
 } from "@/core/agents/api";

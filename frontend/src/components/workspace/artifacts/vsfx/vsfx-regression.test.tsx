@@ -384,6 +384,9 @@ describe("VSFX regression coverage", () => {
     expect(screen.getByTestId("vsfx-toolbar")).toHaveClass("w-full", "flex-wrap");
     expect(screen.getByTestId("vsfx-viewer-root")).toHaveClass("overflow-hidden");
 
+    fireEvent.click(screen.getByRole("button", { name: "Restore Construct tree" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restore Selected properties" }));
+
     const treeRow = await screen.findByTestId("vsfx-tree-row-42");
 
     fireEvent.click(treeRow);
@@ -434,9 +437,10 @@ describe("VSFX regression coverage", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("vsfx-canvas")).toBeInTheDocument();
-      expect(screen.getByTestId("vsfx-tree-row-7")).toBeInTheDocument();
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "Restore Construct tree" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restore Selected properties" }));
     fireEvent.click(screen.getByTestId("vsfx-tree-row-7"));
 
     await waitFor(() => {
@@ -486,10 +490,11 @@ describe("VSFX regression coverage", () => {
     render(<ArtifactFileDetail filepath="/artifacts/bad-props.vsfx" threadId="thread-123" />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("vsfx-tree-row-9")).toBeInTheDocument();
       expect(screen.getByTestId("vsfx-canvas")).toBeInTheDocument();
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "Restore Construct tree" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restore Selected properties" }));
     fireEvent.click(screen.getByTestId("vsfx-tree-row-9"));
 
     await waitFor(() => {

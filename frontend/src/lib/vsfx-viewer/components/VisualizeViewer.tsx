@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
+import { useEffect, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -26,9 +26,24 @@ export function VisualizeViewer({
   const { resolvedTheme } = useTheme();
   const viewerRootRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLCanvasElement | null>(null);
+  const onErrorRef = useRef(onError);
+  const onProgressRef = useRef(onProgress);
+  const onReadyRef = useRef(onReady);
   const [isLoading, setIsLoading] = useState(true);
   const [progress, setProgress] = useState(0);
   const [viewerInstance, setViewerInstance] = useState<Viewer | null>(null);
+
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
+
+  useEffect(() => {
+    onProgressRef.current = onProgress;
+  }, [onProgress]);
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -48,7 +63,7 @@ export function VisualizeViewer({
               return;
             }
             setProgress(nextProgress.percent);
-            onProgress?.(nextProgress);
+            onProgressRef.current?.(nextProgress);
           },
         });
 
@@ -78,7 +93,7 @@ export function VisualizeViewer({
 
         setIsLoading(false);
         setViewerInstance(viewer);
-        onReady?.(viewer);
+        onReadyRef.current?.(viewer);
       }
       catch (error) {
         if (!active) {
@@ -86,7 +101,7 @@ export function VisualizeViewer({
         }
         setIsLoading(false);
         setViewerInstance(null);
-        onError?.(error);
+        onErrorRef.current?.(error);
       }
     };
 
@@ -99,7 +114,7 @@ export function VisualizeViewer({
         viewer.dispose();
       }, 0);
     };
-  }, [onError, onProgress, onReady]);
+  }, []);
 
   useEffect(() => {
     if (!viewerInstance || !viewerRootRef.current) {

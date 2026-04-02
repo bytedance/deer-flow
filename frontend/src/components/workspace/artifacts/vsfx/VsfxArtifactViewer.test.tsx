@@ -16,12 +16,12 @@ const viewerMock = {
 };
 
 vi.mock("@/lib/vsfx-viewer/components/VisualizeViewer", () => ({
-  VisualizeViewer: (props: { onReady?: (viewer: typeof viewerMock) => void }) => {
-    visualizeViewerSpy(props);
+  VisualizeViewer: ({ onReady }: { onReady?: (viewer: typeof viewerMock) => void }) => {
+    visualizeViewerSpy({ onReady });
 
     useEffect(() => {
-      props.onReady?.(viewerMock);
-    }, [props.onReady]);
+      onReady?.(viewerMock);
+    }, [onReady]);
 
     return (
       <div
@@ -305,6 +305,45 @@ describe("VsfxArtifactViewer", () => {
         filename: "widget.vsfx",
       });
     });
+  });
+
+  test("does not reload the artifact when rerendered with a new artifacts array containing the same paths", async () => {
+    mockSuccessfulVsfxArtifactFetches(fetchMock);
+
+    const { rerender } = render(
+      <VsfxArtifactViewer
+        artifacts={[
+          "/artifacts/widget.vsfx",
+          "/artifacts/widget.cda.json",
+          "/artifacts/widget.Properties.json",
+        ]}
+        filepath="/artifacts/widget.vsfx"
+        threadId="thread-123"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    rerender(
+      <VsfxArtifactViewer
+        artifacts={[
+          "/artifacts/widget.vsfx",
+          "/artifacts/widget.cda.json",
+          "/artifacts/widget.Properties.json",
+        ]}
+        filepath="/artifacts/widget.vsfx"
+        threadId="thread-123"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenCalledTimes(1);
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   test("renders the construct tree and selected properties windows minimized by default, then restores and re-minimizes them", async () => {

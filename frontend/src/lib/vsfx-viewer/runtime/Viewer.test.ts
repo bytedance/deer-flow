@@ -585,7 +585,7 @@ describe("Viewer", () => {
 
     expect(backend.resize).toHaveBeenCalledTimes(1);
     expect(backend.update).toHaveBeenCalledTimes(1);
-    expect(backend.render).not.toHaveBeenCalled();
+    expect(backend.render).toHaveBeenCalledTimes(1);
     expect(resizeListener).toHaveBeenCalledWith({
       height: 180,
       width: 320,

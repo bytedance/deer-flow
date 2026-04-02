@@ -96,6 +96,45 @@ describe("VisualizeViewer", () => {
     });
   });
 
+  test("does not reinitialize the viewer when parent rerenders with new callback identities", async () => {
+    viewerState.initialize.mockResolvedValue(undefined);
+
+    const firstOnReady = vi.fn();
+    const firstOnProgress = vi.fn();
+    const firstOnError = vi.fn();
+
+    const { rerender } = render(
+      <VisualizeViewer
+        onError={firstOnError}
+        onProgress={firstOnProgress}
+        onReady={firstOnReady}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(viewerState.initialize).toHaveBeenCalledTimes(1);
+    });
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    viewerState.dispose.mockClear();
+
+    rerender(
+      <VisualizeViewer
+        onError={vi.fn()}
+        onProgress={vi.fn()}
+        onReady={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(viewerState.initialize).toHaveBeenCalledTimes(1);
+    });
+
+    expect(viewerState.dispose).not.toHaveBeenCalled();
+  });
+
   test("re-applies the SDK background color after the viewer opens content", async () => {
     let openListener: (() => void) | undefined;
 

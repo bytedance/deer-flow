@@ -34,6 +34,8 @@ export function VsfxArtifactViewer({
 }: VsfxArtifactViewerProps) {
   const requestIdRef = useRef(0);
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
+  const artifactsSignature = useMemo(() => JSON.stringify(artifacts), [artifacts]);
+  const stableArtifactsRef = useRef(artifacts);
   const initialBundle = useMemo(
     () => createInitialVsfxArtifactBundle(threadId, filepath, isMock),
     [filepath, isMock, threadId],
@@ -47,13 +49,17 @@ export function VsfxArtifactViewer({
   const [artifactVersion, setArtifactVersion] = useState(0);
 
   useEffect(() => {
+    stableArtifactsRef.current = artifacts;
+  }, [artifacts]);
+
+  useEffect(() => {
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
 
     const request = createVsfxArtifactBundleRequest(
       threadId,
       filepath,
-      artifacts,
+      stableArtifactsRef.current,
       isMock,
     );
     const primaryController = new AbortController();
@@ -133,7 +139,7 @@ export function VsfxArtifactViewer({
       request.cancel();
       primaryController.abort();
     };
-  }, [artifacts, filepath, isMock, threadId]);
+  }, [artifactsSignature, filepath, isMock, threadId]);
 
   const isLoading = bundle.loading || primaryLoading;
   const fatalError = primaryError ?? bundle.errors.primary;
