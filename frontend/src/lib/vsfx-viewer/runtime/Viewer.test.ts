@@ -65,6 +65,138 @@ function createVisualizeBackend() {
   };
 }
 
+function createInteractionBackend() {
+  const backend = createVisualizeBackend() as ReturnType<typeof createVisualizeBackend> & {
+    readonly activeView: {
+      beginInteractivity: ReturnType<typeof vi.fn>;
+      delete: ReturnType<typeof vi.fn>;
+      endInteractivity: ReturnType<typeof vi.fn>;
+      perspective: boolean;
+      upVector: number[];
+      viewFieldHeight: number;
+      viewFieldWidth: number;
+      viewPosition: number[];
+      viewTarget: number[];
+      vportRect: [number, number, number, number];
+    };
+    getActiveDevice: ReturnType<typeof vi.fn>;
+    getActiveTvExtendedView: ReturnType<typeof vi.fn>;
+    screenToWorld: ReturnType<typeof vi.fn>;
+    setActiveDragger: ReturnType<typeof vi.fn>;
+    setView: ReturnType<typeof vi.fn>;
+    zoomAt: ReturnType<typeof vi.fn>;
+  };
+  const viewState = {
+    perspective: true,
+    upVector: [0, 1, 0],
+    viewFieldHeight: 10,
+    viewFieldWidth: 10,
+    viewPosition: [0, 0, 10],
+    viewTarget: [0, 0, 0],
+    vportRect: [0, 0, 100, 100] as [number, number, number, number],
+  };
+  const beginInteractivity = vi.fn();
+  const endInteractivity = vi.fn();
+  const setView = vi.fn(
+    (
+      position: number[],
+      target: number[],
+      upVector: number[],
+      viewFieldWidth: number,
+      viewFieldHeight: number,
+      perspective: boolean,
+    ) => {
+      viewState.viewPosition = [...position];
+      viewState.viewTarget = [...target];
+      viewState.upVector = [...upVector];
+      viewState.viewFieldWidth = viewFieldWidth;
+      viewState.viewFieldHeight = viewFieldHeight;
+      viewState.perspective = perspective;
+    },
+  );
+
+  Object.defineProperty(backend, "activeView", {
+    configurable: true,
+    get: () => ({
+      beginInteractivity,
+      delete: vi.fn(),
+      endInteractivity,
+      perspective: viewState.perspective,
+      upVector: [...viewState.upVector],
+      viewFieldHeight: viewState.viewFieldHeight,
+      viewFieldWidth: viewState.viewFieldWidth,
+      viewPosition: [...viewState.viewPosition],
+      viewTarget: [...viewState.viewTarget],
+      vportRect: [...viewState.vportRect] as [number, number, number, number],
+    }),
+  });
+
+  backend.getActiveDevice = vi.fn(() => ({
+    delete: vi.fn(),
+    invalidate: vi.fn(),
+  }));
+  backend.getActiveTvExtendedView = vi.fn(() => ({
+    delete: vi.fn(),
+    setView,
+  }));
+  backend.screenToWorld = vi.fn((x: number, y: number) => [x / 10, y / 10, 0]);
+  backend.setActiveDragger = vi.fn();
+  backend.setView = setView;
+  backend.zoomAt = vi.fn();
+
+  return backend;
+}
+
+function dispatchCanvasPointerEvent(
+  target: HTMLCanvasElement,
+  type: string,
+  init: PointerEventInit & { offsetX?: number; offsetY?: number },
+) {
+  const event = new PointerEvent(type, {
+    bubbles: true,
+    isPrimary: true,
+    pointerId: 1,
+    pointerType: "mouse",
+    ...init,
+  });
+
+  Object.defineProperties(event, {
+    offsetX: {
+      configurable: true,
+      value: init.offsetX ?? init.clientX ?? 0,
+    },
+    offsetY: {
+      configurable: true,
+      value: init.offsetY ?? init.clientY ?? 0,
+    },
+  });
+
+  target.dispatchEvent(event);
+}
+
+function dispatchCanvasWheelEvent(
+  target: HTMLCanvasElement,
+  init: WheelEventInit & { offsetX?: number; offsetY?: number },
+) {
+  const event = new WheelEvent("wheel", {
+    bubbles: true,
+    ...init,
+  });
+
+  Object.defineProperties(event, {
+    offsetX: {
+      configurable: true,
+      value: init.offsetX ?? 0,
+    },
+    offsetY: {
+      configurable: true,
+      value: init.offsetY ?? 0,
+    },
+  });
+
+  target.dispatchEvent(event);
+}
+
 describe("Viewer", () => {
   test("initializes and disposes cleanly without markup dependencies", async () => {
     const loadVisualizeLibrary = vi.fn(async () => ({ ready: true }));
@@ -455,5 +587,99 @@ describe("Viewer", () => {
     expect(onSpy).toHaveBeenCalledWith("pointerdown", expect.any(Function));
     expect(offSpy).toHaveBeenCalledWith("wheel", expect.any(Function));
     expect(offSpy).toHaveBeenCalledWith("pointerdown", expect.any(Function));
+  });
+
+  test("zoom wheel converts wheel input into backend zoomAt calls", async () => {
+    const backend = createInteractionBackend();
+    const canvas = document.createElement("canvas");
+    vi.spyOn(window, "devicePixelRatio", "get").mockReturnValue(1);
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    backend.zoomAt.mockClear();
+
+    dispatchCanvasWheelEvent(canvas, { deltaY: -120, offsetX: 12, offsetY: 18 });
+
+    expect(backend.zoomAt).toHaveBeenCalledTimes(1);
+    expect(backend.zoomAt).toHaveBeenCalledWith(expect.any(Number), 12, 18);
+  });
+
+  test("orbit-pan maps left button drag to orbit and middle button drag to pan", async () => {
+    const backend = createInteractionBackend();
+    const canvas = document.createElement("canvas");
+    canvas.setPointerCapture = vi.fn();
+    canvas.releasePointerCapture = vi.fn();
+
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    viewer.setActiveDragger("orbit-pan");
+    backend.setView.mockClear();
+    backend.screenToWorld.mockClear();
+
+    dispatchCanvasPointerEvent(canvas, "pointerdown", {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      offsetX: 10,
+      offsetY: 10,
+    });
+    dispatchCanvasPointerEvent(canvas, "pointermove", {
+      button: 0,
+      clientX: 24,
+      clientY: 26,
+      offsetX: 24,
+      offsetY: 26,
+    });
+    dispatchCanvasPointerEvent(canvas, "pointerup", {
+      button: 0,
+      clientX: 24,
+      clientY: 26,
+      offsetX: 24,
+      offsetY: 26,
+    });
+
+    expect(backend.setView).toHaveBeenCalled();
+    expect(backend.screenToWorld).not.toHaveBeenCalled();
+
+    backend.setView.mockClear();
+    backend.screenToWorld.mockClear();
+
+    dispatchCanvasPointerEvent(canvas, "pointerdown", {
+      button: 1,
+      clientX: 18,
+      clientY: 18,
+      offsetX: 18,
+      offsetY: 18,
+    });
+    dispatchCanvasPointerEvent(canvas, "pointermove", {
+      button: 1,
+      clientX: 28,
+      clientY: 30,
+      offsetX: 28,
+      offsetY: 30,
+    });
+    dispatchCanvasPointerEvent(canvas, "pointerup", {
+      button: 1,
+      clientX: 28,
+      clientY: 30,
+      offsetX: 28,
+      offsetY: 30,
+    });
+
+    expect(backend.screenToWorld).toHaveBeenCalled();
+    expect(backend.setView).toHaveBeenCalled();
   });
 });
