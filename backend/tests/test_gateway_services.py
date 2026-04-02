@@ -278,6 +278,32 @@ def test_context_does_not_override_existing_configurable():
     assert config["configurable"]["subagent_enabled"] is True
 
 
+def test_merge_context_overrides_keeps_context_mode():
+    """When request config already uses context, do not reintroduce configurable."""
+    from app.gateway.services import merge_context_overrides
+
+    config = {
+        "recursion_limit": 100,
+        "context": {"thread_id": "thread-1", "user_id": "u-42"},
+        "tags": ["prod"],
+    }
+
+    merged = merge_context_overrides(
+        config,
+        {
+            "model_name": "deepseek-v3",
+            "thinking_enabled": True,
+            "thread_id": "should-be-ignored",
+        },
+    )
+
+    assert "configurable" not in merged
+    assert merged["context"]["thread_id"] == "thread-1"
+    assert merged["context"]["user_id"] == "u-42"
+    assert merged["context"]["model_name"] == "deepseek-v3"
+    assert merged["context"]["thinking_enabled"] is True
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------

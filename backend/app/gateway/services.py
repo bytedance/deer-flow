@@ -166,6 +166,43 @@ def build_run_config(
     return config
 
 
+_CONTEXT_CONFIGURABLE_KEYS = {
+    "model_name",
+    "mode",
+    "thinking_enabled",
+    "reasoning_effort",
+    "is_plan_mode",
+    "subagent_enabled",
+    "max_concurrent_subagents",
+}
+
+
+def merge_context_overrides(config: dict[str, Any], context: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge DeerFlow-specific context overrides without mixing LangGraph modes.
+
+    LangGraph >= 0.6.0 rejects requests that include both ``context`` and
+    ``configurable``. When the incoming request already uses ``context``, keep
+    these overrides in ``config["context"]``. Otherwise, map the allowlisted
+    agent settings into ``configurable`` for the legacy path.
+    """
+    if not context:
+        return config
+
+    if "context" in config and "configurable" not in config:
+        merged_context = {**config["context"]}
+        for key in _CONTEXT_CONFIGURABLE_KEYS:
+            if key in context:
+                merged_context.setdefault(key, context[key])
+        config["context"] = merged_context
+        return config
+
+    configurable = config.setdefault("configurable", {})
+    for key in _CONTEXT_CONFIGURABLE_KEYS:
+        if key in context:
+            configurable.setdefault(key, context[key])
+    return config
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
@@ -290,19 +327,7 @@ async def start_run(
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
     context = getattr(body, "context", None)
     if context:
-        _CONTEXT_CONFIGURABLE_KEYS = {
-            "model_name",
-            "mode",
-            "thinking_enabled",
-            "reasoning_effort",
-            "is_plan_mode",
-            "subagent_enabled",
-            "max_concurrent_subagents",
-        }
-        configurable = config.setdefault("configurable", {})
-        for key in _CONTEXT_CONFIGURABLE_KEYS:
-            if key in context:
-                configurable.setdefault(key, context[key])
+        config = merge_context_overrides(config, context)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
