@@ -45,14 +45,6 @@ If no other skills are discovered (only surprise-me exists), use one of these fa
 3. Combine outputs into one cohesive deliverable
 4. Present the result with minimal preamble — let the work speak for itself
 
-**Delivery rules:**
-- Temporary planning files belong in `/mnt/user-data/workspace`
-- Temporary planning files are not the final surprise
-- Do not keep rewriting the same intermediate JSON / prompt file once it already contains the intended content
-- After the planning file is ready, move on to the actual user-facing artifact
-- Final deliverables must be placed in `/mnt/user-data/outputs` and presented with `present_files`
-- Never stop after only producing a prompt-spec JSON in `workspace`
-
 ### Step 5: Reveal
 
 Present the surprise with minimal spoilers. A short teaser line, then the artifact.

@@ -4,14 +4,15 @@ from deerflow.config.sandbox_config import SandboxConfig
 
 
 def _make_model(**overrides) -> ModelConfig:
-    return ModelConfig(
-        name="openai-responses",
-        display_name="OpenAI Responses",
-        description=None,
-        use="langchain_openai:ChatOpenAI",
-        model="gpt-5",
-        **overrides,
-    )
+    defaults = {
+        "name": "openai-responses",
+        "display_name": "OpenAI Responses",
+        "description": None,
+        "use": "langchain_openai:ChatOpenAI",
+        "model": "gpt-5",
+    }
+    defaults.update(overrides)
+    return ModelConfig(**defaults)
 
 
 def _make_app_config(models: list[ModelConfig]) -> AppConfig:
@@ -55,3 +56,16 @@ def test_get_model_config_matches_name_model_and_display_name():
     assert config.get_model_config("glm-router") is not None
     assert config.get_model_config("glm-5-turbo") is not None
     assert config.get_model_config("GLM-5-Turbo") is not None
+
+
+def test_get_model_config_prefers_name_before_model_and_display_name():
+    name_match = _make_model(name="glm-5-turbo", model="different-provider-model")
+    model_match = _make_model(name="router-model", model="glm-5-turbo")
+    display_name_match = _make_model(
+        name="display-router",
+        model="another-provider-model",
+        display_name="glm-5-turbo",
+    )
+    config = _make_app_config([model_match, display_name_match, name_match])
+
+    assert config.get_model_config("glm-5-turbo") == name_match
