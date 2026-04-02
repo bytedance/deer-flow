@@ -256,6 +256,7 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  - name: icad
 
 # ============================================================================
 # Tools Configuration
@@ -339,6 +340,17 @@ tools:
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
+
+  # iCAD steel-structure visualization tool
+  # Configure the fea-worker base URL here.
+  # The tool will call: {worker_base_url}/api/visualize
+  # Local example:  http://127.0.0.1:8000
+  # Docker example: http://fea-worker:8000
+  - name: visualize_steel_structure
+    group: icad
+    use: icad.tools:visualize_steel_structure
+    worker_base_url: http://127.0.0.1:8000
+    timeout_seconds: 120
 
 # ============================================================================
 # Tool Search Configuration (Deferred Tool Loading)
