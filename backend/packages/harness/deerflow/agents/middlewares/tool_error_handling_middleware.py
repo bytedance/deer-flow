@@ -138,6 +138,6 @@ def build_subagent_runtime_middlewares(*, lazy_init: bool = True) -> list[AgentM
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     return _build_runtime_middlewares(
         include_uploads=False,
-        include_dangling_tool_call_patch=False,
+        include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
     )
