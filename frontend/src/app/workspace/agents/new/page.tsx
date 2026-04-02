@@ -16,11 +16,7 @@ import { ArtifactsProvider } from "@/components/workspace/artifacts";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
-import {
-  AgentNameCheckError,
-  checkAgentName,
-  getAgent,
-} from "@/core/agents/api";
+import { checkAgentName, getAgent } from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
