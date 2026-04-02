@@ -331,8 +331,8 @@ export function useThreadStream({
               recursion_limit: 1000,
             },
             context: {
-              ...extraContext,
               ...context,
+              ...extraContext,
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
               subagent_enabled: context.mode === "ultra",

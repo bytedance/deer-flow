@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
+from src.config.agent_identity import validate_agent_display_name, validate_agent_slug
 from src.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
@@ -25,15 +26,19 @@ def setup_agent(
     """
 
     agent_name: str | None = runtime.context.get("agent_name")
+    agent_display_name: str | None = runtime.context.get("agent_display_name")
 
     try:
         paths = get_paths()
+        if agent_name is not None:
+            agent_name = validate_agent_slug(agent_name)
         agent_dir = paths.agent_dir(agent_name) if agent_name else paths.base_dir
         agent_dir.mkdir(parents=True, exist_ok=True)
 
         if agent_name:
             # If agent_name is provided, we are creating a custom agent in the agents/ directory
-            config_data: dict = {"name": agent_name}
+            display_name = validate_agent_display_name(agent_display_name or agent_name)
+            config_data: dict = {"name": agent_name, "display_name": display_name}
             if description:
                 config_data["description"] = description
 

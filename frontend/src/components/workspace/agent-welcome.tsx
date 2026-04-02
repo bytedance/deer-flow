@@ -14,7 +14,7 @@ export function AgentWelcome({
   agent: Agent | null | undefined;
   agentName: string;
 }) {
-  const displayName = agent?.name ?? agentName;
+  const displayName = agent?.display_name ?? agent?.name ?? agentName;
   const description = agent?.description;
 
   return (

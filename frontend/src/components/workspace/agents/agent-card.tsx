@@ -62,7 +62,7 @@ export function AgentCard({ agent }: AgentCardProps) {
               </div>
               <div className="min-w-0">
                 <CardTitle className="truncate text-base">
-                  {agent.name}
+                  {agent.display_name}
                 </CardTitle>
                 {agent.model && (
                   <Badge variant="secondary" className="mt-0.5 text-xs">

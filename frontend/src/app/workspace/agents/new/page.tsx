@@ -24,8 +24,6 @@ import { cn } from "@/lib/utils";
 
 type Step = "name" | "chat";
 
-const NAME_RE = /^[A-Za-z0-9-]+$/;
-
 export default function NewAgentPage() {
   const { t } = useI18n();
   const router = useRouter();
@@ -36,6 +34,7 @@ export default function NewAgentPage() {
   const [nameError, setNameError] = useState("");
   const [isCheckingName, setIsCheckingName] = useState(false);
   const [agentName, setAgentName] = useState("");
+  const [agentDisplayName, setAgentDisplayName] = useState("");
   const [agent, setAgent] = useState<Agent | null>(null);
   // ── Step 2: chat ───────────────────────────────────────────────────────────
 
@@ -47,6 +46,8 @@ export default function NewAgentPage() {
     context: {
       mode: "flash",
       is_bootstrap: true,
+      agent_name: agentName,
+      agent_display_name: agentDisplayName,
     },
     onToolEnd({ name }) {
       if (name !== "setup_agent" || !agentName) return;
@@ -63,10 +64,6 @@ export default function NewAgentPage() {
   const handleConfirmName = useCallback(async () => {
     const trimmed = nameInput.trim();
     if (!trimmed) return;
-    if (!NAME_RE.test(trimmed)) {
-      setNameError(t.agents.nameStepInvalidError);
-      return;
-    }
     setNameError("");
     setIsCheckingName(true);
     try {
@@ -75,24 +72,37 @@ export default function NewAgentPage() {
         setNameError(t.agents.nameStepAlreadyExistsError);
         return;
       }
-    } catch {
-      setNameError(t.agents.nameStepCheckError);
+      setAgentName(result.name);
+      setAgentDisplayName(result.display_name);
+      setStep("chat");
+      await sendMessage(
+        threadId,
+        {
+          text: t.agents.nameStepBootstrapMessage.replace(
+            "{name}",
+            result.display_name,
+          ),
+          files: [],
+        },
+        {
+          agent_name: result.name,
+          agent_display_name: result.display_name,
+        },
+      );
+      return;
+    } catch (error) {
+      setNameError(
+        error instanceof Error ? error.message : t.agents.nameStepCheckError,
+      );
       return;
     } finally {
       setIsCheckingName(false);
     }
-    setAgentName(trimmed);
-    setStep("chat");
-    await sendMessage(threadId, {
-      text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
-      files: [],
-    });
   }, [
     nameInput,
     sendMessage,
     threadId,
     t.agents.nameStepBootstrapMessage,
-    t.agents.nameStepInvalidError,
     t.agents.nameStepAlreadyExistsError,
     t.agents.nameStepCheckError,
   ]);
@@ -211,7 +221,7 @@ export default function NewAgentPage() {
                     <p className="font-semibold">{t.agents.agentCreated}</p>
                     <div className="flex gap-2">
                       <Button
-                        onClick={() =>
+                  onClick={() =>
                           router.push(
                             `/workspace/agents/${agentName}/chats/new`,
                           )

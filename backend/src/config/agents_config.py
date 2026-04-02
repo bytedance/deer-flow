@@ -1,27 +1,33 @@
 """Configuration and loaders for custom agents."""
 
 import logging
-import re
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
+from src.config.agent_identity import validate_agent_slug
 from src.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
-AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
     name: str
+    display_name: str | None = None
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _fill_display_name(self) -> "AgentConfig":
+        if self.display_name is None:
+            self.display_name = self.name
+        return self
 
 
 def load_agent_config(name: str | None) -> AgentConfig | None:
@@ -41,8 +47,7 @@ def load_agent_config(name: str | None) -> AgentConfig | None:
     if name is None:
         return None
 
-    if not AGENT_NAME_PATTERN.match(name):
-        raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
+    name = validate_agent_slug(name)
     agent_dir = get_paths().agent_dir(name)
     config_file = agent_dir / "config.yaml"
 

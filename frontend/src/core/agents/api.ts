@@ -53,7 +53,7 @@ export async function deleteAgent(name: string): Promise<void> {
 
 export async function checkAgentName(
   name: string,
-): Promise<{ available: boolean; name: string }> {
+): Promise<{ available: boolean; name: string; display_name: string }> {
   const res = await fetch(
     `${getBackendBaseURL()}/api/agents/check?name=${encodeURIComponent(name)}`,
   );
@@ -63,5 +63,9 @@ export async function checkAgentName(
       err.detail ?? `Failed to check agent name: ${res.statusText}`,
     );
   }
-  return res.json() as Promise<{ available: boolean; name: string }>;
+  return res.json() as Promise<{
+    available: boolean;
+    name: string;
+    display_name: string;
+  }>;
 }

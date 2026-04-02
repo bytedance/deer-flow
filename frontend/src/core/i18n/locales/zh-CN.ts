@@ -172,10 +172,10 @@ export const zhCN: Translations = {
     createPageSubtitle: "描述你想要的智能体，我来帮你通过对话创建。",
     nameStepTitle: "给新智能体起个名字",
     nameStepHint:
-      "只允许字母、数字和连字符，存储时自动转为小写（例如 code-reviewer）",
-    nameStepPlaceholder: "例如 code-reviewer",
+      "支持中文、英文和数字等自然名称；系统会自动生成内部标识",
+    nameStepPlaceholder: "例如 研究助手",
     nameStepContinue: "继续",
-    nameStepInvalidError: "名称无效，只允许字母、数字和连字符",
+    nameStepInvalidError: "名称无效，请换一个名称",
     nameStepAlreadyExistsError: "已存在同名智能体",
     nameStepCheckError: "无法验证名称可用性，请稍后重试",
     nameStepBootstrapMessage:

@@ -76,6 +76,7 @@ class TestAgentConfig:
 
         cfg = AgentConfig(name="my-agent")
         assert cfg.name == "my-agent"
+        assert cfg.display_name == "my-agent"
         assert cfg.description == ""
         assert cfg.model is None
         assert cfg.tool_groups is None
@@ -85,11 +86,13 @@ class TestAgentConfig:
 
         cfg = AgentConfig(
             name="code-reviewer",
+            display_name="Code Reviewer",
             description="Specialized for code review",
             model="deepseek-v3",
             tool_groups=["file:read", "bash"],
         )
         assert cfg.name == "code-reviewer"
+        assert cfg.display_name == "Code Reviewer"
         assert cfg.model == "deepseek-v3"
         assert cfg.tool_groups == ["file:read", "bash"]
 
@@ -152,6 +155,23 @@ class TestLoadAgentConfig:
             cfg = load_agent_config("inferred-name")
 
         assert cfg.name == "inferred-name"
+        assert cfg.display_name == "inferred-name"
+
+    def test_load_config_preserves_display_name(self, tmp_path):
+        config_dict = {
+            "name": "research-assistant",
+            "display_name": "研究助手",
+            "description": "帮你做研究",
+        }
+        _write_agent(tmp_path, "research-assistant", config_dict)
+
+        with patch("src.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from src.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("research-assistant")
+
+        assert cfg.name == "research-assistant"
+        assert cfg.display_name == "研究助手"
 
     def test_load_config_with_tool_groups(self, tmp_path):
         config_dict = {"name": "restricted", "tool_groups": ["file:read", "file:write"]}
@@ -388,13 +408,35 @@ class TestAgentsAPI:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "code-reviewer"
+        assert data["display_name"] == "code-reviewer"
         assert data["description"] == "Reviews code"
         assert data["soul"] == "You are a code reviewer."
 
-    def test_create_agent_invalid_name(self, agent_client):
-        payload = {"name": "Code Reviewer!", "soul": "test"}
+    def test_create_agent_invalid_display_name(self, agent_client):
+        payload = {"name": "Code/Reviewer", "soul": "test"}
         response = agent_client.post("/api/agents", json=payload)
         assert response.status_code == 422
+
+    def test_create_agent_with_chinese_display_name(self, agent_client):
+        payload = {
+            "name": "研究助手",
+            "description": "帮助用户做研究",
+            "soul": "你是研究助手",
+        }
+        response = agent_client.post("/api/agents", json=payload)
+        assert response.status_code == 201
+        data = response.json()
+        assert data["name"] == "agent-347704096c"
+        assert data["display_name"] == "研究助手"
+
+    def test_check_agent_name_returns_generated_slug_for_display_name(self, agent_client):
+        response = agent_client.get("/api/agents/check", params={"name": "研究助手"})
+        assert response.status_code == 200
+        assert response.json() == {
+            "available": True,
+            "name": "agent-347704096c",
+            "display_name": "研究助手",
+        }
 
     def test_create_duplicate_agent_409(self, agent_client):
         payload = {"name": "my-agent", "soul": "test"}
@@ -421,6 +463,7 @@ class TestAgentsAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "test-agent"
+        assert data["display_name"] == "test-agent"
         assert data["soul"] == "Hello world"
 
     def test_get_missing_agent_404(self, agent_client):
@@ -440,6 +483,14 @@ class TestAgentsAPI:
         response = agent_client.put("/api/agents/desc-agent", json={"description": "new desc"})
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
+
+    def test_update_agent_display_name(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "desc-agent", "soul": "p"})
+
+        response = agent_client.put("/api/agents/desc-agent", json={"display_name": "研究助手"})
+        assert response.status_code == 200
+        assert response.json()["name"] == "desc-agent"
+        assert response.json()["display_name"] == "研究助手"
 
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})
@@ -474,13 +525,17 @@ class TestAgentsAPI:
         assert data["tool_groups"] == ["file:read", "bash"]
 
     def test_create_persists_files_on_disk(self, agent_client, tmp_path):
-        agent_client.post("/api/agents", json={"name": "disk-check", "soul": "disk soul"})
+        agent_client.post("/api/agents", json={"name": "研究助手", "soul": "disk soul"})
 
-        agent_dir = tmp_path / "agents" / "disk-check"
+        agent_dir = tmp_path / "agents" / "agent-347704096c"
         assert agent_dir.exists()
         assert (agent_dir / "config.yaml").exists()
         assert (agent_dir / "SOUL.md").exists()
         assert (agent_dir / "SOUL.md").read_text() == "disk soul"
+        assert yaml.safe_load((agent_dir / "config.yaml").read_text(encoding="utf-8")) == {
+            "name": "agent-347704096c",
+            "display_name": "研究助手",
+        }
 
     def test_delete_removes_files_from_disk(self, agent_client, tmp_path):
         agent_client.post("/api/agents", json={"name": "remove-me", "soul": "bye"})

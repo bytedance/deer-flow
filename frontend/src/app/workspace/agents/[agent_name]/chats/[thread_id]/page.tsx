@@ -94,7 +94,7 @@ export default function AgentChatPage() {
             <div className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
               <BotIcon className="text-primary h-3.5 w-3.5" />
               <span className="text-xs font-medium">
-                {agent?.name ?? agent_name}
+                {agent?.display_name ?? agent?.name ?? agent_name}
               </span>
             </div>
 

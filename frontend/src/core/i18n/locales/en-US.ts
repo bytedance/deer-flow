@@ -182,11 +182,10 @@ export const enUS: Translations = {
       "Describe the agent you want — I'll help you create it through conversation.",
     nameStepTitle: "Name your new Agent",
     nameStepHint:
-      "Letters, digits, and hyphens only — stored lowercase (e.g. code-reviewer)",
-    nameStepPlaceholder: "e.g. code-reviewer",
+      "Use a natural display name in any supported language — the internal ID is generated automatically",
+    nameStepPlaceholder: "e.g. Research Assistant",
     nameStepContinue: "Continue",
-    nameStepInvalidError:
-      "Invalid name — use only letters, digits, and hyphens",
+    nameStepInvalidError: "Invalid name — please choose a different display name",
     nameStepAlreadyExistsError: "An agent with this name already exists",
     nameStepCheckError: "Could not verify name availability — please try again",
     nameStepBootstrapMessage:

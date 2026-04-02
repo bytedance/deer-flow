@@ -269,6 +269,11 @@ def make_lead_agent(config: RunnableConfig):
     agent_name = cfg.get("agent_name")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    agent_display_name = (
+        cfg.get("agent_display_name")
+        or (agent_config.display_name if agent_config else None)
+        or agent_name
+    )
     # Custom agent model or fallback to global/default model resolution
     agent_model_name = agent_config.model if agent_config and agent_config.model else _resolve_model_name()
 
@@ -327,6 +332,11 @@ def make_lead_agent(config: RunnableConfig):
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
-        system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
+        system_prompt=apply_prompt_template(
+            subagent_enabled=subagent_enabled,
+            max_concurrent_subagents=max_concurrent_subagents,
+            agent_name=agent_name,
+            agent_display_name=agent_display_name,
+        ),
         state_schema=ThreadState,
     )
