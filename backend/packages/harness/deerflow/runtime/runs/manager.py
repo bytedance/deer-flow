@@ -81,11 +81,9 @@ class RunManager:
     async def list_by_thread(self, thread_id: str) -> list[RunRecord]:
         """Return all runs for a given thread, newest first."""
         async with self._lock:
-            return sorted(
-                (r for r in self._runs.values() if r.thread_id == thread_id),
-                key=lambda r: r.created_at,
-                reverse=True,
-            )
+            # Dict insertion order matches creation order, so reversing it gives
+            # us deterministic newest-first results even when timestamps tie.
+            return [r for r in reversed(self._runs.values()) if r.thread_id == thread_id]
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""

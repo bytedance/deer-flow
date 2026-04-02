@@ -180,6 +180,7 @@ make down   # 停止并移除容器
 如果你更希望直接在本地启动各个服务：
 
 前提：先完成上面的“配置”步骤（`make config` 和模型 API key 配置）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`，也可以通过 `DEER_FLOW_CONFIG_PATH` 覆盖。
+在 Windows 上，请使用 Git Bash 运行本地开发流程。基于 bash 的服务脚本不支持直接在原生 `cmd.exe` 或 PowerShell 中执行，且 WSL 也不保证可用，因为部分脚本依赖 Git for Windows 的 `cygpath` 等工具。
 
 1. **检查依赖环境**：
    ```bash

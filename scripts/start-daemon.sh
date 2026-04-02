@@ -71,6 +71,7 @@ trap cleanup_on_failure INT TERM
 # ── Start services ────────────────────────────────────────────────────────────
 
 mkdir -p logs
+mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
 
 echo "Starting LangGraph server..."
 nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &

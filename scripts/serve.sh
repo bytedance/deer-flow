@@ -30,7 +30,15 @@ done
 if $DEV_MODE; then
     FRONTEND_CMD="pnpm run dev"
 else
-    FRONTEND_CMD="env BETTER_AUTH_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="python3"
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="python"
+    else
+        echo "Python is required to generate BETTER_AUTH_SECRET, but neither python3 nor python was found."
+        exit 1
+    fi
+    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
 fi
 
 # ── Stop existing services ────────────────────────────────────────────────────
@@ -121,6 +129,7 @@ trap cleanup INT TERM
 # ── Start services ────────────────────────────────────────────────────────────
 
 mkdir -p logs
+mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
 
 if $DEV_MODE; then
     LANGGRAPH_EXTRA_FLAGS="--no-reload"
