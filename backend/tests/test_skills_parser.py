@@ -93,6 +93,27 @@ class TestParseSkillFile:
         assert result is not None
         assert result.description == "A skill: does things"
 
+    def test_multiline_yaml_folded_description(self, tmp_path):
+        skill_file = _write_skill(
+            tmp_path,
+            "---\nname: multiline-skill\ndescription: >\n   This is a multiline\n   description for a skill.\n\n   It spans multiple lines.\nlicense: MIT\n---\n\nBody\n",
+        )
+        result = parse_skill_file(skill_file, "public")
+        assert result is not None
+        assert result.name == "multiline-skill"
+        assert result.description == "This is a multiline description for a skill.\n\nIt spans multiple lines."
+        assert result.license == "MIT"
+
+    def test_multiline_yaml_literal_description(self, tmp_path):
+        skill_file = _write_skill(
+            tmp_path,
+            "---\nname: pipe-skill\ndescription: |\n    First line.\n    Second line.\n---\n\nBody\n",
+        )
+        result = parse_skill_file(skill_file, "public")
+        assert result is not None
+        assert result.name == "pipe-skill"
+        assert result.description == "First line.\nSecond line."
+
     def test_empty_front_matter_returns_none(self, tmp_path):
         skill_file = _write_skill(tmp_path, "---\n\n---\n\nBody\n")
         assert parse_skill_file(skill_file, "public") is None
