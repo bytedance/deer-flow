@@ -211,4 +211,51 @@ describe("VsfxArtifactViewer", () => {
       });
     });
   });
+
+  test("reopens when the same filepath resolves to new bytes", async () => {
+    let primaryRequestCount = 0;
+
+    fetchMock.mockImplementation(async (input) => {
+      const url = readFetchInputUrl(input);
+
+      if (url.endsWith("/artifacts/widget.vsfx")) {
+        primaryRequestCount += 1;
+        return primaryRequestCount === 1
+          ? createBinaryResponse([1, 2, 3, 4])
+          : createBinaryResponse([9, 8, 7, 6]);
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    const { rerender } = render(
+      <VsfxArtifactViewer
+        artifacts={["/artifacts/widget.vsfx"]}
+        filepath="/artifacts/widget.vsfx"
+        threadId="thread-123"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenNthCalledWith(1, {
+        data: expect.any(ArrayBuffer),
+        filename: "widget.vsfx",
+      });
+    });
+
+    rerender(
+      <VsfxArtifactViewer
+        artifacts={["/artifacts/widget.vsfx"]}
+        filepath="/artifacts/widget.vsfx"
+        threadId="thread-456"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenNthCalledWith(2, {
+        data: expect.any(ArrayBuffer),
+        filename: "widget.vsfx",
+      });
+    });
+  });
 });

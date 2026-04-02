@@ -43,6 +43,7 @@ export function VsfxArtifactViewer({
   const [primaryError, setPrimaryError] = useState<VsfxArtifactPanelError | null>(
     initialBundle.errors.primary,
   );
+  const [artifactVersion, setArtifactVersion] = useState(0);
 
   useEffect(() => {
     const requestId = requestIdRef.current + 1;
@@ -62,22 +63,16 @@ export function VsfxArtifactViewer({
     setPrimaryLoading(Boolean(request.initial.primaryUrl) && !request.initial.errors.primary);
 
     const load = async () => {
-      try {
-        const nextBundle = await request.promise;
-
-        if (requestIdRef.current !== requestId) {
+      const loadPrimaryArtifact = async () => {
+        if (!request.initial.primaryUrl || request.initial.errors.primary) {
+          if (requestIdRef.current === requestId) {
+            setPrimaryError(request.initial.errors.primary);
+            setPrimaryLoading(false);
+          }
           return;
         }
 
-        setBundle(nextBundle);
-
-        if (!nextBundle.primaryUrl || nextBundle.errors.primary) {
-          setPrimaryError(nextBundle.errors.primary);
-          setPrimaryLoading(false);
-          return;
-        }
-
-        const response = await fetch(nextBundle.primaryUrl, {
+        const response = await fetch(request.initial.primaryUrl, {
           signal: primaryController.signal,
         });
 
@@ -92,7 +87,25 @@ export function VsfxArtifactViewer({
         }
 
         setPrimaryData(nextPrimaryData);
+        setArtifactVersion((current) => current + 1);
         setPrimaryLoading(false);
+      };
+
+      const loadSiblingMetadata = async () => {
+        const nextBundle = await request.promise;
+
+        if (requestIdRef.current !== requestId) {
+          return;
+        }
+
+        setBundle(nextBundle);
+      };
+
+      try {
+        await Promise.all([
+          loadPrimaryArtifact(),
+          loadSiblingMetadata(),
+        ]);
       }
       catch (error) {
         if (requestIdRef.current !== requestId || isVsfxArtifactAbortError(error)) {
@@ -149,6 +162,7 @@ export function VsfxArtifactViewer({
         </div>
       ) : primaryData ? (
         <VsfxArtifactViewerRuntime
+          artifactKey={`${filepath}:${artifactVersion}`}
           cdaTree={bundle.cdaTree}
           cdaTreeError={bundle.errors.cdaTree}
           filepath={filepath}
@@ -173,6 +187,7 @@ export function VsfxArtifactViewer({
 }
 
 type VsfxArtifactViewerRuntimeProps = {
+  artifactKey: string;
   cdaTree: unknown | null;
   cdaTreeError: VsfxArtifactPanelError | null;
   filepath: string;
@@ -184,7 +199,7 @@ type VsfxArtifactViewerRuntimeProps = {
 
 function VsfxArtifactViewerRuntime(props: VsfxArtifactViewerRuntimeProps) {
   return (
-    <VsfxContextProvider artifactKey={props.filepath}>
+    <VsfxContextProvider artifactKey={props.artifactKey}>
       <VsfxArtifactViewerSurface {...props} />
     </VsfxContextProvider>
   );
@@ -200,7 +215,10 @@ function VsfxArtifactViewerSurface({
   propertiesError,
 }: VsfxArtifactViewerRuntimeProps) {
   const { actions, state } = useVsfxContext();
-  const openedArtifactRef = useRef<string | null>(null);
+  const openedArtifactRef = useRef<{
+    data: ArrayBuffer;
+    filepath: string;
+  } | null>(null);
 
   useEffect(() => {
     actions.setCdaTreeState({
@@ -223,12 +241,15 @@ function VsfxArtifactViewerSurface({
       return;
     }
 
-    if (openedArtifactRef.current === filepath) {
+    if (
+      openedArtifactRef.current?.filepath === filepath
+      && openedArtifactRef.current.data === primaryData
+    ) {
       return;
     }
 
     let active = true;
-    openedArtifactRef.current = filepath;
+    openedArtifactRef.current = { data: primaryData, filepath };
 
     const openArtifact = async () => {
       try {
