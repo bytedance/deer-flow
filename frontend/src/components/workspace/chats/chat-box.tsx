@@ -10,6 +10,7 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
+import { normalizeArtifactFilepath } from "@/core/artifacts/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -44,13 +45,17 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   useEffect(() => {
+    const normalizedArtifacts = (thread.values.artifacts ?? []).map((artifactPath) =>
+      normalizeArtifactFilepath(artifactPath, threadId),
+    );
+
     if (threadIdRef.current !== threadId) {
       threadIdRef.current = threadId;
       deselect();
     }
 
     // Update artifacts from the current thread
-    setArtifacts(thread.values.artifacts);
+    setArtifacts(normalizedArtifacts);
 
     // DO NOT automatically deselect the artifact when switching threads, because the artifacts auto discovering is not work now.
     // if (
@@ -64,12 +69,13 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
       autoSelectFirstArtifact
     ) {
-      if (thread?.values?.artifacts?.length > 0) {
+      if (normalizedArtifacts.length > 0) {
         setAutoSelectFirstArtifact(false);
-        selectArtifact(thread.values.artifacts[0]!);
+        selectArtifact(normalizedArtifacts[0]!);
       }
     }
   }, [
+    thread,
     threadId,
     autoSelectFirstArtifact,
     deselect,

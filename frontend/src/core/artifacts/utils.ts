@@ -3,7 +3,7 @@ import type { AgentThread } from "../threads";
 
 const THREAD_ARTIFACT_ROOTS = new Set(["outputs", "uploads", "workspace"]);
 
-function normalizeArtifactFilepath(filepath: string, threadId: string) {
+export function normalizeArtifactFilepath(filepath: string, threadId: string) {
   const normalizedFilepath = filepath.replaceAll("\\", "/");
 
   if (normalizedFilepath.startsWith("/mnt/user-data/")) {
