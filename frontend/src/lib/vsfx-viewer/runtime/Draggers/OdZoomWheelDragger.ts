@@ -8,10 +8,15 @@ export class OdZoomWheelDragger extends OdBaseDragger {
 
   constructor(viewer: IViewer) {
     super(viewer, "zoom-wheel");
+    this.canvasEvents = ["wheel"];
     this.action = new ZoomAction(viewer);
   }
 
   handleWheel(deltaY: number) {
     this.action.zoom(deltaY);
+  }
+
+  protected wheel(event: WheelEvent) {
+    this.handleWheel(event.deltaY);
   }
 }

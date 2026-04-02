@@ -4,7 +4,7 @@ import { GestureManager } from "../Draggers/Common/GestureManager";
 
 export function installGestureManagerComponent(viewer: IViewer) {
   const manager = new GestureManager(viewer);
-  manager.attach();
+  manager.initialize();
 
   return () => {
     manager.dispose();

@@ -5,7 +5,6 @@ import {
   type ViewerInteractionEventMap,
   type IViewer,
   type ViewerBinarySource,
-  type ViewerEventMap,
 } from "@/lib/vsfx-viewer/viewer-core";
 
 import { getVisualizeAssetPaths, type VisualizeAssetPaths } from "./asset-paths";
@@ -111,6 +110,7 @@ export class Viewer implements IViewer {
 
   dispose() {
     this.detachCanvasEvents();
+    this.activeDragger?.deactivate();
     this.activeDragger?.dispose();
     this.activeDragger = null;
 
@@ -285,8 +285,10 @@ export class Viewer implements IViewer {
       throw new Error(`Unknown dragger: ${name}`);
     }
 
+    this.activeDragger?.deactivate();
     this.activeDragger?.dispose();
     const nextDragger = provider(this);
+    nextDragger.initialize?.();
     nextDragger.activate();
     this.activeDragger = nextDragger;
     this.activeDraggerName = name;

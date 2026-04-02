@@ -400,4 +400,60 @@ describe("Viewer", () => {
 
     expect(provider).toHaveBeenCalledTimes(1);
   });
+
+  test("initializes lifecycle-aware draggers when they become active", async () => {
+    const activate = vi.fn();
+    const dispose = vi.fn();
+    const initialize = vi.fn();
+    const provider = vi.fn(() => ({
+      activate,
+      deactivate: vi.fn(),
+      dispose,
+      id: "test-lifecycle",
+      initialize,
+    }));
+    viewerDraggers.registerDragger("test-lifecycle", provider);
+
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => createVisualizeBackend(),
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    provider.mockClear();
+    activate.mockClear();
+    initialize.mockClear();
+    dispose.mockClear();
+
+    viewer.setActiveDragger("test-lifecycle");
+    viewer.dispose();
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("registers zoom-wheel and gesture helpers through viewer event subscriptions", async () => {
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => createVisualizeBackend(),
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+    const onSpy = vi.spyOn(viewer, "on");
+    const offSpy = vi.spyOn(viewer, "off");
+
+    await viewer.initialize();
+    viewer.dispose();
+
+    expect(onSpy).toHaveBeenCalledWith("wheel", expect.any(Function));
+    expect(onSpy).toHaveBeenCalledWith("pointerdown", expect.any(Function));
+    expect(offSpy).toHaveBeenCalledWith("wheel", expect.any(Function));
+    expect(offSpy).toHaveBeenCalledWith("pointerdown", expect.any(Function));
+  });
 });
