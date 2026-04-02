@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 
+import { viewerDraggers } from "@/lib/vsfx-viewer/runtime/Draggers";
 import { Viewer } from "@/lib/vsfx-viewer/runtime/Viewer";
 
 const APPROVED_COMMANDS = [
@@ -349,5 +350,54 @@ describe("Viewer", () => {
       height: 180,
       width: 320,
     });
+  });
+
+  test("forwards pointer events from the canvas DOM into viewer listeners", async () => {
+    const canvas = document.createElement("canvas");
+    const viewer = new Viewer({
+      container: canvas,
+      dependencies: {
+        createVisualizeViewer: () => createVisualizeBackend(),
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+    const pointerDown = vi.fn();
+
+    await viewer.initialize();
+    (
+      viewer as unknown as {
+        on: (eventName: string, listener: (payload: unknown) => void) => () => void;
+      }
+    ).on("pointerdown", pointerDown);
+
+    canvas.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+
+    expect(pointerDown).toHaveBeenCalledTimes(1);
+  });
+
+  test("reuses the active dragger when the same dragger is selected repeatedly", async () => {
+    const provider = vi.fn(() => ({
+      activate: vi.fn(),
+      deactivate: vi.fn(),
+      dispose: vi.fn(),
+      id: "test-persistent",
+    }));
+    viewerDraggers.registerDragger("test-persistent", provider);
+
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => createVisualizeBackend(),
+        loadVisualizeLibrary: async () => ({ ready: true }),
+      },
+    });
+
+    await viewer.initialize();
+    provider.mockClear();
+
+    viewer.setActiveDragger("test-persistent");
+    viewer.setActiveDragger("test-persistent");
+
+    expect(provider).toHaveBeenCalledTimes(1);
   });
 });
