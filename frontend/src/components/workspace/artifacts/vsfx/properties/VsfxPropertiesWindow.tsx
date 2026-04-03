@@ -113,7 +113,7 @@ export function VsfxPropertiesWindow({
 
   return (
     <VsfxFloatingWindow
-      className="w-96 max-w-full"
+      className="w-80 max-w-full"
       containerElement={containerElement}
       contentClassName="min-h-0 flex-1"
       data-testid="vsfx-properties-window"
