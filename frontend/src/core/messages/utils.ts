@@ -332,6 +332,7 @@ export interface FileInMessage {
   size: number; // bytes
   path?: string; // virtual path, may not be set during upload
   status?: "uploading" | "uploaded";
+  progress?: number; // 0-100, only used for optimistic upload UI
 }
 
 /**
