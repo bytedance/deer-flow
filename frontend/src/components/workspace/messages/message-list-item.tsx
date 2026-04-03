@@ -1,5 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { FileIcon, Loader2Icon } from "lucide-react";
+import { FileIcon } from "lucide-react";
 import { useParams } from "next/navigation";
 import { memo, useMemo, type ImgHTMLAttributes } from "react";
 import rehypeKatex from "rehype-katex";
@@ -309,29 +309,40 @@ function RichFileCard({
   const { t } = useI18n();
   const isUploading = file.status === "uploading";
   const isImage = isImageFile(file.filename);
+  const progress = Math.min(100, Math.max(0, file.progress ?? 0));
 
   if (isUploading) {
     return (
-      <div className="bg-background border-border/40 flex max-w-50 min-w-30 flex-col gap-1 rounded-lg border p-3 opacity-60 shadow-sm">
-        <div className="flex items-start gap-2">
-          <Loader2Icon className="text-muted-foreground mt-0.5 size-4 shrink-0 animate-spin" />
-          <span
-            className="text-foreground truncate text-sm font-medium"
-            title={file.filename}
-          >
-            {file.filename}
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <Badge
-            variant="secondary"
-            className="rounded px-1.5 py-0.5 text-[10px] font-normal"
-          >
-            {getFileTypeLabel(file.filename)}
-          </Badge>
-          <span className="text-muted-foreground text-[10px]">
-            {t.uploads.uploading}
-          </span>
+      <div className="bg-background border-border/40 flex max-w-50 min-w-30 flex-col gap-2 rounded-lg border p-3 shadow-sm">
+        <div className="flex items-start gap-3">
+          <div className="bg-muted/40 border-border/50 relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-md border">
+            <FileIcon className="text-muted-foreground size-4" />
+            <div className="absolute inset-0 flex items-center justify-center bg-black/12 backdrop-blur-[1px]">
+              <UploadProgressRing progress={progress} />
+            </div>
+          </div>
+          <div className="min-w-0 flex-1 space-y-1">
+            <span
+              className="text-foreground block truncate text-sm font-medium"
+              title={file.filename}
+            >
+              {file.filename}
+            </span>
+            <div className="flex items-center justify-between gap-2">
+              <Badge
+                variant="secondary"
+                className="rounded px-1.5 py-0.5 text-[10px] font-normal"
+              >
+                {getFileTypeLabel(file.filename)}
+              </Badge>
+              <span className="text-muted-foreground text-[10px] font-mono">
+                {progress}%
+              </span>
+            </div>
+            <div className="text-muted-foreground text-[10px]">
+              {t.uploads.uploading}
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -380,6 +391,48 @@ function RichFileCard({
           {formatBytes(file.size)}
         </span>
       </div>
+    </div>
+  );
+}
+
+function UploadProgressRing({ progress }: { progress: number }) {
+  const size = 28;
+  const strokeWidth = 2.5;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference * (1 - progress / 100);
+
+  return (
+    <div className="relative flex size-8 items-center justify-center">
+      <svg
+        className="-rotate-90"
+        height={size}
+        width={size}
+        viewBox={`0 0 ${size} ${size}`}
+      >
+        <circle
+          className="stroke-white/25"
+          cx={size / 2}
+          cy={size / 2}
+          fill="none"
+          r={radius}
+          strokeWidth={strokeWidth}
+        />
+        <circle
+          className="stroke-white"
+          cx={size / 2}
+          cy={size / 2}
+          fill="none"
+          r={radius}
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          strokeLinecap="round"
+          strokeWidth={strokeWidth}
+        />
+      </svg>
+      <span className="text-[8px] font-semibold text-white tabular-nums">
+        {progress}
+      </span>
     </div>
   );
 }

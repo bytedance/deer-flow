@@ -235,6 +235,7 @@ export function useThreadStream({
           filename: f.filename ?? "",
           size: 0,
           status: "uploading" as const,
+          progress: 0,
         }),
       );
 
@@ -308,7 +309,36 @@ export function useThreadStream({
             }
 
             if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
+              const uploadResponse = await uploadFiles(threadId, files, {
+                onProgress: (progress) => {
+                  setOptimisticMessages((messages) => {
+                    if (messages.length === 0 || !messages[0]) {
+                      return messages;
+                    }
+
+                    const humanMessage: Message = messages[0];
+                    const existingFiles =
+                      (humanMessage.additional_kwargs?.files as
+                        | FileInMessage[]
+                        | undefined) ?? [];
+
+                    return [
+                      {
+                        ...humanMessage,
+                        additional_kwargs: {
+                          ...humanMessage.additional_kwargs,
+                          files: existingFiles.map((file) => ({
+                            ...file,
+                            status: "uploading" as const,
+                            progress,
+                          })),
+                        },
+                      },
+                      ...messages.slice(1),
+                    ];
+                  });
+                },
+              });
               uploadedFileInfo = uploadResponse.files;
 
               // Update optimistic human message with uploaded status + paths
@@ -318,6 +348,7 @@ export function useThreadStream({
                   size: info.size,
                   path: info.virtual_path,
                   status: "uploaded" as const,
+                  progress: 100,
                 }),
               );
               setOptimisticMessages((messages) => {
