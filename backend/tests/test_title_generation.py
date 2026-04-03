@@ -6,11 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
+from title_config_test_utils import clone_title_config
 
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
-
-from title_config_test_utils import clone_title_config
 
 
 class TestTitleConfig:
