@@ -6,6 +6,16 @@ export function isLocale(value: string): value is Locale {
   return (SUPPORTED_LOCALES as readonly string[]).includes(value);
 }
 
+export function getLocaleByLang(lang: string): Locale {
+  const normalizedLang = lang.toLowerCase();
+  for (const locale of SUPPORTED_LOCALES) {
+    if (locale.startsWith(normalizedLang)) {
+      return locale;
+    }
+  }
+  return DEFAULT_LOCALE;
+}
+
 export function normalizeLocale(locale: string | null | undefined): Locale {
   if (!locale) {
     return DEFAULT_LOCALE;
