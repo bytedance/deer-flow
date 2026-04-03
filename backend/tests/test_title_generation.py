@@ -136,6 +136,10 @@ class TestTitleMiddleware:
             lambda **kwargs: fake_model,
         )
 
+        config = clone_title_config(get_title_config())
+        config.max_chars = 40
+        set_title_config(config)
+
         user_message = "This is a long discussion about improving thread title fallback behavior"
         state = {
             "messages": [
@@ -147,8 +151,9 @@ class TestTitleMiddleware:
         result = asyncio.run(middleware.aafter_model(state, runtime))
 
         assert result is not None
-        assert result["title"].startswith(user_message[: get_title_config().max_chars])
-        assert len(result["title"]) <= get_title_config().max_chars
+        expected_prefix = user_message[: config.max_chars]
+        assert result["title"].startswith(expected_prefix)
+        assert len(result["title"]) <= config.max_chars
         fake_model.ainvoke.assert_called_once()
 
     def test_aafter_model_respects_disabled_config(self, monkeypatch):
