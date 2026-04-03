@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
@@ -26,6 +26,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
+  const [followupsVisible, setFollowupsVisible] = useState(false);
   const { t } = useI18n();
   const { threadId, isNewThread, setIsNewThread, isMock } = useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
@@ -97,6 +98,7 @@ export default function ChatPage() {
                 className={cn("size-full", !isNewThread && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                paddingBottom={followupsVisible ? 256 : 160}
               />
             </div>
             <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">
@@ -140,6 +142,7 @@ export default function ChatPage() {
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                     isUploading
                   }
+                  onFollowupsVisibilityChange={setFollowupsVisible}
                   onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}
                   onStop={handleStop}

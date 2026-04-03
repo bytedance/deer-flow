@@ -108,6 +108,7 @@ export function InputBox({
   isNewThread,
   threadId,
   initialValue,
+  onFollowupsVisibilityChange,
   onContextChange,
   onSubmit,
   onStop,
@@ -127,6 +128,7 @@ export function InputBox({
   isNewThread?: boolean;
   threadId: string;
   initialValue?: string;
+  onFollowupsVisibilityChange?: (visible: boolean) => void;
   onContextChange?: (
     context: Omit<
       AgentThreadContext,
@@ -157,6 +159,22 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
+
+  const showFollowups =
+    !disabled &&
+    !isNewThread &&
+    !followupsHidden &&
+    (followupsLoading || followups.length > 0);
+
+  useEffect(() => {
+    onFollowupsVisibilityChange?.(showFollowups);
+  }, [onFollowupsVisibilityChange, showFollowups]);
+
+  useEffect(() => {
+    return () => {
+      onFollowupsVisibilityChange?.(false);
+    };
+  }, [onFollowupsVisibilityChange]);
 
   useEffect(() => {
     if (models.length === 0) {
@@ -769,10 +787,7 @@ export function InputBox({
         )}
       </PromptInput>
 
-      {!disabled &&
-        !isNewThread &&
-        !followupsHidden &&
-        (followupsLoading || followups.length > 0) && (
+      {showFollowups && (
           <div className="absolute -top-20 right-0 left-0 z-20 flex items-center justify-center">
             <div className="flex items-center gap-2">
               {followupsLoading ? (

@@ -2,7 +2,7 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export default function AgentChatPage() {
+  const [followupsVisible, setFollowupsVisible] = useState(false);
   const { t } = useI18n();
   const router = useRouter();
 
@@ -128,6 +129,7 @@ export default function AgentChatPage() {
                 className={cn("size-full", !isNewThread && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                paddingBottom={followupsVisible ? 256 : 160}
               />
             </div>
 
@@ -172,6 +174,7 @@ export default function AgentChatPage() {
                     )
                   }
                   disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  onFollowupsVisibilityChange={setFollowupsVisible}
                   onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
