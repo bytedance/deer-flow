@@ -28,7 +28,9 @@ for arg in "$@"; do
 done
 
 if $DEV_MODE; then
-    FRONTEND_CMD="pnpm run dev"
+    # Webpack dev mode is more stable for the workspace routes in this repo.
+    # Turbopack currently triggers hydration mismatch overlays on the chat page.
+    FRONTEND_CMD="pnpm exec next dev --webpack"
 else
     if command -v python3 >/dev/null 2>&1; then
         PYTHON_BIN="python3"
