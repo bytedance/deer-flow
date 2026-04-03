@@ -12,7 +12,6 @@ from app.gateway.routers import (
     assistants_compat,
     channels,
     mcp,
-    memory,
     models,
     runs,
     skills,
@@ -171,9 +170,6 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
-
-    # Memory API is mounted at /api/memory
-    app.include_router(memory.router)
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
