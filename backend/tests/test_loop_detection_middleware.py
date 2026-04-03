@@ -229,3 +229,101 @@ class TestLoopDetection:
 
         mw._apply(_make_state(tool_calls=call), runtime)
         assert "default" in mw._history
+
+
+class TestAppendText:
+    """Unit tests for LoopDetectionMiddleware._append_text."""
+
+    def test_none_content_returns_text(self):
+        result = LoopDetectionMiddleware._append_text(None, "hello")
+        assert result == "hello"
+
+    def test_str_content_concatenates(self):
+        result = LoopDetectionMiddleware._append_text("existing", "appended")
+        assert result == "existing\n\nappended"
+
+    def test_empty_str_content_concatenates(self):
+        result = LoopDetectionMiddleware._append_text("", "appended")
+        assert result == "\n\nappended"
+
+    def test_list_content_appends_text_block(self):
+        """List content (e.g. Anthropic thinking mode) should get a new text block."""
+        content = [
+            {"type": "thinking", "text": "Let me think..."},
+            {"type": "text", "text": "Here is my answer"},
+        ]
+        result = LoopDetectionMiddleware._append_text(content, "stop msg")
+        assert isinstance(result, list)
+        assert len(result) == 3
+        assert result[0] == content[0]
+        assert result[1] == content[1]
+        assert result[2] == {"type": "text", "text": "\n\nstop msg"}
+
+    def test_empty_list_content_appends_text_block(self):
+        result = LoopDetectionMiddleware._append_text([], "stop msg")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0] == {"type": "text", "text": "\n\nstop msg"}
+
+
+class TestHardStopWithListContent:
+    """Regression tests: hard stop must not crash when AIMessage.content is a list."""
+
+    def test_hard_stop_with_list_content(self):
+        """Hard stop on list content should not raise TypeError (regression)."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        # Build state with list content (e.g. Anthropic thinking mode)
+        list_content = [
+            {"type": "thinking", "text": "Let me think..."},
+            {"type": "text", "text": "I'll run ls"},
+        ]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call, content=list_content), runtime)
+
+        # Fourth call triggers hard stop — must not raise TypeError
+        result = mw._apply(_make_state(tool_calls=call, content=list_content), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls == []
+        # Content should remain a list with the stop message appended
+        assert isinstance(msg.content, list)
+        assert len(msg.content) == 3
+        assert msg.content[2]["type"] == "text"
+        assert _HARD_STOP_MSG in msg.content[2]["text"]
+
+    def test_hard_stop_with_none_content(self):
+        """Hard stop on None content should produce a plain string."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        # Fourth call with default empty-string content
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg.content, str)
+        assert _HARD_STOP_MSG in msg.content
+
+    def test_hard_stop_with_str_content(self):
+        """Hard stop on str content should concatenate the stop message."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call, content="thinking..."), runtime)
+
+        result = mw._apply(_make_state(tool_calls=call, content="thinking..."), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg.content, str)
+        assert msg.content.startswith("thinking...")
+        assert _HARD_STOP_MSG in msg.content
