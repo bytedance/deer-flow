@@ -1,12 +1,23 @@
+import errno
 import ntpath
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
+
+
+@dataclass(frozen=True)
+class PathMapping:
+    """A path mapping from a container path to a local path with optional read-only flag."""
+
+    container_path: str
+    local_path: str
+    read_only: bool = False
 
 
 class LocalSandbox(Sandbox):
@@ -40,17 +51,42 @@ class LocalSandbox(Sandbox):
 
         return None
 
-    def __init__(self, id: str, path_mappings: dict[str, str] | None = None):
+    def __init__(self, id: str, path_mappings: list[PathMapping] | None = None):
         """
         Initialize local sandbox with optional path mappings.
 
         Args:
             id: Sandbox identifier
-            path_mappings: Dictionary mapping container paths to local paths
-                          Example: {"/mnt/skills": "/absolute/path/to/skills"}
+            path_mappings: List of path mappings with optional read-only flag.
+                          Skills directory is read-only by default.
         """
         super().__init__(id)
-        self.path_mappings = path_mappings or {}
+        self.path_mappings = path_mappings or []
+
+    def _is_read_only_path(self, resolved_path: str) -> bool:
+        """Check if a resolved path is under a read-only mount.
+
+        When multiple mappings match (nested mounts), prefer the most specific
+        mapping (i.e. the one whose local_path is the longest prefix of the
+        resolved path), similar to how ``_resolve_path`` handles container paths.
+        """
+        resolved = str(Path(resolved_path).resolve())
+
+        best_mapping: PathMapping | None = None
+        best_prefix_len = -1
+
+        for mapping in self.path_mappings:
+            local_resolved = str(Path(mapping.local_path).resolve())
+            if resolved == local_resolved or resolved.startswith(local_resolved + os.sep):
+                prefix_len = len(local_resolved)
+                if prefix_len > best_prefix_len:
+                    best_prefix_len = prefix_len
+                    best_mapping = mapping
+
+        if best_mapping is None:
+            return False
+
+        return best_mapping.read_only
 
     def _resolve_path(self, path: str) -> str:
         """
@@ -65,7 +101,9 @@ class LocalSandbox(Sandbox):
         path_str = str(path)
 
         # Try each mapping (longest prefix first for more specific matches)
-        for container_path, local_path in sorted(self.path_mappings.items(), key=lambda x: len(x[0]), reverse=True):
+        for mapping in sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True):
+            container_path = mapping.container_path
+            local_path = mapping.local_path
             if path_str == container_path or path_str.startswith(container_path + "/"):
                 # Replace the container path prefix with local path
                 relative = path_str[len(container_path) :].lstrip("/")
@@ -85,15 +123,16 @@ class LocalSandbox(Sandbox):
         Returns:
             Container path if mapping exists, otherwise original path
         """
-        path_str = str(Path(path).resolve())
+        normalized_path = path.replace("\\", "/")
+        path_str = str(Path(normalized_path).resolve())
 
         # Try each mapping (longest local path first for more specific matches)
-        for container_path, local_path in sorted(self.path_mappings.items(), key=lambda x: len(x[1]), reverse=True):
-            local_path_resolved = str(Path(local_path).resolve())
-            if path_str.startswith(local_path_resolved):
+        for mapping in sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True):
+            local_path_resolved = str(Path(mapping.local_path).resolve())
+            if path_str == local_path_resolved or path_str.startswith(local_path_resolved + "/"):
                 # Replace the local path prefix with container path
                 relative = path_str[len(local_path_resolved) :].lstrip("/")
-                resolved = f"{container_path}/{relative}" if relative else container_path
+                resolved = f"{mapping.container_path}/{relative}" if relative else mapping.container_path
                 return resolved
 
         # No mapping found, return original path
@@ -112,7 +151,7 @@ class LocalSandbox(Sandbox):
         import re
 
         # Sort mappings by local path length (longest first) for correct prefix matching
-        sorted_mappings = sorted(self.path_mappings.items(), key=lambda x: len(x[1]), reverse=True)
+        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True)
 
         if not sorted_mappings:
             return output
@@ -120,12 +159,11 @@ class LocalSandbox(Sandbox):
         # Create pattern that matches absolute paths
         # Match paths like /Users/... or other absolute paths
         result = output
-        for container_path, local_path in sorted_mappings:
-            local_path_resolved = str(Path(local_path).resolve())
+        for mapping in sorted_mappings:
             # Escape the local path for use in regex
-            escaped_local = re.escape(local_path_resolved)
-            # Match the local path followed by optional path components
-            pattern = re.compile(escaped_local + r"(?:/[^\s\"';&|<>()]*)?")
+            escaped_local = re.escape(str(Path(mapping.local_path).resolve()))
+            # Match the local path followed by optional path components with either separator
+            pattern = re.compile(escaped_local + r"(?:[/\\][^\s\"';&|<>()]*)?")
 
             def replace_match(match: re.Match) -> str:
                 matched_path = match.group(0)
@@ -148,7 +186,7 @@ class LocalSandbox(Sandbox):
         import re
 
         # Sort mappings by length (longest first) for correct prefix matching
-        sorted_mappings = sorted(self.path_mappings.items(), key=lambda x: len(x[0]), reverse=True)
+        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
 
         # Build regex pattern to match all container paths
         # Match container path followed by optional path components
@@ -158,7 +196,7 @@ class LocalSandbox(Sandbox):
         # Create pattern that matches any of the container paths.
         # The lookahead (?=/|$|...) ensures we only match at a path-segment boundary,
         # preventing /mnt/skills from matching inside /mnt/skills-extra.
-        patterns = [re.escape(container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for container_path, _ in sorted_mappings]
+        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for m in sorted_mappings]
         pattern = re.compile("|".join(f"({p})" for p in patterns))
 
         def replace_match(match: re.Match) -> str:
@@ -249,6 +287,8 @@ class LocalSandbox(Sandbox):
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved_path = self._resolve_path(path)
+        if self._is_read_only_path(resolved_path):
+            raise OSError(errno.EROFS, "Read-only file system", path)
         try:
             dir_path = os.path.dirname(resolved_path)
             if dir_path:
@@ -295,6 +335,8 @@ class LocalSandbox(Sandbox):
 
     def update_file(self, path: str, content: bytes) -> None:
         resolved_path = self._resolve_path(path)
+        if self._is_read_only_path(resolved_path):
+            raise OSError(errno.EROFS, "Read-only file system", path)
         try:
             dir_path = os.path.dirname(resolved_path)
             if dir_path:
