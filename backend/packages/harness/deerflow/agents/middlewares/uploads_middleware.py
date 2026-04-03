@@ -150,6 +150,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if thread_id is None:
             try:
                 from langgraph.config import get_config
+
                 thread_id = get_config().get("configurable", {}).get("thread_id")
             except RuntimeError:
                 pass  # get_config() raises outside a runnable context (e.g. unit tests)
