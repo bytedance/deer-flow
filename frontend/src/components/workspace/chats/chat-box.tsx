@@ -22,7 +22,7 @@ import {
 import { useThread } from "../messages/context";
 
 const CLOSE_MODE = { chat: 100, artifacts: 0 };
-const OPEN_MODE = { chat: 60, artifacts: 40 };
+const OPEN_MODE = { chat: 30, artifacts: 70 };
 
 const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   children,
