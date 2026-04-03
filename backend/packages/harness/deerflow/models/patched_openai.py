@@ -1,9 +1,11 @@
-"""Patched ChatOpenAI that preserves thought_signature for Gemini thinking models.
+"""Patched ChatOpenAI that preserves provider-specific assistant metadata.
 
-When using Gemini with thinking enabled via an OpenAI-compatible gateway (e.g.
-Vertex AI, Google AI Studio, or any proxy), the API requires that the
-``thought_signature`` field on tool-call objects is echoed back verbatim in
-every subsequent request.
+When using thinking-enabled models via an OpenAI-compatible gateway, providers
+may require assistant metadata to be replayed verbatim on every follow-up
+request. Two known cases are:
+
+- Gemini requires ``thought_signature`` on assistant tool-call objects.
+- Kimi requires ``reasoning_content`` on assistant messages.
 
 The OpenAI-compatible gateway stores the raw tool-call dicts (including
 ``thought_signature``) in ``additional_kwargs["tool_calls"]``, but standard
@@ -15,8 +17,8 @@ signature.  That causes an HTTP 400 ``INVALID_ARGUMENT`` error:
     block is missing a `thought_signature`.
 
 This module fixes the problem by overriding ``_get_request_payload`` to
-re-inject tool-call signatures back into the outgoing payload for any assistant
-message that originally carried them.
+re-inject provider-specific assistant metadata back into the outgoing payload
+for any assistant message that originally carried it.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from langchain_openai import ChatOpenAI
 
 
 class PatchedChatOpenAI(ChatOpenAI):
-    """ChatOpenAI with ``thought_signature`` preservation for Gemini thinking via OpenAI gateway.
+    """ChatOpenAI with assistant metadata preservation for OpenAI-compatible gateways.
 
     When using Gemini with thinking enabled via an OpenAI-compatible gateway,
     the API expects ``thought_signature`` to be present on tool-call objects in
@@ -81,12 +83,14 @@ class PatchedChatOpenAI(ChatOpenAI):
             for payload_msg, orig_msg in zip(payload_messages, original_messages):
                 if payload_msg.get("role") == "assistant" and isinstance(orig_msg, AIMessage):
                     _restore_tool_call_signatures(payload_msg, orig_msg)
+                    _restore_reasoning_content(payload_msg, orig_msg)
         else:
             # Fallback: match assistant-role entries positionally against AIMessages.
             ai_messages = [m for m in original_messages if isinstance(m, AIMessage)]
             assistant_payloads = [(i, m) for i, m in enumerate(payload_messages) if m.get("role") == "assistant"]
             for (_, payload_msg), ai_msg in zip(assistant_payloads, ai_messages):
                 _restore_tool_call_signatures(payload_msg, ai_msg)
+                _restore_reasoning_content(payload_msg, ai_msg)
 
         return payload
 
@@ -130,3 +134,17 @@ def _restore_tool_call_signatures(payload_msg: dict, orig_msg: AIMessage) -> Non
         sig = raw_tc.get("thought_signature") or raw_tc.get("thoughtSignature")
         if sig:
             payload_tc["thought_signature"] = sig
+
+
+def _restore_reasoning_content(payload_msg: dict, orig_msg: AIMessage) -> None:
+    """Re-inject ``reasoning_content`` onto assistant payload messages.
+
+    Kimi thinking models require prior assistant ``reasoning_content`` to be
+    preserved across multi-turn conversations. ``langchain_openai.ChatOpenAI``
+    stores that field in ``AIMessage.additional_kwargs`` but does not serialize
+    it back into the outbound assistant message payload.
+    """
+
+    reasoning_content = orig_msg.additional_kwargs.get("reasoning_content")
+    if reasoning_content is not None:
+        payload_msg["reasoning_content"] = reasoning_content

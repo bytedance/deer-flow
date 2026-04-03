@@ -166,6 +166,27 @@ models:
 
 For Gemini accessed **without** thinking (e.g. via OpenRouter where thinking is not activated), the plain `langchain_openai:ChatOpenAI` with `supports_thinking: false` is sufficient and no patch is needed.
 
+When routing Kimi's official API through the OpenAI-compatible endpoint (`https://api.moonshot.cn/v1`) with thinking enabled, the API expects assistant `reasoning_content` to be replayed on follow-up turns. Standard `langchain_openai:ChatOpenAI` drops that field during payload serialization, which causes multi-turn chats to fail after the first round. Use the same `deerflow.models.patched_openai:PatchedChatOpenAI` adapter for Kimi:
+
+```yaml
+models:
+  - name: kimi-k2.5
+    display_name: Kimi K2.5
+    use: deerflow.models.patched_openai:PatchedChatOpenAI
+    model: kimi-k2.5
+    api_key: $MOONSHOT_API_KEY
+    base_url: https://api.moonshot.cn/v1
+    request_timeout: 600.0
+    max_retries: 2
+    max_tokens: 32768
+    supports_thinking: true
+    supports_vision: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+```
+
 ### Tool Groups
 
 Organize tools into logical groups:
