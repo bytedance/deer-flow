@@ -369,6 +369,15 @@ tool_search:
 
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
+uploads:
+  # PDF-to-Markdown converter used when a PDF is uploaded.
+  # auto        — prefer pymupdf4llm when installed; fall back to MarkItDown for
+  #               image-based or encrypted PDFs (recommended default).
+  # pymupdf4llm — always use pymupdf4llm (must be installed: uv add pymupdf4llm).
+  #               Better heading/table extraction; faster on most files.
+  # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
+  pdf_converter: auto
+
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is
