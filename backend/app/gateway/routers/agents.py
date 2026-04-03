@@ -108,11 +108,7 @@ def _resolve_create_names(request: AgentCreateRequest) -> tuple[str, str]:
             detail="Either 'name' or 'display_name' must be provided.",
         )
 
-    normalized_display_name = (
-        _validate_display_name(raw_display_name)
-        if raw_display_name
-        else normalize_agent_name(raw_name)
-    )
+    normalized_display_name = _validate_display_name(raw_display_name) if raw_display_name else normalize_agent_name(raw_name)
 
     if raw_name:
         _validate_agent_name(raw_name)
@@ -183,10 +179,7 @@ async def check_agent_name(
     """
     request = AgentCreateRequest(name=name, display_name=display_name)
     normalized_name, normalized_display_name = _resolve_create_names(request)
-    available = (
-        _find_agent_by_display_name(normalized_display_name) is None
-        and not get_paths().agent_dir(normalized_name).exists()
-    )
+    available = _find_agent_by_display_name(normalized_display_name) is None and not get_paths().agent_dir(normalized_name).exists()
     return {
         "available": available,
         "name": normalized_name,
@@ -323,11 +316,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     agent_dir = get_paths().agent_dir(name)
 
     try:
-        new_display_name = (
-            _validate_display_name(request.display_name)
-            if request.display_name is not None
-            else _resolve_display_name(agent_cfg)
-        )
+        new_display_name = _validate_display_name(request.display_name) if request.display_name is not None else _resolve_display_name(agent_cfg)
         existing_with_display_name = _find_agent_by_display_name(new_display_name)
         if existing_with_display_name is not None and existing_with_display_name.name != name:
             raise HTTPException(
