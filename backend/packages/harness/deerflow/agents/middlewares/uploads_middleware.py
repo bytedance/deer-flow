@@ -10,8 +10,25 @@ from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.config.paths import Paths, get_paths
+from deerflow.utils.file_conversion import extract_outline
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_outline_for_file(file_path: Path) -> list[dict]:
+    """Return the document outline for *file_path* if a converted .md exists.
+
+    Looks for a sibling ``<stem>.md`` file produced by the upload conversion
+    pipeline.  Returns an empty list when the file is not a converted document
+    or when no headings are found.
+    """
+    md_path = file_path.with_suffix(".md")
+    if not md_path.is_file():
+        return []
+    outline = extract_outline(md_path)
+    if outline:
+        logger.debug("Extracted %d outline entries from %s", len(outline), file_path.name)
+    return outline
 
 
 class UploadsMiddlewareState(AgentState):
@@ -39,12 +56,31 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         super().__init__()
         self._paths = Paths(base_dir) if base_dir else get_paths()
 
+    def _format_file_entry(self, file: dict, lines: list[str]) -> None:
+        """Append a single file entry (name, size, path, optional outline) to lines."""
+        size_kb = file["size"] / 1024
+        size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+        lines.append(f"- {file['filename']} ({size_str})")
+        lines.append(f"  Path: {file['path']}")
+        outline = file.get("outline") or []
+        if outline:
+            truncated = outline[-1].get("truncated", False) if outline else False
+            visible = [e for e in outline if not e.get("truncated")]
+            lines.append("  Document outline (use `read_file` with line ranges to read sections):")
+            for entry in visible:
+                lines.append(f"    L{entry['line']}: {entry['title']}")
+            if truncated:
+                lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further)")
+        lines.append("")
+
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
         """Create a formatted message listing uploaded files.
 
         Args:
             new_files: Files uploaded in the current message.
             historical_files: Files uploaded in previous messages.
+                Each file dict may contain an optional ``outline`` key — a list of
+                ``{title, line}`` dicts extracted from the converted Markdown file.
 
         Returns:
             Formatted string inside <uploaded_files> tags.
@@ -55,23 +91,16 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         lines.append("")
         if new_files:
             for file in new_files:
-                size_kb = file["size"] / 1024
-                size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-                lines.append(f"- {file['filename']} ({size_str})")
-                lines.append(f"  Path: {file['path']}")
-                lines.append("")
+                self._format_file_entry(file, lines)
         else:
             lines.append("(empty)")
+            lines.append("")
 
         if historical_files:
             lines.append("The following files were uploaded in previous messages and are still available:")
             lines.append("")
             for file in historical_files:
-                size_kb = file["size"] / 1024
-                size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-                lines.append(f"- {file['filename']} ({size_str})")
-                lines.append(f"  Path: {file['path']}")
-                lines.append("")
+                self._format_file_entry(file, lines)
 
         lines.append("You can read these files using the `read_file` tool with the paths shown above.")
         lines.append("</uploaded_files>")
@@ -172,8 +201,15 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                             "size": stat.st_size,
                             "path": f"/mnt/user-data/uploads/{file_path.name}",
                             "extension": file_path.suffix,
+                            "outline": _extract_outline_for_file(file_path),
                         }
                     )
+
+        # Attach outlines to new files as well
+        if uploads_dir:
+            for file in new_files:
+                phys_path = uploads_dir / file["filename"]
+                file["outline"] = _extract_outline_for_file(phys_path)
 
         if not new_files and not historical_files:
             return None
