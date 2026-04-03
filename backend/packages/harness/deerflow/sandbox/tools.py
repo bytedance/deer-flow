@@ -890,7 +890,10 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
-        return "\n".join(children)
+        output = "\n".join(children)
+        if is_local_sandbox(runtime):
+            output = mask_local_paths_in_output(output, get_thread_data(runtime))
+        return output
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:

@@ -15,6 +15,7 @@ from deerflow.sandbox.tools import (
     _resolve_and_validate_user_data_path,
     _resolve_skills_path,
     bash_tool,
+    ls_tool,
     mask_local_paths_in_output,
     replace_virtual_path,
     replace_virtual_paths_in_command,
@@ -567,6 +568,49 @@ def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None
                 validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
 
 
+# ---------- ls_tool path masking ----------
+
+def test_ls_tool_masks_host_paths_to_virtual_paths_in_local_sandbox(monkeypatch, tmp_path) -> None:
+    """ls tool should return virtual paths, not host paths, when in local sandbox mode.
+
+    Previously, ls_tool resolved the virtual path to a host path before calling
+    sandbox.list_dir(), but never applied mask_local_paths_in_output() to convert
+    host paths back to virtual paths in the output. This caused ls to return real
+    host paths while 'bash ls' returned virtual paths (inconsistency #1778).
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    host_file = workspace / "script.py"
+    host_file.write_text("print('hello')")
+
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data.copy()},
+        context={"thread_id": "thread-1"},
+    )
+
+    fake_sandbox = SimpleNamespace(
+        list_dir=lambda path, **kw: [str(host_file)],
+    )
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda r: fake_sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda r: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.validate_local_tool_path", lambda path, td, **kw: None)
+    monkeypatch.setattr("deerflow.sandbox.tools._resolve_and_validate_user_data_path", lambda path, td: str(workspace))
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list workspace",
+        path="/mnt/user-data/workspace",
+    )
+
+    assert str(workspace) not in result, f"Host path leaked into ls output: {result}"
+    assert "/mnt/user-data/workspace" in result
 def test_str_replace_parallel_updates_should_preserve_both_edits(monkeypatch) -> None:
     class SharedSandbox:
         def __init__(self) -> None:
