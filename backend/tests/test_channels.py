@@ -1854,6 +1854,20 @@ class TestSlackSendRetry:
 
         _run(go())
 
+    def test_raises_runtime_error_when_no_attempts_configured(self):
+        from app.channels.slack import SlackChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = SlackChannel(bus=bus, config={"bot_token": "xoxb-test", "app_token": "xapp-test"})
+            ch._web_client = MagicMock()
+
+            msg = OutboundMessage(channel_name="slack", chat_id="C123", thread_id="t1", text="hello")
+            with pytest.raises(RuntimeError, match="without an exception"):
+                await ch.send(msg, _max_retries=0)
+
+        _run(go())
+
 
 # ---------------------------------------------------------------------------
 # Telegram send retry tests
@@ -1909,6 +1923,36 @@ class TestTelegramSendRetry:
                 await ch.send(msg)
 
             assert mock_bot.send_message.call_count == 3
+
+        _run(go())
+
+    def test_raises_runtime_error_when_no_attempts_configured(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._application = MagicMock()
+
+            msg = OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="hello")
+            with pytest.raises(RuntimeError, match="without an exception"):
+                await ch.send(msg, _max_retries=0)
+
+        _run(go())
+
+
+class TestFeishuSendRetry:
+    def test_raises_runtime_error_when_no_attempts_configured(self):
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = FeishuChannel(bus=bus, config={"app_id": "id", "app_secret": "secret"})
+            ch._api_client = MagicMock()
+
+            msg = OutboundMessage(channel_name="feishu", chat_id="chat", thread_id="t1", text="hello")
+            with pytest.raises(RuntimeError, match="without an exception"):
+                await ch.send(msg, _max_retries=0)
 
         _run(go())
 
