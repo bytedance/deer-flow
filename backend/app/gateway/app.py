@@ -11,6 +11,7 @@ from app.gateway.routers import (
     artifacts,
     assistants_compat,
     channels,
+    cron,
     mcp,
     memory,
     models,
@@ -61,15 +62,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
-        yield
+    # Start cron service
+    try:
+        from src.cron import start_cron_service
+        from src.cron.handler import handle_cron_job
 
-        # Stop channel service on shutdown
-        try:
-            from app.channels.service import stop_channel_service
+        cron_service = await start_cron_service(on_job=handle_cron_job)
+        logger.info("Cron service started: %s", await cron_service.status())
+    except Exception:
+        logger.exception("Cron service failed to start")
 
-            await stop_channel_service()
-        except Exception:
-            logger.exception("Failed to stop channel service")
+    yield
+
+    # Stop cron service on shutdown
+    try:
+        from src.cron import stop_cron_service_async
+
+        await stop_cron_service_async()
+    except Exception:
+        logger.exception("Failed to stop cron service")
+
+    # Stop channel service on shutdown
+    try:
+        from app.channels.service import stop_channel_service
+
+        await stop_channel_service()
+    except Exception:
+        logger.exception("Failed to stop channel service")
 
     logger.info("Shutting down API Gateway")
 
@@ -157,6 +176,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
             },
             {
+                "name": "cron",
+                "description": "Manage scheduled tasks and recurring reminders",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -204,6 +227,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
+
+    # Cron API is mounted at /api/cron
+    app.include_router(cron.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
