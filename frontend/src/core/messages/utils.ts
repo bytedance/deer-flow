@@ -373,9 +373,10 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
   let fileMatch;
 
   while ((fileMatch = fileRegex.exec(uploadedFilesContent ?? "")) !== null) {
+    const size = parseInt(fileMatch[2].trim(), 10);
     files.push({
       filename: fileMatch[1].trim(),
-      size: parseInt(fileMatch[2].trim(), 10) ?? 0,
+      size: isNaN(size) ? 0 : size,
       path: fileMatch[3].trim(),
     });
   }
