@@ -89,31 +89,33 @@ def extract_outline(md_path: Path) -> list[dict]:
         Returns an empty list if the file cannot be read or has no headings.
         Capped at MAX_OUTLINE_ENTRIES entries.
     """
+    outline: list[dict] = []
     try:
-        lines = md_path.read_text(encoding="utf-8").splitlines()
+        with md_path.open(encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+
+                # Style 1: standard Markdown heading
+                if stripped.startswith("#"):
+                    title = stripped.lstrip("#").strip()
+                    # Strip any inline **...** wrapping (e.g. "## **Overview**" → "Overview")
+                    if title:
+                        if m2 := re.fullmatch(r"\*\*(.+?)\*\*", title):
+                            title = m2.group(1).strip()
+                        outline.append({"title": title, "line": lineno})
+
+                # Style 2: bold-only line (entire line is **...**)
+                elif m := _BOLD_HEADING_RE.match(stripped):
+                    title = m.group(1).strip()
+                    if title:
+                        outline.append({"title": title, "line": lineno})
+
+                if len(outline) >= MAX_OUTLINE_ENTRIES:
+                    break
     except Exception:
         return []
-
-    outline = []
-    for lineno, line in enumerate(lines, 1):
-        stripped = line.strip()
-        if not stripped:
-            continue
-
-        # Style 1: standard Markdown heading
-        if stripped.startswith("#"):
-            title = stripped.lstrip("#").strip()
-            if title:
-                outline.append({"title": title, "line": lineno})
-
-        # Style 2: bold-only line (entire line is **...**)
-        elif m := _BOLD_HEADING_RE.match(stripped):
-            title = m.group(1).strip()
-            if title:
-                outline.append({"title": title, "line": lineno})
-
-        if len(outline) >= MAX_OUTLINE_ENTRIES:
-            break
 
     return outline
 

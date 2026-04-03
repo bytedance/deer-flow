@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from deerflow.utils.file_conversion import (
-    extract_outline,
     MAX_OUTLINE_ENTRIES,
+    extract_outline,
 )
-
 
 # ---------------------------------------------------------------------------
 # extract_outline
