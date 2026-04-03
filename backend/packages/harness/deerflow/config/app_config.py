@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import yaml
 from dotenv import load_dotenv
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 class UploadsConfig(BaseModel):
     """Configuration for file upload handling."""
 
-    pdf_converter: str = Field(
+    pdf_converter: Literal["auto", "pymupdf4llm", "markitdown"] = Field(
         default="auto",
         description=(
             "PDF-to-Markdown converter. "

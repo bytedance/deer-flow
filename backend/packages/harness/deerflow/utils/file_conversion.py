@@ -4,8 +4,8 @@ Converts document files (PDF, PPT, Excel, Word) to Markdown.
 
 PDF conversion strategy (auto mode):
   1. Try pymupdf4llm if installed — better heading detection, faster on most files.
-  2. If output is suspiciously short (< MIN_CHARS_PYMUPDF, likely an image-based PDF),
-     fall back to MarkItDown.
+  2. If output is suspiciously short (< _MIN_CHARS_PER_PAGE chars/page, or < 200 chars
+     total when page count is unavailable), treat as image-based and fall back to MarkItDown.
   3. If pymupdf4llm is not installed, use MarkItDown directly (existing behaviour).
 
 Large files (> ASYNC_THRESHOLD_BYTES) are converted in a thread pool via
@@ -53,16 +53,23 @@ def _pymupdf_output_too_sparse(text: str, file_path: Path) -> bool:
     are handled correctly.
     """
     chars = len(text.strip())
+    doc = None
+    pages: int | None = None
     try:
         import pymupdf
 
         doc = pymupdf.open(str(file_path))
         pages = len(doc)
-        doc.close()
-        if pages > 0:
-            return (chars / pages) < _MIN_CHARS_PER_PAGE
     except Exception:
         pass
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+    if pages is not None and pages > 0:
+        return (chars / pages) < _MIN_CHARS_PER_PAGE
     # Fallback: absolute threshold when page count is unavailable
     return chars < 200
 
@@ -70,13 +77,18 @@ def _pymupdf_output_too_sparse(text: str, file_path: Path) -> bool:
 def _convert_pdf_with_pymupdf4llm(file_path: Path) -> str | None:
     """Attempt PDF conversion with pymupdf4llm.
 
-    Returns the markdown text, or None if pymupdf4llm is not installed.
+    Returns the markdown text, or None if pymupdf4llm is not installed or
+    if conversion fails (e.g. encrypted/corrupt PDF).
     """
     try:
         import pymupdf4llm
-
-        return pymupdf4llm.to_markdown(str(file_path))
     except ImportError:
+        return None
+
+    try:
+        return pymupdf4llm.to_markdown(str(file_path))
+    except Exception:
+        logger.exception("pymupdf4llm failed to convert %s; falling back to MarkItDown", file_path.name)
         return None
 
 
