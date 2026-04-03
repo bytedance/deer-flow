@@ -39,11 +39,31 @@ import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 type Step = "name" | "chat";
+type SetupAgentStatus = "idle" | "requested" | "completed";
 
 const NAME_RE = /^[A-Za-z0-9-]+$/;
 const SAVE_HINT_STORAGE_KEY = "deerflow.agent-create.save-hint-seen";
-const SAVE_AGENT_MESSAGE =
-  "Please save this custom agent now based on everything we have discussed so far. Treat this as my explicit confirmation to save. If some details are still missing, make reasonable assumptions, generate a concise first SOUL.md in English, and call setup_agent immediately without asking me for more confirmation.";
+const AGENT_READ_RETRY_DELAYS_MS = [200, 500, 1_000, 2_000];
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function getAgentWithRetry(agentName: string) {
+  for (const delay of [0, ...AGENT_READ_RETRY_DELAYS_MS]) {
+    if (delay > 0) {
+      await wait(delay);
+    }
+
+    try {
+      return await getAgent(agentName);
+    } catch {
+      // Retry until the write settles or the attempts are exhausted.
+    }
+  }
+
+  return null;
+}
 
 export default function NewAgentPage() {
   const { t } = useI18n();
@@ -56,7 +76,8 @@ export default function NewAgentPage() {
   const [agentName, setAgentName] = useState("");
   const [agent, setAgent] = useState<Agent | null>(null);
   const [showSaveHint, setShowSaveHint] = useState(false);
-  const [isSaveRequested, setIsSaveRequested] = useState(false);
+  const [setupAgentStatus, setSetupAgentStatus] =
+    useState<SetupAgentStatus>("idle");
 
   const threadId = useMemo(() => uuid(), []);
 
@@ -67,18 +88,21 @@ export default function NewAgentPage() {
       is_bootstrap: true,
     },
     onFinish() {
-      if (!agent) {
-        setIsSaveRequested(false);
+      if (!agent && setupAgentStatus === "requested") {
+        setSetupAgentStatus("idle");
       }
     },
     onToolEnd({ name }) {
       if (name !== "setup_agent" || !agentName) return;
-      setIsSaveRequested(false);
-      getAgent(agentName)
-        .then((fetched) => setAgent(fetched))
-        .catch(() => {
-          // Ignore transient read failures while the write settles.
-        });
+      setSetupAgentStatus("completed");
+      void getAgentWithRetry(agentName).then((fetched) => {
+        if (fetched) {
+          setAgent(fetched);
+          return;
+        }
+
+        toast.error(t.agents.agentCreatedPendingRefresh);
+      });
     },
   });
 
@@ -158,26 +182,35 @@ export default function NewAgentPage() {
   );
 
   const handleSaveAgent = useCallback(async () => {
-    if (!agentName || agent || thread.isLoading || isSaveRequested) return;
+    if (
+      !agentName ||
+      agent ||
+      thread.isLoading ||
+      setupAgentStatus !== "idle"
+    ) {
+      return;
+    }
 
-    setIsSaveRequested(true);
+    setSetupAgentStatus("requested");
     setShowSaveHint(false);
     try {
       await sendMessage(
         threadId,
-        { text: SAVE_AGENT_MESSAGE, files: [] },
+        { text: t.agents.saveCommandMessage, files: [] },
         { agent_name: agentName },
+        { additionalKwargs: { hide_from_ui: true } },
       );
       toast.success(t.agents.saveRequested);
     } catch (error) {
-      setIsSaveRequested(false);
+      setSetupAgentStatus("idle");
       toast.error(error instanceof Error ? error.message : String(error));
     }
   }, [
     agent,
     agentName,
-    isSaveRequested,
     sendMessage,
+    setupAgentStatus,
+    t.agents.saveCommandMessage,
     t.agents.saveRequested,
     thread.isLoading,
     threadId,
@@ -206,10 +239,14 @@ export default function NewAgentPage() {
           <DropdownMenuContent align="end">
             <DropdownMenuItem
               onSelect={() => void handleSaveAgent()}
-              disabled={!!agent || thread.isLoading || isSaveRequested}
+              disabled={
+                !!agent || thread.isLoading || setupAgentStatus !== "idle"
+              }
             >
               <SaveIcon className="h-4 w-4" />
-              {isSaveRequested ? t.agents.saving : t.agents.save}
+              {setupAgentStatus === "requested"
+                ? t.agents.saving
+                : t.agents.save}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
