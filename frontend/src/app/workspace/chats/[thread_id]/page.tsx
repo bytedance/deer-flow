@@ -1,5 +1,7 @@
 "use client";
 
+import dynamic from "next/dynamic";
+
 import { useCallback } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -10,7 +12,6 @@ import {
   useThreadChat,
 } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
-import { InputBox } from "@/components/workspace/input-box";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
@@ -24,6 +25,16 @@ import { useThreadStream } from "@/core/threads/hooks";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
+
+const ClientInputBox = dynamic(
+  () => import("@/components/workspace/input-box").then((mod) => mod.InputBox),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="bg-background/5 w-full -translate-y-4 rounded-2xl border h-32" />
+    ),
+  },
+);
 
 export default function ChatPage() {
   const { t } = useI18n();
@@ -120,7 +131,7 @@ export default function ChatPage() {
                     />
                   </div>
                 </div>
-                <InputBox
+                <ClientInputBox
                   className={cn("bg-background/5 w-full -translate-y-4")}
                   isNewThread={isNewThread}
                   threadId={threadId}
