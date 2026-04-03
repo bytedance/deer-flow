@@ -65,12 +65,7 @@ class TestExtractOutline:
         """Address lines and short cover boilerplate must NOT appear in outline."""
         md = tmp_path / "8k.md"
         md.write_text(
-            "## **UNITED STATES SECURITIES AND EXCHANGE COMMISSION**\n\n"
-            "**WASHINGTON, DC 20549**\n\n"
-            "**CURRENT REPORT**\n\n"
-            "**SIGNATURES**\n\n"
-            "**TESLA, INC.**\n\n"
-            "**ITEM 2.02. RESULTS OF OPERATIONS**\n",
+            "## **UNITED STATES SECURITIES AND EXCHANGE COMMISSION**\n\n**WASHINGTON, DC 20549**\n\n**CURRENT REPORT**\n\n**SIGNATURES**\n\n**TESLA, INC.**\n\n**ITEM 2.02. RESULTS OF OPERATIONS**\n",
             encoding="utf-8",
         )
         outline = extract_outline(md)
@@ -128,8 +123,7 @@ class TestExtractOutline:
         """Mid-sentence bold text must not be mistaken for a heading."""
         md = tmp_path / "prose.md"
         md.write_text(
-            "This sentence has **bold words** inside it.\n\n"
-            "Another with **MULTIPLE CAPS** inline.\n",
+            "This sentence has **bold words** inside it.\n\nAnother with **MULTIPLE CAPS** inline.\n",
             encoding="utf-8",
         )
         outline = extract_outline(md)

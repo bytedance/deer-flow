@@ -63,9 +63,7 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
 #
 # Chinese headings (第三节...) are already captured as standard # headings
 # by pymupdf4llm, so they don't need this pattern.
-_BOLD_HEADING_RE = re.compile(
-    r"^\*\*((ITEM|PART|SECTION|SCHEDULE|EXHIBIT|APPENDIX|ANNEX|CHAPTER)\b[A-Z0-9 .,\-]*)\*\*\s*$"
-)
+_BOLD_HEADING_RE = re.compile(r"^\*\*((ITEM|PART|SECTION|SCHEDULE|EXHIBIT|APPENDIX|ANNEX|CHAPTER)\b[A-Z0-9 .,\-]*)\*\*\s*$")
 
 # Maximum number of outline entries injected into the agent context.
 # Keeps prompt size bounded even for very long documents.

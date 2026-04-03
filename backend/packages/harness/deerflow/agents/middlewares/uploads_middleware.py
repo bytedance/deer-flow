@@ -178,6 +178,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             from langgraph.config import get_config
+
             thread_id = get_config().get("configurable", {}).get("thread_id")
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
