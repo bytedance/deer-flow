@@ -188,6 +188,8 @@ export function InputBox({
     return models.find((m) => m.name === context.model_name) ?? models[0];
   }, [context.model_name, models]);
 
+  const resolvedModelName = selectedModel?.name;
+
   const supportThinking = useMemo(
     () => selectedModel?.supports_thinking ?? false,
     [selectedModel],
@@ -255,9 +257,33 @@ export function InputBox({
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
+
+      // Guard against submitting before the initial model auto-selection
+      // effect has flushed thread settings to storage/state.
+      if (resolvedModelName && context.model_name !== resolvedModelName) {
+        onContextChange?.({
+          ...context,
+          model_name: resolvedModelName,
+          mode: getResolvedMode(
+            context.mode,
+            selectedModel?.supports_thinking ?? false,
+          ),
+        });
+        setTimeout(() => onSubmit?.(message), 0);
+        return;
+      }
+
       onSubmit?.(message);
     },
-    [onSubmit, onStop, status],
+    [
+      context,
+      onContextChange,
+      onSubmit,
+      onStop,
+      resolvedModelName,
+      selectedModel?.supports_thinking,
+      status,
+    ],
   );
 
   const requestFormSubmit = useCallback(() => {
@@ -317,10 +343,19 @@ export function InputBox({
     !followupsHidden &&
     (followupsLoading || followups.length > 0);
 
+  const followupsVisibilityChangeRef = useRef(onFollowupsVisibilityChange);
+
   useEffect(() => {
-    onFollowupsVisibilityChange?.(showFollowups);
-    return () => onFollowupsVisibilityChange?.(false);
-  }, [onFollowupsVisibilityChange, showFollowups]);
+    followupsVisibilityChangeRef.current = onFollowupsVisibilityChange;
+  }, [onFollowupsVisibilityChange]);
+
+  useEffect(() => {
+    followupsVisibilityChangeRef.current?.(showFollowups);
+  }, [showFollowups]);
+
+  useEffect(() => {
+    return () => followupsVisibilityChangeRef.current?.(false);
+  }, []);
 
   useEffect(() => {
     const streaming = status === "streaming";
