@@ -375,6 +375,12 @@ sandbox:
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+  # Optional: Mount additional host directories into the sandbox.
+  # Each mount maps a host path to a virtual container path accessible by the agent.
+  # mounts:
+  #   - host_path: /home/user/my-project    # Absolute path on the host machine
+  #     container_path: /mnt/my-project     # Virtual path inside the sandbox
+  #     read_only: true                     # Whether the mount is read-only (default: false)
 
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
