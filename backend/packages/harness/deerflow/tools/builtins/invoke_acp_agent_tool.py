@@ -209,7 +209,15 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
         cmd = agent_config.command
         args = agent_config.args or []
         physical_cwd = _get_work_dir(thread_id)
-        mcp_servers = _build_acp_mcp_servers()
+        try:
+            mcp_servers = _build_acp_mcp_servers()
+        except ValueError as exc:
+            logger.warning(
+                "Invalid MCP server configuration for ACP agent '%s'; continuing without MCP servers: %s",
+                agent,
+                exc,
+            )
+            mcp_servers = []
         agent_env: dict[str, str] | None = None
         if agent_config.env:
             agent_env = {k: (os.environ.get(v[1:], "") if v.startswith("$") else v) for k, v in agent_config.env.items()}

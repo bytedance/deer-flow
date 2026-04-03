@@ -493,6 +493,94 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_invoke_acp_agent_skips_invalid_mcp_servers(monkeypatch, tmp_path, caplog):
+    """Invalid MCP config should be logged and skipped instead of failing ACP invocation."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool._build_acp_mcp_servers",
+        lambda: (_ for _ in ()).throw(ValueError("missing command")),
+    )
+
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        @property
+        def collected_text(self) -> str:
+            return ""
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            captured["new_session"] = kwargs
+            return SimpleNamespace(session_id="s1")
+
+        async def prompt(self, **kwargs):
+            pass
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, env=None, cwd=None):
+            captured["spawn"] = {"cmd": cmd, "args": list(args), "env": env, "cwd": cwd}
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyRequestError(Exception):
+        @staticmethod
+        def method_not_found(method):
+            return DummyRequestError(method)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            RequestError=DummyRequestError,
+            spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            TextContentBlock=type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)}),
+        ),
+    )
+
+    tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
+    caplog.set_level("WARNING")
+
+    try:
+        await tool.coroutine(agent="codex", prompt="Do something")
+    finally:
+        sys.modules.pop("acp", None)
+        sys.modules.pop("acp.schema", None)
+
+    assert captured["new_session"]["mcp_servers"] == []
+    assert "continuing without MCP servers" in caplog.text
+    assert "missing command" in caplog.text
+
+
+@pytest.mark.anyio
 async def test_invoke_acp_agent_passes_none_env_when_not_configured(monkeypatch, tmp_path):
     """When env is empty, None is passed to spawn_agent_process (subprocess inherits parent env)."""
     from deerflow.config import paths as paths_module
