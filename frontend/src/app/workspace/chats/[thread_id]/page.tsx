@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
@@ -11,7 +11,11 @@ import {
 } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
-import { MessageList } from "@/components/workspace/messages";
+import {
+  MessageList,
+  MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
+  MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM,
+} from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
@@ -27,6 +31,7 @@ import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
   const { t } = useI18n();
+  const [showFollowups, setShowFollowups] = useState(false);
   const { threadId, isNewThread, setIsNewThread, isMock } = useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
   useSpecificChatMode();
@@ -70,6 +75,11 @@ export default function ChatPage() {
     await thread.stop();
   }, [thread]);
 
+  const messageListPaddingBottom = showFollowups
+    ? MESSAGE_LIST_DEFAULT_PADDING_BOTTOM +
+      MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM
+    : undefined;
+
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
       <ChatBox threadId={threadId}>
@@ -97,6 +107,7 @@ export default function ChatPage() {
                 className={cn("size-full", !isNewThread && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                paddingBottom={messageListPaddingBottom}
               />
             </div>
             <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">
@@ -141,6 +152,7 @@ export default function ChatPage() {
                     isUploading
                   }
                   onContextChange={(context) => setSettings("context", context)}
+                  onFollowupsVisibilityChange={setShowFollowups}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
                 />
