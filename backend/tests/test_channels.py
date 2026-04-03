@@ -1868,12 +1868,8 @@ class TestSlackAllowedUsers:
         ) as submit:
             channel._handle_message_event(event)
 
-        channel._add_reaction.assert_called_once_with(
-            "C123", "1710000000.000100", "eyes"
-        )
-        channel._send_running_reply.assert_called_once_with(
-            "C123", "1710000000.000100"
-        )
+        channel._add_reaction.assert_called_once_with("C123", "1710000000.000100", "eyes")
+        channel._send_running_reply.assert_called_once_with("C123", "1710000000.000100")
         submit.assert_called_once()
         inbound = bus.publish_inbound.call_args.args[0]
         assert inbound.user_id == "123456"
