@@ -194,7 +194,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return text
         if isinstance(content, list):
             return [*content, {"type": "text", "text": f"\n\n{text}"}]
-        return content + f"\n\n{text}"
+        if isinstance(content, str):
+            return content + f"\n\n{text}"
+        # Fallback: coerce unexpected types to str to avoid TypeError
+        return str(content) + f"\n\n{text}"
 
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
         warning, hard_stop = self._track_and_check(state, runtime)

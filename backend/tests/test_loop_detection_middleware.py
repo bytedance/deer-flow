@@ -1,5 +1,6 @@
 """Tests for LoopDetectionMiddleware."""
 
+import copy
 from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -19,8 +20,13 @@ def _make_runtime(thread_id="test-thread"):
 
 
 def _make_state(tool_calls=None, content=""):
-    """Build a minimal AgentState dict with an AIMessage."""
-    msg = AIMessage(content=content, tool_calls=tool_calls or [])
+    """Build a minimal AgentState dict with an AIMessage.
+
+    Deep-copies *content* when it is mutable (e.g. list) so that
+    successive calls never share the same object reference.
+    """
+    safe_content = copy.deepcopy(content) if isinstance(content, list) else content
+    msg = AIMessage(content=safe_content, tool_calls=tool_calls or [])
     return {"messages": [msg]}
 
 
@@ -264,6 +270,19 @@ class TestAppendText:
         assert isinstance(result, list)
         assert len(result) == 1
         assert result[0] == {"type": "text", "text": "\n\nstop msg"}
+
+    def test_unexpected_type_coerced_to_str(self):
+        """Unexpected content types should be coerced to str as a fallback."""
+        result = LoopDetectionMiddleware._append_text(42, "stop msg")
+        assert isinstance(result, str)
+        assert result == "42\n\nstop msg"
+
+    def test_list_content_not_mutated_in_place(self):
+        """_append_text must not modify the original list."""
+        original = [{"type": "text", "text": "hello"}]
+        result = LoopDetectionMiddleware._append_text(original, "appended")
+        assert len(original) == 1  # original unchanged
+        assert len(result) == 2   # new list has the appended block
 
 
 class TestHardStopWithListContent:
