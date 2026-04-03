@@ -96,12 +96,25 @@ class TestExtractOutline:
         assert outline[1]["title"] == "第三节 管理层讨论与分析"
 
     def test_outline_capped_at_max_entries(self, tmp_path):
-        """Result never exceeds MAX_OUTLINE_ENTRIES regardless of document length."""
+        """When truncated, result has MAX_OUTLINE_ENTRIES real entries + 1 sentinel."""
         lines = [f"# Heading {i}" for i in range(MAX_OUTLINE_ENTRIES + 10)]
         md = tmp_path / "long.md"
         md.write_text("\n".join(lines), encoding="utf-8")
         outline = extract_outline(md)
-        assert len(outline) == MAX_OUTLINE_ENTRIES
+        # Last entry is the truncation sentinel
+        assert outline[-1] == {"truncated": True}
+        # Visible entries are exactly MAX_OUTLINE_ENTRIES
+        visible = [e for e in outline if not e.get("truncated")]
+        assert len(visible) == MAX_OUTLINE_ENTRIES
+
+    def test_no_truncation_sentinel_when_under_limit(self, tmp_path):
+        """Short documents produce no sentinel entry."""
+        lines = [f"# Heading {i}" for i in range(5)]
+        md = tmp_path / "short.md"
+        md.write_text("\n".join(lines), encoding="utf-8")
+        outline = extract_outline(md)
+        assert len(outline) == 5
+        assert not any(e.get("truncated") for e in outline)
 
     def test_blank_lines_and_whitespace_ignored(self, tmp_path):
         """Blank lines between headings do not produce empty entries."""

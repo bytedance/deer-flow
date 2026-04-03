@@ -64,9 +64,13 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         lines.append(f"  Path: {file['path']}")
         outline = file.get("outline") or []
         if outline:
+            truncated = outline[-1].get("truncated", False) if outline else False
+            visible = [e for e in outline if not e.get("truncated")]
             lines.append("  Document outline (use `read_file` with line ranges to read sections):")
-            for entry in outline:
+            for entry in visible:
                 lines.append(f"    L{entry['line']}: {entry['title']}")
+            if truncated:
+                lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further)")
         lines.append("")
 
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:

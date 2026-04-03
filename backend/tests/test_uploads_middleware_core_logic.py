@@ -376,6 +376,39 @@ class TestBeforeAgent:
         content = result["messages"][-1].content
         assert "Document outline" not in content
 
+    def test_outline_truncation_hint_shown(self, tmp_path):
+        """When outline is truncated, a hint line is appended after the last visible entry."""
+        from deerflow.utils.file_conversion import MAX_OUTLINE_ENTRIES
+
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "big.pdf").write_bytes(b"%PDF fake")
+        # Write MAX_OUTLINE_ENTRIES + 5 headings so truncation is triggered
+        headings = "\n".join(f"# Heading {i}" for i in range(MAX_OUTLINE_ENTRIES + 5))
+        (uploads_dir / "big.md").write_text(headings, encoding="utf-8")
+
+        msg = _human("read", files=[{"filename": "big.pdf", "size": 9, "path": "/mnt/user-data/uploads/big.pdf"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert f"showing first {MAX_OUTLINE_ENTRIES} headings" in content
+        assert "use `read_file` to explore further" in content
+
+    def test_no_truncation_hint_for_short_outline(self, tmp_path):
+        """Short outlines (under the cap) must not show a truncation hint."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "short.pdf").write_bytes(b"%PDF fake")
+        (uploads_dir / "short.md").write_text("# Intro\n\n# Conclusion\n", encoding="utf-8")
+
+        msg = _human("read", files=[{"filename": "short.pdf", "size": 9, "path": "/mnt/user-data/uploads/short.pdf"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "showing first" not in content
+
     def test_historical_file_outline_injected(self, tmp_path):
         """Outline is also shown for historical (previously uploaded) files."""
         mw = _middleware(tmp_path)

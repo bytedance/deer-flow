@@ -86,8 +86,10 @@ def extract_outline(md_path: Path) -> list[dict]:
 
     Returns:
         List of dicts with keys: title (str), line (int, 1-based).
+        When the outline is truncated at MAX_OUTLINE_ENTRIES, a sentinel entry
+        ``{"truncated": True}`` is appended as the last element so callers can
+        render a "showing first N headings" hint without re-scanning the file.
         Returns an empty list if the file cannot be read or has no headings.
-        Capped at MAX_OUTLINE_ENTRIES entries.
     """
     outline: list[dict] = []
     try:
@@ -113,6 +115,7 @@ def extract_outline(md_path: Path) -> list[dict]:
                         outline.append({"title": title, "line": lineno})
 
                 if len(outline) >= MAX_OUTLINE_ENTRIES:
+                    outline.append({"truncated": True})
                     break
     except Exception:
         return []
