@@ -1,11 +1,53 @@
 import logging
 import os
+import shutil
+import subprocess
+from importlib.util import find_spec
 from pathlib import Path
 
 from .parser import parse_skill_file
 from .types import Skill
 
 logger = logging.getLogger(__name__)
+_CHECKED_SKILL_DEPENDENCIES: set[str] = set()
+
+
+def _has_module_spec(module_name: str) -> bool:
+    try:
+        return find_spec(module_name) is not None
+    except Exception:
+        return False
+
+
+def ensure_skill_dependencies(skill: Skill) -> None:
+    """Ensure declared skill dependencies are installed (pip only)."""
+    skill_key = f"{skill.category}:{skill.name}"
+    if skill_key in _CHECKED_SKILL_DEPENDENCIES:
+        return
+    _CHECKED_SKILL_DEPENDENCIES.add(skill_key)
+
+    dependencies = skill.dependencies
+    if not dependencies or not dependencies.pip:
+        return
+
+    missing_packages: list[str] = []
+    for package in dependencies.pip:
+        if not isinstance(package, str) or not package.strip():
+            continue
+
+        normalized_name = package.replace("-", "_")
+        if not _has_module_spec(package) and not _has_module_spec(normalized_name):
+            missing_packages.append(package)
+
+    if not missing_packages:
+        return
+
+    command = ["uv", "pip", "install", *missing_packages] if shutil.which("uv") else ["pip", "install", *missing_packages]
+    try:
+        subprocess.run(command)
+    except FileNotFoundError:
+        if command[0] == "uv":
+            subprocess.run(["pip", "install", *missing_packages])
 
 
 def get_skills_root_path() -> Path:
@@ -90,6 +132,10 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
     except Exception as e:
         # If config loading fails, default to all enabled
         logger.warning("Failed to load extensions config: %s", e)
+
+    for skill in skills:
+        if skill.enabled:
+            ensure_skill_dependencies(skill)
 
     # Filter by enabled status if requested
     if enabled_only:

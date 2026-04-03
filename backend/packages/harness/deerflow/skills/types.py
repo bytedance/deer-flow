@@ -1,5 +1,11 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+
+@dataclass
+class SkillDependencies:
+    pip: list[str] = field(default_factory=list)
+    npm: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -14,6 +20,7 @@ class Skill:
     relative_path: Path  # Relative path from category root to skill directory
     category: str  # 'public' or 'custom'
     enabled: bool = False  # Whether this skill is enabled
+    dependencies: SkillDependencies | None = None
 
     @property
     def skill_path(self) -> str:

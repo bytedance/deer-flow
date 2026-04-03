@@ -2,7 +2,9 @@ import logging
 import re
 from pathlib import Path
 
-from .types import Skill
+import yaml
+
+from .types import Skill, SkillDependencies
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,24 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
                 text = "\n".join(current_value).rstrip()
                 metadata[current_key] = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
 
+        dependencies: SkillDependencies | None = None
+        try:
+            yaml_front_matter = yaml.safe_load(front_matter)
+        except Exception:
+            yaml_front_matter = None
+
+        if isinstance(yaml_front_matter, dict):
+            yaml_dependencies = yaml_front_matter.get("dependencies")
+            if isinstance(yaml_dependencies, dict):
+                pip = yaml_dependencies.get("pip")
+                npm = yaml_dependencies.get("npm")
+
+                pip_deps = [pkg for pkg in pip if isinstance(pkg, str)] if isinstance(pip, list) else []
+                npm_deps = [pkg for pkg in npm if isinstance(pkg, str)] if isinstance(npm, list) else []
+
+                if pip_deps or npm_deps:
+                    dependencies = SkillDependencies(pip=pip_deps, npm=npm_deps)
+
         # Extract required fields
         name = metadata.get("name")
         description = metadata.get("description")
@@ -118,6 +138,7 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
             relative_path=relative_path or Path(skill_file.parent.name),
             category=category,
             enabled=True,  # Default to enabled, actual state comes from config file
+            dependencies=dependencies,
         )
 
     except Exception as e:
