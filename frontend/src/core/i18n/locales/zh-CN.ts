@@ -51,6 +51,12 @@ export const zhCN: Translations = {
     exportSuccess: "对话已导出",
   },
 
+  // Home
+  home: {
+    docs: "文档",
+    blog: "博客",
+  },
+
   // Welcome
   welcome: {
     greeting: "你好，欢迎回来！",
