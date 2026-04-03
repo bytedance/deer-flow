@@ -282,7 +282,7 @@ class TestAppendText:
         original = [{"type": "text", "text": "hello"}]
         result = LoopDetectionMiddleware._append_text(original, "appended")
         assert len(original) == 1  # original unchanged
-        assert len(result) == 2   # new list has the appended block
+        assert len(result) == 2  # new list has the appended block
 
 
 class TestHardStopWithListContent:
