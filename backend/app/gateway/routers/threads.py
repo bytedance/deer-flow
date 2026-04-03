@@ -488,16 +488,19 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
             "metadata": {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")},
         }
 
-    status = _derive_thread_status(checkpoint_tuple) if checkpoint_tuple is not None else record.get("status", "idle")  # type: ignore[union-attr]
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    status = _derive_thread_status(checkpoint_tuple) if checkpoint_tuple is not None else record.get("status", "idle")
     checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {} if checkpoint_tuple is not None else {}
     channel_values = checkpoint.get("channel_values", {})
 
     return ThreadResponse(
         thread_id=thread_id,
         status=status,
-        created_at=str(record.get("created_at", "")),  # type: ignore[union-attr]
-        updated_at=str(record.get("updated_at", "")),  # type: ignore[union-attr]
-        metadata=record.get("metadata", {}),  # type: ignore[union-attr]
+        created_at=str(record.get("created_at", "")),
+        updated_at=str(record.get("updated_at", "")),
+        metadata=record.get("metadata", {}),
         values=serialize_channel_values(channel_values),
     )
 

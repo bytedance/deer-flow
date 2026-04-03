@@ -4,21 +4,14 @@ import { useEffect } from "react";
 
 import { useI18nContext } from "./context";
 import { getLocaleFromCookie, setLocaleInCookie } from "./cookies";
-import { enUS } from "./locales/en-US";
-import { zhCN } from "./locales/zh-CN";
+import { translations } from "./translations";
 
 import {
   DEFAULT_LOCALE,
   detectLocale,
   normalizeLocale,
   type Locale,
-  type Translations,
 } from "./index";
-
-const translations: Record<Locale, Translations> = {
-  "en-US": enUS,
-  "zh-CN": zhCN,
-};
 
 export function useI18n() {
   const { locale, setLocale } = useI18nContext();
