@@ -205,6 +205,33 @@ class TestStream:
         msg_events = _ai_events(events)
         assert msg_events[0].data["content"] == "Hello!"
 
+    def test_custom_events_are_forwarded(self, client):
+        """stream() forwards custom stream events alongside normal values output."""
+        ai = AIMessage(content="Hello!", id="ai-1")
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("custom", {"type": "task_started", "task_id": "task-1"}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), ai]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-custom"))
+
+        agent.stream.assert_called_once()
+        call_kwargs = agent.stream.call_args.kwargs
+        assert call_kwargs["stream_mode"] == ["values", "custom"]
+
+        assert events[0].type == "custom"
+        assert events[0].data == {"type": "task_started", "task_id": "task-1"}
+        assert any(event.type == "messages-tuple" and event.data["content"] == "Hello!" for event in events)
+        assert any(event.type == "values" for event in events)
+        assert events[-1].type == "end"
+
     def test_context_propagation(self, client):
         """stream() passes agent_name to the context."""
         agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
