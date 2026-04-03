@@ -325,6 +325,16 @@ tools:
     group: file:read
     use: deerflow.sandbox.tools:read_file_tool
 
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+    max_results: 200
+
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+    max_results: 100
+
   - name: write_file
     group: file:write
     use: deerflow.sandbox.tools:write_file_tool

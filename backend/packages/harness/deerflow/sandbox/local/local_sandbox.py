@@ -6,6 +6,7 @@ from pathlib import Path
 
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
 
 class LocalSandbox(Sandbox):
@@ -258,6 +259,39 @@ class LocalSandbox(Sandbox):
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
+
+    def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+        resolved_path = Path(self._resolve_path(path))
+        matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+        return [self._reverse_resolve_path(match) for match in matches], truncated
+
+    def grep(
+        self,
+        path: str,
+        pattern: str,
+        *,
+        glob: str | None = None,
+        literal: bool = False,
+        case_sensitive: bool = False,
+        max_results: int = 100,
+    ) -> tuple[list[GrepMatch], bool]:
+        resolved_path = Path(self._resolve_path(path))
+        matches, truncated = find_grep_matches(
+            resolved_path,
+            pattern,
+            glob_pattern=glob,
+            literal=literal,
+            case_sensitive=case_sensitive,
+            max_results=max_results,
+        )
+        return [
+            GrepMatch(
+                path=self._reverse_resolve_path(match.path),
+                line_number=match.line_number,
+                line=match.line,
+            )
+            for match in matches
+        ], truncated
 
     def update_file(self, path: str, content: bytes) -> None:
         resolved_path = self._resolve_path(path)
