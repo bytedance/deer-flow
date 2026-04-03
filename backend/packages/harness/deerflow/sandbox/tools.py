@@ -366,12 +366,17 @@ def _path_variants(path: str) -> set[str]:
     return {path, path.replace("\\", "/"), path.replace("/", "\\")}
 
 
+def _path_separator_for_style(path: str) -> str:
+    return "\\" if "\\" in path and "/" not in path else "/"
+
+
 def _join_path_preserving_style(base: str, relative: str) -> str:
     if not relative:
         return base
-    if "/" in base and "\\" not in base:
-        return f"{base.rstrip('/')}/{relative}"
-    return str(Path(base) / relative)
+    separator = _path_separator_for_style(base)
+    normalized_relative = relative.replace("\\" if separator == "/" else "/", separator).lstrip("/\\")
+    stripped_base = base.rstrip("/\\")
+    return f"{stripped_base}{separator}{normalized_relative}"
 
 
 def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadState] | None" = None) -> str:
@@ -416,7 +421,10 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
             return actual_base
         if path.startswith(f"{virtual_base}/"):
             rest = path[len(virtual_base) :].lstrip("/")
-            return _join_path_preserving_style(actual_base, rest)
+            result = _join_path_preserving_style(actual_base, rest)
+            if path.endswith("/") and not result.endswith(("/", "\\")):
+                result += _path_separator_for_style(actual_base)
+            return result
 
     return path
 
