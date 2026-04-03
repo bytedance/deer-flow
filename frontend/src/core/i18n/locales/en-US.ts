@@ -197,7 +197,7 @@ export const enUS: Translations = {
       "Network request failed — check your network or backend connection",
     nameStepCheckError: "Could not verify name availability — please try again",
     nameStepBootstrapMessage:
-      "The new custom agent display name is {name}. Let's bootstrap it's **SOUL**.",
+      "The new custom agent display name is {name}. Let's bootstrap its **SOUL**.",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",

@@ -74,7 +74,14 @@ def get_agent_display_name(agent_name: str | None) -> str | None:
     """Return the user-facing display name for an agent, falling back to slug."""
     if agent_name is None:
         return None
-    config = load_agent_config(agent_name)
+    try:
+        config = load_agent_config(agent_name)
+    except (FileNotFoundError, ValueError):
+        logger.debug(
+            "Unable to load display name for agent '%s'; falling back to slug.",
+            agent_name,
+        )
+        return None
     if config is None:
         return None
     return config.display_name or config.name

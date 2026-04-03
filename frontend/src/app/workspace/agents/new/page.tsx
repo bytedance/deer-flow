@@ -68,6 +68,7 @@ export default function NewAgentPage() {
 
   const handleConfirmName = useCallback(async () => {
     const trimmed = nameInput.trim();
+    let normalizedDisplayName = trimmed;
     if (!trimmed) return;
     setNameError("");
     setIsCheckingName(true);
@@ -79,6 +80,7 @@ export default function NewAgentPage() {
       }
       setAgentName(result.name);
       setAgentDisplayName(result.display_name);
+      normalizedDisplayName = result.display_name;
     } catch (err) {
       if (
         err instanceof AgentNameCheckError &&
@@ -94,7 +96,10 @@ export default function NewAgentPage() {
     }
     setStep("chat");
     await sendMessage(threadId, {
-      text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
+      text: t.agents.nameStepBootstrapMessage.replace(
+        "{name}",
+        normalizedDisplayName,
+      ),
       files: [],
     });
   }, [

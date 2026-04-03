@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -167,6 +167,58 @@ class TestLoadAgentConfig:
 
             with pytest.raises(FileNotFoundError):
                 load_agent_config("broken-agent")
+
+    def test_get_agent_display_name_missing_agent_returns_none(self, tmp_path):
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import get_agent_display_name
+
+            assert get_agent_display_name("missing-agent") is None
+
+    def test_get_agent_display_name_invalid_agent_returns_none(self, tmp_path):
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import get_agent_display_name
+
+            assert get_agent_display_name("bad agent") is None
+
+
+class TestSetupAgentTool:
+    def test_setup_agent_normalizes_display_name(self, tmp_path):
+        paths_instance = _make_paths(tmp_path)
+
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=paths_instance):
+            from deerflow.tools.builtins.setup_agent_tool import setup_agent
+
+            runtime = MagicMock(
+                context={
+                    "agent_name": "code-reviewer",
+                    "agent_display_name": "  代码助手  ",
+                },
+                tool_call_id="tc-1",
+            )
+
+            setup_agent.func("Soul", "Reviews code", runtime=runtime)
+
+        config_data = yaml.safe_load((tmp_path / "agents" / "code-reviewer" / "config.yaml").read_text(encoding="utf-8"))
+        assert config_data["display_name"] == "代码助手"
+
+    def test_setup_agent_rejects_invalid_display_name(self, tmp_path):
+        paths_instance = _make_paths(tmp_path)
+
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=paths_instance):
+            from deerflow.tools.builtins.setup_agent_tool import setup_agent
+
+            runtime = MagicMock(
+                context={
+                    "agent_name": "code-reviewer",
+                    "agent_display_name": "   ",
+                },
+                tool_call_id="tc-2",
+            )
+
+            result = setup_agent.func("Soul", "Reviews code", runtime=runtime)
+
+        assert "Display name must be a non-empty string." in result.update["messages"][0].content
+        assert not (tmp_path / "agents" / "code-reviewer").exists()
 
     def test_load_config_infers_name_from_dir(self, tmp_path):
         """Config without 'name' field should use directory name."""
