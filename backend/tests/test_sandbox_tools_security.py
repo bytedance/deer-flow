@@ -39,6 +39,28 @@ def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
     assert Path(replace_virtual_path("/mnt/user-data", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
 
 
+def test_replace_virtual_path_maps_configured_mounts() -> None:
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    config = AppConfig(
+        models=[],
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[
+                {
+                    "host_path": "/host/videos",
+                    "container_path": "/mnt/videos",
+                    "read_only": True,
+                }
+            ],
+        ),
+    )
+
+    with patch("deerflow.config.get_app_config", return_value=config):
+        assert replace_virtual_path("/mnt/videos/demo.mp4", _THREAD_DATA) == "/host/videos/demo.mp4"
+
+
 # ---------- mask_local_paths_in_output ----------
 
 
@@ -61,6 +83,30 @@ def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
 
         assert "/home/user/deer-flow/skills" not in masked
         assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
+
+
+def test_mask_local_paths_in_output_hides_configured_mount_host_paths() -> None:
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    config = AppConfig(
+        models=[],
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[
+                {
+                    "host_path": "/host/videos",
+                    "container_path": "/mnt/videos",
+                    "read_only": True,
+                }
+            ],
+        ),
+    )
+
+    with patch("deerflow.config.get_app_config", return_value=config):
+        masked = mask_local_paths_in_output("Rendered /host/videos/out/demo.mp4", _THREAD_DATA)
+        assert "/host/videos" not in masked
+        assert "/mnt/videos/out/demo.mp4" in masked
 
 
 # ---------- _reject_path_traversal ----------
@@ -112,6 +158,51 @@ def test_validate_local_tool_path_allows_user_data_paths() -> None:
 def test_validate_local_tool_path_allows_user_data_write() -> None:
     # read_only=False (default) should still work for user-data paths
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_allows_configured_mount_read_only_access() -> None:
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    config = AppConfig(
+        models=[],
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[
+                {
+                    "host_path": "/host/videos",
+                    "container_path": "/mnt/videos",
+                    "read_only": True,
+                }
+            ],
+        ),
+    )
+
+    with patch("deerflow.config.get_app_config", return_value=config):
+        validate_local_tool_path("/mnt/videos/demo.mp4", _THREAD_DATA, read_only=True)
+
+
+def test_validate_local_tool_path_rejects_writes_to_read_only_configured_mount() -> None:
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    config = AppConfig(
+        models=[],
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[
+                {
+                    "host_path": "/host/videos",
+                    "container_path": "/mnt/videos",
+                    "read_only": True,
+                }
+            ],
+        ),
+    )
+
+    with patch("deerflow.config.get_app_config", return_value=config):
+        with pytest.raises(PermissionError, match="read-only mounted path"):
+            validate_local_tool_path("/mnt/videos/demo.mp4", _THREAD_DATA, read_only=False)
 
 
 def test_validate_local_tool_path_rejects_traversal_in_user_data() -> None:

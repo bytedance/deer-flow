@@ -84,6 +84,42 @@ def _get_skills_host_path() -> str | None:
     return None
 
 
+def _get_configured_sandbox_mounts() -> list[tuple[str, str, bool]]:
+    """Get configured sandbox mounts as (container_path, host_path, read_only)."""
+    try:
+        from deerflow.config import get_app_config
+
+        mounts: list[tuple[str, str, bool]] = []
+        for mount in get_app_config().sandbox.mounts:
+            container_path = str(mount.container_path).rstrip("/") or "/"
+            mounts.append((container_path, str(mount.host_path), bool(mount.read_only)))
+        return mounts
+    except Exception:
+        return []
+
+
+def _configured_mount_for_path(path: str) -> tuple[str, str, bool] | None:
+    """Resolve a virtual path against configured sandbox mounts."""
+    for container_path, host_path, read_only in sorted(_get_configured_sandbox_mounts(), key=lambda item: len(item[0]), reverse=True):
+        if path == container_path or path.startswith(f"{container_path}/"):
+            return container_path, host_path, read_only
+    return None
+
+
+def _resolve_configured_mount_path(path: str) -> str:
+    """Resolve a configured sandbox mount path to its host path."""
+    mount = _configured_mount_for_path(path)
+    if mount is None:
+        raise FileNotFoundError(f"Configured sandbox mount not available for path: {path}")
+
+    container_path, host_path, _read_only = mount
+    if path == container_path:
+        return host_path
+
+    relative = path[len(container_path) :].lstrip("/")
+    return _join_path_preserving_style(host_path, relative)
+
+
 def _is_skills_path(path: str) -> bool:
     """Check if a path is under the skills container path."""
     skills_prefix = _get_skills_container_path()
@@ -370,6 +406,10 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
             rest = path[len(virtual_base) :].lstrip("/")
             return _join_path_preserving_style(actual_base, rest)
 
+    configured_mount = _configured_mount_for_path(path)
+    if configured_mount is not None:
+        return _resolve_configured_mount_path(path)
+
     return path
 
 
@@ -448,6 +488,23 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
 
             result = pattern.sub(replace_acp, result)
 
+    # Mask configured sandbox mount host paths
+    for container_path, host_path, _read_only in _get_configured_sandbox_mounts():
+        raw_base = str(Path(host_path))
+        resolved_base = str(Path(host_path).resolve())
+        for base in _path_variants(raw_base) | _path_variants(resolved_base):
+            escaped = re.escape(base).replace(r"\\", r"[/\\]")
+            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+
+            def replace_mount(match: re.Match, _base: str = base, _virtual: str = container_path) -> str:
+                matched_path = match.group(0)
+                if matched_path == _base:
+                    return _virtual
+                relative = matched_path[len(_base) :].lstrip("/\\")
+                return f"{_virtual}/{relative}" if relative else _virtual
+
+            result = pattern.sub(replace_mount, result)
+
     # Mask user-data host paths
     if thread_data is None:
         return result
@@ -523,11 +580,18 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
+    configured_mount = _configured_mount_for_path(path)
+    if configured_mount is not None:
+        _container_path, _host_path, mount_read_only = configured_mount
+        if mount_read_only and not read_only:
+            raise PermissionError(f"Write access to read-only mounted path is not allowed: {path}")
+        return
+
     # User-data paths
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
 
-    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, or {_ACP_WORKSPACE_VIRTUAL_PATH}/ are allowed")
+    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, {_ACP_WORKSPACE_VIRTUAL_PATH}/, or configured sandbox mounts are allowed")
 
 
 def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
