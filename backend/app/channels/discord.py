@@ -58,7 +58,10 @@ class DiscordChannel(Channel):
         intents.guilds = True
         intents.message_content = True
 
-        client = discord.Client(intents=intents)
+        client = discord.Client(
+            intents=intents,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         self._client = client
         self._discord_module = discord
         self._main_loop = asyncio.get_event_loop()
@@ -81,7 +84,9 @@ class DiscordChannel(Channel):
         if self._client and self._discord_loop and self._discord_loop.is_running():
             close_future = asyncio.run_coroutine_threadsafe(self._client.close(), self._discord_loop)
             try:
-                await asyncio.wrap_future(close_future)
+                await asyncio.wait_for(asyncio.wrap_future(close_future), timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning("[Discord] client close timed out after 10s")
             except Exception:
                 logger.exception("[Discord] error while closing client")
 
@@ -115,7 +120,8 @@ class DiscordChannel(Channel):
             return False
 
         try:
-            file = self._discord_module.File(str(attachment.actual_path), filename=attachment.filename)
+            fp = open(str(attachment.actual_path), "rb")  # noqa: SIM115
+            file = self._discord_module.File(fp, filename=attachment.filename)
             send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
             await asyncio.wrap_future(send_future)
             logger.info("[Discord] file uploaded: %s", attachment.filename)
@@ -172,7 +178,11 @@ class DiscordChannel(Channel):
         inbound.topic_id = thread_id
 
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
+            future = asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
+            future.add_done_callback(
+                lambda f: logger.exception("[Discord] publish_inbound failed", exc_info=f.exception())
+                if f.exception() else None
+            )
 
     def _run_client(self) -> None:
         self._discord_loop = asyncio.new_event_loop()
@@ -194,7 +204,13 @@ class DiscordChannel(Channel):
             thread_name = f"deerflow-{message.author.display_name}-{message.id}"[:100]
             return await message.create_thread(name=thread_name)
         except Exception:
-            logger.exception("[Discord] failed to create thread for message=%s", message.id)
+            logger.exception("[Discord] failed to create thread for message=%s (threads may be disabled or missing permissions)", message.id)
+            try:
+                await message.channel.send(
+                    f"Could not create a thread for your message. Please check that threads are enabled in this channel."
+                )
+            except Exception:
+                pass
             return None
 
     async def _resolve_target(self, msg: OutboundMessage):
