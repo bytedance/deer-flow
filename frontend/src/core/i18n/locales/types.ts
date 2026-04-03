@@ -134,6 +134,11 @@ export interface Translations {
     nameStepAlreadyExistsError: string;
     nameStepCheckError: string;
     nameStepBootstrapMessage: string;
+    save: string;
+    saving: string;
+    saveRequested: string;
+    saveHint: string;
+    more: string;
     agentCreated: string;
     startChatting: string;
     backToGallery: string;
@@ -219,7 +224,7 @@ export interface Translations {
     output: string;
     total: string;
   };
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: string;
