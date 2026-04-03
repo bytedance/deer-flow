@@ -205,6 +205,13 @@ export const enUS: Translations = {
     nameStepCheckError: "Could not verify name availability — please try again",
     nameStepBootstrapMessage:
       "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
+    save: "Save agent",
+    saving: "Saving agent...",
+    saveRequested:
+      "Save requested. DeerFlow is generating and saving an initial version now.",
+    saveHint:
+      "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
+    more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",

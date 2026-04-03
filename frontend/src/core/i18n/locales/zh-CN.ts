@@ -193,6 +193,13 @@ export const zhCN: Translations = {
     nameStepCheckError: "无法验证名称可用性，请稍后重试",
     nameStepBootstrapMessage:
       "新智能体的名称是 {name}，现在开始为它生成 **SOUL**。",
+    save: "保存智能体",
+    saving: "正在保存智能体...",
+    saveRequested:
+      "已提交保存请求，DeerFlow 正在根据当前对话生成并保存初版智能体。",
+    saveHint:
+      "你可以在右上角的菜单里随时保存这个智能体，就算目前还只是初稿也可以。",
+    more: "更多操作",
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
     backToGallery: "返回 Gallery",
