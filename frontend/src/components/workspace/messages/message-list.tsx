@@ -51,12 +51,13 @@ export function MessageList({
     [messages],
   );
   const lastStreamingGroupIndex = useMemo(() => {
-    for (let i = groups.length - 1; i >= 0; i -= 1) {
-      if (groups[i]?.type !== "human") {
-        return i;
-      }
+    const lastGroupIndex = groups.length - 1;
+
+    if (lastGroupIndex < 0) {
+      return -1;
     }
-    return -1;
+
+    return groups[lastGroupIndex]?.type !== "human" ? lastGroupIndex : -1;
   }, [groups]);
 
   if (thread.isThreadLoading && messages.length === 0) {
