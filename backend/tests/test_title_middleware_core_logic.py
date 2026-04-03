@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import get_title_config, set_title_config
 
-from backend.tests.title_config_test_utils import clone_title_config
+from tests.title_config_test_utils import clone_title_config
 
 
 def _set_test_title_config(**overrides):

@@ -10,7 +10,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
 
-from backend.tests.title_config_test_utils import clone_title_config
+from tests.title_config_test_utils import clone_title_config
 
 
 class TestTitleConfig:
