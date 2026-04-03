@@ -51,6 +51,12 @@ export const enUS: Translations = {
     exportSuccess: "Conversation exported",
   },
 
+  // Home
+  home: {
+    docs: "Docs",
+    blog: "Blog",
+  },
+
   // Welcome
   welcome: {
     greeting: "Hello, again!",

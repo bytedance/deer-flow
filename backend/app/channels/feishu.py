@@ -9,9 +9,16 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
+
+
+def _is_feishu_command(text: str) -> bool:
+    if not text.startswith("/"):
+        return False
+    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
 
 
 class FeishuChannel(Channel):
@@ -199,7 +206,9 @@ class FeishuChannel(Channel):
                     await asyncio.sleep(delay)
 
         logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        if last_exc is None:
+            raise RuntimeError("Feishu send failed without an exception from any attempt")
+        raise last_exc
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -509,8 +518,9 @@ class FeishuChannel(Channel):
                 logger.info("[Feishu] empty text, ignoring message")
                 return
 
-            # Check if it's a command
-            if text.startswith("/"):
+            # Only treat known slash commands as commands; absolute paths and
+            # other slash-prefixed text should be handled as normal chat.
+            if _is_feishu_command(text):
                 msg_type = InboundMessageType.COMMAND
             else:
                 msg_type = InboundMessageType.CHAT

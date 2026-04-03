@@ -57,6 +57,7 @@ export function CaseStudySection({ className }: { className?: string }) {
             key={caseStudy.title}
             href={pathOfThread(caseStudy.threadId) + "?mock=true"}
             target="_blank"
+            rel="noopener noreferrer"
           >
             <Card className="group/card relative h-64 overflow-hidden">
               <div
