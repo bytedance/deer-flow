@@ -880,6 +880,48 @@ describe("Viewer", () => {
     expect(selectListener).toHaveBeenLastCalledWith([]);
   });
 
+  test("setSelected converts handles into a visualize selection set before calling the backend", async () => {
+    class MockSelectionSet {
+      readonly appendEntity = vi.fn();
+      readonly delete = vi.fn();
+    }
+
+    const backend = {
+      ...createVisualizeBackend(),
+      getEntityByOriginalHandle: vi.fn((handle: string) => ({
+        handle,
+        isNull: vi.fn(() => false),
+      })),
+    };
+    const viewer = new Viewer({
+      container: document.createElement("canvas"),
+      dependencies: {
+        createVisualizeViewer: () => backend,
+        loadVisualizeLibrary: async () => ({
+          OdTvSelectionSet: MockSelectionSet,
+          ready: true,
+        }),
+      },
+    });
+    const selectListener = vi.fn();
+
+    viewer.on("select", selectListener);
+    await viewer.initialize();
+    backend.setSelected.mockClear();
+    backend.getEntityByOriginalHandle.mockClear();
+    selectListener.mockClear();
+
+    viewer.executeCommand("setSelected", [199, "200"]);
+
+    expect(backend.getEntityByOriginalHandle).toHaveBeenNthCalledWith(1, "199");
+    expect(backend.getEntityByOriginalHandle).toHaveBeenNthCalledWith(2, "200");
+    expect(backend.setSelected).toHaveBeenCalledTimes(1);
+    expect(backend.setSelected.mock.calls[0]?.[0]).toBeInstanceOf(MockSelectionSet);
+    expect((backend.setSelected.mock.calls[0]?.[0] as MockSelectionSet).appendEntity)
+      .toHaveBeenCalledTimes(2);
+    expect(selectListener).toHaveBeenLastCalledWith([199, "200"]);
+  });
+
   test("normalizes visualize selection sets into handle arrays before emitting selection", async () => {
     const backend = createVisualizeBackend();
     const selectionSet = createSelectionSet(["A1", "B2"]);

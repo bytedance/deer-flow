@@ -404,6 +404,66 @@ describe("VSFX regression coverage", () => {
     });
   });
 
+  test("supports cad-web style array-based properties payloads when selecting from the tree", async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = readFetchInputUrl(input);
+
+      if (url.endsWith("/artifacts/qa-smoke.cda.json")) {
+        return createJsonResponse({
+          nodes: [
+            {
+              children: [],
+              handle: 42,
+              name: "Portal beam",
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/artifacts/qa-smoke.properties.json")) {
+        return createJsonResponse([
+          {
+            handle: "0",
+            Weight: "248571.485",
+          },
+          {
+            handle: "42",
+            Name: "Portal beam",
+            Material: "S355",
+          },
+        ]);
+      }
+
+      if (url.endsWith("/artifacts/qa-smoke.vsfx")) {
+        return createBinaryResponse([1, 2, 3, 4]);
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    render(
+      <div className="h-[480px] w-[360px]">
+        <ArtifactFileDetail filepath="/artifacts/qa-smoke.vsfx" threadId="thread-123" />
+      </div>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("vsfx-viewer-root")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore Construct tree" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restore Selected properties" }));
+    fireEvent.click(await screen.findByTestId("vsfx-tree-row-42"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Handle 42")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId("vsfx-property-row-general-name")).toHaveTextContent("Portal beam");
+    expect(screen.getByTestId("vsfx-property-row-general-material")).toHaveTextContent("S355");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   test("keeps missing sibling metadata scoped while the main VSFX canvas stays mounted", async () => {
     currentArtifacts = [
       "/artifacts/missing-props.vsfx",

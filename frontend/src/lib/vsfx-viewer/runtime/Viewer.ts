@@ -35,6 +35,7 @@ export type VisualizeBackend = {
   getActiveExtents?: () => unknown;
   getActiveTvExtendedView?: () => unknown;
   getEnableAutoSelect?: () => boolean;
+  getEntityByOriginalHandle?: (handle: string) => unknown;
   getSelected?: () => Array<string | number>;
   hideSelected?: () => void;
   isolateSelected?: () => void;
@@ -50,7 +51,7 @@ export type VisualizeBackend = {
   select?: (x1: number, y1: number, x2: number, y2: number) => void;
   setActiveDragger?: (name: string) => void;
   setEnableAutoSelect?: (enabled: boolean) => void;
-  setSelected?: (handles: Array<string | number>) => void;
+  setSelected?: (selection: unknown) => void;
   showAll?: () => void;
   syncView?: () => void;
   unselect?: () => void;
@@ -185,6 +186,10 @@ export class Viewer implements IViewer {
 
   getSelected() {
     return this.executeCommand("getSelected") as Array<string | number>;
+  }
+
+  getVisualizeLibrary() {
+    return this.visualizeLibrary;
   }
 
   getVisualizeViewer() {

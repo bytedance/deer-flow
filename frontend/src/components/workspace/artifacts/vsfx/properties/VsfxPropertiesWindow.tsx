@@ -241,6 +241,18 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function resolveSelectedProperties(properties: unknown, handle: VsfxHandle) {
+  if (Array.isArray(properties)) {
+    const selectedPart = properties.find((part) => {
+      if (!isPlainObject(part)) {
+        return false;
+      }
+
+      return part.handle === handle || String(part.handle) === String(handle);
+    });
+
+    return isPlainObject(selectedPart) ? selectedPart : null;
+  }
+
   if (!isPlainObject(properties)) {
     throw new Error("Malformed properties payload");
   }

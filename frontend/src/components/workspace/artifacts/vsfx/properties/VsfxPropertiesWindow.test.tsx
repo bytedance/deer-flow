@@ -58,6 +58,33 @@ function renderPropertiesWindow(props?: HarnessProps) {
 }
 
 describe("VsfxPropertiesWindow", () => {
+  test("renders properties from array-based payloads keyed by handle like the cad-web sidebar source data", async () => {
+    renderPropertiesWindow({
+      primaryHandle: 114,
+      properties: [
+        {
+          handle: "0",
+          Weight: "248571.485",
+        },
+        {
+          handle: "114",
+          Name: "Portal column",
+          Material: "Q355B",
+        },
+      ],
+    });
+
+    expect(await screen.findByTestId("vsfx-properties-window")).toBeInTheDocument();
+    expect(screen.getByText("Handle 114")).toBeInTheDocument();
+    expect(screen.getByText("General")).toBeInTheDocument();
+    expect(screen.getByText("handle")).toBeInTheDocument();
+    expect(screen.getByText("114")).toBeInTheDocument();
+    expect(screen.getByText("Name")).toBeInTheDocument();
+    expect(screen.getByText("Portal column")).toBeInTheDocument();
+    expect(screen.getByText("Material")).toBeInTheDocument();
+    expect(screen.getByText("Q355B")).toBeInTheDocument();
+  });
+
   test("renders grouped rows for a selected part by flattening nested property objects", async () => {
     renderPropertiesWindow({
       primaryHandle: 42,
