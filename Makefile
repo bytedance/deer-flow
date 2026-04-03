@@ -63,6 +63,11 @@ install:
 	@echo "  make setup-sandbox"
 	@echo ""
 
+# Install a community skill from a Git repo
+install-skill:
+	@if [ -z "$(URL)" ]; then echo "Usage: make install-skill URL=https://github.com/user/my-skill"; exit 1; fi
+	@$(PYTHON) -c "from deerflow.skills.registry import install_skill_from_repo; print(install_skill_from_repo('$(URL)'))"
+
 # Pre-pull sandbox Docker image (optional but recommended)
 setup-sandbox:
 	@echo "=========================================="
