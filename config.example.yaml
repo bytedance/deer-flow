@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 3
+config_version: 5
 
 # ============================================================================
 # Logging
@@ -188,6 +188,7 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
   # - name: minimax-m2.5-highspeed
   #   display_name: MiniMax M2.5 Highspeed
@@ -200,6 +201,7 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
   # Example: MiniMax (OpenAI-compatible) - CN 中国区用户
   # MiniMax provides high-performance models with 204K context window
@@ -215,11 +217,12 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
-  # - name: minimax-m2.5-highspeed
-  #   display_name: MiniMax M2.5 Highspeed
+  # - name: minimax-m2.7-highspeed
+  #   display_name: MiniMax M2.7 Highspeed
   #   use: langchain_openai:ChatOpenAI
-  #   model: MiniMax-M2.5-highspeed
+  #   model: MiniMax-M2.7-highspeed
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimaxi.com/v1
   #   request_timeout: 600.0
@@ -227,8 +230,8 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
-  
   # Example: OpenRouter (OpenAI-compatible)
   # OpenRouter models use the same ChatOpenAI + base_url pattern as other OpenAI-compatible gateways.
   # - name: openrouter-gemini-2.5-flash
@@ -321,6 +324,16 @@ tools:
     group: file:read
     use: deerflow.sandbox.tools:read_file_tool
 
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+    max_results: 200
+
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+    max_results: 100
+
   - name: write_file
     group: file:write
     use: deerflow.sandbox.tools:write_file_tool
@@ -330,6 +343,8 @@ tools:
     use: deerflow.sandbox.tools:str_replace_tool
 
   # Bash execution tool
+  # Active only when using an isolated shell sandbox or when
+  # sandbox.allow_host_bash: true explicitly opts into host bash.
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
@@ -353,8 +368,34 @@ tool_search:
 
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
+uploads:
+  # PDF-to-Markdown converter used when a PDF is uploaded.
+  # auto        — prefer pymupdf4llm when installed; fall back to MarkItDown for
+  #               image-based or encrypted PDFs (recommended default).
+  # pymupdf4llm — always use pymupdf4llm (must be installed: uv add pymupdf4llm).
+  #               Better heading/table extraction; faster on most files.
+  # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
+  pdf_converter: auto
+
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+  # Host bash execution is disabled by default because LocalSandboxProvider is
+  # not a secure isolation boundary for shell access. Enable only for fully
+  # trusted, single-user local workflows.
+  allow_host_bash: false
+  # Optional: Mount additional host directories into the sandbox.
+  # Each mount maps a host path to a virtual container path accessible by the agent.
+  # mounts:
+  #   - host_path: /home/user/my-project    # Absolute path on the host machine
+  #     container_path: /mnt/my-project     # Virtual path inside the sandbox
+  #     read_only: true                     # Whether the mount is read-only (default: false)
+
+  # Tool output truncation limits (characters).
+  # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
+  # read_file uses head-truncation since source code context is front-loaded.
+  # Set to 0 to disable truncation.
+  bash_output_max_chars: 20000
+  read_file_output_max_chars: 50000
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
@@ -387,6 +428,9 @@ sandbox:
 #   #   - host_path: /path/on/host
 #   #     container_path: /home/user/shared
 #   #     read_only: false
+#   #
+#   #   # DeerFlow will surface configured container_path values to the agent,
+#   #   # so it can directly read/write mounted directories such as /home/user/shared
 #
 #   # Optional: Environment variables to inject into the sandbox container
 #   # Values starting with $ will be resolved from host environment variables
@@ -463,6 +507,12 @@ skills:
   # This is used by the agent to access skills in both local and Docker sandbox
   # Default: /mnt/skills
   container_path: /mnt/skills
+
+# Note: To restrict which skills are loaded for a specific custom agent,
+# define a `skills` list in that agent's `config.yaml` (e.g. `agents/my-agent/config.yaml`):
+# - Omitted or null: load all globally enabled skills (default)
+# - []: disable all skills for this agent
+# - ["skill-name"]: load only specific skills
 
 # ============================================================================
 # Title Generation Configuration
@@ -607,6 +657,8 @@ checkpointer:
 #     enabled: false
 #     app_id: $FEISHU_APP_ID
 #     app_secret: $FEISHU_APP_SECRET
+#     # domain: https://open.feishu.cn       # China (default)
+#     # domain: https://open.larksuite.com   # International
 #
 #   slack:
 #     enabled: false
@@ -634,6 +686,10 @@ checkpointer:
 #           context:
 #             thinking_enabled: true
 #             subagent_enabled: true
+#   wecom:
+#     enabled: false
+#     bot_id: $WECOM_BOT_ID
+#     bot_secret: $WECOM_BOT_SECRET
 
 # ============================================================================
 # Guardrails Configuration

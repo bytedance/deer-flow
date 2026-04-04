@@ -9,9 +9,16 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
+
+
+def _is_feishu_command(text: str) -> bool:
+    if not text.startswith("/"):
+        return False
+    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
 
 
 class FeishuChannel(Channel):
@@ -92,12 +99,14 @@ class FeishuChannel(Channel):
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
+        domain = self.config.get("domain", "https://open.feishu.cn")
 
         if not app_id or not app_secret:
             logger.error("Feishu channel requires app_id and app_secret")
             return
 
-        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
+        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
+        logger.info("[Feishu] using domain: %s", domain)
         self._main_loop = asyncio.get_event_loop()
 
         self._running = True
@@ -109,13 +118,13 @@ class FeishuChannel(Channel):
         # which conflicts with an already-running uvloop.
         self._thread = threading.Thread(
             target=self._run_ws,
-            args=(app_id, app_secret),
+            args=(app_id, app_secret, domain),
             daemon=True,
         )
         self._thread.start()
         logger.info("Feishu channel started")
 
-    def _run_ws(self, app_id: str, app_secret: str) -> None:
+    def _run_ws(self, app_id: str, app_secret: str, domain: str) -> None:
         """Construct and run the lark WS client in a thread with a fresh event loop.
 
         The lark-oapi SDK captures a module-level event loop at import time
@@ -145,6 +154,7 @@ class FeishuChannel(Channel):
                 app_secret=app_secret,
                 event_handler=event_handler,
                 log_level=lark.LogLevel.INFO,
+                domain=domain,
             )
             ws_client.start()
         except Exception:
@@ -196,7 +206,9 @@ class FeishuChannel(Channel):
                     await asyncio.sleep(delay)
 
         logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        if last_exc is None:
+            raise RuntimeError("Feishu send failed without an exception from any attempt")
+        raise last_exc
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -506,8 +518,9 @@ class FeishuChannel(Channel):
                 logger.info("[Feishu] empty text, ignoring message")
                 return
 
-            # Check if it's a command
-            if text.startswith("/"):
+            # Only treat known slash commands as commands; absolute paths and
+            # other slash-prefixed text should be handled as normal chat.
+            if _is_feishu_command(text):
                 msg_type = InboundMessageType.COMMAND
             else:
                 msg_type = InboundMessageType.CHAT

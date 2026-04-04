@@ -3,8 +3,17 @@ from datetime import datetime
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
+from deerflow.subagents import get_available_subagent_names
 
 logger = logging.getLogger(__name__)
+
+
+def _get_enabled_skills():
+    try:
+        return list(load_skills(enabled_only=True))
+    except Exception:
+        logger.exception("Failed to load enabled skills for prompt injection")
+        return []
 
 
 def _build_subagent_section(max_concurrent: int) -> str:
@@ -17,6 +26,19 @@ def _build_subagent_section(max_concurrent: int) -> str:
         Formatted subagent section string.
     """
     n = max_concurrent
+    bash_available = "bash" in get_available_subagent_names()
+    available_subagents = (
+        "- **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.\n- **bash**: For command execution (git, build, test, deploy operations)"
+        if bash_available
+        else "- **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.\n"
+        "- **bash**: Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
+    )
+    direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
+    direct_execution_example = (
+        '# User asks: "Run the tests"\n# Thinking: Cannot decompose into parallel sub-tasks\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
+        if bash_available
+        else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/mnt/user-data/workspace/README.md")  # Direct execution, not task()'
+    )
     return f"""<subagent_system>
 **🚀 SUBAGENT MODE ACTIVE - DECOMPOSE, DELEGATE, SYNTHESIZE**
 
@@ -40,8 +62,7 @@ You are running with subagent capabilities enabled. Your role is to be a **task 
 - **Example thinking pattern**: "I identified 6 sub-tasks. Since the limit is {n} per turn, I will launch the first {n} now, and the rest in the next turn."
 
 **Available Subagents:**
-- **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.
-- **bash**: For command execution (git, build, test, deploy operations)
+{available_subagents}
 
 **Your Orchestration Strategy:**
 
@@ -89,7 +110,7 @@ For complex queries, break them down into focused sub-tasks and execute in paral
 3. **EXECUTE**: Launch ONLY the current batch (max {n} `task` calls). Do NOT launch sub-tasks from future batches.
 4. **REPEAT**: After results return, launch the next batch. Continue until all batches complete.
 5. **SYNTHESIZE**: After ALL batches are done, synthesize all results.
-6. **Cannot decompose** → Execute directly using available tools (bash, read_file, web_search, etc.)
+6. **Cannot decompose** → Execute directly using available tools ({direct_tool_examples})
 
 **⛔ VIOLATION: Launching more than {n} `task` calls in a single response is a HARD ERROR. The system WILL discard excess calls and you WILL lose work. Always batch.**
 
@@ -135,11 +156,7 @@ task(description="Oracle Cloud analysis", prompt="...", subagent_type="general-p
 **Counter-Example - Direct Execution (NO subagents):**
 
 ```python
-# User asks: "Run the tests"
-# Thinking: Cannot decompose into parallel sub-tasks
-# → Execute directly
-
-bash("npm test")  # Direct execution, not task()
+{direct_execution_example}
 ```
 
 **CRITICAL**:
@@ -377,7 +394,7 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
     Returns the <skill_system>...</skill_system> block listing all enabled skills,
     suitable for injection into any agent's system prompt.
     """
-    skills = load_skills(enabled_only=True)
+    skills = _get_enabled_skills()
 
     try:
         from deerflow.config import get_app_config
@@ -392,6 +409,10 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
 
     if available_skills is not None:
         skills = [skill for skill in skills if skill.name in available_skills]
+
+    # Check again after filtering
+    if not skills:
+        return ""
 
     skill_items = "\n".join(
         f"    <skill>\n        <name>{skill.name}</name>\n        <description>{skill.description}</description>\n        <location>{skill.get_container_file_path(container_base_path)}</location>\n    </skill>" for skill in skills
@@ -437,7 +458,7 @@ def get_deferred_tools_prompt_section() -> str:
 
         if not get_app_config().tool_search.enabled:
             return ""
-    except FileNotFoundError:
+    except Exception:
         return ""
 
     registry = get_deferred_registry()
@@ -466,6 +487,28 @@ def _build_acp_section() -> str:
         "- ACP agent results are accessible at `/mnt/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files\n"
         "- To deliver ACP output to the user: copy from `/mnt/acp-workspace/<file>` to `/mnt/user-data/outputs/<file>`, then use `present_file`"
     )
+
+
+def _build_custom_mounts_section() -> str:
+    """Build a prompt section for explicitly configured sandbox mounts."""
+    try:
+        from deerflow.config import get_app_config
+
+        mounts = get_app_config().sandbox.mounts or []
+    except Exception:
+        logger.exception("Failed to load configured sandbox mounts for the lead-agent prompt")
+        return ""
+
+    if not mounts:
+        return ""
+
+    lines = []
+    for mount in mounts:
+        access = "read-only" if mount.read_only else "read-write"
+        lines.append(f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})")
+
+    mounts_list = "\n".join(lines)
+    return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
 def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
@@ -502,6 +545,8 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
 
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section()
+    custom_mounts_section = _build_custom_mounts_section()
+    acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
 
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -513,7 +558,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
-        acp_section=acp_section,
+        acp_section=acp_and_mounts_section,
     )
 
     return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"

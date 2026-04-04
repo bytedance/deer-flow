@@ -117,6 +117,7 @@ class DeerFlowClient:
         subagent_enabled: bool = False,
         plan_mode: bool = False,
         agent_name: str | None = None,
+        available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
     ):
         """Initialize the client.
@@ -133,6 +134,7 @@ class DeerFlowClient:
             subagent_enabled: Enable subagent delegation.
             plan_mode: Enable TodoList middleware for plan mode.
             agent_name: Name of the agent to use.
+            available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
         """
         if config_path is not None:
@@ -148,6 +150,7 @@ class DeerFlowClient:
         self._subagent_enabled = subagent_enabled
         self._plan_mode = plan_mode
         self._agent_name = agent_name
+        self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
 
         # Lazy agent — created on first call, recreated when config changes.
@@ -208,6 +211,8 @@ class DeerFlowClient:
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
+            self._agent_name,
+            frozenset(self._available_skills) if self._available_skills is not None else None,
         )
 
         if self._agent is not None and self._agent_config_key == key:
@@ -226,6 +231,7 @@ class DeerFlowClient:
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
+                available_skills=self._available_skills,
             ),
             "state_schema": ThreadState,
         }
@@ -507,6 +513,18 @@ class DeerFlowClient:
 
         return get_memory_data()
 
+    def export_memory(self) -> dict:
+        """Export current memory data for backup or transfer."""
+        from deerflow.agents.memory.updater import get_memory_data
+
+        return get_memory_data()
+
+    def import_memory(self, memory_data: dict) -> dict:
+        """Import and persist full memory data."""
+        from deerflow.agents.memory.updater import import_memory_data
+
+        return import_memory_data(memory_data)
+
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
 
@@ -688,11 +706,34 @@ class DeerFlowClient:
 
         return clear_memory_data()
 
+    def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
+        """Create a single fact manually."""
+        from deerflow.agents.memory.updater import create_memory_fact
+
+        return create_memory_fact(content=content, category=category, confidence=confidence)
+
     def delete_memory_fact(self, fact_id: str) -> dict:
         """Delete a single fact from memory by fact id."""
         from deerflow.agents.memory.updater import delete_memory_fact
 
         return delete_memory_fact(fact_id)
+
+    def update_memory_fact(
+        self,
+        fact_id: str,
+        content: str | None = None,
+        category: str | None = None,
+        confidence: float | None = None,
+    ) -> dict:
+        """Update a single fact manually, preserving omitted fields."""
+        from deerflow.agents.memory.updater import update_memory_fact
+
+        return update_memory_fact(
+            fact_id=fact_id,
+            content=content,
+            category=category,
+            confidence=confidence,
+        )
 
     def get_memory_config(self) -> dict:
         """Get memory system configuration.

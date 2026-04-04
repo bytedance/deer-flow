@@ -37,6 +37,7 @@ You have access to the sandbox environment:
 - User uploads: `/mnt/user-data/uploads`
 - User workspace: `/mnt/user-data/workspace`
 - Output files: `/mnt/user-data/outputs`
+- Deployment-configured custom mounts may also be available at other absolute container paths; use them directly when the task references those mounted directories
 </working_directory>
 """,
     tools=["bash", "ls", "read_file", "write_file", "str_replace"],  # Sandbox tools only

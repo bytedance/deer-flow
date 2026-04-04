@@ -14,6 +14,8 @@ class SandboxConfig(BaseModel):
 
     Common options:
         use: Class path of the sandbox provider (required)
+        allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
+            Dangerous and intended only for fully trusted local workflows.
 
     AioSandboxProvider specific options:
         image: Docker image to use (default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest)
@@ -28,6 +30,10 @@ class SandboxConfig(BaseModel):
     use: str = Field(
         ...,
         description="Class path of the sandbox provider (e.g. deerflow.sandbox.local:LocalSandboxProvider)",
+    )
+    allow_host_bash: bool = Field(
+        default=False,
+        description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
     )
     image: str | None = Field(
         default=None,
@@ -56,6 +62,17 @@ class SandboxConfig(BaseModel):
     environment: dict[str, str] = Field(
         default_factory=dict,
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
+    )
+
+    bash_output_max_chars: int = Field(
+        default=20000,
+        ge=0,
+        description="Maximum characters to keep from bash tool output. Output exceeding this limit is middle-truncated (head + tail), preserving the first and last half. Set to 0 to disable truncation.",
+    )
+    read_file_output_max_chars: int = Field(
+        default=50000,
+        ge=0,
+        description="Maximum characters to keep from read_file tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
     )
 
     model_config = ConfigDict(extra="allow")

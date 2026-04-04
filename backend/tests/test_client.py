@@ -59,18 +59,20 @@ class TestClientInit:
         assert client._subagent_enabled is False
         assert client._plan_mode is False
         assert client._agent_name is None
+        assert client._available_skills is None
         assert client._checkpointer is None
         assert client._agent is None
 
     def test_custom_params(self, mock_app_config):
         mock_middleware = MagicMock()
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
-            c = DeerFlowClient(model_name="gpt-4", thinking_enabled=False, subagent_enabled=True, plan_mode=True, agent_name="test-agent", middlewares=[mock_middleware])
+            c = DeerFlowClient(model_name="gpt-4", thinking_enabled=False, subagent_enabled=True, plan_mode=True, agent_name="test-agent", available_skills={"skill1", "skill2"}, middlewares=[mock_middleware])
         assert c._model_name == "gpt-4"
         assert c._thinking_enabled is False
         assert c._subagent_enabled is True
         assert c._plan_mode is True
         assert c._agent_name == "test-agent"
+        assert c._available_skills == {"skill1", "skill2"}
         assert c._middlewares == [mock_middleware]
 
     def test_invalid_agent_name(self, mock_app_config):
@@ -142,6 +144,13 @@ class TestConfigQueries:
         memory = {"version": "1.0", "facts": []}
         with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
             result = client.get_memory()
+            mock_mem.assert_called_once()
+        assert result == memory
+
+    def test_export_memory(self, client):
+        memory = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
+            result = client.export_memory()
             mock_mem.assert_called_once()
         assert result == memory
 
@@ -387,8 +396,10 @@ class TestEnsureAgent:
             patch("deerflow.client._build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._agent_name = "custom-agent"
+            client._available_skills = {"test_skill"}
             client._ensure_agent(config)
 
         assert client._agent is mock_agent
@@ -397,6 +408,7 @@ class TestEnsureAgent:
         assert mock_build_middlewares.call_args.kwargs.get("agent_name") == "custom-agent"
         mock_apply_prompt.assert_called_once()
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
+        assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
 
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
@@ -434,6 +446,7 @@ class TestEnsureAgent:
             patch("deerflow.client._build_middlewares", side_effect=fake_build_middlewares),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config)
 
@@ -462,7 +475,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False)
+        client._agent_config_key = (None, True, False, False, None, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
@@ -661,6 +674,14 @@ class TestSkillsManagement:
 
 
 class TestMemoryManagement:
+    def test_import_memory(self, client):
+        imported = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.import_memory_data", return_value=imported) as mock_import:
+            result = client.import_memory(imported)
+
+        mock_import.assert_called_once_with(imported)
+        assert result == imported
+
     def test_reload_memory(self, client):
         data = {"version": "1.0", "facts": []}
         with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=data):
@@ -673,11 +694,58 @@ class TestMemoryManagement:
             result = client.clear_memory()
         assert result == data
 
+    def test_create_memory_fact(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.create_memory_fact", return_value=data) as create_fact:
+            result = client.create_memory_fact(
+                "User prefers concise code reviews.",
+                category="preference",
+                confidence=0.88,
+            )
+            create_fact.assert_called_once_with(
+                content="User prefers concise code reviews.",
+                category="preference",
+                confidence=0.88,
+            )
+        assert result == data
+
     def test_delete_memory_fact(self, client):
         data = {"version": "1.0", "facts": []}
         with patch("deerflow.agents.memory.updater.delete_memory_fact", return_value=data) as delete_fact:
             result = client.delete_memory_fact("fact_123")
             delete_fact.assert_called_once_with("fact_123")
+        assert result == data
+
+    def test_update_memory_fact(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
+            result = client.update_memory_fact(
+                "fact_123",
+                "User prefers spaces",
+                category="workflow",
+                confidence=0.91,
+            )
+            update_fact.assert_called_once_with(
+                fact_id="fact_123",
+                content="User prefers spaces",
+                category="workflow",
+                confidence=0.91,
+            )
+        assert result == data
+
+    def test_update_memory_fact_preserves_omitted_fields(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
+            result = client.update_memory_fact(
+                "fact_123",
+                "User prefers spaces",
+            )
+            update_fact.assert_called_once_with(
+                fact_id="fact_123",
+                content="User prefers spaces",
+                category=None,
+                confidence=None,
+            )
         assert result == data
 
     def test_get_memory_config(self, client):
@@ -1214,6 +1282,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config_a)
             first_agent = client._agent
@@ -1241,6 +1310,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config)
             client._ensure_agent(config)
@@ -1265,6 +1335,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config)
             client.reset_agent()

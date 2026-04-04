@@ -11,6 +11,7 @@ export interface Translations {
     home: string;
     settings: string;
     delete: string;
+    edit: string;
     rename: string;
     share: string;
     openInNewWindow: string;
@@ -32,10 +33,16 @@ export interface Translations {
     save: string;
     install: string;
     create: string;
+    import: string;
     export: string;
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+  };
+
+  home: {
+    docs: string;
+    blog: string;
   };
 
   // Welcome
@@ -131,8 +138,16 @@ export interface Translations {
     nameStepContinue: string;
     nameStepInvalidError: string;
     nameStepAlreadyExistsError: string;
+    nameStepNetworkError: string;
     nameStepCheckError: string;
     nameStepBootstrapMessage: string;
+    save: string;
+    saving: string;
+    saveRequested: string;
+    saveHint: string;
+    saveCommandMessage: string;
+    agentCreatedPendingRefresh: string;
+    more: string;
     agentCreated: string;
     startChatting: string;
     backToGallery: string;
@@ -247,6 +262,20 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
+      exportButton: string;
+      exportSuccess: string;
+      importButton: string;
+      importConfirmTitle: string;
+      importConfirmDescription: string;
+      importFileLabel: string;
+      importInvalidFile: string;
+      importSuccess: string;
+      manualFactSource: string;
+      addFact: string;
+      addFactTitle: string;
+      editFactTitle: string;
+      addFactSuccess: string;
+      editFactSuccess: string;
       clearAll: string;
       clearAllConfirmTitle: string;
       clearAllConfirmDescription: string;
@@ -254,6 +283,15 @@ export interface Translations {
       factDeleteConfirmTitle: string;
       factDeleteConfirmDescription: string;
       factDeleteSuccess: string;
+      factContentLabel: string;
+      factCategoryLabel: string;
+      factConfidenceLabel: string;
+      factContentPlaceholder: string;
+      factCategoryPlaceholder: string;
+      factConfidenceHint: string;
+      factSave: string;
+      factValidationContent: string;
+      factValidationConfidence: string;
       noFacts: string;
       summaryReadOnly: string;
       memoryFullyEmpty: string;

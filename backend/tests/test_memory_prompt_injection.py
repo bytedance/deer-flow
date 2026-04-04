@@ -119,3 +119,57 @@ def test_format_memory_skips_non_string_content_facts() -> None:
     # The formatted line for a list content would be "- [knowledge | 0.85] ['list']".
     assert "| 0.85]" not in result
     assert "Valid fact" in result
+
+
+def test_format_memory_renders_correction_source_error() -> None:
+    memory_data = {
+        "facts": [
+            {
+                "content": "Use make dev for local development.",
+                "category": "correction",
+                "confidence": 0.95,
+                "sourceError": "The agent previously suggested npm start.",
+            }
+        ]
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "Use make dev for local development." in result
+    assert "avoid: The agent previously suggested npm start." in result
+
+
+def test_format_memory_renders_correction_without_source_error_normally() -> None:
+    memory_data = {
+        "facts": [
+            {
+                "content": "Use make dev for local development.",
+                "category": "correction",
+                "confidence": 0.95,
+            }
+        ]
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "Use make dev for local development." in result
+    assert "avoid:" not in result
+
+
+def test_format_memory_includes_long_term_background() -> None:
+    """longTermBackground in history must be injected into the prompt."""
+    memory_data = {
+        "user": {},
+        "history": {
+            "recentMonths": {"summary": "Recent activity summary"},
+            "earlierContext": {"summary": "Earlier context summary"},
+            "longTermBackground": {"summary": "Core expertise in distributed systems"},
+        },
+        "facts": [],
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "Background: Core expertise in distributed systems" in result
+    assert "Recent: Recent activity summary" in result
+    assert "Earlier: Earlier context summary" in result
