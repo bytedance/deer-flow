@@ -2,6 +2,7 @@
 
 import asyncio
 import concurrent.futures
+from enum import Enum
 import json
 import tempfile
 import zipfile
@@ -248,6 +249,33 @@ class TestStream:
         call_kwargs = agent.stream.call_args.kwargs
         assert call_kwargs["context"]["thread_id"] == "t1"
         assert call_kwargs["context"]["agent_name"] == "test-agent-1"
+
+    def test_custom_mode_is_normalized_to_string(self, client):
+        """stream() forwards custom events even when the mode is not a plain string."""
+
+        class StreamMode(Enum):
+            CUSTOM = "custom"
+
+            def __str__(self):
+                return self.value
+
+        agent = _make_agent_mock(
+            [
+                (StreamMode.CUSTOM, {"type": "task_started", "task_id": "task-1"}),
+                {"messages": [AIMessage(content="Hello!", id="ai-1")]},
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-custom-enum"))
+
+        assert events[0].type == "custom"
+        assert events[0].data == {"type": "task_started", "task_id": "task-1"}
+        assert any(event.type == "messages-tuple" and event.data["content"] == "Hello!" for event in events)
+        assert events[-1].type == "end"
 
     def test_tool_call_and_result(self, client):
         """stream() emits messages-tuple events for tool calls and results."""

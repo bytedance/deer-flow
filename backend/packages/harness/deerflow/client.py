@@ -374,6 +374,7 @@ class DeerFlowClient:
         ):
             if isinstance(item, tuple) and len(item) == 2:
                 mode, chunk = item
+                mode = str(mode)
             else:
                 mode, chunk = "values", item
 
