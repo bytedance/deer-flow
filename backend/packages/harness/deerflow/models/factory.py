@@ -20,6 +20,16 @@ def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
     return merged
 
 
+def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
+    """Build the disable payload for vLLM/Qwen chat template kwargs."""
+    disable_kwargs: dict[str, bool] = {}
+    if "thinking" in chat_template_kwargs:
+        disable_kwargs["thinking"] = False
+    if "enable_thinking" in chat_template_kwargs:
+        disable_kwargs["enable_thinking"] = False
+    return disable_kwargs
+
+
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
@@ -70,11 +80,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 {"thinking": {"type": "disabled"}},
             )
             model_settings_from_config["reasoning_effort"] = "minimal"
-        elif "thinking" in (effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {}):
+        elif disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {}):
             # vLLM uses chat template kwargs to switch thinking on/off.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
                 model_settings_from_config.get("extra_body"),
-                {"chat_template_kwargs": {"thinking": False}},
+                {"chat_template_kwargs": disable_chat_template_kwargs},
             )
         elif effective_wte.get("thinking", {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter

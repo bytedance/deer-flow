@@ -36,6 +36,32 @@ from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import _create_usage_metadata
 
 
+def _normalize_vllm_chat_template_kwargs(payload: dict[str, Any]) -> None:
+    """Map DeerFlow's legacy ``thinking`` toggle to vLLM/Qwen's ``enable_thinking``.
+
+    DeerFlow originally documented ``extra_body.chat_template_kwargs.thinking``
+    for vLLM, but vLLM 0.19.0's Qwen reasoning parser reads
+    ``chat_template_kwargs.enable_thinking``. Normalize the payload just before
+    it is sent so existing configs keep working and flash mode can truly
+    disable reasoning.
+    """
+    extra_body = payload.get("extra_body")
+    if not isinstance(extra_body, dict):
+        return
+
+    chat_template_kwargs = extra_body.get("chat_template_kwargs")
+    if not isinstance(chat_template_kwargs, dict):
+        return
+
+    if "thinking" not in chat_template_kwargs:
+        return
+
+    normalized_chat_template_kwargs = dict(chat_template_kwargs)
+    normalized_chat_template_kwargs.setdefault("enable_thinking", normalized_chat_template_kwargs["thinking"])
+    normalized_chat_template_kwargs.pop("thinking", None)
+    extra_body["chat_template_kwargs"] = normalized_chat_template_kwargs
+
+
 def _reasoning_to_text(reasoning: Any) -> str:
     """Best-effort extraction of readable reasoning text from vLLM payloads."""
     if isinstance(reasoning, str):
@@ -148,6 +174,7 @@ class VllmChatModel(ChatOpenAI):
         """Restore assistant reasoning in request payloads for interleaved thinking."""
         original_messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        _normalize_vllm_chat_template_kwargs(payload)
         payload_messages = payload.get("messages", [])
 
         if len(payload_messages) == len(original_messages):

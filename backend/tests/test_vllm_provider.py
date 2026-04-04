@@ -32,6 +32,35 @@ def test_vllm_provider_restores_reasoning_in_request_payload():
     assert assistant_message["tool_calls"][0]["function"]["name"] == "bash"
 
 
+def test_vllm_provider_normalizes_legacy_thinking_kwarg_to_enable_thinking():
+    model = VllmChatModel(
+        model="qwen3",
+        api_key="dummy",
+        base_url="http://localhost:8000/v1",
+        extra_body={"chat_template_kwargs": {"thinking": True}},
+    )
+
+    payload = model._get_request_payload([HumanMessage(content="Hello")])
+
+    assert payload["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_vllm_provider_preserves_explicit_enable_thinking_kwarg():
+    model = VllmChatModel(
+        model="qwen3",
+        api_key="dummy",
+        base_url="http://localhost:8000/v1",
+        extra_body={"chat_template_kwargs": {"enable_thinking": False, "foo": "bar"}},
+    )
+
+    payload = model._get_request_payload([HumanMessage(content="Hello")])
+
+    assert payload["extra_body"]["chat_template_kwargs"] == {
+        "enable_thinking": False,
+        "foo": "bar",
+    }
+
+
 def test_vllm_provider_preserves_reasoning_in_chat_result():
     model = _make_model()
     result = model._create_chat_result(
