@@ -7,6 +7,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.config.title_config import get_title_config
+from deerflow.models import create_chat_model
 
 
 class TitleMiddlewareState(AgentState):
@@ -105,11 +106,24 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return {"title": self._fallback_title(user_msg)}
 
     async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
-        """Generate a local fallback title without an extra LLM request."""
+        """Generate a title asynchronously and fall back locally on failure."""
         if not self._should_generate_title(state):
             return None
 
-        _, user_msg = self._build_title_prompt(state)
+        config = get_title_config()
+        prompt, user_msg = self._build_title_prompt(state)
+
+        try:
+            if config.model_name:
+                model = create_chat_model(name=config.model_name, thinking_enabled=False)
+            else:
+                model = create_chat_model(thinking_enabled=False)
+            response = await model.ainvoke(prompt)
+            title = self._parse_title(response.content)
+            if title:
+                return {"title": title}
+        except Exception:
+            pass
         return {"title": self._fallback_title(user_msg)}
 
     @override

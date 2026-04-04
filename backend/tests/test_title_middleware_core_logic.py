@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.agents.middlewares import title_middleware as title_middleware_module
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
 
@@ -73,9 +74,12 @@ class TestTitleMiddlewareCoreLogic:
 
         assert middleware._should_generate_title(state) is False
 
-    def test_generate_title_uses_local_fallback_and_respects_max_chars(self, monkeypatch):
+    def test_generate_title_uses_async_model_and_respects_max_chars(self, monkeypatch):
         _set_test_title_config(max_chars=12)
         middleware = TitleMiddleware()
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="短标题"))
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(return_value=model))
 
         state = {
             "messages": [
@@ -86,12 +90,16 @@ class TestTitleMiddlewareCoreLogic:
         result = asyncio.run(middleware._agenerate_title_result(state))
         title = result["title"]
 
-        assert title.endswith("...")
-        assert title.startswith("请帮我写一个很长很长")
+        assert title == "短标题"
+        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False)
+        model.ainvoke.assert_awaited_once()
 
     def test_generate_title_normalizes_structured_message_content(self, monkeypatch):
         _set_test_title_config(max_chars=20)
         middleware = TitleMiddleware()
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="请帮我总结这段代码"))
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(return_value=model))
 
         state = {
             "messages": [
@@ -108,6 +116,9 @@ class TestTitleMiddlewareCoreLogic:
     def test_generate_title_fallback_for_long_message(self, monkeypatch):
         _set_test_title_config(max_chars=20)
         middleware = TitleMiddleware()
+        model = MagicMock()
+        model.ainvoke = AsyncMock(side_effect=RuntimeError("model unavailable"))
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(return_value=model))
 
         state = {
             "messages": [
