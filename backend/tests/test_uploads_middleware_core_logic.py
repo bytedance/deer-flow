@@ -290,6 +290,7 @@ class TestBeforeAgent:
                 "path": "/mnt/user-data/uploads/notes.txt",
                 "extension": ".txt",
                 "outline": [],
+                "outline_preview": [],
             }
         ]
 
@@ -429,3 +430,41 @@ class TestBeforeAgent:
         content = result["messages"][-1].content
         assert "Chapter 1" in content
         assert "Chapter 2" in content
+
+    def test_fallback_preview_shown_when_outline_empty(self, tmp_path):
+        """When .md exists but has no headings, first lines are shown as a preview."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"%PDF fake")
+        # .md with no # headings — plain prose only
+        (uploads_dir / "report.md").write_text(
+            "Annual Financial Report 2024\n\nThis document summarises key findings.\n\nRevenue grew by 12%.\n",
+            encoding="utf-8",
+        )
+
+        msg = _human("analyse", files=[{"filename": "report.pdf", "size": 9, "path": "/mnt/user-data/uploads/report.pdf"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        # Outline section must NOT appear
+        assert "Document outline" not in content
+        # Preview lines must appear
+        assert "Annual Financial Report 2024" in content
+        assert "No structural headings detected" in content
+        # grep hint must appear
+        assert "grep" in content
+
+    def test_fallback_grep_hint_shown_when_no_md_file(self, tmp_path):
+        """Files with no sibling .md still get the grep hint (outline is empty)."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "data.csv").write_bytes(b"a,b,c\n1,2,3\n")
+
+        msg = _human("analyse", files=[{"filename": "data.csv", "size": 12, "path": "/mnt/user-data/uploads/data.csv"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Document outline" not in content
+        assert "grep" in content

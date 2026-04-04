@@ -182,6 +182,16 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
 # by pymupdf4llm, so they don't need this pattern.
 _BOLD_HEADING_RE = re.compile(r"^\*\*((ITEM|PART|SECTION|SCHEDULE|EXHIBIT|APPENDIX|ANNEX|CHAPTER)\b[A-Z0-9 .,\-]*)\*\*\s*$")
 
+# Regex for split-bold headings produced by pymupdf4llm when a heading spans
+# multiple text spans in the PDF (e.g. section number and title are separate spans).
+# Matches lines like:  **1** **Introduction**  or  **3.2** **Multi-Head Attention**
+# Requirements:
+#   1. Entire line consists only of **...** blocks separated by whitespace
+#   2. First block is a section number (digits and dots, e.g. "1", "3.2", "A.1")
+#   3. The second block must contain at least one letter — this excludes financial
+#      table headers like **2023** **2022** **2021** where all blocks are pure numbers
+_SPLIT_BOLD_HEADING_RE = re.compile(r"^\*\*[\dA-Z][\d\.]*\*\*\s+\*\*[^*]*[A-Za-z][^*]*\*\*(\s+\*\*.+\*\*)*\s*$")
+
 # Maximum number of outline entries injected into the agent context.
 # Keeps prompt size bounded even for very long documents.
 MAX_OUTLINE_ENTRIES = 50
@@ -189,14 +199,43 @@ MAX_OUTLINE_ENTRIES = 50
 _ALLOWED_PDF_CONVERTERS = {"auto", "pymupdf4llm", "markitdown"}
 
 
+def _clean_bold_title(raw: str) -> str:
+    """Normalise a title string that may contain pymupdf4llm bold artefacts.
+
+    pymupdf4llm sometimes emits adjacent bold spans as ``**A** **B**`` instead
+    of a single ``**A B**`` block.  This helper merges those fragments and then
+    strips the outermost ``**...**`` wrapper so the caller gets plain text.
+
+    Examples::
+
+        "**Overview**"                       → "Overview"
+        "**UNITED STATES** **SECURITIES**"   → "UNITED STATES SECURITIES"
+        "plain text"                         → "plain text"  (unchanged)
+    """
+    # Merge adjacent bold spans: "** **" → " "
+    merged = re.sub(r"\*\*\s*\*\*", " ", raw).strip()
+    # Strip outermost **...** if the whole string is wrapped
+    if m := re.fullmatch(r"\*\*(.+?)\*\*", merged, re.DOTALL):
+        return m.group(1).strip()
+    return merged
+
+
 def extract_outline(md_path: Path) -> list[dict]:
     """Extract document outline (headings) from a Markdown file.
 
-    Recognises two heading styles produced by pymupdf4llm:
-    1. Standard Markdown headings: lines starting with one or more '#'
-    2. Bold-only structural headings: **ITEM 1. BUSINESS**, **PART II**, etc.
-       (SEC filings use bold+caps for section headings with the same font size
-       as body text, so pymupdf4llm cannot promote them to # headings)
+    Recognises three heading styles produced by pymupdf4llm:
+
+    1. Standard Markdown headings: lines starting with one or more '#'.
+       Inline ``**...**`` wrappers and adjacent bold spans (``** **``) are
+       cleaned so the title is plain text.
+
+    2. Bold-only structural headings: ``**ITEM 1. BUSINESS**``, ``**PART II**``,
+       etc.  SEC filings use bold+caps for section headings with the same font
+       size as body text, so pymupdf4llm cannot promote them to # headings.
+
+    3. Split-bold headings: ``**1** **Introduction**``, ``**3.2** **Attention**``.
+       pymupdf4llm emits these when the section number and title text are
+       separate spans in the underlying PDF (common in academic papers).
 
     Args:
         md_path: Path to the .md file.
@@ -218,18 +257,24 @@ def extract_outline(md_path: Path) -> list[dict]:
 
                 # Style 1: standard Markdown heading
                 if stripped.startswith("#"):
-                    title = stripped.lstrip("#").strip()
-                    # Strip any inline **...** wrapping (e.g. "## **Overview**" → "Overview")
+                    title = _clean_bold_title(stripped.lstrip("#").strip())
                     if title:
-                        if m2 := re.fullmatch(r"\*\*(.+?)\*\*", title):
-                            title = m2.group(1).strip()
                         outline.append({"title": title, "line": lineno})
 
-                # Style 2: bold-only line (entire line is **...**)
+                # Style 2: single bold block with SEC structural keyword
                 elif m := _BOLD_HEADING_RE.match(stripped):
                     title = m.group(1).strip()
                     if title:
                         outline.append({"title": title, "line": lineno})
+
+                # Style 3: split-bold heading — **<num>** **<title>**
+                elif _SPLIT_BOLD_HEADING_RE.match(stripped):
+                    blocks = re.findall(r"\*\*(.+?)\*\*", stripped)
+                    # Ignore table column headers that have many blocks (> 4)
+                    if len(blocks) <= 4:
+                        title = " ".join(blocks)
+                        if title:
+                            outline.append({"title": title, "line": lineno})
 
                 if len(outline) >= MAX_OUTLINE_ENTRIES:
                     outline.append({"truncated": True})
