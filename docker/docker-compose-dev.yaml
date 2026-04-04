@@ -72,7 +72,6 @@ services:
     depends_on:
       - frontend
       - gateway
-      - langgraph
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -102,6 +101,7 @@ services:
       - CI=true
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
       - DEER_FLOW_INTERNAL_LANGGRAPH_BASE_URL=http://langgraph:2024
+      - NEXT_PUBLIC_LANGGRAPH_BASE_URL=${NEXT_PUBLIC_LANGGRAPH_BASE_URL:-}
     env_file:
       - ../frontend/.env
     networks:

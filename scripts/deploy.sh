@@ -3,14 +3,22 @@
 # deploy.sh - Build and start (or stop) DeerFlow production services
 #
 # Usage:
-#   deploy.sh [up]   — build images and start containers (default)
-#   deploy.sh down   — stop and remove containers
+#   deploy.sh [up]          — build images and start containers (default)
+#   deploy.sh down          — stop and remove containers
+#   deploy.sh up --gateway  — Gateway mode (experimental, no LangGraph container)
 #
 # Must be run from the repo root directory.
 
 set -e
 
 CMD="${1:-up}"
+GATEWAY_MODE=false
+for arg in "$@"; do
+    case "$arg" in
+        --gateway) GATEWAY_MODE=true ;;
+        up|down) ;;
+    esac
+done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -162,9 +170,17 @@ echo ""
 sandbox_mode="$(detect_sandbox_mode)"
 echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
+if $GATEWAY_MODE; then
+    echo -e "${BLUE}Runtime: Gateway mode (experimental) — no LangGraph container${NC}"
+    export NEXT_PUBLIC_LANGGRAPH_BASE_URL=/api/langgraph-compat
+fi
+
 if [ "$sandbox_mode" = "provisioner" ]; then
     services=""
     extra_args="--profile provisioner"
+elif $GATEWAY_MODE; then
+    services="frontend gateway nginx"
+    extra_args=""
 else
     services="frontend gateway langgraph nginx"
     extra_args=""
@@ -199,12 +215,21 @@ echo ""
 
 echo ""
 echo "=========================================="
-echo "  DeerFlow is running!"
+if $GATEWAY_MODE; then
+    echo "  DeerFlow is running! (Gateway mode)"
+else
+    echo "  DeerFlow is running!"
+fi
 echo "=========================================="
 echo ""
 echo "  🌐 Application: http://localhost:${PORT:-2026}"
 echo "  📡 API Gateway: http://localhost:${PORT:-2026}/api/*"
-echo "  🤖 LangGraph:   http://localhost:${PORT:-2026}/api/langgraph/*"
+if $GATEWAY_MODE; then
+    echo "  🤖 Runtime:     Gateway embedded (experimental)"
+    echo "  API:            /api/langgraph-compat/* → Gateway"
+else
+    echo "  🤖 LangGraph:   http://localhost:${PORT:-2026}/api/langgraph/*"
+fi
 echo ""
 echo "  Manage:"
 echo "    make down        — stop and remove containers"

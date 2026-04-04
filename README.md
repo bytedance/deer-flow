@@ -280,6 +280,27 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 6. **Access**: http://localhost:2026
 
+#### Startup Modes
+
+DeerFlow supports multiple startup modes across two dimensions:
+
+- **Dev / Prod** — dev enables hot-reload; prod uses pre-built frontend
+- **Standard / Gateway** — standard uses a separate LangGraph server (4 processes); Gateway mode (experimental) embeds the agent runtime in the Gateway API (3 processes)
+
+| | **Local 前台** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
+|---|---|---|---|---|
+| **Dev** | `serve.sh --dev`<br/>`make dev` | `serve.sh --dev --daemon`<br/>`make dev-daemon` | `docker.sh start`<br/>`make docker-start` | — |
+| **Dev + Gateway** | `serve.sh --dev --gateway`<br/>`make dev-pro` | `serve.sh --dev --gateway --daemon`<br/>`make dev-daemon-pro` | `docker.sh start --gateway`<br/>`make docker-start-pro` | — |
+| **Prod** | `serve.sh --prod`<br/>`make start` | `serve.sh --prod --daemon`<br/>`make start-daemon` | — | `deploy.sh`<br/>`make up` |
+| **Prod + Gateway** | `serve.sh --prod --gateway`<br/>`make start-pro` | `serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `deploy.sh up --gateway`<br/>`make up-pro` |
+
+| 操作 | Local | Docker Dev | Docker Prod |
+|---|---|---|---|
+| **停止** | `serve.sh --stop`<br/>`make stop` | `docker.sh stop`<br/>`make docker-stop` | `deploy.sh down`<br/>`make down` |
+| **重启** | `serve.sh --restart [flags]` | `docker.sh restart` | — |
+
+> **Gateway mode** is experimental. It eliminates the LangGraph server process — the Gateway API handles agent execution directly via async tasks, managing its own concurrency.
+
 ### Advanced
 #### Sandbox Mode
 

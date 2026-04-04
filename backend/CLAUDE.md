@@ -13,6 +13,10 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 - **Nginx** (port 2026): Unified reverse proxy entry point
 - **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
 
+**Runtime Modes**:
+- **Standard mode** (`make dev`): LangGraph Server handles agent execution as a separate process. 4 processes total.
+- **Gateway mode** (`make dev-pro`, experimental): Agent runtime embedded in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Service manages its own concurrency via async tasks. 3 processes total, no LangGraph Server.
+
 **Project Structure**:
 ```
 deer-flow/
@@ -80,6 +84,8 @@ When making code changes, you MUST update the relevant documentation:
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
 make dev        # Start all services (LangGraph + Gateway + Frontend + Nginx), with config.yaml preflight
+make dev-pro    # Gateway mode (experimental): skip LangGraph, agent runtime embedded in Gateway
+make start-pro  # Production + Gateway mode (experimental)
 make stop       # Stop all services
 ```
 
@@ -436,8 +442,25 @@ make dev
 
 This starts all services and makes the application available at `http://localhost:2026`.
 
+**All startup modes:**
+
+| | **Local 前台** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
+|---|---|---|---|---|
+| **Dev** | `serve.sh --dev`<br/>`make dev` | `serve.sh --dev --daemon`<br/>`make dev-daemon` | `docker.sh start`<br/>`make docker-start` | — |
+| **Dev + Gateway** | `serve.sh --dev --gateway`<br/>`make dev-pro` | `serve.sh --dev --gateway --daemon`<br/>`make dev-daemon-pro` | `docker.sh start --gateway`<br/>`make docker-start-pro` | — |
+| **Prod** | `serve.sh --prod`<br/>`make start` | `serve.sh --prod --daemon`<br/>`make start-daemon` | — | `deploy.sh`<br/>`make up` |
+| **Prod + Gateway** | `serve.sh --prod --gateway`<br/>`make start-pro` | `serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `deploy.sh up --gateway`<br/>`make up-pro` |
+
+| 操作 | Local | Docker Dev | Docker Prod |
+|---|---|---|---|
+| **停止** | `serve.sh --stop`<br/>`make stop` | `docker.sh stop`<br/>`make docker-stop` | `deploy.sh down`<br/>`make down` |
+| **重启** | `serve.sh --restart [flags]` | `docker.sh restart` | — |
+
+Gateway mode is experimental — agent runtime embedded in Gateway, no LangGraph server.
+
 **Nginx routing**:
-- `/api/langgraph/*` → LangGraph Server (2024)
+- `/api/langgraph/*` → LangGraph Server (2024) — standard mode only
+- `/api/langgraph-compat/*` → Gateway embedded runtime (8001) — Gateway mode
 - `/api/*` (other) → Gateway API (8001)
 - `/` (non-API) → Frontend (3000)
 
