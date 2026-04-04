@@ -9,6 +9,7 @@ from langgraph.typing import ContextT
 from deerflow.agents.thread_state import ThreadDataState, ThreadState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.context.tool_output_budget import prepare_tool_output_for_context
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -37,6 +38,83 @@ _DEFAULT_GLOB_MAX_RESULTS = 200
 _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
+
+
+def _is_unrestricted_host_access_enabled() -> bool:
+    """Whether local sandbox tools should allow direct host absolute paths."""
+    cached = getattr(_is_unrestricted_host_access_enabled, "_cached", None)
+    if cached is not None:
+        return cached
+    try:
+        from deerflow.config import get_app_config
+
+        enabled = get_app_config().sandbox.host_access_mode == "unrestricted"
+        _is_unrestricted_host_access_enabled._cached = enabled  # type: ignore[attr-defined]
+        return enabled
+    except Exception:
+        return False
+
+
+def _get_custom_mounts() -> list[tuple[str, str, bool]]:
+    """Return configured local-sandbox mounts as (container_path, host_path, read_only)."""
+    cached = getattr(_get_custom_mounts, "_cached", None)
+    if cached is not None:
+        return cached
+    try:
+        from deerflow.config import get_app_config
+
+        mounts: list[tuple[str, str, bool]] = []
+        for mount in get_app_config().sandbox.mounts:
+            mounts.append((mount.container_path.rstrip("/"), mount.host_path, mount.read_only))
+        _get_custom_mounts._cached = mounts  # type: ignore[attr-defined]
+        return mounts
+    except Exception:
+        return []
+
+
+def _get_custom_mount_for_path(path: str) -> tuple[str, str, bool] | None:
+    """Return the best matching configured mount for a virtual path."""
+    for container_path, host_path, read_only in sorted(_get_custom_mounts(), key=lambda item: len(item[0]), reverse=True):
+        if path == container_path or path.startswith(f"{container_path}/"):
+            return container_path, host_path, read_only
+    return None
+
+
+def _is_custom_mount_path(path: str) -> bool:
+    return _get_custom_mount_for_path(path) is not None
+
+
+def _resolve_custom_mount_path(path: str) -> str:
+    """Resolve a custom mounted virtual path to a host filesystem path."""
+    _reject_path_traversal(path)
+    mount = _get_custom_mount_for_path(path)
+    if mount is None:
+        raise FileNotFoundError(f"Custom mount not available for path: {path}")
+
+    container_path, host_path, _read_only = mount
+    if path == container_path:
+        return host_path
+
+    relative = path[len(container_path) :].lstrip("/")
+    resolved = _join_path_preserving_style(host_path, relative)
+
+    if "/" in host_path and "\\" not in host_path:
+        base_path = posixpath.normpath(host_path)
+        candidate_path = posixpath.normpath(resolved)
+        try:
+            if posixpath.commonpath([base_path, candidate_path]) != base_path:
+                raise PermissionError("Access denied: path traversal detected")
+        except ValueError:
+            raise PermissionError("Access denied: path traversal detected") from None
+        return resolved
+
+    resolved_path = Path(resolved).resolve()
+    try:
+        resolved_path.relative_to(Path(host_path).resolve())
+    except ValueError:
+        raise PermissionError("Access denied: path traversal detected")
+
+    return str(resolved_path)
 
 
 def _get_skills_container_path() -> str:
@@ -983,7 +1061,8 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
                 max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
             except Exception:
                 max_chars = 20000
-            return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
+            output = _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
+            return prepare_tool_output_for_context(content=output, tool_name="bash", thread_data=thread_data)
         ensure_thread_directories_exist(runtime)
         try:
             from deerflow.config.app_config import get_app_config
@@ -992,7 +1071,12 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
-        return _truncate_bash_output(sandbox.execute_command(command), max_chars)
+        output = _truncate_bash_output(sandbox.execute_command(command), max_chars)
+        return prepare_tool_output_for_context(
+            content=output,
+            tool_name="bash",
+            thread_data=get_thread_data(runtime),
+        )
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:
@@ -1199,7 +1283,8 @@ def read_file_tool(
             max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
         except Exception:
             max_chars = 50000
-        return _truncate_read_file_output(content, max_chars)
+        content = _truncate_read_file_output(content, max_chars)
+        return prepare_tool_output_for_context(content=content, tool_name="read_file", thread_data=get_thread_data(runtime))
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:

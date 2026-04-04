@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
+from deerflow.config.context_management_config import load_context_management_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import load_guardrails_config_from_dict
 from deerflow.config.memory_config import load_memory_config_from_dict
@@ -120,6 +121,10 @@ class AppConfig(BaseModel):
         # Load memory config if present
         if "memory" in config_data:
             load_memory_config_from_dict(config_data["memory"])
+
+        # Load incremental context management config if present
+        if "context_management" in config_data:
+            load_context_management_config_from_dict(config_data["context_management"])
 
         # Load subagents config if present
         if "subagents" in config_data:

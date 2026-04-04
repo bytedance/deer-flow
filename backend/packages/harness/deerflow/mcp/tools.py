@@ -10,6 +10,7 @@ from typing import Any
 from langchain_core.tools import BaseTool
 
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.context.tool_output_budget import prepare_tool_result_value_for_context, resolve_thread_data_from_config
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 
@@ -51,6 +52,30 @@ def _make_sync_tool_wrapper(coro: Callable[..., Any], tool_name: str) -> Callabl
             raise
 
     return sync_wrapper
+
+
+def _budget_mcp_tool_result(result: Any, *, tool_name: str) -> Any:
+    return prepare_tool_result_value_for_context(
+        result,
+        tool_name=tool_name,
+        thread_data=resolve_thread_data_from_config(),
+    )
+
+
+def _make_budgeted_sync_wrapper(func: Callable[..., Any], tool_name: str) -> Callable[..., Any]:
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        result = func(*args, **kwargs)
+        return _budget_mcp_tool_result(result, tool_name=tool_name)
+
+    return wrapped
+
+
+def _make_budgeted_async_wrapper(coro: Callable[..., Any], tool_name: str) -> Callable[..., Any]:
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        result = await coro(*args, **kwargs)
+        return _budget_mcp_tool_result(result, tool_name=tool_name)
+
+    return wrapped
 
 
 async def get_mcp_tools() -> list[BaseTool]:
@@ -105,6 +130,10 @@ async def get_mcp_tools() -> list[BaseTool]:
         for tool in tools:
             if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
                 tool.func = _make_sync_tool_wrapper(tool.coroutine, tool.name)
+            if getattr(tool, "func", None) is not None:
+                tool.func = _make_budgeted_sync_wrapper(tool.func, tool.name)
+            if getattr(tool, "coroutine", None) is not None:
+                tool.coroutine = _make_budgeted_async_wrapper(tool.coroutine, tool.name)
 
         return tools
 

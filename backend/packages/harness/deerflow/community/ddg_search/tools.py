@@ -8,6 +8,7 @@ import logging
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
+from deerflow.context.tool_output_budget import prepare_tool_output_for_context, resolve_thread_data_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -92,4 +93,8 @@ def web_search_tool(
         "results": normalized_results,
     }
 
-    return json.dumps(output, indent=2, ensure_ascii=False)
+    return prepare_tool_output_for_context(
+        content=json.dumps(output, indent=2, ensure_ascii=False),
+        tool_name="web_search",
+        thread_data=resolve_thread_data_from_config(),
+    )

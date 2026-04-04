@@ -4,6 +4,7 @@ from firecrawl import FirecrawlApp
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
+from deerflow.context.tool_output_budget import prepare_tool_output_for_context, resolve_thread_data_from_config
 
 
 def _get_firecrawl_client() -> FirecrawlApp:
@@ -40,8 +41,11 @@ def web_search_tool(query: str) -> str:
             }
             for item in web_results
         ]
-        json_results = json.dumps(normalized_results, indent=2, ensure_ascii=False)
-        return json_results
+        return prepare_tool_output_for_context(
+            content=json.dumps(normalized_results, indent=2, ensure_ascii=False),
+            tool_name="web_search",
+            thread_data=resolve_thread_data_from_config(),
+        )
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -70,4 +74,8 @@ def web_fetch_tool(url: str) -> str:
     except Exception as e:
         return f"Error: {str(e)}"
 
-    return f"# {title}\n\n{markdown_content[:4096]}"
+    return prepare_tool_output_for_context(
+        content=f"# {title}\n\n{markdown_content[:4096]}",
+        tool_name="web_fetch",
+        thread_data=resolve_thread_data_from_config(),
+    )

@@ -15,6 +15,8 @@ from langchain.agents.middleware.todo import PlanningState, Todo
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
+_TODO_REMINDER_TAG = "<system_reminder>"
+
 
 def _todos_in_messages(messages: list[Any]) -> bool:
     """Return True if any AIMessage in *messages* contains a write_todos tool call."""
@@ -27,9 +29,9 @@ def _todos_in_messages(messages: list[Any]) -> bool:
 
 
 def _reminder_in_messages(messages: list[Any]) -> bool:
-    """Return True if a todo_reminder HumanMessage is already present in *messages*."""
+    """Return True if a todo reminder HumanMessage is already present in *messages*."""
     for msg in messages:
-        if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == "todo_reminder":
+        if isinstance(msg, HumanMessage) and isinstance(msg.content, str) and _TODO_REMINDER_TAG in msg.content:
             return True
     return False
 
@@ -77,9 +79,8 @@ class TodoMiddleware(TodoListMiddleware):
         # Inject a reminder as a HumanMessage so the model stays aware.
         formatted = _format_todos(todos)
         reminder = HumanMessage(
-            name="todo_reminder",
             content=(
-                "<system_reminder>\n"
+                f"{_TODO_REMINDER_TAG}\n"
                 "Your todo list from earlier is no longer visible in the current context window, "
                 "but it is still active. Here is the current state:\n\n"
                 f"{formatted}\n\n"

@@ -2,6 +2,7 @@ from langchain.tools import tool
 
 from deerflow.community.jina_ai.jina_client import JinaClient
 from deerflow.config import get_app_config
+from deerflow.context.tool_output_budget import prepare_tool_output_for_context, resolve_thread_data_from_config
 from deerflow.utils.readability import ReadabilityExtractor
 
 readability_extractor = ReadabilityExtractor()
@@ -27,4 +28,8 @@ async def web_fetch_tool(url: str) -> str:
     if isinstance(html_content, str) and html_content.startswith("Error:"):
         return html_content
     article = readability_extractor.extract_article(html_content)
-    return article.to_markdown()[:4096]
+    return prepare_tool_output_for_context(
+        content=article.to_markdown()[:4096],
+        tool_name="web_fetch",
+        thread_data=resolve_thread_data_from_config(),
+    )

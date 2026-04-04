@@ -4,6 +4,7 @@ from langchain.tools import tool
 from tavily import TavilyClient
 
 from deerflow.config import get_app_config
+from deerflow.context.tool_output_budget import prepare_tool_output_for_context, resolve_thread_data_from_config
 
 
 def _get_tavily_client() -> TavilyClient:
@@ -36,8 +37,11 @@ def web_search_tool(query: str) -> str:
         }
         for result in res["results"]
     ]
-    json_results = json.dumps(normalized_results, indent=2, ensure_ascii=False)
-    return json_results
+    return prepare_tool_output_for_context(
+        content=json.dumps(normalized_results, indent=2, ensure_ascii=False),
+        tool_name="web_search",
+        thread_data=resolve_thread_data_from_config(),
+    )
 
 
 @tool("web_fetch", parse_docstring=True)
@@ -57,6 +61,10 @@ def web_fetch_tool(url: str) -> str:
         return f"Error: {res['failed_results'][0]['error']}"
     elif "results" in res and len(res["results"]) > 0:
         result = res["results"][0]
-        return f"# {result['title']}\n\n{result['raw_content'][:4096]}"
+        return prepare_tool_output_for_context(
+            content=f"# {result['title']}\n\n{result['raw_content'][:4096]}",
+            tool_name="web_fetch",
+            thread_data=resolve_thread_data_from_config(),
+        )
     else:
         return "Error: No results found"

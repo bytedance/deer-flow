@@ -1,4 +1,5 @@
 from .app_config import get_app_config
+from .context_management_config import ContextManagementConfig, get_context_management_config
 from .extensions_config import ExtensionsConfig, get_extensions_config
 from .memory_config import MemoryConfig, get_memory_config
 from .paths import Paths, get_paths
@@ -18,6 +19,8 @@ __all__ = [
     "SkillsConfig",
     "ExtensionsConfig",
     "get_extensions_config",
+    "ContextManagementConfig",
+    "get_context_management_config",
     "MemoryConfig",
     "get_memory_config",
     "get_tracing_config",

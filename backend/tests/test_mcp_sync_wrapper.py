@@ -5,11 +5,19 @@ import pytest
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from deerflow.config.context_management_config import ContextManagementConfig, ToolResultBudgetConfig, set_context_management_config
 from deerflow.mcp.tools import _make_sync_tool_wrapper, get_mcp_tools
 
 
 class MockArgs(BaseModel):
     x: int = Field(..., description="test param")
+
+
+@pytest.fixture(autouse=True)
+def _reset_context_management_config():
+    set_context_management_config(ContextManagementConfig())
+    yield
+    set_context_management_config(ContextManagementConfig())
 
 
 def test_mcp_tool_sync_wrapper_generation():
@@ -83,3 +91,44 @@ def test_mcp_tool_sync_wrapper_exception_logging():
         mock_log_error.assert_called_once()
         # Verify the tool name is in the log message
         assert "error_tool" in mock_log_error.call_args[0][0]
+
+
+def test_get_mcp_tools_budgets_oversized_structured_results(tmp_path):
+    set_context_management_config(
+        ContextManagementConfig(
+            tool_result_budget=ToolResultBudgetConfig(
+                enabled=True,
+                externalize_min_chars=20,
+                preview_head_chars=10,
+                preview_tail_chars=6,
+            )
+        )
+    )
+
+    async def mock_coro(x: int):
+        return {"payload": "x" * 120, "index": x}
+
+    mock_tool = StructuredTool(
+        name="x-reader_read_url",
+        description="test description",
+        args_schema=MockArgs,
+        func=None,
+        coroutine=mock_coro,
+    )
+    mock_client_instance = MagicMock()
+    mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool])
+
+    with (
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
+        patch("deerflow.mcp.tools.build_servers_config", return_value={"x-reader": {}}),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.resolve_thread_data_from_config", return_value={"outputs_path": str(tmp_path / "outputs")}),
+    ):
+        tools = asyncio.run(get_mcp_tools())
+        result = tools[0].func(x=7)
+
+    assert isinstance(result, str)
+    assert "Full x-reader_read_url output saved to /mnt/user-data/outputs/.context/tool-results/" in result
+    saved_files = list((tmp_path / "outputs" / ".context" / "tool-results").glob("x-reader_read_url-*.txt"))
+    assert len(saved_files) == 1

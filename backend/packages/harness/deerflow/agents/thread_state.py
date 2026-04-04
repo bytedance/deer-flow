@@ -18,6 +18,25 @@ class ViewedImageData(TypedDict):
     mime_type: str
 
 
+class TaskContractData(TypedDict):
+    original_request: NotRequired[str | None]
+    active_request: NotRequired[str | None]
+    scope: NotRequired[str | None]
+    deliverable: NotRequired[str | None]
+    output_format: NotRequired[str | None]
+    quality_bar: NotRequired[str | None]
+    must_save_output: NotRequired[bool | None]
+    must_present_output: NotRequired[bool | None]
+
+
+class SessionStateData(TypedDict):
+    current_goal: NotRequired[str | None]
+    task_contract: NotRequired[TaskContractData | None]
+    active_todos: NotRequired[list[str] | None]
+    recent_artifacts: NotRequired[list[str] | None]
+    last_assistant_response: NotRequired[str | None]
+
+
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
     """Reducer for artifacts list - merges and deduplicates artifacts."""
     if existing is None:
@@ -53,3 +72,4 @@ class ThreadState(AgentState):
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    session_state: NotRequired[SessionStateData | None]
