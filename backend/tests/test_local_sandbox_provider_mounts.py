@@ -293,6 +293,26 @@ class TestMultipleMounts:
 
 
 class TestLocalSandboxProviderMounts:
+    def test_setup_path_mappings_splits_public_and_runtime_custom_skills(self, tmp_path, monkeypatch):
+        repo_skills = tmp_path / "repo-skills"
+        runtime_home = tmp_path / "runtime-home"
+        (repo_skills / "public").mkdir(parents=True)
+        (runtime_home / "skills" / "custom").mkdir(parents=True)
+
+        config = SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: repo_skills),
+            sandbox=SimpleNamespace(mounts=[]),
+        )
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(runtime_home))
+        with patch("deerflow.config.get_app_config", return_value=config):
+            provider = LocalSandboxProvider()
+
+        assert [m.container_path for m in provider._path_mappings] == [
+            "/mnt/skills/public",
+            "/mnt/skills/custom",
+        ]
+
     def test_setup_path_mappings_uses_configured_skills_container_path_as_reserved_prefix(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()

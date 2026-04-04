@@ -225,3 +225,18 @@ class TestInstallSkillFromArchive:
         result = install_skill_from_archive(zip_path, skills_root=skills_root)
         assert result["success"] is True
         assert result["skill_name"] == "my-skill"
+
+    def test_default_install_targets_runtime_custom_skills_dir(self, tmp_path, monkeypatch):
+        """Without an explicit override, runtime installs should land under DEER_FLOW_HOME."""
+        zip_path = self._make_skill_zip(tmp_path, "runtime-skill")
+        repo_skills = tmp_path / "repo-skills"
+        runtime_home = tmp_path / "runtime-home"
+
+        (repo_skills / "public").mkdir(parents=True)
+        monkeypatch.setenv("DEER_FLOW_HOME", str(runtime_home))
+
+        result = install_skill_from_archive(zip_path)
+
+        assert result["success"] is True
+        assert not (repo_skills / "custom" / "runtime-skill").exists()
+        assert (runtime_home / "skills" / "custom" / "runtime-skill" / "SKILL.md").exists()

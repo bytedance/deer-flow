@@ -29,6 +29,7 @@ from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.skills.loader import get_custom_skills_path
 
 from .aio_sandbox import AioSandbox
 from .backend import SandboxBackend, wait_for_sandbox_ready
@@ -196,8 +197,8 @@ class AioSandboxProvider(SandboxProvider):
             mounts.extend(self._get_thread_mounts(thread_id))
             logger.info(f"Adding thread mounts for thread {thread_id}: {mounts}")
 
-        skills_mount = self._get_skills_mount()
-        if skills_mount:
+        skills_mounts = self._get_skills_mounts()
+        for skills_mount in skills_mounts:
             mounts.append(skills_mount)
             logger.info(f"Adding skills mount: {skills_mount}")
 
@@ -224,7 +225,7 @@ class AioSandboxProvider(SandboxProvider):
         ]
 
     @staticmethod
-    def _get_skills_mount() -> tuple[str, str, bool] | None:
+    def _get_skills_mounts() -> list[tuple[str, str, bool]]:
         """Get the skills directory mount configuration.
 
         Mount source uses DEER_FLOW_HOST_SKILLS_PATH when running inside Docker (DooD)
@@ -233,15 +234,29 @@ class AioSandboxProvider(SandboxProvider):
         try:
             config = get_app_config()
             skills_path = config.skills.get_skills_path()
-            container_path = config.skills.container_path
+            container_path = config.skills.container_path.rstrip("/")
+            mounts: list[tuple[str, str, bool]] = []
 
-            if skills_path.exists():
-                # When running inside Docker with DooD, use host-side skills path.
-                host_skills = os.environ.get("DEER_FLOW_HOST_SKILLS_PATH") or str(skills_path)
-                return (host_skills, container_path, True)  # Read-only for security
+            public_path = skills_path / "public"
+            if public_path.exists():
+                host_skills_root = os.environ.get("DEER_FLOW_HOST_SKILLS_PATH")
+                host_public = os.path.join(host_skills_root, "public") if host_skills_root else str(public_path)
+                mounts.append((host_public, f"{container_path}/public", True))
+
+            custom_path = get_custom_skills_path(skills_path)
+            if custom_path.exists():
+                runtime_custom = get_paths().base_dir / "skills" / "custom"
+                if custom_path.resolve() == runtime_custom.resolve():
+                    host_custom = get_paths().host_base_dir / "skills" / "custom"
+                    mounts.append((str(host_custom), f"{container_path}/custom", True))
+                else:
+                    host_skills_root = os.environ.get("DEER_FLOW_HOST_SKILLS_PATH")
+                    host_custom = os.path.join(host_skills_root, "custom") if host_skills_root else str(custom_path)
+                    mounts.append((host_custom, f"{container_path}/custom", True))
+            return mounts
         except Exception as e:
             logger.warning(f"Could not setup skills mount: {e}")
-        return None
+        return []
 
     # ── Idle timeout management ──────────────────────────────────────────
 

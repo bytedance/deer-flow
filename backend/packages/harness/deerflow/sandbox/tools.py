@@ -19,6 +19,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.skills.loader import get_custom_skills_path
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
@@ -59,15 +60,9 @@ def _get_skills_container_path() -> str:
         return _DEFAULT_SKILLS_CONTAINER_PATH
 
 
-def _get_skills_host_path() -> str | None:
-    """Get the skills host filesystem path from config.
-
-    Returns None if the skills directory does not exist or config cannot be
-    loaded.  Only successful lookups are cached; failures are retried on the
-    next call so that a transiently unavailable skills directory does not
-    permanently disable skills access.
-    """
-    cached = getattr(_get_skills_host_path, "_cached", None)
+def _get_skills_host_paths() -> dict[str, str]:
+    """Get the available skills host filesystem paths keyed by category."""
+    cached = getattr(_get_skills_host_paths, "_cached", None)
     if cached is not None:
         return cached
     try:
@@ -75,12 +70,32 @@ def _get_skills_host_path() -> str | None:
 
         config = get_app_config()
         skills_path = config.skills.get_skills_path()
-        if skills_path.exists():
-            value = str(skills_path)
-            _get_skills_host_path._cached = value  # type: ignore[attr-defined]
-            return value
+        values: dict[str, str] = {}
+        public_path = skills_path / "public"
+        if public_path.exists():
+            values["public"] = str(public_path)
+
+        custom_path = get_custom_skills_path(skills_path)
+        if custom_path.exists():
+            values["custom"] = str(custom_path)
+
+        if values:
+            _get_skills_host_paths._cached = values  # type: ignore[attr-defined]
+            return values
     except Exception:
         pass
+    return {}
+
+
+def _get_skills_host_path() -> str | None:
+    """Backward-compatible helper returning the public/root host path when available."""
+    host_paths = _get_skills_host_paths()
+    public = host_paths.get("public")
+    if public:
+        return str(Path(public).parent)
+    custom = host_paths.get("custom")
+    if custom:
+        return str(Path(custom).parent)
     return None
 
 
@@ -103,15 +118,32 @@ def _resolve_skills_path(path: str) -> str:
         FileNotFoundError: If skills directory is not configured or doesn't exist.
     """
     skills_container = _get_skills_container_path()
-    skills_host = _get_skills_host_path()
-    if skills_host is None:
-        raise FileNotFoundError(f"Skills directory not available for path: {path}")
+    skills_hosts = _get_skills_host_paths()
+    if not skills_hosts:
+        legacy_host = _get_skills_host_path()
+        if legacy_host is None:
+            raise FileNotFoundError(f"Skills directory not available for path: {path}")
+        skills_hosts = {
+            "public": _join_path_preserving_style(legacy_host, "public"),
+            "custom": _join_path_preserving_style(legacy_host, "custom"),
+        }
 
     if path == skills_container:
-        return skills_host
+        root_host = _get_skills_host_path()
+        if root_host is None:
+            raise FileNotFoundError(f"Skills directory not available for path: {path}")
+        return root_host
 
     relative = path[len(skills_container) :].lstrip("/")
-    return _join_path_preserving_style(skills_host, relative)
+    category, _, remainder = relative.partition("/")
+    skills_host = skills_hosts.get(category)
+    if skills_host is None:
+        root_host = _get_skills_host_path()
+        if root_host is None:
+            raise FileNotFoundError(f"Skills directory not available for path: {path}")
+        return _join_path_preserving_style(root_host, relative)
+
+    return _join_path_preserving_style(skills_host, remainder)
 
 
 def _is_acp_workspace_path(path: str) -> bool:
@@ -459,21 +491,30 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     result = output
 
     # Mask skills host paths
-    skills_host = _get_skills_host_path()
+    skills_hosts = _get_skills_host_paths()
     skills_container = _get_skills_container_path()
-    if skills_host:
+    if not skills_hosts:
+        legacy_host = _get_skills_host_path()
+        if legacy_host:
+            skills_hosts = {
+                "public": _join_path_preserving_style(legacy_host, "public"),
+                "custom": _join_path_preserving_style(legacy_host, "custom"),
+            }
+
+    for category, skills_host in skills_hosts.items():
         raw_base = str(Path(skills_host))
         resolved_base = str(Path(skills_host).resolve())
+        container_base = f"{skills_container}/{category}"
         for base in _path_variants(raw_base) | _path_variants(resolved_base):
             escaped = re.escape(base).replace(r"\\", r"[/\\]")
             pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
 
-            def replace_skills(match: re.Match, _base: str = base) -> str:
+            def replace_skills(match: re.Match, _base: str = base, _container: str = container_base) -> str:
                 matched_path = match.group(0)
                 if matched_path == _base:
-                    return skills_container
+                    return _container
                 relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{skills_container}/{relative}" if relative else skills_container
+                return f"{_container}/{relative}" if relative else _container
 
             result = pattern.sub(replace_skills, result)
 
@@ -702,8 +743,14 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
 
     # Replace skills paths
     skills_container = _get_skills_container_path()
-    skills_host = _get_skills_host_path()
-    if skills_host and skills_container in result:
+    if not _get_skills_host_paths() and _get_skills_host_path() and skills_container in result:
+        skills_pattern = re.compile(rf"{re.escape(skills_container)}(/[^\s\"';&|<>()]*)?")
+
+        def replace_skills_match(match: re.Match) -> str:
+            return _resolve_skills_path(match.group(0))
+
+        result = skills_pattern.sub(replace_skills_match, result)
+    elif _get_skills_host_paths() and skills_container in result:
         skills_pattern = re.compile(rf"{re.escape(skills_container)}(/[^\s\"';&|<>()]*)?")
 
         def replace_skills_match(match: re.Match) -> str:

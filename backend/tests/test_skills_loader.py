@@ -62,3 +62,23 @@ def test_load_skills_skips_hidden_directories(tmp_path: Path):
 
     assert "ok-skill" in names
     assert "secret-skill" not in names
+
+
+def test_load_skills_includes_runtime_custom_skills_from_deer_flow_home(tmp_path: Path, monkeypatch) -> None:
+    """Default loading should merge repo public skills with runtime-installed custom skills."""
+    repo_skills = tmp_path / "repo-skills"
+    runtime_home = tmp_path / "runtime-home"
+
+    _write_skill(repo_skills / "public" / "repo-public", "repo-public", "Repo public skill")
+    _write_skill(runtime_home / "skills" / "custom" / "runtime-skill", "runtime-skill", "Runtime installed skill")
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(runtime_home))
+    monkeypatch.setattr("deerflow.skills.loader.get_skills_root_path", lambda: repo_skills)
+
+    skills = load_skills(enabled_only=False)
+    by_name = {skill.name: skill for skill in skills}
+
+    assert "repo-public" in by_name
+    assert "runtime-skill" in by_name
+    assert by_name["runtime-skill"].category == "custom"
+    assert by_name["runtime-skill"].get_container_file_path() == "/mnt/skills/custom/runtime-skill/SKILL.md"

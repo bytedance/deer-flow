@@ -4,6 +4,7 @@ from pathlib import Path
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.skills.loader import get_custom_skills_path
 
 logger = logging.getLogger(__name__)
 
@@ -33,15 +34,25 @@ class LocalSandboxProvider(SandboxProvider):
 
             config = get_app_config()
             skills_path = config.skills.get_skills_path()
-            container_path = config.skills.container_path
+            container_path = config.skills.container_path.rstrip("/")
 
-            # Only add mapping if skills directory exists
-            if skills_path.exists():
+            public_path = skills_path / "public"
+            if public_path.exists():
                 mappings.append(
                     PathMapping(
-                        container_path=container_path,
-                        local_path=str(skills_path),
+                        container_path=f"{container_path}/public",
+                        local_path=str(public_path),
                         read_only=True,  # Skills directory is always read-only
+                    )
+                )
+
+            custom_path = get_custom_skills_path(skills_path)
+            if custom_path.exists():
+                mappings.append(
+                    PathMapping(
+                        container_path=f"{container_path}/custom",
+                        local_path=str(custom_path),
+                        read_only=True,
                     )
                 )
 

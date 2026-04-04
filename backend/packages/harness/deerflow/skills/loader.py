@@ -2,6 +2,8 @@ import logging
 import os
 from pathlib import Path
 
+from deerflow.config.paths import get_paths
+
 from .parser import parse_skill_file
 from .types import Skill
 
@@ -22,6 +24,30 @@ def get_skills_root_path() -> Path:
     return skills_dir
 
 
+def get_runtime_skills_root_path() -> Path:
+    """Get the writable runtime skills directory under DEER_FLOW_HOME."""
+    return get_paths().base_dir / "skills"
+
+
+def get_runtime_custom_skills_path() -> Path:
+    """Get the writable runtime custom skills directory."""
+    return get_runtime_skills_root_path() / "custom"
+
+
+def get_custom_skills_path(skills_root: Path | None = None) -> Path:
+    """Return the effective custom skills directory.
+
+    Runtime-installed custom skills under DEER_FLOW_HOME take precedence when
+    present. Otherwise we fall back to the repo/configured ``skills/custom``.
+    """
+    runtime_custom = get_runtime_custom_skills_path()
+    if runtime_custom.exists():
+        return runtime_custom
+
+    root = skills_root or get_skills_root_path()
+    return root / "custom"
+
+
 def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False) -> list[Skill]:
     """
     Load all skills from the skills directory.
@@ -39,27 +65,30 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
     Returns:
         List of Skill objects, sorted by name
     """
+    skills = []
+
     if skills_path is None:
         if use_config:
             try:
                 from deerflow.config import get_app_config
 
-                config = get_app_config()
-                skills_path = config.skills.get_skills_path()
+                configured_root = get_app_config().skills.get_skills_path()
             except Exception:
-                # Fallback to default if config fails
-                skills_path = get_skills_root_path()
+                configured_root = get_skills_root_path()
         else:
-            skills_path = get_skills_root_path()
+            configured_root = get_skills_root_path()
 
-    if not skills_path.exists():
-        return []
+        category_paths = {
+            "public": configured_root / "public",
+            "custom": get_custom_skills_path(configured_root),
+        }
+    else:
+        category_paths = {
+            "public": skills_path / "public",
+            "custom": skills_path / "custom",
+        }
 
-    skills = []
-
-    # Scan public and custom directories
-    for category in ["public", "custom"]:
-        category_path = skills_path / category
+    for category, category_path in category_paths.items():
         if not category_path.exists() or not category_path.is_dir():
             continue
 

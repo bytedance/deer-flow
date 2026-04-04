@@ -1,6 +1,7 @@
 """Tests for AioSandboxProvider mount helpers."""
 
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -104,6 +105,30 @@ def test_get_thread_mounts_preserves_windows_host_path_style(tmp_path, monkeypat
     assert container_paths["/mnt/user-data/uploads"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\uploads"
     assert container_paths["/mnt/user-data/outputs"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\outputs"
     assert container_paths["/mnt/acp-workspace"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\acp-workspace"
+
+
+def test_get_extra_mounts_splits_public_and_runtime_custom_skills(tmp_path, monkeypatch):
+    """Skills mounts should keep repo public skills read-only and runtime custom skills writable on host."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+
+    repo_skills = tmp_path / "repo-skills"
+    runtime_home = tmp_path / "runtime-home"
+    (repo_skills / "public").mkdir(parents=True)
+    (runtime_home / "skills" / "custom").mkdir(parents=True)
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: repo_skills),
+    )
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(runtime_home))
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: config)
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_thread_mounts", staticmethod(lambda _thread_id: []))
+
+    mounts = provider._get_extra_mounts("thread-11")
+
+    assert (str(repo_skills / "public"), "/mnt/skills/public", True) in mounts
+    assert (str(runtime_home / "skills" / "custom"), "/mnt/skills/custom", True) in mounts
 
 
 def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatch):

@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from deerflow.skills.loader import get_skills_root_path
+from deerflow.skills.loader import get_runtime_custom_skills_path
 from deerflow.skills.validation import _validate_skill_frontmatter
 
 logger = logging.getLogger(__name__)
@@ -144,8 +144,9 @@ def install_skill_from_archive(
         raise ValueError("File must have .skill extension")
 
     if skills_root is None:
-        skills_root = get_skills_root_path()
-    custom_dir = skills_root / "custom"
+        custom_dir = get_runtime_custom_skills_path()
+    else:
+        custom_dir = skills_root / "custom"
     custom_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmp:
