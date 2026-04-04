@@ -13,6 +13,7 @@
 #   --daemon    Run all services in background (nohup), exit after startup
 #
 # Actions:
+#   --skip-install  Skip dependency installation (faster restart)
 #   --stop      Stop all running services and exit
 #   --restart   Stop all services, then start with the given mode flags
 #
@@ -29,7 +30,7 @@
 
 set -e
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd -P)"
 cd "$REPO_ROOT"
 
 # ── Load .env ────────────────────────────────────────────────────────────────
@@ -45,6 +46,7 @@ fi
 DEV_MODE=true
 GATEWAY_MODE=false
 DAEMON_MODE=false
+SKIP_INSTALL=false
 ACTION="start"   # start | stop | restart
 
 for arg in "$@"; do
@@ -53,11 +55,12 @@ for arg in "$@"; do
         --prod)    DEV_MODE=false ;;
         --gateway) GATEWAY_MODE=true ;;
         --daemon)  DAEMON_MODE=true ;;
+        --skip-install) SKIP_INSTALL=true ;;
         --stop)    ACTION="stop" ;;
         --restart) ACTION="restart" ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [--dev|--prod] [--gateway] [--daemon] [--stop|--restart]"
+            echo "Usage: $0 [--dev|--prod] [--gateway] [--daemon] [--skip-install] [--stop|--restart]"
             exit 1
             ;;
     esac
@@ -157,6 +160,17 @@ if ! { \
 fi
 
 "$REPO_ROOT/scripts/config-upgrade.sh"
+
+# ── Install dependencies ────────────────────────────────────────────────────
+
+if ! $SKIP_INSTALL; then
+    echo "Syncing dependencies..."
+    (cd backend && uv sync --quiet) || { echo "✗ Backend dependency install failed"; exit 1; }
+    (cd frontend && pnpm install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
+    echo "✓ Dependencies synced"
+else
+    echo "⏩ Skipping dependency install (--skip-install)"
+fi
 
 # ── Sync frontend .env.local ─────────────────────────────────────────────────
 # Next.js .env.local takes precedence over process env vars.
