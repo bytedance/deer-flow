@@ -64,7 +64,7 @@ class AppConfig(BaseModel):
         Priority:
         1. If provided `config_path` argument, use it.
         2. If provided `DEER_FLOW_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, first check the `config.yaml` in the current directory, then fallback to `config.yaml` in the parent directory.
+        3. Otherwise, search deterministic backend/repository-root defaults from `_default_config_candidates()`.
         """
         if config_path:
             path = Path(config_path)

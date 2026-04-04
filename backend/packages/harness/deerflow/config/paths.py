@@ -73,8 +73,7 @@ class Paths:
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
         2. DEER_FLOW_HOME environment variable
-        3. Local dev fallback: cwd/.deer-flow  (when cwd is the backend/ dir)
-        4. Default: $HOME/.deer-flow
+        3. Repo-local fallback derived from this module path: `{backend_dir}/.deer-flow`
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:

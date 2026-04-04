@@ -7,21 +7,12 @@ from deerflow.subagents import get_available_subagent_names
 
 logger = logging.getLogger(__name__)
 
-_ENABLED_SKILLS_CACHE_FN = None
-_ENABLED_SKILLS_CACHE_VALUE: tuple = ()
-
-
 def _get_enabled_skills():
-    global _ENABLED_SKILLS_CACHE_FN, _ENABLED_SKILLS_CACHE_VALUE
-
-    if _ENABLED_SKILLS_CACHE_FN is not load_skills:
-        try:
-            _ENABLED_SKILLS_CACHE_VALUE = tuple(load_skills(enabled_only=True))
-        except Exception:
-            logger.exception("Failed to load enabled skills for prompt injection")
-            _ENABLED_SKILLS_CACHE_VALUE = ()
-        _ENABLED_SKILLS_CACHE_FN = load_skills
-    return list(_ENABLED_SKILLS_CACHE_VALUE)
+    try:
+        return list(load_skills(enabled_only=True))
+    except Exception:
+        logger.exception("Failed to load enabled skills for prompt injection")
+        return []
 
 
 def _build_subagent_section(max_concurrent: int) -> str:

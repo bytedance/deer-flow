@@ -80,6 +80,12 @@ class ExtensionsConfig(BaseModel):
         Args:
             config_path: Optional path to extensions config file.
 
+        Resolution order:
+            1. If provided `config_path` argument, use it.
+            2. If provided `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable, use it.
+            3. Otherwise, search backend/repository-root defaults for
+               `extensions_config.json`, then legacy `mcp_config.json`.
+
         Returns:
             Path to the extensions config file if found, otherwise None.
         """

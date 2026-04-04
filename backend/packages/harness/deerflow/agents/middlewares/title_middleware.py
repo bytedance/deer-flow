@@ -1,5 +1,6 @@
 """Middleware for automatic thread title generation."""
 
+import logging
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -8,6 +9,8 @@ from langgraph.runtime import Runtime
 
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
+
+logger = logging.getLogger(__name__)
 
 
 class TitleMiddlewareState(AgentState):
@@ -123,7 +126,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             if title:
                 return {"title": title}
         except Exception:
-            pass
+            logger.debug("Failed to generate async title; falling back to local title", exc_info=True)
         return {"title": self._fallback_title(user_msg)}
 
     @override
