@@ -186,11 +186,14 @@ _BOLD_HEADING_RE = re.compile(r"^\*\*((ITEM|PART|SECTION|SCHEDULE|EXHIBIT|APPEND
 # multiple text spans in the PDF (e.g. section number and title are separate spans).
 # Matches lines like:  **1** **Introduction**  or  **3.2** **Multi-Head Attention**
 # Requirements:
-#   1. Entire line consists only of **...** blocks separated by whitespace
+#   1. Entire line consists only of **...** blocks separated by whitespace (no prose)
 #   2. First block is a section number (digits and dots, e.g. "1", "3.2", "A.1")
-#   3. The second block must contain at least one letter — this excludes financial
-#      table headers like **2023** **2022** **2021** where all blocks are pure numbers
-_SPLIT_BOLD_HEADING_RE = re.compile(r"^\*\*[\dA-Z][\d\.]*\*\*\s+\*\*[^*]*[A-Za-z][^*]*\*\*(\s+\*\*.+\*\*)*\s*$")
+#   3. Second block must not be purely numeric/punctuation — excludes financial table
+#      headers like **2023** **2022** **2021** while allowing non-ASCII titles such as
+#      **1** **概述** or accented words (negative lookahead instead of [A-Za-z])
+#   4. At most two additional blocks (four total) with [^*]+ (no * inside) to keep
+#      the regex linear and avoid ReDoS on attacker-controlled content
+_SPLIT_BOLD_HEADING_RE = re.compile(r"^\*\*[\dA-Z][\d\.]*\*\*\s+\*\*(?!\d[\d\s.,\-–—/:()%]*\*\*)[^*]+\*\*(?:\s+\*\*[^*]+\*\*){0,2}\s*$")
 
 # Maximum number of outline entries injected into the agent context.
 # Keeps prompt size bounded even for very long documents.
@@ -268,13 +271,11 @@ def extract_outline(md_path: Path) -> list[dict]:
                         outline.append({"title": title, "line": lineno})
 
                 # Style 3: split-bold heading — **<num>** **<title>**
+                # Regex already enforces max 4 blocks and non-numeric second block.
                 elif _SPLIT_BOLD_HEADING_RE.match(stripped):
-                    blocks = re.findall(r"\*\*(.+?)\*\*", stripped)
-                    # Ignore table column headers that have many blocks (> 4)
-                    if len(blocks) <= 4:
-                        title = " ".join(blocks)
-                        if title:
-                            outline.append({"title": title, "line": lineno})
+                    title = " ".join(re.findall(r"\*\*([^*]+)\*\*", stripped))
+                    if title:
+                        outline.append({"title": title, "line": lineno})
 
                 if len(outline) >= MAX_OUTLINE_ENTRIES:
                     outline.append({"truncated": True})

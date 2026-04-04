@@ -52,7 +52,7 @@ def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
                 if len(preview) >= _OUTLINE_PREVIEW_LINES:
                     break
     except Exception:
-        pass
+        logger.debug("Failed to read preview lines from %s", md_path, exc_info=True)
     return [], preview
 
 
