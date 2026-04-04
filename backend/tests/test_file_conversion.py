@@ -420,3 +420,40 @@ class TestExtractOutline:
         )
         outline = extract_outline(md)
         assert outline == []
+
+    def test_split_bold_heading_academic_paper(self, tmp_path):
+        """**<num>** **<title>** lines from academic papers are recognised (Style 3)."""
+        md = tmp_path / "paper.md"
+        md.write_text(
+            "## **Attention Is All You Need**\n\n**1** **Introduction**\n\nBody text.\n\n**2** **Background**\n\nMore text.\n\n**3.1** **Encoder and Decoder Stacks**\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        titles = [e["title"] for e in outline]
+        assert "1 Introduction" in titles
+        assert "2 Background" in titles
+        assert "3.1 Encoder and Decoder Stacks" in titles
+
+    def test_split_bold_year_columns_excluded(self, tmp_path):
+        """Financial table headers like **2023** **2022** **2021** are NOT headings."""
+        md = tmp_path / "annual.md"
+        md.write_text(
+            "# Financial Summary\n\n**2023** **2022** **2021**\n\nRevenue 100 90 80\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        titles = [e["title"] for e in outline]
+        # Only the # heading should appear, not the year-column row
+        assert titles == ["Financial Summary"]
+
+    def test_adjacent_bold_spans_merged_in_markdown_heading(self, tmp_path):
+        """** ** artefacts inside a # heading are merged into clean plain text."""
+        md = tmp_path / "sec.md"
+        md.write_text(
+            "## **UNITED STATES** **SECURITIES AND EXCHANGE COMMISSION**\n\nBody text.\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        assert len(outline) == 1
+        # Title must be clean — no ** ** artefacts
+        assert outline[0]["title"] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"
