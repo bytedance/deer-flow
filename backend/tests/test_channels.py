@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
 
 
@@ -1714,6 +1714,159 @@ class TestFeishuChannel:
             assert json.loads(first_patch_request.body.content)["elements"][0]["content"] == "Hello"
             assert json.loads(final_patch_request.body.content)["elements"][0]["content"] == "Hello world"
             assert json.loads(final_patch_request.body.content)["config"]["update_multi"] is True
+
+        _run(go())
+
+
+class TestWeComChannel:
+    def test_publish_ws_inbound_starts_stream_and_publishes_message(self, monkeypatch):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = WeComChannel(bus, config={})
+            channel._ws_client = SimpleNamespace(reply_stream=AsyncMock())
+
+            monkeypatch.setitem(
+                __import__("sys").modules,
+                "aibot",
+                SimpleNamespace(generate_req_id=lambda prefix: "stream-1"),
+            )
+
+            frame = {
+                "body": {
+                    "msgid": "msg-1",
+                    "from": {"userid": "user-1"},
+                    "aibotid": "bot-1",
+                    "chattype": "single",
+                }
+            }
+            files = [{"type": "image", "url": "https://example.com/image.png"}]
+
+            await channel._publish_ws_inbound(frame, "hello", files=files)
+
+            channel._ws_client.reply_stream.assert_awaited_once_with(frame, "stream-1", "Working on it...", False)
+            bus.publish_inbound.assert_awaited_once()
+
+            inbound = bus.publish_inbound.await_args.args[0]
+            assert inbound.channel_name == "wecom"
+            assert inbound.chat_id == "user-1"
+            assert inbound.user_id == "user-1"
+            assert inbound.text == "hello"
+            assert inbound.thread_ts == "msg-1"
+            assert inbound.topic_id == "user-1"
+            assert inbound.files == files
+            assert inbound.metadata == {"aibotid": "bot-1", "chattype": "single"}
+            assert channel._ws_frames["msg-1"] is frame
+            assert channel._ws_stream_ids["msg-1"] == "stream-1"
+
+        _run(go())
+
+    def test_publish_ws_inbound_uses_configured_working_message(self, monkeypatch):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = WeComChannel(bus, config={"working_message": "Please wait..."})
+            channel._ws_client = SimpleNamespace(reply_stream=AsyncMock())
+            channel._working_message = "Please wait..."
+
+            monkeypatch.setitem(
+                __import__("sys").modules,
+                "aibot",
+                SimpleNamespace(generate_req_id=lambda prefix: "stream-1"),
+            )
+
+            frame = {
+                "body": {
+                    "msgid": "msg-1",
+                    "from": {"userid": "user-1"},
+                }
+            }
+
+            await channel._publish_ws_inbound(frame, "hello")
+
+            channel._ws_client.reply_stream.assert_awaited_once_with(frame, "stream-1", "Please wait...", False)
+
+        _run(go())
+
+    def test_on_outbound_sends_attachment_before_clearing_context(self, tmp_path):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = WeComChannel(bus, config={})
+
+            frame = {"body": {"msgid": "msg-1"}}
+            ws_client = SimpleNamespace(
+                reply_stream=AsyncMock(),
+                reply=AsyncMock(),
+            )
+            channel._ws_client = ws_client
+            channel._ws_frames["msg-1"] = frame
+            channel._ws_stream_ids["msg-1"] = "stream-1"
+            channel._upload_media_ws = AsyncMock(return_value="media-1")
+
+            attachment_path = tmp_path / "image.png"
+            attachment_path.write_bytes(b"png")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/image.png",
+                actual_path=attachment_path,
+                filename="image.png",
+                mime_type="image/png",
+                size=attachment_path.stat().st_size,
+                is_image=True,
+            )
+
+            msg = OutboundMessage(
+                channel_name="wecom",
+                chat_id="user-1",
+                thread_id="thread-1",
+                text="done",
+                attachments=[attachment],
+                is_final=True,
+                thread_ts="msg-1",
+            )
+
+            await channel._on_outbound(msg)
+
+            ws_client.reply_stream.assert_awaited_once_with(frame, "stream-1", "done", True)
+            channel._upload_media_ws.assert_awaited_once_with(
+                media_type="image",
+                filename="image.png",
+                path=str(attachment_path),
+                size=attachment.size,
+            )
+            ws_client.reply.assert_awaited_once_with(frame, {"image": {"media_id": "media-1"}, "msgtype": "image"})
+            assert "msg-1" not in channel._ws_frames
+            assert "msg-1" not in channel._ws_stream_ids
+
+        _run(go())
+
+    def test_send_falls_back_to_send_message_without_thread_context(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = WeComChannel(bus, config={})
+            channel._ws_client = SimpleNamespace(send_message=AsyncMock())
+
+            msg = OutboundMessage(
+                channel_name="wecom",
+                chat_id="user-1",
+                thread_id="thread-1",
+                text="hello",
+                thread_ts=None,
+            )
+
+            await channel.send(msg)
+
+            channel._ws_client.send_message.assert_awaited_once_with(
+                "user-1",
+                {"msgtype": "markdown", "markdown": {"content": "hello"}},
+            )
 
         _run(go())
 
