@@ -35,6 +35,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { PromptInputFilePart } from "@/core/uploads";
+import { splitUnsupportedUploadFiles } from "@/core/uploads";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 import type { ChatStatus } from "ai";
@@ -72,6 +73,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 
 // ============================================================================
 // Provider Context & Types
@@ -108,6 +110,9 @@ const PromptInputController = createContext<PromptInputControllerProps | null>(
 const ProviderAttachmentsContext = createContext<AttachmentsContext | null>(
   null,
 );
+const PromptInputValidationContext = createContext<
+  ((files: File[] | FileList) => File[]) | null
+>(null);
 
 export const usePromptInputController = () => {
   const ctx = useContext(PromptInputController);
@@ -135,6 +140,7 @@ export const useProviderAttachments = () => {
 
 const useOptionalProviderAttachments = () =>
   useContext(ProviderAttachmentsContext);
+const usePromptInputValidation = () => useContext(PromptInputValidationContext);
 
 export type PromptInputProviderProps = PropsWithChildren<{
   initialInput?: string;
@@ -453,7 +459,7 @@ export type PromptInputProps = Omit<
   maxFiles?: number;
   maxFileSize?: number; // bytes
   onError?: (err: {
-    code: "max_files" | "max_file_size" | "accept";
+    code: "max_files" | "max_file_size" | "accept" | "unsupported_package";
     message: string;
   }) => void;
   onSubmit: (
@@ -604,6 +610,23 @@ export const PromptInput = ({
     ? controller.attachments.openFileDialog
     : openFileDialogLocal;
 
+  const sanitizeIncomingFiles = useCallback(
+    (fileList: File[] | FileList) => {
+      const { accepted, message } = splitUnsupportedUploadFiles(fileList);
+      if (message) {
+        onError?.({
+          code: "unsupported_package",
+          message,
+        });
+        if (!onError) {
+          toast.error(message);
+        }
+      }
+      return accepted;
+    },
+    [onError],
+  );
+
   // Let provider know about our hidden file input so external menus can call openFileDialog()
   useEffect(() => {
     if (!usingProvider) return;
@@ -634,7 +657,10 @@ export const PromptInput = ({
         e.preventDefault();
       }
       if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
-        add(e.dataTransfer.files);
+        const accepted = sanitizeIncomingFiles(e.dataTransfer.files);
+        if (accepted.length > 0) {
+          add(accepted);
+        }
       }
     };
     form.addEventListener("dragover", onDragOver);
@@ -643,7 +669,7 @@ export const PromptInput = ({
       form.removeEventListener("dragover", onDragOver);
       form.removeEventListener("drop", onDrop);
     };
-  }, [add, globalDrop]);
+  }, [add, globalDrop, sanitizeIncomingFiles]);
 
   useEffect(() => {
     if (!globalDrop) return;
@@ -658,7 +684,10 @@ export const PromptInput = ({
         e.preventDefault();
       }
       if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
-        add(e.dataTransfer.files);
+        const accepted = sanitizeIncomingFiles(e.dataTransfer.files);
+        if (accepted.length > 0) {
+          add(accepted);
+        }
       }
     };
     document.addEventListener("dragover", onDragOver);
@@ -667,7 +696,7 @@ export const PromptInput = ({
       document.removeEventListener("dragover", onDragOver);
       document.removeEventListener("drop", onDrop);
     };
-  }, [add, globalDrop]);
+  }, [add, globalDrop, sanitizeIncomingFiles]);
 
   useEffect(
     () => () => {
@@ -683,7 +712,10 @@ export const PromptInput = ({
 
   const handleChange: ChangeEventHandler<HTMLInputElement> = (event) => {
     if (event.currentTarget.files) {
-      add(event.currentTarget.files);
+      const accepted = sanitizeIncomingFiles(event.currentTarget.files);
+      if (accepted.length > 0) {
+        add(accepted);
+      }
     }
     // Reset input value to allow selecting files that were previously removed
     event.currentTarget.value = "";
@@ -787,7 +819,7 @@ export const PromptInput = ({
 
   // Render with or without local provider
   const inner = (
-    <>
+    <PromptInputValidationContext.Provider value={sanitizeIncomingFiles}>
       <input
         accept={accept}
         aria-label="Upload files"
@@ -806,7 +838,7 @@ export const PromptInput = ({
       >
         <InputGroup>{children}</InputGroup>
       </form>
-    </>
+    </PromptInputValidationContext.Provider>
   );
 
   return usingProvider ? (
@@ -839,6 +871,7 @@ export const PromptInputTextarea = ({
 }: PromptInputTextareaProps) => {
   const controller = useOptionalPromptInputController();
   const attachments = usePromptInputAttachments();
+  const sanitizeIncomingFiles = usePromptInputValidation();
   const [isComposing, setIsComposing] = useState(false);
 
   const handleKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = (e) => {
@@ -897,7 +930,12 @@ export const PromptInputTextarea = ({
 
     if (files.length > 0) {
       event.preventDefault();
-      attachments.add(files);
+      const accepted = sanitizeIncomingFiles
+        ? sanitizeIncomingFiles(files)
+        : files;
+      if (accepted.length > 0) {
+        attachments.add(accepted);
+      }
     }
   };
 
