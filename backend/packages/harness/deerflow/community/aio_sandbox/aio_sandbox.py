@@ -7,6 +7,7 @@ import uuid
 from agent_sandbox import Sandbox as AioSandboxClient
 
 from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,86 @@ class AioSandbox(Sandbox):
             except Exception as e:
                 logger.error(f"Failed to write file in sandbox: {e}")
                 raise
+
+    def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+        if not include_dirs:
+            result = self._client.file.find_files(path=path, glob=pattern)
+            files = result.data.files if result.data and result.data.files else []
+            filtered = [file_path for file_path in files if not should_ignore_path(file_path)]
+            truncated = len(filtered) > max_results
+            return filtered[:max_results], truncated
+
+        result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
+        entries = result.data.files if result.data and result.data.files else []
+        matches: list[str] = []
+        root_path = path.rstrip("/") or "/"
+        root_prefix = root_path if root_path == "/" else f"{root_path}/"
+        for entry in entries:
+            if entry.path != root_path and not entry.path.startswith(root_prefix):
+                continue
+            if should_ignore_path(entry.path):
+                continue
+            rel_path = entry.path[len(root_path) :].lstrip("/")
+            if path_matches(pattern, rel_path):
+                matches.append(entry.path)
+                if len(matches) >= max_results:
+                    return matches, True
+        return matches, False
+
+    def grep(
+        self,
+        path: str,
+        pattern: str,
+        *,
+        glob: str | None = None,
+        literal: bool = False,
+        case_sensitive: bool = False,
+        max_results: int = 100,
+    ) -> tuple[list[GrepMatch], bool]:
+        import re as _re
+
+        regex_source = _re.escape(pattern) if literal else pattern
+        # Validate the pattern locally so an invalid regex raises re.error
+        # (caught by grep_tool's except re.error handler) rather than a
+        # generic remote API error.
+        _re.compile(regex_source, 0 if case_sensitive else _re.IGNORECASE)
+        regex = regex_source if case_sensitive else f"(?i){regex_source}"
+
+        if glob is not None:
+            find_result = self._client.file.find_files(path=path, glob=glob)
+            candidate_paths = find_result.data.files if find_result.data and find_result.data.files else []
+        else:
+            list_result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
+            entries = list_result.data.files if list_result.data and list_result.data.files else []
+            candidate_paths = [entry.path for entry in entries if not entry.is_directory]
+
+        matches: list[GrepMatch] = []
+        truncated = False
+
+        for file_path in candidate_paths:
+            if should_ignore_path(file_path):
+                continue
+
+            search_result = self._client.file.search_in_file(file=file_path, regex=regex)
+            data = search_result.data
+            if data is None:
+                continue
+
+            line_numbers = data.line_numbers or []
+            matched_lines = data.matches or []
+            for line_number, line in zip(line_numbers, matched_lines):
+                matches.append(
+                    GrepMatch(
+                        path=file_path,
+                        line_number=line_number if isinstance(line_number, int) else 0,
+                        line=truncate_line(line),
+                    )
+                )
+                if len(matches) >= max_results:
+                    truncated = True
+                    return matches, truncated
+
+        return matches, truncated
 
     def update_file(self, path: str, content: bytes) -> None:
         """Update a file with binary content in the sandbox.

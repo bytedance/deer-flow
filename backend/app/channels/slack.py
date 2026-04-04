@@ -126,7 +126,9 @@ class SlackChannel(Channel):
                 )
             except Exception:
                 pass
-        raise last_exc  # type: ignore[misc]
+        if last_exc is None:
+            raise RuntimeError("Slack send failed without an exception from any attempt")
+        raise last_exc
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._web_client:
