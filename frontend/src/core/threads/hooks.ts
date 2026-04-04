@@ -36,6 +36,57 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
+function normalizeStoredRunId(runId: string | null): string | null {
+  if (!runId) {
+    return null;
+  }
+
+  const trimmed = runId.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const queryIndex = trimmed.indexOf("?");
+  if (queryIndex >= 0) {
+    const params = new URLSearchParams(trimmed.slice(queryIndex + 1));
+    const queryRunId = params.get("run_id")?.trim();
+    if (queryRunId) {
+      return queryRunId;
+    }
+  }
+
+  return trimmed.split(/[/?#]/, 1)[0] ?? null;
+}
+
+function getRunMetadataStorage(): {
+  getItem(key: `lg:stream:${string}`): string | null;
+  setItem(key: `lg:stream:${string}`, value: string): void;
+  removeItem(key: `lg:stream:${string}`): void;
+} {
+  return {
+    getItem(key) {
+      const normalized = normalizeStoredRunId(window.sessionStorage.getItem(key));
+      if (normalized) {
+        window.sessionStorage.setItem(key, normalized);
+        return normalized;
+      }
+      window.sessionStorage.removeItem(key);
+      return null;
+    },
+    setItem(key, value) {
+      const normalized = normalizeStoredRunId(value);
+      if (normalized) {
+        window.sessionStorage.setItem(key, normalized);
+        return;
+      }
+      window.sessionStorage.removeItem(key);
+    },
+    removeItem(key) {
+      window.sessionStorage.removeItem(key);
+    },
+  };
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -113,12 +164,24 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const runMetadataStorageRef = useRef<
+    ReturnType<typeof getRunMetadataStorage> | undefined
+  >(undefined);
+
+  if (
+    typeof window !== "undefined" &&
+    runMetadataStorageRef.current === undefined
+  ) {
+    runMetadataStorageRef.current = getRunMetadataStorage();
+  }
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
-    reconnectOnMount: true,
+    reconnectOnMount: runMetadataStorageRef.current
+      ? () => runMetadataStorageRef.current!
+      : false,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id);
