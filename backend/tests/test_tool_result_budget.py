@@ -1,5 +1,6 @@
+import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -193,10 +194,10 @@ def test_jina_web_fetch_passes_full_content_to_budget_helper():
         patch("deerflow.community.jina_ai.tools.prepare_tool_output_for_context", return_value="budgeted") as mock_budget,
     ):
         mock_client = MagicMock()
-        mock_client.crawl.return_value = html_payload
+        mock_client.crawl = AsyncMock(return_value=html_payload)
         mock_client_cls.return_value = mock_client
 
-        result = jina_tools.web_fetch_tool.run("https://example.com")
+        result = asyncio.run(jina_tools.web_fetch_tool.ainvoke({"url": "https://example.com"}))
 
     assert result == "budgeted"
     passed_content = mock_budget.call_args.kwargs["content"]

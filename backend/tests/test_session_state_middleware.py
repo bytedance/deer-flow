@@ -216,10 +216,32 @@ def test_after_agent_does_not_create_hard_deliverable_contract_for_incidental_fo
 
     assert result is not None
     contract = result["session_state"]["task_contract"]
-    assert contract["output_format"] == "markdown"
+    assert contract.get("output_format") is None
     assert contract.get("deliverable") is None
     assert contract["must_save_output"] is False
     assert contract["must_present_output"] is False
+
+
+def test_after_agent_distinguishes_input_format_mentions_from_output_requirements():
+    set_context_management_config(ContextManagementConfig(session_state=SessionStateConfig(enabled=True)))
+    middleware = SessionStateMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="Please read this markdown file first, then generate an HTML report."),
+            AIMessage(content="I started by reading the file."),
+        ],
+        "todos": [],
+        "artifacts": [],
+    }
+
+    result = middleware.after_agent(state, MagicMock())
+
+    assert result is not None
+    contract = result["session_state"]["task_contract"]
+    assert contract["output_format"] == "html"
+    assert contract["deliverable"] == "HTML report"
+    assert contract["must_save_output"] is True
+    assert contract["must_present_output"] is True
 
 
 def test_before_model_surfaces_latest_user_requirement_when_it_differs_from_original_request():

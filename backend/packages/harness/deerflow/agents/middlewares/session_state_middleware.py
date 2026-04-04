@@ -19,6 +19,7 @@ _SUMMARY_PREFIXES = (
     "Here is a summary of the conversation to date:",
     "Here is the summary of the conversation to date:",
 )
+_CLAUSE_SPLIT_RE = re.compile(r"[\n\r\t。！？!?;；]+")
 _DELIVERY_INTENT_MARKERS = (
     "生成",
     "输出",
@@ -37,6 +38,22 @@ _DELIVERY_INTENT_MARKERS = (
     "produce",
     "present",
     "deliver",
+)
+_INPUT_REFERENCE_MARKERS = (
+    "read",
+    "inspect",
+    "look at",
+    "analyze",
+    "analyse",
+    "open",
+    "review",
+    "check",
+    "读取",
+    "阅读",
+    "查看",
+    "分析",
+    "检查",
+    "看看",
 )
 _FORMAT_RULES: list[tuple[str, tuple[str, ...], str]] = [
     ("html", ("html", "htm", "网页", "web page", "single page", "单文件页面"), "HTML report"),
@@ -134,6 +151,24 @@ def _has_delivery_intent(text: str) -> bool:
     return any(marker in text or marker in lowered for marker in _DELIVERY_INTENT_MARKERS)
 
 
+def _has_input_reference_intent(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in text or marker in lowered for marker in _INPUT_REFERENCE_MARKERS)
+
+
+def _iter_request_clauses(text: str) -> list[str]:
+    clauses = [clause.strip() for clause in _CLAUSE_SPLIT_RE.split(text) if clause.strip()]
+    return clauses or [text.strip()]
+
+
+def _detect_format_in_clause(clause: str) -> tuple[str, str] | tuple[None, None]:
+    lowered = clause.lower()
+    for candidate_format, markers, candidate_deliverable in _FORMAT_RULES:
+        if any(marker in lowered for marker in markers):
+            return candidate_format, candidate_deliverable
+    return None, None
+
+
 def _derive_task_contract(original_request: str | None, *, goal_limit: int) -> TaskContractData | None:
     if not original_request:
         return None
@@ -143,13 +178,20 @@ def _derive_task_contract(original_request: str | None, *, goal_limit: int) -> T
     output_format = None
     scope = None
     quality_bar = None
-    delivery_intent = _has_delivery_intent(original_request)
+    delivery_intent = False
 
-    for candidate_format, markers, candidate_deliverable in _FORMAT_RULES:
-        if any(marker in lowered for marker in markers):
-            output_format = candidate_format
-            if delivery_intent:
-                deliverable = candidate_deliverable
+    for clause in _iter_request_clauses(original_request):
+        candidate_format, candidate_deliverable = _detect_format_in_clause(clause)
+        if not candidate_format:
+            continue
+        if _has_input_reference_intent(clause) and not _has_delivery_intent(clause):
+            continue
+        output_format = candidate_format
+        if _has_delivery_intent(clause):
+            deliverable = candidate_deliverable
+            delivery_intent = True
+            break
+        if output_format and deliverable is None:
             break
 
     if deliverable is None and delivery_intent and ("报告" in original_request or "report" in lowered):
