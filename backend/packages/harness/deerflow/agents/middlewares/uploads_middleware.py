@@ -15,20 +15,45 @@ from deerflow.utils.file_conversion import extract_outline
 logger = logging.getLogger(__name__)
 
 
-def _extract_outline_for_file(file_path: Path) -> list[dict]:
-    """Return the document outline for *file_path* if a converted .md exists.
+_OUTLINE_PREVIEW_LINES = 5
+
+
+def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
+    """Return the document outline and fallback preview for *file_path*.
 
     Looks for a sibling ``<stem>.md`` file produced by the upload conversion
-    pipeline.  Returns an empty list when the file is not a converted document
-    or when no headings are found.
+    pipeline.
+
+    Returns:
+        (outline, preview) where:
+        - outline: list of ``{title, line}`` dicts (plus optional sentinel).
+          Empty when no headings are found or no .md exists.
+        - preview: first few non-empty lines of the .md, used as a content
+          anchor when outline is empty so the agent has some context.
+          Empty when outline is non-empty (no fallback needed).
     """
     md_path = file_path.with_suffix(".md")
     if not md_path.is_file():
-        return []
+        return [], []
+
     outline = extract_outline(md_path)
     if outline:
         logger.debug("Extracted %d outline entries from %s", len(outline), file_path.name)
-    return outline
+        return outline, []
+
+    # outline is empty — read the first few non-empty lines as a content preview
+    preview: list[str] = []
+    try:
+        with md_path.open(encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped:
+                    preview.append(stripped)
+                if len(preview) >= _OUTLINE_PREVIEW_LINES:
+                    break
+    except Exception:
+        logger.debug("Failed to read preview lines from %s", md_path, exc_info=True)
+    return [], preview
 
 
 class UploadsMiddlewareState(AgentState):
@@ -64,13 +89,20 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         lines.append(f"  Path: {file['path']}")
         outline = file.get("outline") or []
         if outline:
-            truncated = outline[-1].get("truncated", False) if outline else False
+            truncated = outline[-1].get("truncated", False)
             visible = [e for e in outline if not e.get("truncated")]
             lines.append("  Document outline (use `read_file` with line ranges to read sections):")
             for entry in visible:
                 lines.append(f"    L{entry['line']}: {entry['title']}")
             if truncated:
                 lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further)")
+        else:
+            preview = file.get("outline_preview") or []
+            if preview:
+                lines.append("  No structural headings detected. Document begins with:")
+                for text in preview:
+                    lines.append(f"    > {text}")
+            lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
         lines.append("")
 
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
@@ -201,13 +233,15 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             for file_path in sorted(uploads_dir.iterdir()):
                 if file_path.is_file() and file_path.name not in new_filenames:
                     stat = file_path.stat()
+                    outline, preview = _extract_outline_for_file(file_path)
                     historical_files.append(
                         {
                             "filename": file_path.name,
                             "size": stat.st_size,
                             "path": f"/mnt/user-data/uploads/{file_path.name}",
                             "extension": file_path.suffix,
-                            "outline": _extract_outline_for_file(file_path),
+                            "outline": outline,
+                            "outline_preview": preview,
                         }
                     )
 
@@ -215,7 +249,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if uploads_dir:
             for file in new_files:
                 phys_path = uploads_dir / file["filename"]
-                file["outline"] = _extract_outline_for_file(phys_path)
+                outline, preview = _extract_outline_for_file(phys_path)
+                file["outline"] = outline
+                file["outline_preview"] = preview
 
         if not new_files and not historical_files:
             return None
