@@ -19,6 +19,25 @@ _SUMMARY_PREFIXES = (
     "Here is a summary of the conversation to date:",
     "Here is the summary of the conversation to date:",
 )
+_DELIVERY_INTENT_MARKERS = (
+    "生成",
+    "输出",
+    "导出",
+    "保存",
+    "产出",
+    "给我一份",
+    "写成",
+    "生成一个",
+    "生成一份",
+    "generate",
+    "create",
+    "export",
+    "save",
+    "write",
+    "produce",
+    "present",
+    "deliver",
+)
 _FORMAT_RULES: list[tuple[str, tuple[str, ...], str]] = [
     ("html", ("html", "htm", "网页", "web page", "single page", "单文件页面"), "HTML report"),
     ("markdown", ("markdown", "md", "markdown report"), "Markdown report"),
@@ -110,6 +129,11 @@ def _extract_original_user_request(messages: list[Any], *, limit: int) -> str | 
     return _truncate_text(_normalize_human_content(real_human_messages[0]), limit=limit)
 
 
+def _has_delivery_intent(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in text or marker in lowered for marker in _DELIVERY_INTENT_MARKERS)
+
+
 def _derive_task_contract(original_request: str | None, *, goal_limit: int) -> TaskContractData | None:
     if not original_request:
         return None
@@ -119,14 +143,16 @@ def _derive_task_contract(original_request: str | None, *, goal_limit: int) -> T
     output_format = None
     scope = None
     quality_bar = None
+    delivery_intent = _has_delivery_intent(original_request)
 
     for candidate_format, markers, candidate_deliverable in _FORMAT_RULES:
         if any(marker in lowered for marker in markers):
             output_format = candidate_format
-            deliverable = candidate_deliverable
+            if delivery_intent:
+                deliverable = candidate_deliverable
             break
 
-    if deliverable is None and ("报告" in original_request or "report" in lowered):
+    if deliverable is None and delivery_intent and ("报告" in original_request or "report" in lowered):
         deliverable = "report"
 
     chapter_match = re.search(r"(\d+)\s*(?:个)?章节", original_request)
@@ -152,8 +178,8 @@ def _derive_task_contract(original_request: str | None, *, goal_limit: int) -> T
         "deliverable": deliverable,
         "output_format": output_format,
         "quality_bar": quality_bar,
-        "must_save_output": bool(deliverable),
-        "must_present_output": bool(deliverable),
+        "must_save_output": bool(deliverable and delivery_intent),
+        "must_present_output": bool(deliverable and delivery_intent),
     }
     if not any(contract.values()):
         return None

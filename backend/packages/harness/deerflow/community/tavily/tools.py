@@ -62,7 +62,7 @@ def web_fetch_tool(url: str) -> str:
     elif "results" in res and len(res["results"]) > 0:
         result = res["results"][0]
         return prepare_tool_output_for_context(
-            content=f"# {result['title']}\n\n{result['raw_content'][:4096]}",
+            content=f"# {result['title']}\n\n{result['raw_content']}",
             tool_name="web_fetch",
             thread_data=resolve_thread_data_from_config(),
         )

@@ -77,13 +77,6 @@ def _deliverable_requirement_unmet(state: DeliverableGuardState) -> tuple[bool, 
     return True, deliverable
 
 
-def _guard_visible(messages: list[Any]) -> bool:
-    for msg in messages[-3:]:
-        if isinstance(msg, HumanMessage) and isinstance(msg.content, str) and _REMINDER_TAG in msg.content:
-            return True
-    return False
-
-
 class DeliverableGuardMiddleware(AgentMiddleware[DeliverableGuardState]):
     """Push the agent back into execution when a required deliverable file is missing."""
 
@@ -99,8 +92,6 @@ class DeliverableGuardMiddleware(AgentMiddleware[DeliverableGuardState]):
         if not isinstance(last_msg, AIMessage):
             return None
         if getattr(last_msg, "tool_calls", None):
-            return None
-        if _guard_visible(messages):
             return None
 
         unmet, deliverable = _deliverable_requirement_unmet(state)

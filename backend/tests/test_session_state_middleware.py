@@ -200,6 +200,28 @@ def test_after_agent_allows_latest_user_requirement_to_override_deliverable_cont
     assert session_state["task_contract"]["output_format"] == "html"
 
 
+def test_after_agent_does_not_create_hard_deliverable_contract_for_incidental_format_mentions():
+    set_context_management_config(ContextManagementConfig(session_state=SessionStateConfig(enabled=True)))
+    middleware = SessionStateMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="Please read this markdown file and inspect this JSON payload and image."),
+            AIMessage(content="I inspected the provided files."),
+        ],
+        "todos": [],
+        "artifacts": [],
+    }
+
+    result = middleware.after_agent(state, MagicMock())
+
+    assert result is not None
+    contract = result["session_state"]["task_contract"]
+    assert contract["output_format"] == "markdown"
+    assert contract.get("deliverable") is None
+    assert contract["must_save_output"] is False
+    assert contract["must_present_output"] is False
+
+
 def test_before_model_surfaces_latest_user_requirement_when_it_differs_from_original_request():
     set_context_management_config(
         ContextManagementConfig(

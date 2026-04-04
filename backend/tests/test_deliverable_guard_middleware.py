@@ -160,3 +160,29 @@ def test_after_model_keeps_guarding_when_ppt_contract_only_has_markdown_artifact
 
     assert result is not None
     assert "Required deliverable: Slide deck" in result["messages"][0].content
+
+
+def test_after_model_rechecks_contract_after_prior_guard_reminder():
+    middleware = DeliverableGuardMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="Research all 12 chapters and generate an HTML report."),
+            AIMessage(content="Here is the report summary."),
+            HumanMessage(content="<deliverable_guard>\nThe task contract is not complete yet.\n</deliverable_guard>"),
+            AIMessage(content="I have now fully finished the report."),
+        ],
+        "artifacts": ["/mnt/user-data/outputs/report.md"],
+        "session_state": {
+            "task_contract": {
+                "deliverable": "HTML report",
+                "output_format": "html",
+                "must_save_output": True,
+                "must_present_output": True,
+            }
+        },
+    }
+
+    result = middleware.after_model(state, MagicMock())
+
+    assert result is not None
+    assert "Required deliverable: HTML report" in result["messages"][0].content

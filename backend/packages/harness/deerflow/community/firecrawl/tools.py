@@ -75,7 +75,7 @@ def web_fetch_tool(url: str) -> str:
         return f"Error: {str(e)}"
 
     return prepare_tool_output_for_context(
-        content=f"# {title}\n\n{markdown_content[:4096]}",
+        content=f"# {title}\n\n{markdown_content}",
         tool_name="web_fetch",
         thread_data=resolve_thread_data_from_config(),
     )

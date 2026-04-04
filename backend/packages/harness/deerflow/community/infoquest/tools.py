@@ -77,7 +77,7 @@ def web_fetch_tool(url: str) -> str:
         return result
     article = readability_extractor.extract_article(result)
     return prepare_tool_output_for_context(
-        content=article.to_markdown()[:4096],
+        content=article.to_markdown(),
         tool_name="web_fetch",
         thread_data=resolve_thread_data_from_config(),
     )
