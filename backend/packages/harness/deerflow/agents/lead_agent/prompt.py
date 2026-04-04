@@ -8,6 +8,14 @@ from deerflow.subagents import get_available_subagent_names
 logger = logging.getLogger(__name__)
 
 
+def _get_enabled_skills():
+    try:
+        return list(load_skills(enabled_only=True))
+    except Exception:
+        logger.exception("Failed to load enabled skills for prompt injection")
+        return []
+
+
 def _build_subagent_section(max_concurrent: int) -> str:
     """Build the subagent system prompt section with dynamic concurrency limit.
 
@@ -282,7 +290,7 @@ You: "Deploying to staging..." [proceed]
 **Example - Inline Citations:**
 ```markdown
 The key AI trends for 2026 include enhanced reasoning capabilities and multimodal integration
-[citation:AI Trends 2026](https://techcrunch.com/category/artificial-intelligence/).
+[citation:AI Trends 2026](https://techcrunch.com/ai-trends).
 Recent breakthroughs in language models have also accelerated progress
 [citation:OpenAI Research](https://openai.com/research).
 ```
@@ -294,7 +302,7 @@ Recent breakthroughs in language models have also accelerated progress
 DeerFlow is an open-source AI agent framework that gained significant traction in early 2026
 [citation:GitHub Repository](https://github.com/bytedance/deer-flow). The project focuses on
 providing a production-ready agent system with sandbox execution and memory management
-[citation:DeerFlow Documentation](https://github.com/bytedance/deer-flow?tab=readme-ov-file#table-of-contents).
+[citation:DeerFlow Documentation](https://deer-flow.dev/docs).
 
 ## Key Analysis
 
@@ -307,10 +315,10 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 
 ### Primary Sources
 - [GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
-- [DeerFlow Documentation](https://github.com/bytedance/deer-flow?tab=readme-ov-file#table-of-contents) - Technical specifications
+- [DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
 
 ### Media Coverage
-- [AI Trends 2026](https://techcrunch.com/category/artificial-intelligence/) - Industry analysis
+- [AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
 ```
 
 **CRITICAL: Sources section format:**
@@ -386,7 +394,7 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
     Returns the <skill_system>...</skill_system> block listing all enabled skills,
     suitable for injection into any agent's system prompt.
     """
-    skills = load_skills(enabled_only=True)
+    skills = _get_enabled_skills()
 
     try:
         from deerflow.config import get_app_config
@@ -450,7 +458,7 @@ def get_deferred_tools_prompt_section() -> str:
 
         if not get_app_config().tool_search.enabled:
             return ""
-    except FileNotFoundError:
+    except Exception:
         return ""
 
     registry = get_deferred_registry()
