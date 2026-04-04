@@ -74,7 +74,13 @@ mkdir -p logs
 mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
 
 echo "Starting LangGraph server..."
-nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &
+LANGGRAPH_JOBS_PER_WORKER="${LANGGRAPH_JOBS_PER_WORKER:-10}"
+LANGGRAPH_ALLOW_BLOCKING="${LANGGRAPH_ALLOW_BLOCKING:-0}"
+LANGGRAPH_ALLOW_BLOCKING_FLAG=""
+if [ "$LANGGRAPH_ALLOW_BLOCKING" = "1" ]; then
+    LANGGRAPH_ALLOW_BLOCKING_FLAG="--allow-blocking"
+fi
+nohup sh -c "cd backend && NO_COLOR=1 uv run langgraph dev --no-browser ${LANGGRAPH_ALLOW_BLOCKING_FLAG} --no-reload --n-jobs-per-worker ${LANGGRAPH_JOBS_PER_WORKER} > ../logs/langgraph.log 2>&1" &
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "✗ LangGraph failed to start. Last log output:"
     tail -60 logs/langgraph.log
