@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import yaml
 from dotenv import load_dotenv
@@ -28,11 +28,26 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class UploadsConfig(BaseModel):
+    """Configuration for file upload handling."""
+
+    pdf_converter: Literal["auto", "pymupdf4llm", "markitdown"] = Field(
+        default="auto",
+        description=(
+            "PDF-to-Markdown converter. "
+            "'auto': prefer pymupdf4llm when installed, fall back to MarkItDown for image-based PDFs; "
+            "'pymupdf4llm': always use pymupdf4llm (must be installed); "
+            "'markitdown': always use MarkItDown (original behaviour)."
+        ),
+    )
+
+
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
     log_level: str = Field(default="info", description="Logging level for deerflow modules (debug/info/warning/error)")
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
+    uploads: UploadsConfig = Field(default_factory=UploadsConfig, description="File upload handling configuration")
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")

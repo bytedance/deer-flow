@@ -232,7 +232,6 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
 
-  
   # Example: OpenRouter (OpenAI-compatible)
   # OpenRouter models use the same ChatOpenAI + base_url pattern as other OpenAI-compatible gateways.
   # - name: openrouter-gemini-2.5-flash
@@ -369,6 +368,15 @@ tool_search:
 
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
+uploads:
+  # PDF-to-Markdown converter used when a PDF is uploaded.
+  # auto        — prefer pymupdf4llm when installed; fall back to MarkItDown for
+  #               image-based or encrypted PDFs (recommended default).
+  # pymupdf4llm — always use pymupdf4llm (must be installed: uv add pymupdf4llm).
+  #               Better heading/table extraction; faster on most files.
+  # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
+  pdf_converter: auto
+
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is
@@ -678,6 +686,10 @@ checkpointer:
 #           context:
 #             thinking_enabled: true
 #             subagent_enabled: true
+#   wecom:
+#     enabled: false
+#     bot_id: $WECOM_BOT_ID
+#     bot_secret: $WECOM_BOT_SECRET
 
 # ============================================================================
 # Guardrails Configuration
