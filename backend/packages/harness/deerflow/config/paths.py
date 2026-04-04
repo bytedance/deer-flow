@@ -9,6 +9,12 @@ VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
+def _default_local_base_dir() -> Path:
+    """Return the repo-local DeerFlow state directory without relying on cwd."""
+    backend_dir = Path(__file__).resolve().parents[4]
+    return backend_dir / ".deer-flow"
+
+
 def _validate_thread_id(thread_id: str) -> str:
     """Validate a thread ID before using it in filesystem paths."""
     if not _SAFE_THREAD_ID_RE.match(thread_id):
@@ -104,11 +110,7 @@ class Paths:
         if env_home := os.getenv("DEER_FLOW_HOME"):
             return Path(env_home).resolve()
 
-        cwd = Path.cwd()
-        if cwd.name == "backend" or (cwd / "pyproject.toml").exists():
-            return cwd / ".deer-flow"
-
-        return Path.home() / ".deer-flow"
+        return _default_local_base_dir()
 
     @property
     def memory_file(self) -> Path:

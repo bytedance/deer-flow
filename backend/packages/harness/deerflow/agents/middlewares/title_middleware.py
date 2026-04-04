@@ -1,6 +1,5 @@
 """Middleware for automatic thread title generation."""
 
-import logging
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -8,9 +7,6 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.config.title_config import get_title_config
-from deerflow.models import create_chat_model
-
-logger = logging.getLogger(__name__)
 
 
 class TitleMiddlewareState(AgentState):
@@ -101,44 +97,20 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return user_msg if user_msg else "New Conversation"
 
     def _generate_title_result(self, state: TitleMiddlewareState) -> dict | None:
-        """Synchronously generate a title. Returns state update or None."""
+        """Generate a local fallback title without blocking on an LLM call."""
         if not self._should_generate_title(state):
             return None
 
-        prompt, user_msg = self._build_title_prompt(state)
-        config = get_title_config()
-        model = create_chat_model(name=config.model_name, thinking_enabled=False)
-
-        try:
-            response = model.invoke(prompt)
-            title = self._parse_title(response.content)
-            if not title:
-                title = self._fallback_title(user_msg)
-        except Exception:
-            logger.exception("Failed to generate title (sync)")
-            title = self._fallback_title(user_msg)
-
-        return {"title": title}
+        _, user_msg = self._build_title_prompt(state)
+        return {"title": self._fallback_title(user_msg)}
 
     async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
-        """Asynchronously generate a title. Returns state update or None."""
+        """Generate a local fallback title without an extra LLM request."""
         if not self._should_generate_title(state):
             return None
 
-        prompt, user_msg = self._build_title_prompt(state)
-        config = get_title_config()
-        model = create_chat_model(name=config.model_name, thinking_enabled=False)
-
-        try:
-            response = await model.ainvoke(prompt)
-            title = self._parse_title(response.content)
-            if not title:
-                title = self._fallback_title(user_msg)
-        except Exception:
-            logger.exception("Failed to generate title (async)")
-            title = self._fallback_title(user_msg)
-
-        return {"title": title}
+        _, user_msg = self._build_title_prompt(state)
+        return {"title": self._fallback_title(user_msg)}
 
     @override
     def after_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
