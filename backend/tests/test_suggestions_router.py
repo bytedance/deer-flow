@@ -1,6 +1,8 @@
 import asyncio
 from unittest.mock import MagicMock
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from app.gateway.routers import suggestions
 
 
@@ -100,3 +102,26 @@ def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):
     result = asyncio.run(suggestions.generate_suggestions("t1", req))
 
     assert result.suggestions == []
+
+
+def test_generate_suggestions_invokes_model_with_system_and_human_messages(monkeypatch):
+    req = suggestions.SuggestionsRequest(
+        messages=[
+            suggestions.SuggestionMessage(role="user", content="What is Python?"),
+            suggestions.SuggestionMessage(role="assistant", content="Python is a programming language."),
+        ],
+        n=2,
+        model_name=None,
+    )
+    fake_model = MagicMock()
+    fake_model.invoke.return_value = MagicMock(content='["Q1", "Q2"]')
+    monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
+
+    asyncio.run(suggestions.generate_suggestions("t1", req))
+
+    call_args = fake_model.invoke.call_args[0][0]
+    assert len(call_args) == 2
+    assert isinstance(call_args[0], SystemMessage)
+    assert isinstance(call_args[1], HumanMessage)
+    assert "follow-up questions" in call_args[0].content
+    assert "What is Python?" in call_args[1].content
