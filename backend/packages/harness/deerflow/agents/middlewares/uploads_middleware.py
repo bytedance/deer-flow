@@ -102,7 +102,13 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             for file in historical_files:
                 self._format_file_entry(file, lines)
 
-        lines.append("You can read these files using the `read_file` tool with the paths shown above.")
+        lines.append("To work with these files:")
+        lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
+        lines.append("- Use `grep` to search for keywords when you are not sure which section to look at")
+        lines.append("  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).")
+        lines.append("- Use `glob` to find files by name pattern")
+        lines.append("  (e.g. `glob(pattern='**/*.md', path='/mnt/user-data/uploads/')`).")
+        lines.append("- Only fall back to web search if the file content is clearly insufficient to answer the question.")
         lines.append("</uploaded_files>")
 
         return "\n".join(lines)
