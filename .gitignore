@@ -54,3 +54,5 @@ web/
 # Deployment artifacts
 backend/Dockerfile.langgraph
 config.yaml.bak
+.playwright-mcp
+.gstack/

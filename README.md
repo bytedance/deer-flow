@@ -46,6 +46,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Official Website](#official-website)
+  - [Coding Plan from ByteDance Volcengine](#coding-plan-from-bytedance-volcengine)
   - [InfoQuest](#infoquest)
   - [Table of Contents](#table-of-contents)
   - [One-Line Agent Setup](#one-line-agent-setup)
@@ -59,6 +60,8 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
       - [MCP Server](#mcp-server)
       - [IM Channels](#im-channels)
       - [LangSmith Tracing](#langsmith-tracing)
+      - [Langfuse Tracing](#langfuse-tracing)
+      - [Using Both Providers](#using-both-providers)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
@@ -243,6 +246,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 If you prefer running services locally:
 
 Prerequisite: complete the "Configuration" steps above first (`make config` and model API keys). `make dev` requires a valid configuration file (defaults to `config.yaml` in the project root; can be overridden via `DEER_FLOW_CONFIG_PATH`).
+On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
 
 1. **Check prerequisites**:
    ```bash
@@ -421,6 +425,27 @@ LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
+
+#### Langfuse Tracing
+
+DeerFlow also supports [Langfuse](https://langfuse.com) observability for LangChain-compatible runs.
+
+Add the following to your `.env` file:
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+If you are using a self-hosted Langfuse instance, set `LANGFUSE_BASE_URL` to your deployment URL.
+
+#### Using Both Providers
+
+If both LangSmith and Langfuse are enabled, DeerFlow attaches both tracing callbacks and reports the same model activity to both systems.
+
+If a provider is explicitly enabled but missing required credentials, or if its callback fails to initialize, DeerFlow fails fast when tracing is initialized during model creation and the error message names the provider that caused the failure.
 
 For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in your `.env` to enable it.
 

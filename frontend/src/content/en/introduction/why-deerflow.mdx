@@ -1,0 +1,73 @@
+import { Callout, Cards } from "nextra/components";
+
+# Why DeerFlow
+
+<Callout type="info" emoji="🦌">
+  DeerFlow started with deep research, but it grew into a general runtime for
+  long-horizon agents that need skills, memory, tools, and coordination.
+</Callout>
+
+DeerFlow exists because modern agent systems need more than a chat loop. A useful agent must plan over long horizons, break work into sub-tasks, use tools, manipulate files, run code safely, and preserve enough context to stay coherent across a complex task. DeerFlow was built to provide that runtime foundation.
+
+## It started as deep research
+
+The first version of DeerFlow was designed around a specific goal: produce real research outputs instead of lightweight chatbot summaries. The idea was to let an AI system work more like a research team: make a plan, gather sources, cross-check findings, and deliver a structured result with useful depth.
+
+That framing worked, but the project quickly revealed something more important. Teams were not only using DeerFlow for research. They were adapting it for data analysis, report generation, internal automation, operations workflows, and other tasks that also require multi-step execution.
+
+The common thread was clear: the valuable part was not only the research workflow itself, but the runtime capabilities underneath it.
+
+## Research was the first skill, not the whole system
+
+That shift in usage led to a key conclusion: deep research should be treated as one capability inside a broader agent runtime, not as the definition of the entire product.
+
+DeerFlow therefore evolved from a project centered on a single research pattern into a general-purpose harness for long-running agents. In this model, research is still important, but it becomes one skill among many rather than the fixed shape of the system.
+
+This is why DeerFlow is described as a **harness** instead of only a framework or only an application.
+
+## Why a harness matters
+
+A harness is an opinionated runtime for agents. It does not just expose abstractions. It packages the infrastructure an agent needs to do useful work in realistic environments.
+
+For DeerFlow, that means combining the core pieces required for long-horizon execution:
+
+- **Skills** for task-specific capabilities that can be loaded only when needed.
+- **Sandboxed execution** so agents can work with files, run commands, and produce artifacts safely.
+- **Subagents** so complex work can be decomposed and executed in parallel.
+- **Memory** so the system can retain user preferences and recurring context across sessions.
+- **Context management** so long tasks remain tractable even when conversations and outputs grow.
+
+These are the building blocks that make an agent useful beyond a single prompt-response exchange.
+
+## Why DeerFlow moved beyond fixed multi-agent graphs
+
+Earlier agent systems often modeled work as a fixed graph of specialized roles. That approach can work for a narrow workflow, but it becomes rigid once users want the system to handle a broader range of tasks.
+
+DeerFlow moved toward a different architecture: a lead agent with middleware, tools, and dynamically invoked subagents. This makes the system easier to extend because new capabilities can be introduced as skills, tools, or runtime policies instead of requiring the whole orchestration graph to be redesigned.
+
+That architectural shift reflects the main motivation behind DeerFlow: build the reusable runtime layer first, then let many workflows sit on top of it.
+
+## DeerFlow is built for long-horizon work
+
+DeerFlow is motivated by a specific view of agents: the most valuable systems are not the ones that generate a single answer fastest, but the ones that can stay productive across a longer chain of actions.
+
+A long-horizon agent needs to do more than respond. It needs to:
+
+1. decide what to do next,
+2. keep track of intermediate state,
+3. store work outside the model context when necessary,
+4. recover from complexity without losing direction, and
+5. return an artifact that a human can review, refine, or continue from.
+
+That is the category of problem DeerFlow is designed for.
+
+## The goal
+
+The goal of DeerFlow is to provide a solid foundation for building and operating agent systems that can actually do work.
+
+If you are evaluating DeerFlow, the important idea is this: DeerFlow is not just a research demo and not just a UI wrapper around an LLM. It is a runtime harness for agents that need skills, memory, tools, isolation, and coordination to complete real tasks.
+
+<Cards num={2}>
+  <Cards.Card title="Core Concepts" href="/docs/introduction/core-concepts" />
+  <Cards.Card title="Harness vs App" href="/docs/introduction/harness-vs-app" />
+</Cards>

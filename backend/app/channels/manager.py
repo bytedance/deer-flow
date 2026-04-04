@@ -12,6 +12,7 @@ from typing import Any
 
 from langgraph_sdk.errors import ConflictError
 
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
 
@@ -735,7 +736,8 @@ class ChannelManager:
                 "/help — Show this help"
             )
         else:
-            reply = f"Unknown command: /{command}. Type /help for available commands."
+            available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
+            reply = f"Unknown command: /{command}. Available commands: {available}"
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,

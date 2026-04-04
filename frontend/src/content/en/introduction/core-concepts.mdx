@@ -1,0 +1,113 @@
+import { Callout, Cards } from "nextra/components";
+
+# Core Concepts
+
+<Callout type="important" emoji="🧠">
+  DeerFlow makes the most sense if you think of it as a runtime for long-horizon
+  agents, not just a chat interface or a workflow graph.
+</Callout>
+
+Before you go deeper into DeerFlow, it helps to anchor on a few concepts that appear throughout the system. These concepts explain what DeerFlow is optimizing for and why its architecture looks the way it does.
+
+## Harness
+
+In DeerFlow, a **harness** is the runtime layer that gives an agent the environment it needs to do real work.
+
+A framework usually gives you abstractions and building blocks. A harness goes further: it packages an opinionated set of runtime capabilities so the agent can plan, act, use tools, manage files, and operate across longer tasks without you rebuilding the same infrastructure each time.
+
+In practice, DeerFlow's harness includes things like:
+
+- tool access,
+- skill loading,
+- sandboxed execution,
+- memory,
+- subagent orchestration, and
+- context management.
+
+That is why DeerFlow is not only a model wrapper and not only a workflow graph. It is a runtime environment for agents.
+
+## Long-horizon agent
+
+A **long-horizon agent** is an agent that stays useful across a chain of actions instead of producing only a single answer.
+
+This kind of agent may need to:
+
+1. make a plan,
+2. decide the next step repeatedly,
+3. call tools many times,
+4. inspect and modify files,
+5. store intermediate results, and
+6. return a usable artifact at the end.
+
+The important point is not just duration. It is sustained coordination across multiple steps.
+
+DeerFlow is designed for this kind of work. Its architecture assumes that useful tasks often take more than one tool call and more than one reasoning pass.
+
+## Skill
+
+A **skill** is a task-oriented capability package that teaches the agent how to do a certain class of work.
+
+A skill is not just a label. It usually includes structured instructions, workflows, best practices, and supporting resources that can be loaded when relevant. This keeps the base agent general while allowing specialized behavior to be added only when needed.
+
+In DeerFlow, deep research is one skill. Data analysis, content generation, design-oriented workflows, and other task families can also be represented as skills.
+
+This is a major part of the DeerFlow mental model: the runtime stays general, while skills provide specialization.
+
+## Sandbox
+
+A **sandbox** is the isolated execution environment where the agent does file and command-based work.
+
+Instead of treating the agent as a pure text generator, DeerFlow gives it a workspace where it can read files, write outputs, run commands, and produce artifacts. This makes the system much more useful for coding, analysis, and multi-step workflows.
+
+Isolation matters because execution should be controlled and reproducible. The sandbox is what lets DeerFlow support action, not just conversation.
+
+## Subagent
+
+A **subagent** is a focused worker that handles a delegated subtask.
+
+When a task is too broad for one reasoning thread, DeerFlow can split the work into smaller units and run them separately. Subagents help with parallel exploration, scoped execution, and reducing overload on the main agent.
+
+The key idea is isolation. A subagent does not need the full conversation history or every detail from the parent context. It only needs the information required to solve its assigned piece of work well.
+
+## Context engineering
+
+**Context engineering** is the practice of controlling what the agent sees, remembers, and ignores so it can stay effective over time.
+
+Long tasks put pressure on the context window. If everything is kept inline forever, the agent becomes slower, noisier, and less reliable. DeerFlow addresses this with techniques such as summarization, scoped context for subagents, and using the file system as external working memory.
+
+This is one of the most important ideas in DeerFlow. Good agent behavior is not only about a stronger model. It is also about giving the model the right working set at the right time.
+
+## Memory
+
+**Memory** is DeerFlow's mechanism for carrying useful information across sessions.
+
+Instead of starting from zero every time, the system can retain information such as user preferences, recurring project context, and durable facts that improve future interactions. Memory makes the agent more adaptive and less repetitive.
+
+In DeerFlow, memory is part of the runtime, not an afterthought layered on top.
+
+## Artifact
+
+An **artifact** is the concrete output of the agent's work.
+
+That output might be a report, a generated file, a code change, a chart, a design asset, or another deliverable that can be reviewed and used outside the chat itself.
+
+This matters because DeerFlow is designed around task completion, not just answer generation. The system is trying to produce something you can inspect, refine, or hand off.
+
+## Putting the concepts together
+
+These concepts fit together as one model:
+
+- The **harness** provides the runtime.
+- **Skills** provide specialization.
+- The **sandbox** provides an execution environment.
+- **Subagents** provide decomposition and parallelism.
+- **Context engineering** keeps long tasks manageable.
+- **Memory** preserves useful continuity.
+- **Artifacts** are the outputs that make the work tangible.
+
+If you keep that model in mind, the rest of the DeerFlow docs will be much easier to navigate.
+
+<Cards num={2}>
+  <Cards.Card title="Why DeerFlow" href="/docs/introduction/why-deerflow" />
+  <Cards.Card title="Harness vs App" href="/docs/introduction/harness-vs-app" />
+</Cards>

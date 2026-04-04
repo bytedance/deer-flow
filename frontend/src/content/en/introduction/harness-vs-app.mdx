@@ -1,0 +1,103 @@
+import { Callout, Cards } from "nextra/components";
+
+# Harness vs App
+
+<Callout type="info" emoji="⚙️">
+  DeerFlow App is the best-practice Super Agent application built on top of
+  DeerFlow Harness, while DeerFlow Harness is the Python SDK and runtime
+  foundation for building your own agent system.
+</Callout>
+
+DeerFlow has two layers that are closely related but serve different purposes:
+
+- **DeerFlow Harness** is the runtime foundation.
+- **DeerFlow App** is the best-practice application built on top of that foundation.
+
+Understanding this distinction makes the rest of the documentation much easier to navigate.
+
+## The Harness is the runtime layer
+
+The **DeerFlow Harness** is the reusable system for building and operating long-horizon agents.
+
+It is also delivered as a **Python library SDK**, so developers can use DeerFlow as a programmable foundation for building their own Super Agent systems instead of starting from scratch.
+
+It provides the core runtime capabilities that make an agent useful in real work:
+
+- skills,
+- tool use,
+- sandboxed execution,
+- memory,
+- subagent orchestration,
+- context management, and
+- configurable runtime behavior.
+
+If you want to build your own agent product, integrate DeerFlow into an existing system, or customize the runtime deeply, the Harness is the part you should focus on.
+
+The Harness is the foundation. It is the part that makes DeerFlow programmable, extensible, and reusable.
+
+## The App is the reference implementation
+
+The **DeerFlow App** is a complete Super Agent application built with the Harness.
+
+Instead of only exposing runtime primitives, it shows what a production-oriented DeerFlow experience looks like when those primitives are assembled into a usable product. In other words, the App is not separate from the Harness. It is the best-practice implementation of what the Harness enables.
+
+That is why the App is the easiest way to understand DeerFlow as a working system: it demonstrates how the runtime, UI, workflows, and operational pieces come together in one place.
+
+## Why the App matters
+
+Many teams do not just want agent infrastructure. They want a usable application that already solves the common product and operations problems around running agents.
+
+The DeerFlow App addresses that need.
+
+It presents DeerFlow as a **Super Agent application** rather than only a set of low-level building blocks. That means users interact with a complete system that can manage conversations, run tasks, produce artifacts, and expose the core DeerFlow capabilities through an opinionated product surface.
+
+The App is therefore useful in two different ways:
+
+1. as a ready-to-run product for teams that want to deploy DeerFlow directly, and
+2. as a reference architecture for teams that want to build their own application on top of the Harness.
+
+## Best practices encoded in the App
+
+The App is where DeerFlow's recommended patterns become concrete.
+
+It reflects best practices for:
+
+- how users interact with a lead agent,
+- how threads and artifacts are organized,
+- how runtime capabilities are exposed in a product workflow,
+- how the system is configured and operated, and
+- how a self-hosted DeerFlow deployment should be structured.
+
+So when we say the App is built on the Harness, we do not only mean it imports the runtime. We mean it packages DeerFlow's preferred way to deliver a Super Agent experience end to end.
+
+## Self-hosting and deployment
+
+A key property of DeerFlow App is that it can be **self-hosted**.
+
+That matters for teams that want control over infrastructure, data handling, runtime configuration, and integration with their own environment. The App is designed so you can run DeerFlow in your own setup instead of treating it as a closed hosted service.
+
+This makes DeerFlow practical for internal tools, team workflows, and organization-specific deployments where control and extensibility matter as much as raw model capability.
+
+## How to choose between them
+
+The simplest rule is:
+
+- Choose the **Harness** if you want to build your own agent system.
+- Choose the **App** if you want DeerFlow as a complete Super Agent product.
+- Use both if you want to start from the App while still keeping access to the underlying runtime.
+
+The two layers are complementary. The Harness gives you the agent runtime. The App turns that runtime into a concrete product with deployment, operations, and user workflows already thought through.
+
+<Cards num={2}>
+  <Cards.Card title="DeerFlow Harness" href="/docs/harness" />
+  <Cards.Card title="DeerFlow App" href="/docs/app" />
+</Cards>
+
+## One foundation, two entry points
+
+DeerFlow is not split into two unrelated products. It is one system with two entry points.
+
+The **Harness** is the core runtime for developers.
+The **App** is the best-practice Super Agent application built on top of that runtime.
+
+If you want to go deeper into the runtime itself, continue with the [DeerFlow Harness](/docs/harness). If you want to run DeerFlow as a product, continue with the [DeerFlow App](/docs/app).
