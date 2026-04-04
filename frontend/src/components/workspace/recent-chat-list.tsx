@@ -56,12 +56,17 @@ import {
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { env } from "@/env";
+import { isIMEComposing } from "@/lib/ime";
 
 export function RecentChatList() {
   const { t } = useI18n();
   const router = useRouter();
   const pathname = usePathname();
-  const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
+  const { thread_id: threadIdFromPath, agent_name: agentNameFromPath } =
+    useParams<{
+      thread_id: string;
+      agent_name?: string;
+    }>();
   const { data: threads = [] } = useThreads();
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
@@ -76,7 +81,9 @@ export function RecentChatList() {
       deleteThread({ threadId });
       if (threadId === threadIdFromPath) {
         const threadIndex = threads.findIndex((t) => t.thread_id === threadId);
-        let nextThreadPath = "/workspace/chats/new";
+        let nextThreadPath = pathOfThread("new", {
+          agent_name: agentNameFromPath,
+        });
         if (threadIndex > -1) {
           if (threads[threadIndex + 1]) {
             nextThreadPath = pathOfThread(threads[threadIndex + 1]!);
@@ -87,7 +94,7 @@ export function RecentChatList() {
         void router.push(nextThreadPath);
       }
     },
-    [deleteThread, router, threadIdFromPath, threads],
+    [agentNameFromPath, deleteThread, router, threadIdFromPath, threads],
   );
 
   const handleRenameClick = useCallback(
@@ -271,7 +278,8 @@ export function RecentChatList() {
               onChange={(e) => setRenameValue(e.target.value)}
               placeholder={t.common.rename}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
+                if (e.key === "Enter" && !isIMEComposing(e)) {
+                  e.preventDefault();
                   handleRenameSubmit();
                 }
               }}
