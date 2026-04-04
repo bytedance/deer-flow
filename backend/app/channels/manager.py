@@ -10,7 +10,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from langgraph_sdk.errors import ConflictError
+from langgraph_sdk.errors import ConflictError, NotFoundError
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
@@ -548,13 +548,25 @@ class ChannelManager:
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
-        result = await client.runs.wait(
-            thread_id,
-            assistant_id,
-            input={"messages": [{"role": "human", "content": msg.text}]},
-            config=run_config,
-            context=run_context,
-        )
+        try:
+            result = await client.runs.wait(
+                thread_id,
+                assistant_id,
+                input={"messages": [{"role": "human", "content": msg.text}]},
+                config=run_config,
+                context=run_context,
+            )
+        except NotFoundError:
+            logger.warning("[Manager] thread %s not found (stale). Creating new thread.", thread_id)
+            self.store.remove(msg.channel_name, msg.chat_id, topic_id=getattr(msg, "topic_id", None))
+            thread_id = await self._create_thread(client, msg)
+            result = await client.runs.wait(
+                thread_id,
+                assistant_id,
+                input={"messages": [{"role": "human", "content": msg.text}]},
+                config=run_config,
+                context=run_context,
+            )
 
         response_text = _extract_response_text(result)
         artifacts = _extract_artifacts(result)
@@ -647,6 +659,19 @@ class ChannelManager:
                 )
                 last_published_text = latest_text
                 last_publish_at = now
+        except NotFoundError:
+            logger.warning("[Manager] thread %s not found (stale) during stream. Creating new thread.", thread_id)
+            self.store.remove(msg.channel_name, msg.chat_id, topic_id=getattr(msg, "topic_id", None))
+            thread_id = await self._create_thread(client, msg)
+            # Retry as non-streaming to avoid nested stream complexity
+            result = await client.runs.wait(
+                thread_id,
+                assistant_id,
+                input={"messages": [{"role": "human", "content": msg.text}]},
+                config=run_config,
+                context=run_context,
+            )
+            last_values = result
         except Exception as exc:
             stream_error = exc
             if _is_thread_busy_error(exc):
