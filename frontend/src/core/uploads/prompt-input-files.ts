@@ -18,10 +18,7 @@ export async function promptInputFilePartToFile(
         ? filePart.mediaType
         : filePart.file.type;
 
-    if (
-      filePart.file.name === filename &&
-      filePart.file.type === mediaType
-    ) {
+    if (filePart.file.name === filename && filePart.file.type === mediaType) {
       return filePart.file;
     }
 
@@ -34,6 +31,11 @@ export async function promptInputFilePartToFile(
 
   try {
     const response = await fetch(filePart.url);
+    if (!response.ok) {
+      throw new Error(
+        `HTTP ${response.status} while fetching fallback file URL`,
+      );
+    }
     const blob = await response.blob();
 
     return new File([blob], filePart.filename, {

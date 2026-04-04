@@ -92,6 +92,12 @@ test("returns null when upload preparation is missing required data", async () =
 test("returns null when the URL fallback fetch fails", async () => {
   const { promptInputFilePartToFile } = await import("./prompt-input-files.ts");
   const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  const warnCalls = [];
+
+  console.warn = (...args) => {
+    warnCalls.push(args);
+  };
 
   globalThis.fetch = async () => {
     throw new Error("network down");
@@ -105,7 +111,40 @@ test("returns null when the URL fallback fetch fails", async () => {
     });
 
     assert.equal(converted, null);
+    assert.equal(warnCalls.length, 1);
   } finally {
     globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
+test("returns null when the URL fallback fetch response is non-ok", async () => {
+  const { promptInputFilePartToFile } = await import("./prompt-input-files.ts");
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  const warnCalls = [];
+
+  console.warn = (...args) => {
+    warnCalls.push(args);
+  };
+
+  globalThis.fetch = async () =>
+    new Response("missing", {
+      status: 404,
+      statusText: "Not Found",
+    });
+
+  try {
+    const converted = await promptInputFilePartToFile({
+      type: "file",
+      filename: "note.txt",
+      url: "blob:http://localhost:2026/missing-preview-url",
+    });
+
+    assert.equal(converted, null);
+    assert.equal(warnCalls.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
   }
 });
