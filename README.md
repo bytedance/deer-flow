@@ -314,15 +314,7 @@ In standard mode, DeerFlow runs a dedicated [LangGraph Platform](https://langcha
 | **LangGraph Platform license** | Required for production images | Not required |
 | **Cold start** | Slower (two services to initialize) | Faster |
 
-The biggest difference is **concurrency**: LangGraph server enforces a per-worker job limit (`--n-jobs-per-worker`), which caps how many conversations can run in parallel. Gateway mode uses Python async tasks with no artificial concurrency ceiling — multiple users can run conversations simultaneously without queuing.
-
-Gateway mode is useful when:
-- You need to support many concurrent conversations without queuing
-- You want a simpler deployment with fewer moving parts
-- You don't have a LangGraph Platform license
-- You're running on resource-constrained environments
-
-Both modes are functionally equivalent — the same agents, tools, and skills work in either mode. The difference is in how the agent runtime is hosted and how concurrency is managed.
+Both modes are functionally equivalent — the same agents, tools, and skills work in either mode.
 
 #### Docker Production Deployment
 
