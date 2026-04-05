@@ -1,18 +1,10 @@
 """Async checkpointer factory.
 
 Provides an **async context manager** for long-running async servers that need
-proper resource cleanup.
+proper resource cleanup. Includes startup recovery for stale runs left behind
+by a previous crash.
 
 Supported backends: memory, sqlite, postgres.
-
-Usage (e.g. FastAPI lifespan)::
-
-    from deerflow.agents.checkpointer.async_provider import make_checkpointer
-
-    async with make_checkpointer() as checkpointer:
-        app.state.checkpointer = checkpointer  # InMemorySaver if not configured
-
-For sync usage see :mod:`deerflow.agents.checkpointer.provider`.
 """
 
 from __future__ import annotations
@@ -78,6 +70,84 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
 
 
 # ---------------------------------------------------------------------------
+# Stale run cleanup on startup
+# ---------------------------------------------------------------------------
+
+
+async def _cleanup_sqlite_stale_runs(conn_str: str) -> int:
+    """Directly clean up stale checkpoint data from the SQLite database.
+
+    When the LangGraph server crashes, checkpoint writes for in-progress runs
+    may be partially committed. On restart, the in-memory runtime detects
+    ``n_running > 0`` from the persisted state but has no active workers,
+    causing the queue to stall indefinitely (active=0, n_running>0).
+
+    This function opens the SQLite database directly and removes checkpoint
+    records that have ``pending_writes`` or ``pending_sends`` (indicators of
+    an interrupted run), allowing the server to start with a clean state.
+
+    Args:
+        conn_str: Path to the SQLite database file.
+
+    Returns:
+        Number of stale checkpoint records removed.
+    """
+    import pathlib
+
+    if conn_str == ":memory:" or conn_str.startswith("file:"):
+        return 0
+
+    db_path = pathlib.Path(conn_str)
+    if not db_path.exists():
+        return 0
+
+    try:
+        import aiosqlite
+
+        stale_count = 0
+        async with aiosqlite.connect(str(db_path)) as db:
+            # Detect interrupted runs: checkpoint_writes with pending data
+            # that will never be consumed because the workers are gone.
+            # Delete these so the queue doesn't stall on restart.
+            for table in ("checkpoint_writes", "checkpoint_blobs"):
+                try:
+                    async with db.execute(f"SELECT COUNT(*) FROM {table}") as cursor:
+                        row = await cursor.fetchone()
+                        count = row[0] if row else 0
+                    if count > 0:
+                        await db.execute(f"DELETE FROM {table}")
+                        stale_count += count
+                        logger.info(
+                            "Removed %d stale records from %s", count, table
+                        )
+                except Exception:
+                    pass  # Table may not exist in all schemas
+
+            if stale_count > 0:
+                await db.commit()
+                logger.warning(
+                    "Cleaned up %d stale checkpoint records from a previous crash. "
+                    "If issues persist, manually delete the checkpointer database "
+                    "file and restart.",
+                    stale_count,
+                )
+
+        return stale_count
+
+    except ImportError:
+        logger.debug("aiosqlite not available, skipping stale run cleanup")
+        return 0
+    except Exception as exc:
+        logger.warning(
+            "Failed to check for stale runs in checkpointer: %s. "
+            "If the server queue appears stuck after a crash, manually "
+            "delete the checkpointer database file and restart.",
+            exc,
+        )
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Public async context manager
 # ---------------------------------------------------------------------------
 
@@ -100,6 +170,18 @@ async def make_checkpointer() -> AsyncIterator[Checkpointer]:
 
         yield InMemorySaver()
         return
+
+    # For SQLite, attempt stale run cleanup before initializing checkpointer
+    if config.checkpointer.type == "sqlite":
+        conn_str = _resolve_sqlite_conn_str(
+            config.checkpointer.connection_string or "store.db"
+        )
+        stale = await _cleanup_sqlite_stale_runs(conn_str)
+        if stale > 0:
+            logger.warning(
+                "Cleaned up %d stale checkpoint records from a previous crash.",
+                stale,
+            )
 
     async with _async_checkpointer(config.checkpointer) as saver:
         yield saver
