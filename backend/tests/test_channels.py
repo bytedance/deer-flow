@@ -7,7 +7,7 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1987,6 +1987,47 @@ class TestSlackSendRetry:
             assert call_count == 3
 
         _run(go())
+
+
+class TestSlackAllowedUsers:
+    def test_numeric_allowed_users_match_string_event_user_id(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(
+            bus=bus,
+            config={"allowed_users": [123456]},
+        )
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "user": "123456",
+            "text": "hello from slack",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        def submit_coro(coro, loop):
+            coro.close()
+            return MagicMock()
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=submit_coro,
+        ) as submit:
+            channel._handle_message_event(event)
+
+        channel._add_reaction.assert_called_once_with("C123", "1710000000.000100", "eyes")
+        channel._send_running_reply.assert_called_once_with("C123", "1710000000.000100")
+        submit.assert_called_once()
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.user_id == "123456"
+        assert inbound.chat_id == "C123"
+        assert inbound.text == "hello from slack"
 
     def test_raises_after_all_retries_exhausted(self):
         from app.channels.slack import SlackChannel
