@@ -292,14 +292,52 @@ DeerFlow supports multiple startup modes across two dimensions:
 | **Dev** | `serve.sh --dev`<br/>`make dev` | `serve.sh --dev --daemon`<br/>`make dev-daemon` | `docker.sh start`<br/>`make docker-start` | — |
 | **Dev + Gateway** | `serve.sh --dev --gateway`<br/>`make dev-pro` | `serve.sh --dev --gateway --daemon`<br/>`make dev-daemon-pro` | `docker.sh start --gateway`<br/>`make docker-start-pro` | — |
 | **Prod** | `serve.sh --prod`<br/>`make start` | `serve.sh --prod --daemon`<br/>`make start-daemon` | — | `deploy.sh`<br/>`make up` |
-| **Prod + Gateway** | `serve.sh --prod --gateway`<br/>`make start-pro` | `serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `deploy.sh up --gateway`<br/>`make up-pro` |
+| **Prod + Gateway** | `serve.sh --prod --gateway`<br/>`make start-pro` | `serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `deploy.sh --gateway`<br/>`make up-pro` |
 
 | 操作 | Local | Docker Dev | Docker Prod |
 |---|---|---|---|
 | **停止** | `serve.sh --stop`<br/>`make stop` | `docker.sh stop`<br/>`make docker-stop` | `deploy.sh down`<br/>`make down` |
 | **重启** | `serve.sh --restart [flags]` | `docker.sh restart` | — |
 
-> **Gateway mode** is experimental. It eliminates the LangGraph server process — the Gateway API handles agent execution directly via async tasks, managing its own concurrency.
+> **Gateway mode** eliminates the LangGraph server process — the Gateway API handles agent execution directly via async tasks, managing its own concurrency.
+
+#### Why Gateway Mode?
+
+In standard mode, DeerFlow runs a dedicated [LangGraph Platform](https://langchain-ai.github.io/langgraph/) server alongside the Gateway API. This architecture works well but has trade-offs:
+
+| | Standard Mode | Gateway Mode |
+|---|---|---|
+| **Architecture** | Gateway (REST API) + LangGraph (agent runtime) | Gateway embeds agent runtime |
+| **Containers / Processes** | 4 (frontend, gateway, langgraph, nginx) | 3 (frontend, gateway, nginx) |
+| **Resource usage** | Higher (two Python runtimes) | Lower (single Python runtime) |
+| **LangGraph Platform license** | Required for production images | Not required |
+| **Cold start** | Slower (two services to initialize) | Faster |
+
+Gateway mode is useful when:
+- You want a simpler deployment with fewer moving parts
+- You don't have a LangGraph Platform license
+- You're running on resource-constrained environments
+- You want faster cold starts for development or CI
+
+Both modes are functionally equivalent — the same agents, tools, and skills work in either mode. The difference is purely in how the agent runtime is hosted.
+
+#### Docker Production Deployment
+
+`deploy.sh` supports building and starting separately. Images are mode-agnostic — runtime mode is selected at start time:
+
+```bash
+# One-step (build + start)
+deploy.sh                    # standard mode (default)
+deploy.sh --gateway          # gateway mode
+
+# Two-step (build once, start with any mode)
+deploy.sh build              # build all images
+deploy.sh start              # start in standard mode
+deploy.sh start --gateway    # start in gateway mode
+
+# Stop
+deploy.sh down
+```
 
 ### Advanced
 #### Sandbox Mode
