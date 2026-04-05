@@ -51,7 +51,6 @@ services:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
       - DEER_FLOW_INTERNAL_LANGGRAPH_BASE_URL=http://langgraph:2024
-      - NEXT_PUBLIC_LANGGRAPH_BASE_URL=${NEXT_PUBLIC_LANGGRAPH_BASE_URL:-}
     env_file:
       - ../frontend/.env
     networks:
@@ -160,13 +159,12 @@ services:
 
   # ── Sandbox Provisioner (optional, Kubernetes mode) ────────────────────────
   provisioner:
-    profiles:
-      - provisioner
     build:
       context: ./provisioner
       dockerfile: Dockerfile
       args:
         APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     container_name: deer-flow-provisioner
     volumes:
       - ~/.kube/config:/root/.kube/config:ro
