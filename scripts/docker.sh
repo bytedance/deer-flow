@@ -247,8 +247,8 @@ start() {
     echo "  🌐 Application: http://localhost:2026"
     echo "  📡 API Gateway: http://localhost:2026/api/*"
     if $gateway_mode; then
-        echo "  🤖 Runtime:     Gateway embedded (experimental)"
-        echo "  API:            /api/langgraph-compat/* → Gateway"
+        echo "  🤖 Runtime:     Gateway embedded"
+        echo "  API:            /api/langgraph/* → Gateway (compat)"
     else
         echo "  🤖 LangGraph:   http://localhost:2026/api/langgraph/*"
     fi

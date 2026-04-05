@@ -444,23 +444,23 @@ This starts all services and makes the application available at `http://localhos
 
 **All startup modes:**
 
-| | **Local 前台** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
+| | **Local Foreground** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
 |---|---|---|---|---|
-| **Dev** | `serve.sh --dev`<br/>`make dev` | `serve.sh --dev --daemon`<br/>`make dev-daemon` | `docker.sh start`<br/>`make docker-start` | — |
-| **Dev + Gateway** | `serve.sh --dev --gateway`<br/>`make dev-pro` | `serve.sh --dev --gateway --daemon`<br/>`make dev-daemon-pro` | `docker.sh start --gateway`<br/>`make docker-start-pro` | — |
-| **Prod** | `serve.sh --prod`<br/>`make start` | `serve.sh --prod --daemon`<br/>`make start-daemon` | — | `deploy.sh`<br/>`make up` |
-| **Prod + Gateway** | `serve.sh --prod --gateway`<br/>`make start-pro` | `serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `deploy.sh --gateway`<br/>`make up-pro` |
+| **Dev** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
+| **Dev + Gateway** | `./scripts/serve.sh --dev --gateway`<br/>`make dev-pro` | `./scripts/serve.sh --dev --gateway --daemon`<br/>`make dev-daemon-pro` | `./scripts/docker.sh start --gateway`<br/>`make docker-start-pro` | — |
+| **Prod** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
+| **Prod + Gateway** | `./scripts/serve.sh --prod --gateway`<br/>`make start-pro` | `./scripts/serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `./scripts/deploy.sh --gateway`<br/>`make up-pro` |
 
-| 操作 | Local | Docker Dev | Docker Prod |
+| Action | Local | Docker Dev | Docker Prod |
 |---|---|---|---|
-| **停止** | `serve.sh --stop`<br/>`make stop` | `docker.sh stop`<br/>`make docker-stop` | `deploy.sh down`<br/>`make down` |
-| **重启** | `serve.sh --restart [flags]` | `docker.sh restart` | — |
+| **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
+| **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
-Gateway mode is experimental — agent runtime embedded in Gateway, no LangGraph server.
+Gateway mode embeds the agent runtime in Gateway, no LangGraph server.
 
 **Nginx routing**:
-- `/api/langgraph/*` → LangGraph Server (2024) — standard mode only
-- `/api/langgraph-compat/*` → Gateway embedded runtime (8001) — Gateway mode
+- Standard mode: `/api/langgraph/*` → LangGraph Server (2024)
+- Gateway mode: `/api/langgraph/*` → Gateway embedded runtime (8001) (via envsubst)
 - `/api/*` (other) → Gateway API (8001)
 - `/` (non-API) → Frontend (3000)
 
