@@ -85,7 +85,7 @@ class DiscordChannel(Channel):
             close_future = asyncio.run_coroutine_threadsafe(self._client.close(), self._discord_loop)
             try:
                 await asyncio.wait_for(asyncio.wrap_future(close_future), timeout=10)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("[Discord] client close timed out after 10s")
             except Exception:
                 logger.exception("[Discord] error while closing client")
@@ -179,10 +179,7 @@ class DiscordChannel(Channel):
 
         if self._main_loop and self._main_loop.is_running():
             future = asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
-            future.add_done_callback(
-                lambda f: logger.exception("[Discord] publish_inbound failed", exc_info=f.exception())
-                if f.exception() else None
-            )
+            future.add_done_callback(lambda f: logger.exception("[Discord] publish_inbound failed", exc_info=f.exception()) if f.exception() else None)
 
     def _run_client(self) -> None:
         self._discord_loop = asyncio.new_event_loop()
@@ -206,9 +203,7 @@ class DiscordChannel(Channel):
         except Exception:
             logger.exception("[Discord] failed to create thread for message=%s (threads may be disabled or missing permissions)", message.id)
             try:
-                await message.channel.send(
-                    f"Could not create a thread for your message. Please check that threads are enabled in this channel."
-                )
+                await message.channel.send("Could not create a thread for your message. Please check that threads are enabled in this channel.")
             except Exception:
                 pass
             return None
