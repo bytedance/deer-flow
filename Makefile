@@ -225,9 +225,9 @@ docker-logs-gateway:
 up:
 	@./scripts/deploy.sh
 
-# Build and start production services in Gateway mode (experimental)
+# Build and start production services in Gateway mode
 up-pro:
-	@./scripts/deploy.sh up --gateway
+	@./scripts/deploy.sh --gateway
 
 # Stop and remove production containers
 down:

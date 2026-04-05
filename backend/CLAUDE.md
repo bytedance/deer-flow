@@ -449,7 +449,7 @@ This starts all services and makes the application available at `http://localhos
 | **Dev** | `serve.sh --dev`<br/>`make dev` | `serve.sh --dev --daemon`<br/>`make dev-daemon` | `docker.sh start`<br/>`make docker-start` | — |
 | **Dev + Gateway** | `serve.sh --dev --gateway`<br/>`make dev-pro` | `serve.sh --dev --gateway --daemon`<br/>`make dev-daemon-pro` | `docker.sh start --gateway`<br/>`make docker-start-pro` | — |
 | **Prod** | `serve.sh --prod`<br/>`make start` | `serve.sh --prod --daemon`<br/>`make start-daemon` | — | `deploy.sh`<br/>`make up` |
-| **Prod + Gateway** | `serve.sh --prod --gateway`<br/>`make start-pro` | `serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `deploy.sh up --gateway`<br/>`make up-pro` |
+| **Prod + Gateway** | `serve.sh --prod --gateway`<br/>`make start-pro` | `serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `deploy.sh --gateway`<br/>`make up-pro` |
 
 | 操作 | Local | Docker Dev | Docker Prod |
 |---|---|---|---|
