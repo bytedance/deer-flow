@@ -55,7 +55,29 @@ function normalizeStoredRunId(runId: string | null): string | null {
     }
   }
 
-  return trimmed.split(/[/?#]/, 1)[0] ?? null;
+  const pathWithoutQueryOrHash = trimmed.split(/[?#]/, 1)[0]?.trim() ?? "";
+  if (!pathWithoutQueryOrHash) {
+    return null;
+  }
+
+  const runsMarker = "/runs/";
+  const runsIndex = pathWithoutQueryOrHash.lastIndexOf(runsMarker);
+  if (runsIndex >= 0) {
+    const runIdAfterMarker = pathWithoutQueryOrHash
+      .slice(runsIndex + runsMarker.length)
+      .split("/", 1)[0]
+      ?.trim();
+    if (runIdAfterMarker) {
+      return runIdAfterMarker;
+    }
+    return null;
+  }
+
+  const segments = pathWithoutQueryOrHash
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  return segments.at(-1) ?? null;
 }
 
 function getRunMetadataStorage(): {
@@ -65,7 +87,9 @@ function getRunMetadataStorage(): {
 } {
   return {
     getItem(key) {
-      const normalized = normalizeStoredRunId(window.sessionStorage.getItem(key));
+      const normalized = normalizeStoredRunId(
+        window.sessionStorage.getItem(key),
+      );
       if (normalized) {
         window.sessionStorage.setItem(key, normalized);
         return normalized;

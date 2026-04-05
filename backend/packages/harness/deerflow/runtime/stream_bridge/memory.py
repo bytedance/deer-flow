@@ -90,7 +90,8 @@ class MemoryStreamBridge(StreamBridge):
         heartbeat_interval: float = 15.0,
     ) -> AsyncIterator[StreamEvent]:
         stream = self._get_or_create_stream(run_id)
-        next_offset = self._resolve_start_offset(stream, last_event_id)
+        async with stream.condition:
+            next_offset = self._resolve_start_offset(stream, last_event_id)
 
         while True:
             async with stream.condition:
