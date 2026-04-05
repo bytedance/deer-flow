@@ -113,6 +113,7 @@ services:
     build:
       context: ../
       dockerfile: backend/Dockerfile
+      target: dev
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-gateway
       args:
         APT_MIRROR: ${APT_MIRROR:-}
@@ -169,6 +170,7 @@ services:
     build:
       context: ../
       dockerfile: backend/Dockerfile
+      target: dev
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-langgraph
       args:
         APT_MIRROR: ${APT_MIRROR:-}
