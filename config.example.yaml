@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 5
+config_version: 6
 
 # ============================================================================
 # Logging
@@ -511,6 +511,17 @@ skills:
   # This is used by the agent to access skills in both local and Docker sandbox
   # Default: /mnt/skills
   container_path: /mnt/skills
+
+# ============================================================================
+# Skill Self-Evolution Configuration
+# ============================================================================
+# Experimental: expose the `skill_manage` tool so the lead agent can propose
+# and edit text-only custom skills under skills/custom/.
+# Disabled by default for safety; enable explicitly if you want the agent to
+# help maintain reusable workflows as custom skills.
+
+skill_evolution:
+  enabled: false
 
 # Note: To restrict which skills are loaded for a specific custom agent,
 # define a `skills` list in that agent's `config.yaml` (e.g. `agents/my-agent/config.yaml`):

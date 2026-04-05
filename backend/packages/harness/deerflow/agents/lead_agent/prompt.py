@@ -255,6 +255,8 @@ You: "Deploying to staging..." [proceed]
 
 {skills_section}
 
+{skill_evolution_section}
+
 {deferred_tools_section}
 
 {subagent_section}
@@ -414,9 +416,17 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
     if not skills:
         return ""
 
-    skill_items = "\n".join(
-        f"    <skill>\n        <name>{skill.name}</name>\n        <description>{skill.description}</description>\n        <location>{skill.get_container_file_path(container_base_path)}</location>\n    </skill>" for skill in skills
-    )
+    def _format_skill_tag(skill) -> str:
+        tag = "[custom, editable]" if skill.category == "custom" else "[built-in]"
+        return (
+            "    <skill>\n"
+            f"        <name>{skill.name} {tag}</name>\n"
+            f"        <description>{skill.description}</description>\n"
+            f"        <location>{skill.get_container_file_path(container_base_path)}</location>\n"
+            "    </skill>"
+        )
+
+    skill_items = "\n".join(_format_skill_tag(skill) for skill in skills)
     skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
 
     return f"""<skill_system>
@@ -434,6 +444,36 @@ You have access to skills that provide optimized workflows for specific tasks. E
 {skills_list}
 
 </skill_system>"""
+
+
+def _build_skill_self_evolution_section() -> str:
+    """Build prompt guidance for the optional skill self-evolution feature."""
+    try:
+        from deerflow.config import get_app_config
+
+        config = get_app_config()
+        if not getattr(config, "skill_evolution", None) or not getattr(config.skill_evolution, "enabled", False):
+            return ""
+    except Exception:
+        return ""
+
+    return """<skill_self_evolution>
+When a workflow proves reusable, you may capture it as a custom skill under `skills/custom/`.
+
+Use the `skill_manage` tool only for text files and only under a custom skill:
+- `create`: create a new custom skill (or override a built-in skill with the same name)
+- `patch`: make a targeted change to an existing custom SKILL.md
+- `edit`: rewrite an existing custom SKILL.md when patch is not sufficient
+- `delete`: delete a custom skill
+- `write_file`: add or update a supporting file under `references/`, `templates/`, or `scripts/`
+- `remove_file`: remove a supporting file from a custom skill
+
+Rules:
+- Prefer `patch` over `edit` when the change is localized
+- Built-in skills (`[built-in]`) are read-only; create a custom skill with the same name to override one
+- Before creating, deleting, or substantially rewriting a skill, confirm with the user unless they already asked explicitly
+- Skip skill creation for one-off tasks that are unlikely to repeat
+</skill_self_evolution>"""
 
 
 def get_agent_soul(agent_name: str | None) -> str:
@@ -539,6 +579,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
 
     # Get skills section
     skills_section = get_skills_prompt_section(available_skills)
+    skill_evolution_section = _build_skill_self_evolution_section()
 
     # Get deferred tools section (tool_search)
     deferred_tools_section = get_deferred_tools_prompt_section()
@@ -553,6 +594,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
         skills_section=skills_section,
+        skill_evolution_section=skill_evolution_section,
         deferred_tools_section=deferred_tools_section,
         memory_context=memory_context,
         subagent_section=subagent_section,

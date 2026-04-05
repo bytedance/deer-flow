@@ -79,6 +79,15 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
+    try:
+        if getattr(config, "skill_evolution", None) and getattr(config.skill_evolution, "enabled", False):
+            from deerflow.tools.skill_manage_tool import skill_manage_tool
+
+            builtin_tools.append(skill_manage_tool)
+            logger.info("Including skill_manage_tool (skill_evolution enabled)")
+    except Exception as e:
+        logger.warning("Failed to load skill_manage tool: %s", e)
+
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
     # to always read the latest configuration from disk. This ensures that changes

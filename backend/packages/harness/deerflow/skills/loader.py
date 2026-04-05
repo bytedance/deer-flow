@@ -1,5 +1,6 @@
 import logging
 import os
+from collections import defaultdict
 from pathlib import Path
 
 from .parser import parse_skill_file
@@ -94,6 +95,20 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
     # Filter by enabled status if requested
     if enabled_only:
         skills = [skill for skill in skills if skill.enabled]
+
+    # Prefer a custom skill over a public skill with the same frontmatter name.
+    grouped: dict[str, list[Skill]] = defaultdict(list)
+    for skill in skills:
+        grouped[skill.name].append(skill)
+
+    deduped: list[Skill] = []
+    for matches in grouped.values():
+        custom_matches = [skill for skill in matches if skill.category == "custom"]
+        if custom_matches:
+            deduped.extend(custom_matches)
+        else:
+            deduped.extend(matches)
+    skills = deduped
 
     # Sort by name for consistent ordering
     skills.sort(key=lambda s: s.name)

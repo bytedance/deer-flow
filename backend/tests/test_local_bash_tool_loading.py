@@ -15,6 +15,7 @@ def _make_config(*, allow_host_bash: bool, sandbox_use: str = "deerflow.sandbox.
             use=sandbox_use,
             allow_host_bash=allow_host_bash,
         ),
+        skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
         get_model_config=lambda name: None,
     )
@@ -79,3 +80,17 @@ def test_get_available_tools_keeps_bash_for_aio_sandbox(monkeypatch):
 
     assert "bash" in names
     assert "ls" in names
+
+
+def test_get_available_tools_includes_skill_manage_when_enabled(monkeypatch):
+    config = _make_config(allow_host_bash=False)
+    config.skill_evolution.enabled = True
+    monkeypatch.setattr("deerflow.tools.tools.get_app_config", lambda: config)
+    monkeypatch.setattr(
+        "deerflow.tools.tools.resolve_variable",
+        lambda use, _: SimpleNamespace(name="bash" if "bash_tool" in use else "ls"),
+    )
+
+    names = [tool.name for tool in get_available_tools(include_mcp=False, subagent_enabled=False)]
+
+    assert "skill_manage" in names

@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
+from deerflow.agents.lead_agent.prompt import _build_skill_self_evolution_section, get_skills_prompt_section
 from deerflow.config.agents_config import AgentConfig
 from deerflow.skills.types import Skill
 
 
-def _make_skill(name: str) -> Skill:
+def _make_skill(name: str, *, category: str = "public") -> Skill:
     return Skill(
         name=name,
         description=f"Description for {name}",
@@ -13,7 +13,7 @@ def _make_skill(name: str) -> Skill:
         skill_dir=Path(f"/tmp/{name}"),
         skill_file=Path(f"/tmp/{name}/SKILL.md"),
         relative_path=Path(name),
-        category="public",
+        category=category,
         enabled=True,
     )
 
@@ -50,6 +50,27 @@ def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(mon
     result = get_skills_prompt_section(available_skills=None)
     assert "skill1" in result
     assert "skill2" in result
+
+
+def test_get_skills_prompt_section_marks_built_in_and_custom(monkeypatch):
+    skills = [_make_skill("skill1", category="public"), _make_skill("skill2", category="custom")]
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: skills)
+
+    result = get_skills_prompt_section(available_skills=None)
+
+    assert "skill1 [built-in]" in result
+    assert "skill2 [custom, editable]" in result
+
+
+def test_build_skill_self_evolution_section_requires_feature_flag(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: type("Config", (), {"skill_evolution": type("SkillEvolution", (), {"enabled": True})()})(),
+    )
+
+    section = _build_skill_self_evolution_section()
+    assert "skill_manage" in section
+    assert "Before creating, deleting, or substantially rewriting a skill" in section
 
 
 def test_make_lead_agent_empty_skills_passed_correctly(monkeypatch):

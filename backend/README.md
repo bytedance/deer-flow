@@ -77,7 +77,8 @@ Per-thread isolated execution with virtual path translation:
 - **Providers**: `LocalSandboxProvider` (filesystem) and `AioSandboxProvider` (Docker, in community/)
 - **Virtual paths**: `/mnt/user-data/{workspace,uploads,outputs}` → thread-specific physical directories
 - **Skills path**: `/mnt/skills` → `deer-flow/skills/` directory
-- **Skills loading**: Recursively discovers nested `SKILL.md` files under `skills/{public,custom}` and preserves nested container paths
+- **Skills loading**: Recursively discovers nested `SKILL.md` files under `skills/{public,custom}`, preserves nested container paths, and prefers a custom skill when it shares a name with a built-in one
+- **Skill self-evolution**: Optional `skill_evolution.enabled` flag exposes an experimental `skill_manage` tool for guarded edits under `skills/custom/`
 - **File-write safety**: `str_replace` serializes read-modify-write per `(sandbox.id, path)` so isolated sandboxes keep concurrency even when virtual paths match
 - **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace` (`bash` is disabled by default when using `LocalSandboxProvider`; use `AioSandboxProvider` for isolated shell access)
 
@@ -105,7 +106,7 @@ LLM-powered persistent context retention across conversations:
 | Category | Tools |
 |----------|-------|
 | **Sandbox** | `bash`, `ls`, `read_file`, `write_file`, `str_replace` |
-| **Built-in** | `present_files`, `ask_clarification`, `view_image`, `task` (subagent) |
+| **Built-in** | `present_files`, `ask_clarification`, `view_image`, `task` (subagent), `skill_manage` (experimental, opt-in) |
 | **Community** | Tavily (web search), Jina AI (web fetch), Firecrawl (scraping), DuckDuckGo (image search) |
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
@@ -264,10 +265,15 @@ Key sections:
 - `tool_groups` - Logical tool groupings
 - `sandbox` - Execution environment provider
 - `skills` - Skills directory paths
+- `skill_evolution` - Experimental custom-skill management toggle
 - `title` - Auto-title generation settings
 - `summarization` - Context summarization settings
 - `subagents` - Subagent system (enabled/disabled)
 - `memory` - Memory system settings (enabled, storage, debounce, facts limits)
+
+Notes:
+- `skill_evolution.enabled` defaults to `false`
+- when enabled, the lead-agent prompt includes guarded instructions for creating or patching reusable custom skills
 
 Provider note:
 - `models[*].use` references provider classes by module path (for example `langchain_openai:ChatOpenAI`).

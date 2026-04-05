@@ -12,37 +12,10 @@ import yaml
 ALLOWED_FRONTMATTER_PROPERTIES = {"name", "description", "license", "allowed-tools", "metadata", "compatibility", "version", "author"}
 
 
-def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]:
-    """Validate a skill directory's SKILL.md frontmatter.
-
-    Args:
-        skill_dir: Path to the skill directory containing SKILL.md.
-
-    Returns:
-        Tuple of (is_valid, message, skill_name).
-    """
-    skill_md = skill_dir / "SKILL.md"
-    if not skill_md.exists():
-        return False, "SKILL.md not found", None
-
-    content = skill_md.read_text(encoding="utf-8")
-    if not content.startswith("---"):
-        return False, "No YAML frontmatter found", None
-
-    # Extract frontmatter
-    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-    if not match:
-        return False, "Invalid frontmatter format", None
-
-    frontmatter_text = match.group(1)
-
-    # Parse YAML frontmatter
-    try:
-        frontmatter = yaml.safe_load(frontmatter_text)
-        if not isinstance(frontmatter, dict):
-            return False, "Frontmatter must be a YAML dictionary", None
-    except yaml.YAMLError as e:
-        return False, f"Invalid YAML in frontmatter: {e}", None
+def _validate_frontmatter_dict(frontmatter: object) -> tuple[bool, str, str | None]:
+    """Validate parsed SKILL.md frontmatter content."""
+    if not isinstance(frontmatter, dict):
+        return False, "Frontmatter must be a YAML dictionary", None
 
     # Check for unexpected properties
     unexpected_keys = set(frontmatter.keys()) - ALLOWED_FRONTMATTER_PROPERTIES
@@ -83,3 +56,41 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
             return False, f"Description is too long ({len(description)} characters). Maximum is 1024 characters.", None
 
     return True, "Skill is valid!", name
+
+
+def validate_skill_frontmatter_content(content: str) -> tuple[bool, str, str | None]:
+    """Validate SKILL.md frontmatter from a content string."""
+    if not content.startswith("---"):
+        return False, "No YAML frontmatter found", None
+
+    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    if not match:
+        return False, "Invalid frontmatter format", None
+
+    frontmatter_text = match.group(1)
+    try:
+        frontmatter = yaml.safe_load(frontmatter_text)
+    except yaml.YAMLError as e:
+        return False, f"Invalid YAML in frontmatter: {e}", None
+
+    return _validate_frontmatter_dict(frontmatter)
+
+
+def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]:
+    """Validate a skill directory's SKILL.md frontmatter.
+
+    Args:
+        skill_dir: Path to the skill directory containing SKILL.md.
+
+    Returns:
+        Tuple of (is_valid, message, skill_name).
+    """
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        return False, "SKILL.md not found", None
+
+    content = skill_md.read_text(encoding="utf-8")
+    if not content.startswith("---"):
+        return False, "No YAML frontmatter found", None
+
+    return validate_skill_frontmatter_content(content)
