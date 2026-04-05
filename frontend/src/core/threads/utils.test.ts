@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { pathOfThread } = await import(new URL("./utils.ts", import.meta.url).href);
+const { pathOfThread } = await import(
+  new URL("./utils.ts", import.meta.url).href
+);
 
 void test("uses standard chat route when thread has no agent context", () => {
   assert.equal(pathOfThread("thread-123"), "/workspace/chats/thread-123");
