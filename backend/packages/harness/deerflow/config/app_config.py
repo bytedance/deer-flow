@@ -1,7 +1,8 @@
 import logging
 import os
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Self
 
 import yaml
 from dotenv import load_dotenv
@@ -10,15 +11,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
-from deerflow.config.guardrails_config import load_guardrails_config_from_dict
-from deerflow.config.memory_config import load_memory_config_from_dict
+from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
+from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
-from deerflow.config.subagents_config import load_subagents_config_from_dict
-from deerflow.config.summarization_config import load_summarization_config_from_dict
-from deerflow.config.title_config import load_title_config_from_dict
+from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
+from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
+from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_usage_config import TokenUsageConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
@@ -28,18 +29,11 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-class UploadsConfig(BaseModel):
-    """Configuration for file upload handling."""
-
-    pdf_converter: Literal["auto", "pymupdf4llm", "markitdown"] = Field(
-        default="auto",
-        description=(
-            "PDF-to-Markdown converter. "
-            "'auto': prefer pymupdf4llm when installed, fall back to MarkItDown for image-based PDFs; "
-            "'pymupdf4llm': always use pymupdf4llm (must be installed); "
-            "'markitdown': always use MarkItDown (original behaviour)."
-        ),
-    )
+def _default_config_candidates() -> tuple[Path, ...]:
+    """Return deterministic config.yaml locations without relying on cwd."""
+    backend_dir = Path(__file__).resolve().parents[4]
+    repo_root = backend_dir.parent
+    return (backend_dir / "config.yaml", repo_root / "config.yaml")
 
 
 class AppConfig(BaseModel):
@@ -47,7 +41,6 @@ class AppConfig(BaseModel):
 
     log_level: str = Field(default="info", description="Logging level for deerflow modules (debug/info/warning/error)")
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
-    uploads: UploadsConfig = Field(default_factory=UploadsConfig, description="File upload handling configuration")
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
@@ -55,6 +48,11 @@ class AppConfig(BaseModel):
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
+    title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
+    summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
+    memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
+    subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
+    guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
@@ -66,7 +64,7 @@ class AppConfig(BaseModel):
         Priority:
         1. If provided `config_path` argument, use it.
         2. If provided `DEER_FLOW_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, first check the `config.yaml` in the current directory, then fallback to `config.yaml` in the parent directory.
+        3. Otherwise, search deterministic backend/repository-root defaults from `_default_config_candidates()`.
         """
         if config_path:
             path = Path(config_path)
@@ -79,14 +77,10 @@ class AppConfig(BaseModel):
                 raise FileNotFoundError(f"Config file specified by environment variable `DEER_FLOW_CONFIG_PATH` not found at {path}")
             return path
         else:
-            # Check if the config.yaml is in the current directory
-            path = Path(os.getcwd()) / "config.yaml"
-            if not path.exists():
-                # Check if the config.yaml is in the parent directory of CWD
-                path = Path(os.getcwd()).parent / "config.yaml"
-                if not path.exists():
-                    raise FileNotFoundError("`config.yaml` file not found at the current directory nor its parent directory")
-            return path
+            for path in _default_config_candidates():
+                if path.exists():
+                    return path
+            raise FileNotFoundError("`config.yaml` file not found at the default backend or repository root locations")
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> Self:
@@ -259,6 +253,8 @@ _app_config: AppConfig | None = None
 _app_config_path: Path | None = None
 _app_config_mtime: float | None = None
 _app_config_is_custom = False
+_current_app_config: ContextVar[AppConfig | None] = ContextVar("deerflow_current_app_config", default=None)
+_current_app_config_stack: ContextVar[tuple[AppConfig | None, ...]] = ContextVar("deerflow_current_app_config_stack", default=())
 
 
 def _get_config_mtime(config_path: Path) -> float | None:
@@ -290,6 +286,10 @@ def get_app_config() -> AppConfig:
     the cache.
     """
     global _app_config, _app_config_path, _app_config_mtime
+
+    runtime_override = _current_app_config.get()
+    if runtime_override is not None:
+        return runtime_override
 
     if _app_config is not None and _app_config_is_custom:
         return _app_config
@@ -352,3 +352,26 @@ def set_app_config(config: AppConfig) -> None:
     _app_config_path = None
     _app_config_mtime = None
     _app_config_is_custom = True
+
+
+def peek_current_app_config() -> AppConfig | None:
+    """Return the runtime-scoped AppConfig override, if one is active."""
+    return _current_app_config.get()
+
+
+def push_current_app_config(config: AppConfig) -> None:
+    """Push a runtime-scoped AppConfig override for the current execution context."""
+    stack = _current_app_config_stack.get()
+    _current_app_config_stack.set(stack + (_current_app_config.get(),))
+    _current_app_config.set(config)
+
+
+def pop_current_app_config() -> None:
+    """Pop the latest runtime-scoped AppConfig override for the current execution context."""
+    stack = _current_app_config_stack.get()
+    if not stack:
+        _current_app_config.set(None)
+        return
+    previous = stack[-1]
+    _current_app_config_stack.set(stack[:-1])
+    _current_app_config.set(previous)
