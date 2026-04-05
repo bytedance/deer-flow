@@ -2,10 +2,10 @@
 
 import asyncio
 import concurrent.futures
-from enum import Enum
 import json
 import tempfile
 import zipfile
+from enum import Enum
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
