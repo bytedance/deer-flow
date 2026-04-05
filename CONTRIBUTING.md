@@ -60,6 +60,8 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 make docker-init
 # Start Docker services (mode-aware, localhost:2026)
 make docker-start
+# Start services with built-in health check and self-healing
+make docker-start-selfheal
 # Stop Docker development services
 make docker-stop
 # View Docker development logs

@@ -218,6 +218,7 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 ```bash
 make docker-init    # Pull sandbox image (only once or when image updates)
 make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
+make docker-start-selfheal  # Start + health check + auto-repair common restart/502 issues
 ```
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
