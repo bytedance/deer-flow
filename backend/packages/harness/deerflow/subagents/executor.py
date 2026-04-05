@@ -6,7 +6,7 @@ import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -56,6 +56,7 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def __post_init__(self):
         """Initialize mutable defaults."""
@@ -242,6 +243,14 @@ class SubagentExecutor:
             # This allows us to collect AI messages as they are generated
             final_state = None
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+                # Cooperative cancellation: check if parent requested stop
+                if result.cancel_event.is_set():
+                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
+                    result.status = SubagentStatus.FAILED
+                    result.error = "Cancelled by user"
+                    result.completed_at = datetime.now()
+                    return result
+
                 final_state = chunk
 
                 # Extract AI messages from the current state
@@ -440,7 +449,8 @@ class SubagentExecutor:
                         _background_tasks[task_id].status = SubagentStatus.TIMED_OUT
                         _background_tasks[task_id].error = f"Execution timed out after {self.config.timeout_seconds} seconds"
                         _background_tasks[task_id].completed_at = datetime.now()
-                    # Cancel the future (best effort - may not stop the actual execution)
+                    # Signal cooperative cancellation and cancel the future
+                    result_holder.cancel_event.set()
                     execution_future.cancel()
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
@@ -454,6 +464,24 @@ class SubagentExecutor:
 
 
 MAX_CONCURRENT_SUBAGENTS = 3
+
+
+def request_cancel_background_task(task_id: str) -> None:
+    """Signal a running background task to stop.
+
+    Sets the cancel_event on the task, which is checked cooperatively
+    by ``_aexecute`` during ``agent.astream()`` iteration.  This allows
+    subagent threads — which cannot be force-killed via ``Future.cancel()``
+    — to stop at the next iteration boundary.
+
+    Args:
+        task_id: The task ID to cancel.
+    """
+    with _background_tasks_lock:
+        result = _background_tasks.get(task_id)
+        if result is not None:
+            result.cancel_event.set()
+            logger.info("Requested cancellation for background task %s", task_id)
 
 
 def get_background_task_result(task_id: str) -> SubagentResult | None:
