@@ -84,7 +84,7 @@ def test_replace_virtual_path_preserves_windows_style_for_nested_subdir_trailing
 
 def test_replace_virtual_paths_in_command_preserves_trailing_slash() -> None:
     """Trailing slash on a virtual path inside a command must be preserved."""
-    cmd = """python -c "output_dir = '/mnt/user-data/workspace/'; print(output_dir + 'some_file.txt')"\""""
+    cmd = """python -c "output_dir = '/mnt/user-data/workspace/'; print(output_dir + 'some_file.txt')\""""
     result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
     assert "/tmp/deer-flow/threads/t1/user-data/workspace/" in result, f"Trailing slash lost in: {result!r}"
 
