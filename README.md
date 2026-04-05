@@ -308,7 +308,7 @@ In standard mode, DeerFlow runs a dedicated [LangGraph Platform](https://langcha
 | | Standard Mode | Gateway Mode |
 |---|---|---|
 | **Architecture** | Gateway (REST API) + LangGraph (agent runtime) | Gateway embeds agent runtime |
-| **Concurrency** | Limited by `--n-jobs-per-worker` | Unlimited async tasks |
+| **Concurrency** | `--n-jobs-per-worker` per worker | Async tasks per `--workers` (no per-worker job cap) |
 | **Containers / Processes** | 4 (frontend, gateway, langgraph, nginx) | 3 (frontend, gateway, nginx) |
 | **Resource usage** | Higher (two Python runtimes) | Lower (single Python runtime) |
 | **LangGraph Platform license** | Required for production images | Not required |
