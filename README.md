@@ -147,6 +147,8 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
+   If you are routing Responses API traffic through an OpenAI-compatible gateway that does not persist response items when `store=false` (for example some zero-data-retention proxies), use `deerflow.models.patched_openai:PatchedChatOpenAI` instead. It preserves Gemini `thought_signature` fields and strips transient Responses items such as `reasoning` blocks that cannot be replayed safely in the next turn.
+
    CLI-backed provider examples:
 
    ```yaml

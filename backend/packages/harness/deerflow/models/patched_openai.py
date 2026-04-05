@@ -1,4 +1,4 @@
-"""Patched ChatOpenAI that preserves thought_signature for Gemini thinking models.
+"""Patched ChatOpenAI for OpenAI-compatible gateways.
 
 When using Gemini with thinking enabled via an OpenAI-compatible gateway (e.g.
 Vertex AI, Google AI Studio, or any proxy), the API requires that the
@@ -14,9 +14,14 @@ signature.  That causes an HTTP 400 ``INVALID_ARGUMENT`` error:
     Unable to submit request because function call `<tool>` in the N. content
     block is missing a `thought_signature`.
 
-This module fixes the problem by overriding ``_get_request_payload`` to
-re-inject tool-call signatures back into the outgoing payload for any assistant
-message that originally carried them.
+Responses API models have a separate replay issue when ``store`` is disabled:
+LangChain forwards prior ``reasoning`` items back into ``input`` unchanged,
+which makes OpenAI-compatible gateways reject the next turn because those
+opaque ``rs_*`` ids were never persisted server-side.
+
+This module fixes both problems by overriding ``_get_request_payload`` to:
+1. re-inject tool-call signatures for compatible chat-completions payloads
+2. strip non-replayable Responses API items when ``store`` is not enabled
 """
 
 from __future__ import annotations
@@ -27,15 +32,33 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
+_NON_REPLAYABLE_RESPONSE_ITEM_TYPES = frozenset(
+    {
+        "reasoning",
+        "web_search_call",
+        "file_search_call",
+        "computer_call",
+        "code_interpreter_call",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "image_generation_call",
+    }
+)
+
 
 class PatchedChatOpenAI(ChatOpenAI):
-    """ChatOpenAI with ``thought_signature`` preservation for Gemini thinking via OpenAI gateway.
+    """ChatOpenAI patches for OpenAI-compatible gateways.
 
     When using Gemini with thinking enabled via an OpenAI-compatible gateway,
     the API expects ``thought_signature`` to be present on tool-call objects in
     multi-turn conversations.  This patched version restores those signatures
     from ``AIMessage.additional_kwargs["tool_calls"]`` into the serialised
     request payload before it is sent to the API.
+
+    For Responses API models running with ``store`` disabled, it also removes
+    response-only history items such as ``reasoning`` blocks, because replaying
+    their opaque ids in the next turn triggers ``404 Item not found`` errors.
 
     Usage in ``config.yaml``::
 
@@ -61,12 +84,12 @@ class PatchedChatOpenAI(ChatOpenAI):
         stop: list[str] | None = None,
         **kwargs: Any,
     ) -> dict:
-        """Get request payload with ``thought_signature`` preserved on tool-call objects.
+        """Get request payload with gateway-safe history serialization.
 
-        Overrides the parent method to re-inject ``thought_signature`` fields
-        on tool-call objects that were stored in
-        ``additional_kwargs["tool_calls"]`` by LangChain but dropped during
-        serialisation.
+        Overrides the parent method to:
+        1. re-inject ``thought_signature`` fields on tool-call objects that
+           LangChain dropped during serialisation
+        2. remove non-replayable Responses API items when ``store`` is off
         """
         # Capture the original LangChain messages *before* conversion so we can
         # access fields that the serialiser might drop.
@@ -74,6 +97,7 @@ class PatchedChatOpenAI(ChatOpenAI):
 
         # Obtain the base payload from the parent implementation.
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        _strip_non_replayable_response_items(payload)
 
         payload_messages = payload.get("messages", [])
 
@@ -89,6 +113,38 @@ class PatchedChatOpenAI(ChatOpenAI):
                 _restore_tool_call_signatures(payload_msg, ai_msg)
 
         return payload
+
+
+def _strip_non_replayable_response_items(payload: dict) -> None:
+    """Drop transient Responses API items that cannot be replayed with ``store=false``.
+
+    OpenAI-compatible Responses API servers return opaque ids for blocks like
+    ``reasoning``. When DeerFlow replays a prior assistant turn, LangChain
+    includes those blocks verbatim in ``input``. If the original response was
+    not stored server-side, the next turn fails with:
+
+        Item with id 'rs_...' not found. Items are not persisted when `store`
+        is set to false.
+
+    Tool-call items are preserved because DeerFlow still needs them to pair
+    with subsequent ``function_call_output`` messages.
+    """
+    if payload.get("store") is True:
+        return
+
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return
+
+    payload["input"] = [
+        item
+        for item in input_items
+        if not (
+            isinstance(item, dict)
+            and item.get("id")
+            and item.get("type") in _NON_REPLAYABLE_RESPONSE_ITEM_TYPES
+        )
+    ]
 
 
 def _restore_tool_call_signatures(payload_msg: dict, orig_msg: AIMessage) -> None:
