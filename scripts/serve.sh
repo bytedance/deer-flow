@@ -236,7 +236,7 @@ run_service() {
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
-        nohup sh -c "$cmd" &
+        nohup sh -c "$cmd" > /dev/null 2>&1 &
     else
         sh -c "$cmd" &
     fi
