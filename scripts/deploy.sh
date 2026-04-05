@@ -234,7 +234,8 @@ echo -e "${BLUE}Runtime mode: $RUNTIME_MODE${NC}"
 
 case "$RUNTIME_MODE" in
     gateway)
-        export NGINX_CONF=nginx.gateway.conf
+        export LANGGRAPH_UPSTREAM=gateway:8001
+        export LANGGRAPH_REWRITE=/api/
         services="frontend gateway nginx"
         ;;
     standard)
