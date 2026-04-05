@@ -8,6 +8,7 @@ import pytest
 from deerflow.config.acp_config import ACPAgentConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, set_extensions_config
 from deerflow.tools.builtins.invoke_acp_agent_tool import (
+    _build_acp_mcp_servers,
     _build_mcp_servers,
     _build_permission_response,
     _get_work_dir,
@@ -37,6 +38,43 @@ def test_build_mcp_servers_filters_disabled_and_maps_transports():
             "stdio": {"transport": "stdio", "command": "npx", "args": ["srv"]},
             "http": {"transport": "http", "url": "https://example.com/mcp"},
         }
+    finally:
+        monkeypatch.undo()
+        set_extensions_config(ExtensionsConfig(mcp_servers={}, skills={}))
+
+
+def test_build_acp_mcp_servers_formats_list_payload():
+    set_extensions_config(ExtensionsConfig(mcp_servers={"stale": McpServerConfig(enabled=True, type="stdio", command="echo")}, skills={}))
+    fresh_config = ExtensionsConfig(
+        mcp_servers={
+            "stdio": McpServerConfig(enabled=True, type="stdio", command="npx", args=["srv"], env={"FOO": "bar"}),
+            "http": McpServerConfig(enabled=True, type="http", url="https://example.com/mcp", headers={"Authorization": "Bearer token"}),
+            "disabled": McpServerConfig(enabled=False, type="stdio", command="echo"),
+        },
+        skills={},
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: fresh_config),
+    )
+
+    try:
+        assert _build_acp_mcp_servers() == [
+            {
+                "name": "stdio",
+                "type": "stdio",
+                "command": "npx",
+                "args": ["srv"],
+                "env": [{"name": "FOO", "value": "bar"}],
+            },
+            {
+                "name": "http",
+                "type": "http",
+                "url": "https://example.com/mcp",
+                "headers": [{"name": "Authorization", "value": "Bearer token"}],
+            },
+        ]
     finally:
         monkeypatch.undo()
         set_extensions_config(ExtensionsConfig(mcp_servers={}, skills={}))
@@ -251,9 +289,15 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
     assert captured["spawn"] == {"cmd": "codex-acp", "args": ["--json"], "cwd": expected_cwd}
     assert captured["new_session"] == {
         "cwd": expected_cwd,
-        "mcp_servers": {
-            "github": {"transport": "stdio", "command": "npx", "args": ["github-mcp"]},
-        },
+        "mcp_servers": [
+            {
+                "name": "github",
+                "type": "stdio",
+                "command": "npx",
+                "args": ["github-mcp"],
+                "env": [],
+            }
+        ],
         "model": "gpt-5-codex",
     }
     assert captured["prompt"] == {
@@ -446,6 +490,94 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
         sys.modules.pop("acp.schema", None)
 
     assert captured["env"] == {"OPENAI_API_KEY": "sk-from-env", "FOO": "bar"}
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_skips_invalid_mcp_servers(monkeypatch, tmp_path, caplog):
+    """Invalid MCP config should be logged and skipped instead of failing ACP invocation."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool._build_acp_mcp_servers",
+        lambda: (_ for _ in ()).throw(ValueError("missing command")),
+    )
+
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        @property
+        def collected_text(self) -> str:
+            return ""
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            captured["new_session"] = kwargs
+            return SimpleNamespace(session_id="s1")
+
+        async def prompt(self, **kwargs):
+            pass
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, env=None, cwd=None):
+            captured["spawn"] = {"cmd": cmd, "args": list(args), "env": env, "cwd": cwd}
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyRequestError(Exception):
+        @staticmethod
+        def method_not_found(method):
+            return DummyRequestError(method)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            RequestError=DummyRequestError,
+            spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            TextContentBlock=type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)}),
+        ),
+    )
+
+    tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
+    caplog.set_level("WARNING")
+
+    try:
+        await tool.coroutine(agent="codex", prompt="Do something")
+    finally:
+        sys.modules.pop("acp", None)
+        sys.modules.pop("acp.schema", None)
+
+    assert captured["new_session"]["mcp_servers"] == []
+    assert "continuing without MCP servers" in caplog.text
+    assert "missing command" in caplog.text
 
 
 @pytest.mark.anyio

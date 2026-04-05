@@ -232,7 +232,6 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
 
-  
   # Example: OpenRouter (OpenAI-compatible)
   # OpenRouter models use the same ChatOpenAI + base_url pattern as other OpenAI-compatible gateways.
   # - name: openrouter-gemini-2.5-flash
@@ -325,6 +324,16 @@ tools:
     group: file:read
     use: deerflow.sandbox.tools:read_file_tool
 
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+    max_results: 200
+
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+    max_results: 100
+
   - name: write_file
     group: file:write
     use: deerflow.sandbox.tools:write_file_tool
@@ -359,12 +368,27 @@ tool_search:
 
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
+uploads:
+  # PDF-to-Markdown converter used when a PDF is uploaded.
+  # auto        — prefer pymupdf4llm when installed; fall back to MarkItDown for
+  #               image-based or encrypted PDFs (recommended default).
+  # pymupdf4llm — always use pymupdf4llm (must be installed: uv add pymupdf4llm).
+  #               Better heading/table extraction; faster on most files.
+  # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
+  pdf_converter: auto
+
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+  # Optional: Mount additional host directories into the sandbox.
+  # Each mount maps a host path to a virtual container path accessible by the agent.
+  # mounts:
+  #   - host_path: /home/user/my-project    # Absolute path on the host machine
+  #     container_path: /mnt/my-project     # Virtual path inside the sandbox
+  #     read_only: true                     # Whether the mount is read-only (default: false)
 
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
@@ -432,13 +456,17 @@ sandbox:
 # subagents:
 #   # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
 #   timeout_seconds: 900
+#   # Optional global max-turn override for all subagents
+#   # max_turns: 120
 #
-#   # Optional per-agent timeout overrides
+#   # Optional per-agent overrides
 #   agents:
 #     general-purpose:
 #       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
+#       max_turns: 160
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
+#       max_turns: 80
 
 # ============================================================================
 # ACP Agents Configuration
@@ -662,6 +690,10 @@ checkpointer:
 #           context:
 #             thinking_enabled: true
 #             subagent_enabled: true
+#   wecom:
+#     enabled: false
+#     bot_id: $WECOM_BOT_ID
+#     bot_secret: $WECOM_BOT_SECRET
 
 # ============================================================================
 # Guardrails Configuration
