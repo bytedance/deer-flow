@@ -140,6 +140,26 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         )
 
     # ------------------------------------------------------------------
+    # Input sanitisation (L2)
+    # ------------------------------------------------------------------
+
+    # Normal bash commands rarely exceed a few hundred characters.  10 000 is
+    # well above any legitimate use case yet a tiny fraction of Linux ARG_MAX.
+    # Anything longer is almost certainly a payload injection or base64-encoded
+    # attack string.
+    _MAX_COMMAND_LENGTH = 10_000
+
+    def _validate_input(self, command: str) -> str | None:
+        """Return ``None`` if *command* is acceptable, else a rejection reason."""
+        if not command.strip():
+            return "empty command"
+        if len(command) > self._MAX_COMMAND_LENGTH:
+            return "command too long"
+        if "\x00" in command:
+            return "null byte detected"
+        return None
+
+    # ------------------------------------------------------------------
     # Core logic (shared between sync and async paths)
     # ------------------------------------------------------------------
 
@@ -152,10 +172,17 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         command: str = args.get("command", "")
         thread_id = self._get_thread_id(request)
 
-        # ① classify command
+        # ① L2 input sanitisation — reject malformed input before regex analysis
+        reject_reason = self._validate_input(command)
+        if reject_reason:
+            self._write_audit(thread_id, command, "block")
+            logger.warning("[SandboxAudit] INVALID INPUT thread=%s reason=%s", thread_id, reject_reason)
+            return command, thread_id, "block"
+
+        # ② classify command
         verdict = _classify_command(command)
 
-        # ② audit log
+        # ③ audit log
         self._write_audit(thread_id, command, verdict)
 
         if verdict == "block":

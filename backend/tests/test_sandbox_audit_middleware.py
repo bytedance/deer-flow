@@ -135,6 +135,74 @@ class TestClassifyCommand:
 
 
 # ---------------------------------------------------------------------------
+# _validate_input unit tests (L2 input sanitisation)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateInput:
+    def setup_method(self):
+        self.mw = SandboxAuditMiddleware()
+
+    def test_empty_string_rejected(self):
+        assert self.mw._validate_input("") == "empty command"
+
+    def test_whitespace_only_rejected(self):
+        assert self.mw._validate_input("   \t\n  ") == "empty command"
+
+    def test_normal_command_accepted(self):
+        assert self.mw._validate_input("ls -la") is None
+
+    def test_command_at_max_length_accepted(self):
+        cmd = "a" * 10_000
+        assert self.mw._validate_input(cmd) is None
+
+    def test_command_exceeding_max_length_rejected(self):
+        cmd = "a" * 10_001
+        assert self.mw._validate_input(cmd) == "command too long"
+
+    def test_null_byte_rejected(self):
+        assert self.mw._validate_input("ls\x00; rm -rf /") == "null byte detected"
+
+    def test_null_byte_at_start_rejected(self):
+        assert self.mw._validate_input("\x00ls") == "null byte detected"
+
+    def test_null_byte_at_end_rejected(self):
+        assert self.mw._validate_input("ls\x00") == "null byte detected"
+
+
+class TestL2BlocksInWrapToolCall:
+    """Verify that L2 rejections flow through wrap_tool_call correctly."""
+
+    def setup_method(self):
+        self.mw = SandboxAuditMiddleware()
+
+    def test_empty_command_blocked(self):
+        request = _make_request("")
+        handler = _make_handler()
+        result = self.mw.wrap_tool_call(request, handler)
+        assert not handler.called
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "blocked" in result.content.lower()
+
+    def test_null_byte_command_blocked(self):
+        request = _make_request("echo\x00rm -rf /")
+        handler = _make_handler()
+        result = self.mw.wrap_tool_call(request, handler)
+        assert not handler.called
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+
+    def test_oversized_command_blocked(self):
+        request = _make_request("a" * 10_001)
+        handler = _make_handler()
+        result = self.mw.wrap_tool_call(request, handler)
+        assert not handler.called
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+
+
+# ---------------------------------------------------------------------------
 # SandboxAuditMiddleware.wrap_tool_call integration tests
 # ---------------------------------------------------------------------------
 
