@@ -11,6 +11,8 @@ from deerflow.agents.thread_state import ThreadState
 
 logger = logging.getLogger(__name__)
 
+VIEW_IMAGE_INJECTION_MARKER = "view_image_context_injection"
+
 
 class ViewImageMiddlewareState(ThreadState):
     """Reuse the thread state so reducer-backed keys keep their annotations."""
@@ -157,6 +159,10 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         assistant_idx = messages.index(last_assistant_msg)
         for msg in messages[assistant_idx + 1 :]:
             if isinstance(msg, HumanMessage):
+                if msg.additional_kwargs.get("hide_from_ui") is True:
+                    return False
+                if msg.additional_kwargs.get(VIEW_IMAGE_INJECTION_MARKER) is True:
+                    return False
                 content_str = str(msg.content)
                 if "Here are the images you've viewed" in content_str or "Here are the details of the images you've viewed" in content_str:
                     # Already added, don't add again
@@ -179,8 +185,15 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # Create the image details message with text and image content
         image_content = self._create_image_details_message(state)
 
-        # Create a new human message with mixed content (text + images)
-        human_msg = HumanMessage(content=image_content)
+        # Mark this as an internal context injection so the frontend can keep
+        # the conversation transcript clean while the model still sees it.
+        human_msg = HumanMessage(
+            content=image_content,
+            additional_kwargs={
+                "hide_from_ui": True,
+                VIEW_IMAGE_INJECTION_MARKER: True,
+            },
+        )
 
         logger.debug("Injecting image details message with images before LLM call")
 

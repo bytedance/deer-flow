@@ -17,16 +17,19 @@ def view_image_tool(
     image_path: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
-    """Read an image file.
+    """Read image content so the model can analyze it visually.
 
-    Use this tool to read an image file and make it available for display.
+    Use this tool when YOU need the model to inspect pixels in an image file.
+    This injects the image into model context for visual interpretation.
 
     When to use the view_image tool:
-    - When you need to view an image file.
+    - When you need the model to describe, compare, or analyze an image
+    - When the next step depends on understanding the visual content itself
 
     When NOT to use the view_image tool:
-    - For non-image files (use present_files instead)
-    - For multiple files at once (use present_files instead)
+    - To show generated images to the user. Use present_files instead.
+    - For non-image files. Use present_files instead.
+    - For multiple files at once that only need to be delivered to the user. Use present_files instead.
 
     Args:
         image_path: Absolute path to the image file. Common formats supported: jpg, jpeg, png, webp.

@@ -1,6 +1,10 @@
 import { getBackendBaseURL } from "../config";
 import type { AgentThread } from "../threads";
 
+export function isArtifactVirtualPath(path: string | undefined): path is string {
+  return typeof path === "string" && path.startsWith("/mnt/");
+}
+
 export function urlOfArtifact({
   filepath,
   threadId,

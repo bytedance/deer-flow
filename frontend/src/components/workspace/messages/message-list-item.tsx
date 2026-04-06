@@ -17,7 +17,10 @@ import {
 } from "@/components/ai-elements/reasoning";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
-import { resolveArtifactURL } from "@/core/artifacts/utils";
+import {
+  isArtifactVirtualPath,
+  resolveArtifactURL,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -100,7 +103,7 @@ function MessageImage({
     return <img className={imgClassName} src={src} alt={alt} {...props} />;
   }
 
-  const url = src.startsWith("/mnt/") ? resolveArtifactURL(src, threadId) : src;
+  const url = isArtifactVirtualPath(src) ? resolveArtifactURL(src, threadId) : src;
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">

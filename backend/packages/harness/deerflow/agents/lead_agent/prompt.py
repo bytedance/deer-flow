@@ -417,7 +417,9 @@ You: "Deploying to staging..." [proceed]
 - Use `read_file` tool to read uploaded files using their paths from the list
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
 - All temporary work happens in `/mnt/user-data/workspace`
-- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_file` tool
+- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files`
+- Use `present_files` to show generated files or images to the user
+- Use `view_image` only when you need the model to inspect image pixels for visual analysis
 {acp_section}
 </working_directory>
 
@@ -645,7 +647,7 @@ def _build_acp_section() -> str:
         "- ACP agents (e.g. codex, claude_code) run in their own independent workspace — NOT in `/mnt/user-data/`\n"
         "- When writing prompts for ACP agents, describe the task only — do NOT reference `/mnt/user-data` paths\n"
         "- ACP agent results are accessible at `/mnt/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files\n"
-        "- To deliver ACP output to the user: copy from `/mnt/acp-workspace/<file>` to `/mnt/user-data/outputs/<file>`, then use `present_file`"
+        "- To deliver ACP output to the user: copy from `/mnt/acp-workspace/<file>` to `/mnt/user-data/outputs/<file>`, then use `present_files`"
     )
 
 
