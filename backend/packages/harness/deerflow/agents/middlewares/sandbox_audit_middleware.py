@@ -45,6 +45,9 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(LD_PRELOAD|LD_LIBRARY_PATH)\s*="),
     # --- bash built-in networking (bypasses tool allowlists) ---
     re.compile(r"/dev/tcp/"),
+    # --- fork bomb ---
+    re.compile(r"\S+\(\)\s*\{[^}]*\|\s*\S+\s*&"),  # :(){ :|:& };:
+    re.compile(r"while\s+true.*&\s*done"),  # while true; do bash & done
 ]
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
@@ -58,9 +61,36 @@ _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
-def _classify_command(command: str) -> str:
-    """Return 'block', 'warn', or 'pass'."""
-    # Normalize for matching (collapse whitespace)
+def _split_compound_command(command: str) -> list[str]:
+    """Split a compound command into sub-commands (quote-aware).
+
+    Uses shlex to correctly handle quoted strings so that operators
+    inside quotes (e.g. ``echo "a && b"``) are not treated as separators.
+    Falls back to returning the whole command if shlex fails (fail-closed:
+    the caller will classify the unsplit command, which is safer than
+    silently dropping parts).
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return [command]
+
+    parts: list[str] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in ("&&", "||", ";"):
+            if current:
+                parts.append(" ".join(current))
+                current = []
+        else:
+            current.append(token)
+    if current:
+        parts.append(" ".join(current))
+    return parts if parts else [command]
+
+
+def _classify_single_command(command: str) -> str:
+    """Classify a single (non-compound) command. Return 'block', 'warn', or 'pass'."""
     normalized = " ".join(command.split())
 
     for pattern in _HIGH_RISK_PATTERNS:
@@ -83,6 +113,23 @@ def _classify_command(command: str) -> str:
             return "warn"
 
     return "pass"
+
+
+def _classify_command(command: str) -> str:
+    """Return 'block', 'warn', or 'pass'.
+
+    Splits compound commands (e.g. ``cmd1 && cmd2 ; cmd3``) and classifies
+    each sub-command independently. The most severe verdict wins.
+    """
+    sub_commands = _split_compound_command(command)
+    worst = "pass"
+    for sub in sub_commands:
+        verdict = _classify_single_command(sub)
+        if verdict == "block":
+            return "block"  # short-circuit: can't get worse
+        if verdict == "warn":
+            worst = "warn"
+    return worst
 
 
 # ---------------------------------------------------------------------------
