@@ -50,11 +50,15 @@ def load_agent_config(name: str | None) -> AgentConfig | None:
         raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
     agent_dir = get_paths().agent_dir(name)
     config_file = agent_dir / "config.yaml"
+    soul_file = agent_dir / SOUL_FILENAME
 
     if not agent_dir.exists():
         raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
 
     if not config_file.exists():
+        if soul_file.exists():
+            logger.info("Falling back to inferred config for legacy agent '%s' without config.yaml", name)
+            return AgentConfig(name=name)
         raise FileNotFoundError(f"Agent config not found: {config_file}")
 
     try:
@@ -112,8 +116,9 @@ def list_custom_agents() -> list[AgentConfig]:
             continue
 
         config_file = entry / "config.yaml"
-        if not config_file.exists():
-            logger.debug(f"Skipping {entry.name}: no config.yaml")
+        soul_file = entry / SOUL_FILENAME
+        if not config_file.exists() and not soul_file.exists():
+            logger.debug(f"Skipping {entry.name}: no config.yaml or SOUL.md")
             continue
 
         try:

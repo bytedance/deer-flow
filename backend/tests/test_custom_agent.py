@@ -139,6 +139,20 @@ class TestLoadAgentConfig:
             with pytest.raises(FileNotFoundError):
                 load_agent_config("broken-agent")
 
+    def test_load_legacy_agent_without_config_yaml(self, tmp_path):
+        agent_dir = tmp_path / "agents" / "legacy-agent"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "SOUL.md").write_text("Legacy soul", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("legacy-agent")
+
+        assert cfg.name == "legacy-agent"
+        assert cfg.description == ""
+        assert cfg.model is None
+
     def test_load_config_infers_name_from_dir(self, tmp_path):
         """Config without 'name' field should use directory name."""
         agent_dir = tmp_path / "agents" / "inferred-name"
@@ -288,6 +302,19 @@ class TestListCustomAgents:
 
         assert len(agents) == 1
         assert agents[0].name == "valid-agent"
+
+    def test_includes_legacy_agent_with_only_soul_file(self, tmp_path):
+        _write_agent(tmp_path, "valid-agent", {"name": "valid-agent"})
+        legacy_agent_dir = tmp_path / "agents" / "legacy-agent"
+        legacy_agent_dir.mkdir(parents=True)
+        (legacy_agent_dir / "SOUL.md").write_text("Legacy soul", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import list_custom_agents
+
+            agents = list_custom_agents()
+
+        assert [agent.name for agent in agents] == ["legacy-agent", "valid-agent"]
 
     def test_skips_non_directory_entries(self, tmp_path):
         # Create the agents dir with a file (not a dir)
@@ -460,6 +487,18 @@ class TestAgentsAPI:
     def test_get_missing_agent_404(self, agent_client):
         response = agent_client.get("/api/agents/nonexistent")
         assert response.status_code == 404
+
+    def test_get_legacy_agent_without_config(self, agent_client, tmp_path):
+        agent_dir = tmp_path / "agents" / "legacy-agent"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "SOUL.md").write_text("Legacy soul", encoding="utf-8")
+
+        response = agent_client.get("/api/agents/legacy-agent")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "legacy-agent"
+        assert data["description"] == ""
+        assert data["soul"] == "Legacy soul"
 
     def test_update_agent_soul(self, agent_client):
         agent_client.post("/api/agents", json={"name": "update-me", "soul": "original"})
