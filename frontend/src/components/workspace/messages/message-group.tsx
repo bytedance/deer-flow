@@ -24,10 +24,6 @@ import {
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
-import {
-  extractReasoningContentFromMessage,
-  findToolCallResult,
-} from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
@@ -38,6 +34,12 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import {
+  convertToSteps,
+  getAboveVisibleSteps,
+  getLastReasoningStep,
+  getVisibleToolCallSteps,
+} from "./message-group-logic";
 
 export function MessageGroup({
   className,
@@ -56,33 +58,31 @@ export function MessageGroup({
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
   const steps = useMemo(() => convertToSteps(messages), [messages]);
-  const lastToolCallStep = useMemo(() => {
-    const filteredSteps = steps.filter((step) => step.type === "toolCall");
-    return filteredSteps[filteredSteps.length - 1];
-  }, [steps]);
-  const aboveLastToolCallSteps = useMemo(() => {
-    if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
-      return steps.slice(0, index);
-    }
-    return [];
-  }, [lastToolCallStep, steps]);
+  const visibleToolCallSteps = useMemo(
+    () => getVisibleToolCallSteps(steps),
+    [steps],
+  );
+  const aboveVisibleToolCallSteps = useMemo(
+    () => getAboveVisibleSteps(steps, visibleToolCallSteps),
+    [steps, visibleToolCallSteps],
+  );
+  const visibleToolCallKey = useMemo(
+    () =>
+      visibleToolCallSteps
+        .map((step) => step.id ?? step.messageId ?? "")
+        .join(":") || "visible-tool-calls",
+    [visibleToolCallSteps],
+  );
   const lastReasoningStep = useMemo(() => {
-    if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
-      return steps.slice(index + 1).find((step) => step.type === "reasoning");
-    } else {
-      const filteredSteps = steps.filter((step) => step.type === "reasoning");
-      return filteredSteps[filteredSteps.length - 1];
-    }
-  }, [lastToolCallStep, steps]);
+    return getLastReasoningStep(steps, visibleToolCallSteps);
+  }, [steps, visibleToolCallSteps]);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   return (
     <ChainOfThought
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
     >
-      {aboveLastToolCallSteps.length > 0 && (
+      {aboveVisibleToolCallSteps.length > 0 && (
         <Button
           key="above"
           className="w-full items-start justify-start text-left"
@@ -94,7 +94,7 @@ export function MessageGroup({
               <span className="opacity-60">
                 {showAbove
                   ? t.toolCalls.lessSteps
-                  : t.toolCalls.moreSteps(aboveLastToolCallSteps.length)}
+                  : t.toolCalls.moreSteps(aboveVisibleToolCallSteps.length)}
               </span>
             }
             icon={
@@ -108,10 +108,10 @@ export function MessageGroup({
           ></ChainOfThoughtStep>
         </Button>
       )}
-      {lastToolCallStep && (
+      {visibleToolCallSteps.length > 0 && (
         <ChainOfThoughtContent className="px-4 pb-2">
           {showAbove &&
-            aboveLastToolCallSteps.map((step) =>
+            aboveVisibleToolCallSteps.map((step) =>
               step.type === "reasoning" ? (
                 <ChainOfThoughtStep
                   key={step.id}
@@ -127,16 +127,18 @@ export function MessageGroup({
                 <ToolCall key={step.id} {...step} isLoading={isLoading} />
               ),
             )}
-          {lastToolCallStep && (
-            <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              <ToolCall
-                key={lastToolCallStep.id}
-                {...lastToolCallStep}
-                isLast={true}
-                isLoading={isLoading}
-              />
-            </FlipDisplay>
-          )}
+          <FlipDisplay uniqueKey={visibleToolCallKey}>
+            <div className="space-y-3">
+              {visibleToolCallSteps.map((step, index) => (
+                <ToolCall
+                  key={step.id}
+                  {...step}
+                  isLast={index === visibleToolCallSteps.length - 1}
+                  isLoading={isLoading}
+                />
+              ))}
+            </div>
+          </FlipDisplay>
         </ChainOfThoughtContent>
       )}
       {lastReasoningStep && (
@@ -188,6 +190,7 @@ function ToolCall({
   messageId,
   name,
   args,
+  isComplete,
   result,
   isLast = false,
   isLoading = false,
@@ -196,6 +199,7 @@ function ToolCall({
   messageId?: string;
   name: string;
   args: Record<string, unknown>;
+  isComplete: boolean;
   result?: string | Record<string, unknown>;
   isLast?: boolean;
   isLoading?: boolean;
@@ -203,6 +207,7 @@ function ToolCall({
   const { t } = useI18n();
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
+  const status = isComplete ? "complete" : isLoading ? "active" : "pending";
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -210,7 +215,12 @@ function ToolCall({
       label = t.toolCalls.searchOnWebFor(args.query);
     }
     return (
-      <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={label}
+        icon={SearchIcon}
+        status={status}
+      >
         {Array.isArray(result) && (
           <ChainOfThoughtSearchResults>
             {result.map((item) => (
@@ -240,7 +250,12 @@ function ToolCall({
       }
     )?.results;
     return (
-      <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={label}
+        icon={SearchIcon}
+        status={status}
+      >
         {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
@@ -283,6 +298,7 @@ function ToolCall({
         className="cursor-pointer"
         label={t.toolCalls.viewWebPage}
         icon={GlobeIcon}
+        status={status}
         onClick={() => {
           window.open(url, "_blank");
         }}
@@ -304,7 +320,12 @@ function ToolCall({
     }
     const path: string | undefined = (args as { path: string })?.path;
     return (
-      <ChainOfThoughtStep key={id} label={description} icon={FolderOpenIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={description}
+        icon={FolderOpenIcon}
+        status={status}
+      >
         {path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
             {path}
@@ -320,7 +341,12 @@ function ToolCall({
     }
     const { path } = args as { path: string; content: string };
     return (
-      <ChainOfThoughtStep key={id} label={description} icon={BookOpenTextIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={description}
+        icon={BookOpenTextIcon}
+        status={status}
+      >
         {path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
             {path}
@@ -354,6 +380,7 @@ function ToolCall({
         className="cursor-pointer"
         label={description}
         icon={NotebookPenIcon}
+        status={status}
         onClick={() => {
           select(
             new URL(
@@ -382,6 +409,7 @@ function ToolCall({
         key={id}
         label={description}
         icon={SquareTerminalIcon}
+        status={status}
       >
         {command && (
           <CodeBlock
@@ -399,6 +427,7 @@ function ToolCall({
         key={id}
         label={t.toolCalls.needYourHelp}
         icon={MessageCircleQuestionMarkIcon}
+        status={status}
       ></ChainOfThoughtStep>
     );
   } else if (name === "write_todos") {
@@ -407,6 +436,7 @@ function ToolCall({
         key={id}
         label={t.toolCalls.writeTodos}
         icon={ListTodoIcon}
+        status={status}
       ></ChainOfThoughtStep>
     );
   } else {
@@ -417,69 +447,8 @@ function ToolCall({
         key={id}
         label={description ?? t.toolCalls.useTool(name)}
         icon={WrenchIcon}
+        status={status}
       ></ChainOfThoughtStep>
     );
   }
-}
-
-interface GenericCoTStep<T extends string = string> {
-  id?: string;
-  messageId?: string;
-  type: T;
-}
-
-interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
-  reasoning: string | null;
-}
-
-interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
-  name: string;
-  args: Record<string, unknown>;
-  result?: string;
-}
-
-type CoTStep = CoTReasoningStep | CoTToolCallStep;
-
-function convertToSteps(messages: Message[]): CoTStep[] {
-  const steps: CoTStep[] = [];
-  for (const message of messages) {
-    if (message.type === "ai") {
-      const reasoning = extractReasoningContentFromMessage(message);
-      if (reasoning) {
-        const step: CoTReasoningStep = {
-          id: message.id,
-          messageId: message.id,
-          type: "reasoning",
-          reasoning: extractReasoningContentFromMessage(message),
-        };
-        steps.push(step);
-      }
-      for (const tool_call of message.tool_calls ?? []) {
-        if (tool_call.name === "task") {
-          continue;
-        }
-        const step: CoTToolCallStep = {
-          id: tool_call.id,
-          messageId: message.id,
-          type: "toolCall",
-          name: tool_call.name,
-          args: tool_call.args,
-        };
-        const toolCallId = tool_call.id;
-        if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
-          if (toolCallResult) {
-            try {
-              const json = JSON.parse(toolCallResult);
-              step.result = json;
-            } catch {
-              step.result = toolCallResult;
-            }
-          }
-        }
-        steps.push(step);
-      }
-    }
-  }
-  return steps;
 }

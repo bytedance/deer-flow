@@ -318,10 +318,7 @@ export function hasSubagent(message: AIMessage) {
 export function findToolCallResult(toolCallId: string, messages: Message[]) {
   for (const message of messages) {
     if (message.type === "tool" && message.tool_call_id === toolCallId) {
-      const content = extractTextFromMessage(message);
-      if (content) {
-        return content;
-      }
+      return extractTextFromMessage(message);
     }
   }
   return undefined;
