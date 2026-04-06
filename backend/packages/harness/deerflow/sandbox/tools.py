@@ -197,54 +197,6 @@ def _is_acp_workspace_path(path: str) -> bool:
     return path == _ACP_WORKSPACE_VIRTUAL_PATH or path.startswith(f"{_ACP_WORKSPACE_VIRTUAL_PATH}/")
 
 
-def _get_custom_mounts():
-    """Get custom volume mounts from sandbox config.
-
-    Result is cached after the first successful config load.  If config loading
-    fails an empty list is returned *without* caching so that a later call can
-    pick up the real value once the config is available.
-    """
-    cached = getattr(_get_custom_mounts, "_cached", None)
-    if cached is not None:
-        return cached
-    try:
-        from pathlib import Path
-
-        from deerflow.config import get_app_config
-
-        config = get_app_config()
-        mounts = []
-        if config.sandbox and config.sandbox.mounts:
-            # Only include mounts whose host_path exists, consistent with
-            # LocalSandboxProvider._setup_path_mappings() which also filters
-            # by host_path.exists().
-            mounts = [m for m in config.sandbox.mounts if Path(m.host_path).exists()]
-        _get_custom_mounts._cached = mounts  # type: ignore[attr-defined]
-        return mounts
-    except Exception:
-        # If config loading fails, return an empty list without caching so that
-        # a later call can retry once the config is available.
-        return []
-
-
-def _is_custom_mount_path(path: str) -> bool:
-    """Check if path is under a custom mount container_path."""
-    for mount in _get_custom_mounts():
-        if path == mount.container_path or path.startswith(f"{mount.container_path}/"):
-            return True
-    return False
-
-
-def _get_custom_mount_for_path(path: str):
-    """Get the mount config matching this path (longest prefix first)."""
-    best = None
-    for mount in _get_custom_mounts():
-        if path == mount.container_path or path.startswith(f"{mount.container_path}/"):
-            if best is None or len(mount.container_path) > len(best.container_path):
-                best = mount
-    return best
-
-
 def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -> str | None:
     """Extract thread_id from thread_data by inspecting workspace_path.
 
@@ -1061,8 +1013,11 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
                 max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
             except Exception:
                 max_chars = 20000
-            output = _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
-            return prepare_tool_output_for_context(content=output, tool_name="bash", thread_data=thread_data)
+            output = mask_local_paths_in_output(output, thread_data)
+            prepared_output = prepare_tool_output_for_context(content=output, tool_name="bash", thread_data=thread_data)
+            if prepared_output == output:
+                prepared_output = _truncate_bash_output(prepared_output, max_chars)
+            return prepared_output
         ensure_thread_directories_exist(runtime)
         try:
             from deerflow.config.app_config import get_app_config
@@ -1071,12 +1026,15 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
-        output = _truncate_bash_output(sandbox.execute_command(command), max_chars)
-        return prepare_tool_output_for_context(
+        output = sandbox.execute_command(command)
+        prepared_output = prepare_tool_output_for_context(
             content=output,
             tool_name="bash",
             thread_data=get_thread_data(runtime),
         )
+        if prepared_output == output:
+            prepared_output = _truncate_bash_output(prepared_output, max_chars)
+        return prepared_output
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:
@@ -1283,8 +1241,14 @@ def read_file_tool(
             max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
         except Exception:
             max_chars = 50000
-        content = _truncate_read_file_output(content, max_chars)
-        return prepare_tool_output_for_context(content=content, tool_name="read_file", thread_data=get_thread_data(runtime))
+        prepared_content = prepare_tool_output_for_context(
+            content=content,
+            tool_name="read_file",
+            thread_data=get_thread_data(runtime),
+        )
+        if prepared_content == content:
+            prepared_content = _truncate_read_file_output(prepared_content, max_chars)
+        return prepared_content
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
