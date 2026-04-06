@@ -176,7 +176,7 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         """
         args = request.tool_call.get("args", {})
         raw_command = args.get("command")
-        command = str(raw_command) if raw_command is not None else ""
+        command = raw_command if isinstance(raw_command, str) else ""
         thread_id = self._get_thread_id(request)
 
         # ① input sanitisation — reject malformed input before regex analysis

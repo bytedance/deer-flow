@@ -395,6 +395,63 @@ class TestSandboxAuditMiddlewareAwrapToolCall:
 
 
 # ---------------------------------------------------------------------------
+# Input sanitisation via awrap_tool_call (async path)
+# ---------------------------------------------------------------------------
+
+
+class TestInputSanitisationBlocksInAwrapToolCall:
+    """Verify that input sanitisation rejections flow through awrap_tool_call correctly."""
+
+    def setup_method(self):
+        self.mw = SandboxAuditMiddleware()
+
+    async def _call_async(self, request):
+        handler_mock = _make_handler()
+
+        async def async_handler(req):
+            return handler_mock(req)
+
+        result = await self.mw.awrap_tool_call(request, async_handler)
+        return result, handler_mock.called
+
+    @pytest.mark.anyio
+    async def test_empty_command_blocked_with_reason(self):
+        request = _make_request("")
+        result, called = await self._call_async(request)
+        assert not called
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "empty command" in result.content.lower()
+
+    @pytest.mark.anyio
+    async def test_null_byte_command_blocked_with_reason(self):
+        request = _make_request("echo\x00rm -rf /")
+        result, called = await self._call_async(request)
+        assert not called
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "null byte" in result.content.lower()
+
+    @pytest.mark.anyio
+    async def test_oversized_command_blocked_with_reason(self):
+        request = _make_request("a" * 10_001)
+        result, called = await self._call_async(request)
+        assert not called
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "command too long" in result.content.lower()
+
+    @pytest.mark.anyio
+    async def test_none_command_coerced_to_empty(self):
+        request = _make_request("")
+        request.tool_call["args"]["command"] = None
+        result, called = await self._call_async(request)
+        assert not called
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+
+
+# ---------------------------------------------------------------------------
 # Precision / recall summary (asserted metrics for benchmark reporting)
 # ---------------------------------------------------------------------------
 
