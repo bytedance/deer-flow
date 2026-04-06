@@ -62,3 +62,15 @@ def test_load_skills_skips_hidden_directories(tmp_path: Path):
 
     assert "ok-skill" in names
     assert "secret-skill" not in names
+
+
+def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public" / "shared-skill", "shared-skill", "Public version")
+    _write_skill(skills_root / "custom" / "shared-skill", "shared-skill", "Custom version")
+
+    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    shared = next(skill for skill in skills if skill.name == "shared-skill")
+
+    assert shared.category == "custom"
+    assert shared.description == "Custom version"

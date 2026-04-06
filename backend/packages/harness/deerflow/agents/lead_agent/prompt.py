@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+from functools import lru_cache
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
@@ -14,6 +15,30 @@ def _get_enabled_skills():
     except Exception:
         logger.exception("Failed to load enabled skills for prompt injection")
         return []
+
+
+def _skill_mutability_label(category: str) -> str:
+    return "[custom, editable]" if category == "custom" else "[built-in]"
+
+
+def clear_skills_system_prompt_cache() -> None:
+    _get_cached_skills_prompt_section.cache_clear()
+
+
+def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:
+    if not skill_evolution_enabled:
+        return ""
+    return """
+## Skill Self-Evolution
+After completing a task, consider creating or updating a skill when:
+- The task required 5+ tool calls to resolve
+- You overcame non-obvious errors or pitfalls
+- The user corrected your approach and the corrected version worked
+- You discovered a non-trivial, recurring workflow
+If you used a skill and encountered issues not covered by it, patch it immediately.
+Prefer patch over edit. Before creating a new skill, confirm with the user first.
+Skip simple one-off tasks.
+"""
 
 
 def _build_subagent_section(max_concurrent: int) -> str:
@@ -388,37 +413,21 @@ def _get_memory_context(agent_name: str | None = None) -> str:
         return ""
 
 
-def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
-    """Generate the skills prompt section with available skills list.
-
-    Returns the <skill_system>...</skill_system> block listing all enabled skills,
-    suitable for injection into any agent's system prompt.
-    """
-    skills = _get_enabled_skills()
-
-    try:
-        from deerflow.config import get_app_config
-
-        config = get_app_config()
-        container_base_path = config.skills.container_path
-    except Exception:
-        container_base_path = "/mnt/skills"
-
-    if not skills:
-        return ""
-
-    if available_skills is not None:
-        skills = [skill for skill in skills if skill.name in available_skills]
-
-    # Check again after filtering
-    if not skills:
-        return ""
-
-    skill_items = "\n".join(
-        f"    <skill>\n        <name>{skill.name}</name>\n        <description>{skill.description}</description>\n        <location>{skill.get_container_file_path(container_base_path)}</location>\n    </skill>" for skill in skills
-    )
-    skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
-
+@lru_cache(maxsize=32)
+def _get_cached_skills_prompt_section(
+    skill_signature: tuple[tuple[str, str, str, str], ...],
+    available_skills_key: tuple[str, ...] | None,
+    container_base_path: str,
+    skill_evolution_section: str,
+) -> str:
+    filtered = [(name, description, category, location) for name, description, category, location in skill_signature if available_skills_key is None or name in available_skills_key]
+    skills_list = ""
+    if filtered:
+        skill_items = "\n".join(
+            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>\n    </skill>"
+            for name, description, category, location in filtered
+        )
+        skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
     return f"""<skill_system>
 You have access to skills that provide optimized workflows for specific tasks. Each skill contains best practices, frameworks, and references to additional resources.
 
@@ -430,10 +439,38 @@ You have access to skills that provide optimized workflows for specific tasks. E
 5. Follow the skill's instructions precisely
 
 **Skills are located at:** {container_base_path}
-
+{skill_evolution_section}
 {skills_list}
 
 </skill_system>"""
+
+
+def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
+    """Generate the skills prompt section with available skills list."""
+    skills = _get_enabled_skills()
+
+    try:
+        from deerflow.config import get_app_config
+
+        config = get_app_config()
+        container_base_path = config.skills.container_path
+        skill_evolution_enabled = config.skill_evolution.enabled
+    except Exception:
+        container_base_path = "/mnt/skills"
+        skill_evolution_enabled = False
+
+    if not skills and not skill_evolution_enabled:
+        return ""
+
+    if available_skills is not None and not any(skill.name in available_skills for skill in skills):
+        return ""
+
+    skill_signature = tuple((skill.name, skill.description, skill.category, skill.get_container_file_path(container_base_path)) for skill in skills)
+    available_key = tuple(sorted(available_skills)) if available_skills is not None else None
+    if not skill_signature and available_key is not None:
+        return ""
+    skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
+    return _get_cached_skills_prompt_section(skill_signature, available_key, container_base_path, skill_evolution_section)
 
 
 def get_agent_soul(agent_name: str | None) -> str:
