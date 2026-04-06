@@ -188,6 +188,7 @@ export function RecentChatList() {
             />
             {searchQuery && (
               <button
+                type="button"
                 className="text-muted-foreground hover:text-foreground absolute right-3 top-1/2 -translate-y-1/2"
                 onClick={() => setSearchQuery("")}
                 aria-label="Clear search"
@@ -197,11 +198,10 @@ export function RecentChatList() {
             )}
           </div>
           <SidebarMenu>
-            <div className="flex w-full flex-col gap-1">
-              {filteredThreads.length === 0 && searchQuery && (
-                <p className="text-muted-foreground px-2 py-4 text-center text-xs">
+              {filteredThreads.length === 0 && deferredQuery && (
+                <li className="text-muted-foreground list-none px-2 py-4 text-center text-xs">
                   {t.sidebar.noMatchingThreads}
-                </p>
+                </li>
               )}
               {filteredThreads.map((thread) => {
                 const isActive = pathOfThread(thread.thread_id) === pathname;
@@ -290,7 +290,6 @@ export function RecentChatList() {
                   </SidebarMenuItem>
                 );
               })}
-            </div>
           </SidebarMenu>
         </SidebarGroupContent>
       </SidebarGroup>
