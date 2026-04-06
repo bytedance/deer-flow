@@ -245,6 +245,28 @@ models:
   #   max_tokens: 8192
   #   temperature: 0.7
 
+  # Example: vLLM 0.19.0 (OpenAI-compatible, with reasoning toggle)
+  # DeerFlow's vLLM provider preserves vLLM reasoning across tool-call turns and
+  # toggles Qwen-style reasoning by writing
+  # extra_body.chat_template_kwargs.enable_thinking=true/false.
+  # Some reasoning models also require the server to be started with
+  # `vllm serve ... --reasoning-parser <parser>`.
+  # - name: qwen3-32b-vllm
+  #   display_name: Qwen3 32B (vLLM)
+  #   use: deerflow.models.vllm_provider:VllmChatModel
+  #   model: Qwen/Qwen3-32B
+  #   api_key: $VLLM_API_KEY
+  #   base_url: http://localhost:8000/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       chat_template_kwargs:
+  #         enable_thinking: true
+
 # ============================================================================
 # Tool Groups Configuration
 # ============================================================================
