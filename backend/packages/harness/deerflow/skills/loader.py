@@ -1,11 +1,16 @@
+import asyncio
 import logging
 import os
+import threading
 from pathlib import Path
 
 from .parser import parse_skill_file
 from .types import Skill
 
 logger = logging.getLogger(__name__)
+
+_SKILLS_CACHE: dict[tuple[str | None, bool], list[Skill]] = {}
+_SKILLS_CACHE_LOCK = threading.Lock()
 
 
 def get_skills_root_path() -> Path:
@@ -22,36 +27,34 @@ def get_skills_root_path() -> Path:
     return skills_dir
 
 
-def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False) -> list[Skill]:
-    """
-    Load all skills from the skills directory.
+def _cache_key(skills_path: Path | None, enabled_only: bool) -> tuple[str | None, bool]:
+    return (str(skills_path.resolve()) if skills_path is not None else None, enabled_only)
 
-    Scans both public and custom skill directories, parsing SKILL.md files
-    to extract metadata. The enabled state is determined by the skills_state_config.json file.
 
-    Args:
-        skills_path: Optional custom path to skills directory.
-                     If not provided and use_config is True, uses path from config.
-                     Otherwise defaults to deer-flow/skills
-        use_config: Whether to load skills path from config (default: True)
-        enabled_only: If True, only return enabled skills (default: False)
+def invalidate_skills_cache() -> None:
+    """Drop the in-process skills cache."""
+    with _SKILLS_CACHE_LOCK:
+        _SKILLS_CACHE.clear()
 
-    Returns:
-        List of Skill objects, sorted by name
-    """
-    if skills_path is None:
-        if use_config:
-            try:
-                from deerflow.config import get_app_config
 
-                config = get_app_config()
-                skills_path = config.skills.get_skills_path()
-            except Exception:
-                # Fallback to default if config fails
-                skills_path = get_skills_root_path()
-        else:
-            skills_path = get_skills_root_path()
+def _resolve_skills_path(skills_path: Path | None, use_config: bool) -> Path:
+    if skills_path is not None:
+        return skills_path
 
+    if use_config:
+        try:
+            from deerflow.config import get_app_config
+
+            config = get_app_config()
+            return config.skills.get_skills_path()
+        except Exception:
+            # Fallback to default if config fails
+            return get_skills_root_path()
+
+    return get_skills_root_path()
+
+
+def _scan_skills(skills_path: Path) -> list[Skill]:
     if not skills_path.exists():
         return []
 
@@ -93,11 +96,54 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
         # If config loading fails, default to all enabled
         logger.warning("Failed to load extensions config: %s", e)
 
-    # Filter by enabled status if requested
-    if enabled_only:
-        skills = [skill for skill in skills if skill.enabled]
-
     # Sort by name for consistent ordering
     skills.sort(key=lambda s: s.name)
-
     return skills
+
+
+def refresh_skills_cache(skills_path: Path | None = None, use_config: bool = True) -> None:
+    """Refresh the in-process skills cache synchronously."""
+    resolved = _resolve_skills_path(skills_path, use_config)
+    scanned = _scan_skills(resolved)
+    full_key = _cache_key(resolved, False)
+    enabled_key = _cache_key(resolved, True)
+    with _SKILLS_CACHE_LOCK:
+        _SKILLS_CACHE[full_key] = scanned
+        _SKILLS_CACHE[enabled_key] = [skill for skill in scanned if skill.enabled]
+
+
+def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False) -> list[Skill]:
+    """
+    Load all skills from the skills directory.
+
+    Scans both public and custom skill directories, parsing SKILL.md files
+    to extract metadata. The enabled state is determined by the skills_state_config.json file.
+
+    Args:
+        skills_path: Optional custom path to skills directory.
+                     If not provided and use_config is True, uses path from config.
+                     Otherwise defaults to deer-flow/skills
+        use_config: Whether to load skills path from config (default: True)
+        enabled_only: If True, only return enabled skills (default: False)
+
+    Returns:
+        List of Skill objects, sorted by name
+    """
+    resolved = _resolve_skills_path(skills_path, use_config)
+    key = _cache_key(resolved, enabled_only)
+
+    with _SKILLS_CACHE_LOCK:
+        cached = _SKILLS_CACHE.get(key)
+    if cached is not None:
+        return list(cached)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        refresh_skills_cache(resolved, use_config=False)
+    else:
+        logger.warning("Skills cache miss inside running event loop; returning empty list until cache is refreshed.")
+        return []
+
+    with _SKILLS_CACHE_LOCK:
+        return list(_SKILLS_CACHE.get(key, []))

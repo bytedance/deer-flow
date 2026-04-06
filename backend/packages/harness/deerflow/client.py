@@ -41,6 +41,7 @@ from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.skills.installer import install_skill_from_archive
+from deerflow.skills.loader import refresh_skills_cache
 from deerflow.uploads.manager import (
     claim_unique_filename,
     delete_file_safe,
@@ -675,6 +676,7 @@ class DeerFlowClient:
         self._agent = None
         self._agent_config_key = None
         reload_extensions_config()
+        refresh_skills_cache()
 
         updated = next((s for s in load_skills(enabled_only=False) if s.name == name), None)
         if updated is None:
@@ -700,7 +702,10 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        return install_skill_from_archive(skill_path)
+        result = install_skill_from_archive(skill_path)
+        refresh_skills_cache()
+        self.reset_agent()
+        return result
 
     # ------------------------------------------------------------------
     # Public API — memory management

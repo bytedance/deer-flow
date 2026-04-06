@@ -1,8 +1,10 @@
 """Tests for recursive skills loading."""
 
+import asyncio
+import os
 from pathlib import Path
 
-from deerflow.skills.loader import get_skills_root_path, load_skills
+from deerflow.skills.loader import get_skills_root_path, invalidate_skills_cache, load_skills, refresh_skills_cache
 
 
 def _write_skill(skill_dir: Path, name: str, description: str) -> None:
@@ -74,3 +76,66 @@ def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
 
     assert shared.category == "custom"
     assert shared.description == "Custom version"
+
+
+def test_load_skills_uses_cache_after_first_scan(tmp_path: Path, monkeypatch) -> None:
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public" / "cached-skill", "cached-skill", "Cached skill")
+
+    invalidate_skills_cache()
+    original_walk = os.walk
+    calls = {"count": 0}
+
+    def counting_walk(*args, **kwargs):
+        calls["count"] += 1
+        yield from original_walk(*args, **kwargs)
+
+    monkeypatch.setattr("deerflow.skills.loader.os.walk", counting_walk)
+
+    first = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    second = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+
+    assert [skill.name for skill in first] == [skill.name for skill in second]
+    assert calls["count"] == 1
+
+
+def test_invalidate_skills_cache_forces_rescan(tmp_path: Path, monkeypatch) -> None:
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public" / "cached-skill", "cached-skill", "Cached skill")
+
+    invalidate_skills_cache()
+    original_walk = os.walk
+    calls = {"count": 0}
+
+    def counting_walk(*args, **kwargs):
+        calls["count"] += 1
+        yield from original_walk(*args, **kwargs)
+
+    monkeypatch.setattr("deerflow.skills.loader.os.walk", counting_walk)
+
+    load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    invalidate_skills_cache()
+    load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+
+    assert calls["count"] == 2
+
+
+def test_load_skills_uses_warmed_cache_inside_running_loop(tmp_path: Path, monkeypatch) -> None:
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public" / "cached-skill", "cached-skill", "Cached skill")
+
+    invalidate_skills_cache()
+    refresh_skills_cache(skills_path=skills_root, use_config=False)
+    refresh_target = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    assert [skill.name for skill in refresh_target] == ["cached-skill"]
+
+    def fail_walk(*args, **kwargs):
+        raise AssertionError("os.walk should not run when the skills cache is already warm")
+
+    monkeypatch.setattr("deerflow.skills.loader.os.walk", fail_walk)
+
+    async def _call_from_loop():
+        loaded = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+        assert [skill.name for skill in loaded] == ["cached-skill"]
+
+    asyncio.run(_call_from_loop())

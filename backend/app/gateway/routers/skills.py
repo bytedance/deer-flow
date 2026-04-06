@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import shutil
@@ -11,6 +12,7 @@ from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.skills import Skill, load_skills
 from deerflow.skills.installer import SkillAlreadyExistsError, install_skill_from_archive
+from deerflow.skills.loader import refresh_skills_cache
 from deerflow.skills.manager import (
     append_history,
     atomic_write,
@@ -102,7 +104,7 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
 )
 async def list_skills() -> SkillsListResponse:
     try:
-        skills = load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(load_skills, enabled_only=False)
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
@@ -119,6 +121,8 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
     try:
         skill_file_path = resolve_thread_virtual_path(request.thread_id, request.path)
         result = install_skill_from_archive(skill_file_path)
+        clear_skills_system_prompt_cache()
+        await asyncio.to_thread(refresh_skills_cache)
         return SkillInstallResponse(**result)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -136,7 +140,8 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
 @router.get("/skills/custom", response_model=SkillsListResponse, summary="List Custom Skills")
 async def list_custom_skills() -> SkillsListResponse:
     try:
-        skills = [skill for skill in load_skills(enabled_only=False) if skill.category == "custom"]
+        loaded_skills = await asyncio.to_thread(load_skills, enabled_only=False)
+        skills = [skill for skill in loaded_skills if skill.category == "custom"]
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
@@ -146,7 +151,7 @@ async def list_custom_skills() -> SkillsListResponse:
 @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
 async def get_custom_skill(skill_name: str) -> CustomSkillContentResponse:
     try:
-        skills = load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(load_skills, enabled_only=False)
         skill = next((s for s in skills if s.name == skill_name and s.category == "custom"), None)
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
@@ -182,6 +187,7 @@ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest
             },
         )
         clear_skills_system_prompt_cache()
+        await asyncio.to_thread(refresh_skills_cache)
         return await get_custom_skill(skill_name)
     except HTTPException:
         raise
@@ -214,6 +220,7 @@ async def delete_custom_skill(skill_name: str) -> dict[str, bool]:
         )
         shutil.rmtree(skill_dir)
         clear_skills_system_prompt_cache()
+        await asyncio.to_thread(refresh_skills_cache)
         return {"success": True}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -269,6 +276,7 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest) 
         atomic_write(skill_file, target_content)
         append_history(skill_name, history_entry)
         clear_skills_system_prompt_cache()
+        await asyncio.to_thread(refresh_skills_cache)
         return await get_custom_skill(skill_name)
     except HTTPException:
         raise
@@ -291,7 +299,7 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest) 
 )
 async def get_skill(skill_name: str) -> SkillResponse:
     try:
-        skills = load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(load_skills, enabled_only=False)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -313,7 +321,7 @@ async def get_skill(skill_name: str) -> SkillResponse:
 )
 async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillResponse:
     try:
-        skills = load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(load_skills, enabled_only=False)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -337,8 +345,9 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
 
         logger.info(f"Skills configuration updated and saved to: {config_path}")
         reload_extensions_config()
+        await asyncio.to_thread(refresh_skills_cache)
 
-        skills = load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(load_skills, enabled_only=False)
         updated_skill = next((s for s in skills if s.name == skill_name), None)
 
         if updated_skill is None:

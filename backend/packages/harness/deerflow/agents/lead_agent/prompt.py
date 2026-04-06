@@ -4,6 +4,7 @@ from functools import lru_cache
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
+from deerflow.skills.loader import invalidate_skills_cache, refresh_skills_cache
 from deerflow.subagents import get_available_subagent_names
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,13 @@ def _skill_mutability_label(category: str) -> str:
 
 def clear_skills_system_prompt_cache() -> None:
     _get_cached_skills_prompt_section.cache_clear()
+    invalidate_skills_cache()
+
+
+try:
+    refresh_skills_cache()
+except Exception:
+    logger.debug("Failed to prewarm skills cache at import time", exc_info=True)
 
 
 def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:

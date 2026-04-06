@@ -14,6 +14,7 @@ from langgraph.typing import ContextT
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache
 from deerflow.agents.thread_state import ThreadState
 from deerflow.mcp.tools import _make_sync_tool_wrapper
+from deerflow.skills.loader import refresh_skills_cache
 from deerflow.skills.manager import (
     append_history,
     atomic_write,
@@ -116,6 +117,7 @@ async def _skill_manage_impl(
                 _history_record(action="create", file_path="SKILL.md", prev_content=None, new_content=content, thread_id=thread_id, scanner=scan),
             )
             clear_skills_system_prompt_cache()
+            await _to_thread(refresh_skills_cache)
             return f"Created custom skill '{name}'."
 
         if action == "edit":
@@ -133,6 +135,7 @@ async def _skill_manage_impl(
                 _history_record(action="edit", file_path="SKILL.md", prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
             )
             clear_skills_system_prompt_cache()
+            await _to_thread(refresh_skills_cache)
             return f"Updated custom skill '{name}'."
 
         if action == "patch":
@@ -157,6 +160,7 @@ async def _skill_manage_impl(
                 _history_record(action="patch", file_path="SKILL.md", prev_content=prev_content, new_content=new_content, thread_id=thread_id, scanner=scan),
             )
             clear_skills_system_prompt_cache()
+            await _to_thread(refresh_skills_cache)
             return f"Patched custom skill '{name}' ({replacement_count} replacement(s) applied, {occurrences} match(es) found)."
 
         if action == "delete":
@@ -170,6 +174,7 @@ async def _skill_manage_impl(
             )
             await _to_thread(shutil.rmtree, skill_dir)
             clear_skills_system_prompt_cache()
+            await _to_thread(refresh_skills_cache)
             return f"Deleted custom skill '{name}'."
 
         if action == "write_file":
