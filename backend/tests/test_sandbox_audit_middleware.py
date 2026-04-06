@@ -1,5 +1,6 @@
 """Tests for SandboxAuditMiddleware - command classification and audit logging."""
 
+import unittest.mock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -135,7 +136,7 @@ class TestClassifyCommand:
 
 
 # ---------------------------------------------------------------------------
-# _validate_input unit tests (L2 input sanitisation)
+# _validate_input unit tests (input sanitisation)
 # ---------------------------------------------------------------------------
 
 
@@ -170,36 +171,60 @@ class TestValidateInput:
         assert self.mw._validate_input("ls\x00") == "null byte detected"
 
 
-class TestL2BlocksInWrapToolCall:
-    """Verify that L2 rejections flow through wrap_tool_call correctly."""
+class TestInputSanitisationBlocksInWrapToolCall:
+    """Verify that input sanitisation rejections flow through wrap_tool_call correctly."""
 
     def setup_method(self):
         self.mw = SandboxAuditMiddleware()
 
-    def test_empty_command_blocked(self):
+    def test_empty_command_blocked_with_reason(self):
         request = _make_request("")
         handler = _make_handler()
         result = self.mw.wrap_tool_call(request, handler)
         assert not handler.called
         assert isinstance(result, ToolMessage)
         assert result.status == "error"
-        assert "blocked" in result.content.lower()
+        assert "empty command" in result.content.lower()
 
-    def test_null_byte_command_blocked(self):
+    def test_null_byte_command_blocked_with_reason(self):
         request = _make_request("echo\x00rm -rf /")
         handler = _make_handler()
         result = self.mw.wrap_tool_call(request, handler)
         assert not handler.called
         assert isinstance(result, ToolMessage)
         assert result.status == "error"
+        assert "null byte" in result.content.lower()
 
-    def test_oversized_command_blocked(self):
+    def test_oversized_command_blocked_with_reason(self):
         request = _make_request("a" * 10_001)
         handler = _make_handler()
         result = self.mw.wrap_tool_call(request, handler)
         assert not handler.called
         assert isinstance(result, ToolMessage)
         assert result.status == "error"
+        assert "command too long" in result.content.lower()
+
+    def test_none_command_coerced_to_empty(self):
+        """args.get('command') returning None should be coerced to str and rejected as empty."""
+        request = _make_request("")
+        # Simulate None value by patching args directly
+        request.tool_call["args"]["command"] = None
+        handler = _make_handler()
+        result = self.mw.wrap_tool_call(request, handler)
+        assert not handler.called
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+
+    def test_oversized_command_audit_log_truncated(self):
+        """Oversized commands should be truncated in audit logs to prevent log amplification."""
+        big_cmd = "x" * 10_001
+        request = _make_request(big_cmd)
+        handler = _make_handler()
+        with unittest.mock.patch.object(self.mw, "_write_audit", wraps=self.mw._write_audit) as spy:
+            self.mw.wrap_tool_call(request, handler)
+            spy.assert_called_once()
+            _, kwargs = spy.call_args
+            assert kwargs.get("truncate") is True
 
 
 # ---------------------------------------------------------------------------

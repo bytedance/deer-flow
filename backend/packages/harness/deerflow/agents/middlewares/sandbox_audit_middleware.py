@@ -105,11 +105,16 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
             thread_id = cfg.get("configurable", {}).get("thread_id")
         return thread_id
 
-    def _write_audit(self, thread_id: str | None, command: str, verdict: str) -> None:
+    _AUDIT_COMMAND_LIMIT = 200
+
+    def _write_audit(self, thread_id: str | None, command: str, verdict: str, *, truncate: bool = False) -> None:
+        audited_command = command
+        if truncate and len(command) > self._AUDIT_COMMAND_LIMIT:
+            audited_command = f"{command[: self._AUDIT_COMMAND_LIMIT]}... ({len(command)} chars)"
         record = {
             "timestamp": datetime.now(UTC).isoformat(),
             "thread_id": thread_id or "unknown",
-            "command": command,
+            "command": audited_command,
             "verdict": verdict,
         }
         logger.info("[SandboxAudit] %s", json.dumps(record, ensure_ascii=False))
@@ -140,7 +145,7 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         )
 
     # ------------------------------------------------------------------
-    # Input sanitisation (L2)
+    # Input sanitisation
     # ------------------------------------------------------------------
 
     # Normal bash commands rarely exceed a few hundred characters.  10 000 is
@@ -163,21 +168,23 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
     # Core logic (shared between sync and async paths)
     # ------------------------------------------------------------------
 
-    def _pre_process(self, request: ToolCallRequest) -> tuple[str, str | None, str]:
+    def _pre_process(self, request: ToolCallRequest) -> tuple[str, str | None, str, str | None]:
         """
-        Returns (command, thread_id, verdict).
+        Returns (command, thread_id, verdict, reject_reason).
         verdict is 'block', 'warn', or 'pass'.
+        reject_reason is non-None only for input sanitisation rejections.
         """
         args = request.tool_call.get("args", {})
-        command: str = args.get("command", "")
+        raw_command = args.get("command")
+        command = str(raw_command) if raw_command is not None else ""
         thread_id = self._get_thread_id(request)
 
-        # ① L2 input sanitisation — reject malformed input before regex analysis
+        # ① input sanitisation — reject malformed input before regex analysis
         reject_reason = self._validate_input(command)
         if reject_reason:
-            self._write_audit(thread_id, command, "block")
+            self._write_audit(thread_id, command, "block", truncate=True)
             logger.warning("[SandboxAudit] INVALID INPUT thread=%s reason=%s", thread_id, reject_reason)
-            return command, thread_id, "block"
+            return command, thread_id, "block", reject_reason
 
         # ② classify command
         verdict = _classify_command(command)
@@ -190,7 +197,7 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         elif verdict == "warn":
             logger.warning("[SandboxAudit] WARN (medium-risk) thread=%s cmd=%r", thread_id, command)
 
-        return command, thread_id, verdict
+        return command, thread_id, verdict, None
 
     # ------------------------------------------------------------------
     # wrap_tool_call hooks
@@ -205,9 +212,10 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         if request.tool_call.get("name") != "bash":
             return handler(request)
 
-        command, _, verdict = self._pre_process(request)
+        command, _, verdict, reject_reason = self._pre_process(request)
         if verdict == "block":
-            return self._build_block_message(request, "security violation detected")
+            reason = reject_reason or "security violation detected"
+            return self._build_block_message(request, reason)
         result = handler(request)
         if verdict == "warn":
             result = self._append_warn_to_result(result, command)
@@ -222,9 +230,10 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         if request.tool_call.get("name") != "bash":
             return await handler(request)
 
-        command, _, verdict = self._pre_process(request)
+        command, _, verdict, reject_reason = self._pre_process(request)
         if verdict == "block":
-            return self._build_block_message(request, "security violation detected")
+            reason = reject_reason or "security violation detected"
+            return self._build_block_message(request, reason)
         result = await handler(request)
         if verdict == "warn":
             result = self._append_warn_to_result(result, command)
