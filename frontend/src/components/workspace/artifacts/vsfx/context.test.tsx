@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { describe, expect, test, vi } from "vitest";
 
 import type { VsfxArtifactPanelError } from "@/core/artifacts/vsfx/adapter";
-import type { IViewer, ViewerEventMap } from "@/lib/vsfx-viewer/viewer-core";
+import type { IViewer, ViewerInteractionEventMap } from "@/lib/vsfx-viewer/viewer-core";
 import { defaultOptions } from "@/lib/vsfx-viewer/viewer-core/options/IOptions";
 import { act, render, waitFor } from "@/test/render";
 
@@ -30,8 +30,8 @@ class MockViewer implements IViewer {
   readonly executeCommand = vi.fn<(name: string, ...args: unknown[]) => unknown>();
 
   private readonly listeners = new Map<
-    keyof ViewerEventMap,
-    Set<(payload: ViewerEventMap[keyof ViewerEventMap]) => void>
+    keyof ViewerInteractionEventMap,
+    Set<(payload: ViewerInteractionEventMap[keyof ViewerInteractionEventMap]) => void>
   >();
 
   clearSlices() {
@@ -42,9 +42,9 @@ class MockViewer implements IViewer {
     void 0;
   }
 
-  emit<TName extends keyof ViewerEventMap>(
+  emit<TName extends keyof ViewerInteractionEventMap>(
     eventName: TName,
-    payload: ViewerEventMap[TName],
+    payload: ViewerInteractionEventMap[TName],
   ) {
     const listeners = this.listeners.get(eventName);
 
@@ -69,19 +69,30 @@ class MockViewer implements IViewer {
     return [];
   }
 
-  on<TName extends keyof ViewerEventMap>(
+  on<TName extends keyof ViewerInteractionEventMap>(
     eventName: TName,
-    listener: (payload: ViewerEventMap[TName]) => void,
+    listener: (payload: ViewerInteractionEventMap[TName]) => void,
   ) {
     const existing = this.listeners.get(eventName) ?? new Set();
-    existing.add(listener as (payload: ViewerEventMap[keyof ViewerEventMap]) => void);
+    existing.add(
+      listener as (payload: ViewerInteractionEventMap[keyof ViewerInteractionEventMap]) => void,
+    );
     this.listeners.set(eventName, existing);
 
     return () => {
       existing.delete(
-        listener as (payload: ViewerEventMap[keyof ViewerEventMap]) => void,
+        listener as (payload: ViewerInteractionEventMap[keyof ViewerInteractionEventMap]) => void,
       );
     };
+  }
+
+  off<TName extends keyof ViewerInteractionEventMap>(
+    eventName: TName,
+    listener: (payload: ViewerInteractionEventMap[TName]) => void,
+  ) {
+    this.listeners.get(eventName)?.delete(
+      listener as (payload: ViewerInteractionEventMap[keyof ViewerInteractionEventMap]) => void,
+    );
   }
 
   open() {

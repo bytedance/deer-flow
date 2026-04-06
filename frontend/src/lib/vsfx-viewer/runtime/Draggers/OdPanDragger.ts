@@ -15,20 +15,20 @@ export class OdPanDragger extends OdBaseDragger {
     });
   }
 
-  protected start(x: number, y: number) {
+  protected start(x: number, y: number, absoluteX: number, absoluteY: number) {
     this.press = true;
-    this.action.beginAction(x, y);
+    this.action.beginAction(x, y, absoluteX, absoluteY);
   }
 
-  protected drag(x: number, y: number) {
+  protected drag(x: number, y: number, absoluteX: number, absoluteY: number) {
     if (!this.press) {
       return;
     }
 
-    this.action.action(x, y);
+    this.action.action(x, y, absoluteX, absoluteY);
   }
 
-  protected end() {
+  protected end(_x: number, _y: number, _absoluteX = 0, _absoluteY = 0) {
     this.press = false;
     this.action.endAction();
   }

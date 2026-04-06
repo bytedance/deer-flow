@@ -1,4 +1,5 @@
 export const CANVAS_EVENTS = [
+  "auxclick",
   "click",
   "contextmenu",
   "dblclick",
@@ -19,6 +20,7 @@ export const CANVAS_EVENTS = [
 ] as const;
 
 export type CanvasEventMap = {
+  auxclick: MouseEvent;
   click: MouseEvent;
   contextmenu: MouseEvent;
   dblclick: MouseEvent;

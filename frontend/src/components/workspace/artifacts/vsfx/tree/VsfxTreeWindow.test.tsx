@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { describe, expect, test, vi } from "vitest";
 
-import type { IViewer, ViewerEventMap } from "@/lib/vsfx-viewer/viewer-core";
+import type { IViewer, ViewerInteractionEventMap } from "@/lib/vsfx-viewer/viewer-core";
 import { defaultOptions } from "@/lib/vsfx-viewer/viewer-core/options/IOptions";
 import { fireEvent, render, screen, waitFor } from "@/test/render";
 
@@ -52,11 +52,18 @@ class MockViewer implements IViewer {
     return this.visViewer;
   }
 
-  on<TName extends keyof ViewerEventMap>(
+  on<TName extends keyof ViewerInteractionEventMap>(
     _eventName: TName,
-    _listener: (payload: ViewerEventMap[TName]) => void,
+    _listener: (payload: ViewerInteractionEventMap[TName]) => void,
   ) {
     return () => undefined;
+  }
+
+  off<TName extends keyof ViewerInteractionEventMap>(
+    _eventName: TName,
+    _listener: (payload: ViewerInteractionEventMap[TName]) => void,
+  ) {
+    void 0;
   }
 
   open() {

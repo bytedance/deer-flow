@@ -159,7 +159,7 @@ export class OdOrbitPanDragger extends OdBaseDragger {
     }
   }
 
-  protected end() {
+  protected end(_x: number, _y: number, _absoluteX = 0, _absoluteY = 0) {
     this.press = false;
 
     if (this.activeMode === "orbit") {

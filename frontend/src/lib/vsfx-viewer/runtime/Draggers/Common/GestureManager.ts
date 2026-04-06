@@ -4,6 +4,11 @@ export class GestureManager {
   private canvasEvents = [...CANVAS_EVENTS];
   private initialized = false;
   private readonly viewer: IViewer;
+  private readonly boundHandlers: Partial<{
+    [TName in keyof ViewerInteractionEventMap]: (
+      payload: ViewerInteractionEventMap[TName],
+    ) => void;
+  }> = {};
 
   constructor(viewer: IViewer) {
     this.viewer = viewer;
@@ -15,18 +20,24 @@ export class GestureManager {
     }
 
     this.canvasEvents = this.canvasEvents.filter(
-      (eventName) => typeof (this as Record<string, unknown>)[eventName] === "function",
+      (eventName) => typeof this.getHandler(eventName) === "function",
     );
 
     for (const eventName of this.canvasEvents) {
-      const handler = (
-        this as Record<string, (...args: Array<unknown>) => void>
-      )[eventName].bind(this);
+      const handler = this.getHandler(eventName);
 
-      (this as Record<string, unknown>)[eventName] = handler;
+      if (!handler) {
+        continue;
+      }
+
+      const boundHandler = handler.bind(this) as (payload: typeof eventName extends never
+        ? never
+        : ViewerInteractionEventMap[typeof eventName]) => void;
+
+      this.boundHandlers[eventName] = boundHandler;
       this.viewer.on(
-        eventName as keyof ViewerInteractionEventMap,
-        handler as (payload: ViewerInteractionEventMap[keyof ViewerInteractionEventMap]) => void,
+        eventName,
+        boundHandler as (payload: ViewerInteractionEventMap[typeof eventName]) => void,
       );
     }
 
@@ -39,10 +50,17 @@ export class GestureManager {
     }
 
     for (const eventName of this.canvasEvents) {
+      const handler = this.boundHandlers[eventName];
+
+      if (!handler) {
+        continue;
+      }
+
       this.viewer.off(
-        eventName as keyof ViewerInteractionEventMap,
-        (this as Record<string, (payload: unknown) => void>)[eventName],
+        eventName,
+        handler as (payload: ViewerInteractionEventMap[typeof eventName]) => void,
       );
+      delete this.boundHandlers[eventName];
     }
 
     this.initialized = false;
@@ -66,5 +84,13 @@ export class GestureManager {
 
   protected pointerup(event: PointerEvent) {
     void event;
+  }
+
+  private getHandler<TName extends keyof ViewerInteractionEventMap>(eventName: TName) {
+    const candidate = this[eventName as keyof this];
+
+    return typeof candidate === "function"
+      ? (candidate as (payload: ViewerInteractionEventMap[TName]) => void)
+      : undefined;
   }
 }

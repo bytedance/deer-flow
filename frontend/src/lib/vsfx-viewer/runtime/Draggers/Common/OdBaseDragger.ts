@@ -19,6 +19,11 @@ export abstract class OdBaseDragger implements IDragger {
   protected mouseDownPosition: DragPoint = { x: 0, y: 0 };
   protected press = false;
   protected readonly viewer: IViewer;
+  private readonly boundHandlers: Partial<{
+    [TName in keyof ViewerInteractionEventMap]: (
+      payload: ViewerInteractionEventMap[TName],
+    ) => void;
+  }> = {};
   private initialized = false;
 
   readonly id: string;
@@ -42,18 +47,24 @@ export abstract class OdBaseDragger implements IDragger {
     }
 
     this.canvasEvents = this.canvasEvents.filter(
-      (eventName) => typeof (this as Record<string, unknown>)[eventName] === "function",
+      (eventName) => typeof this.getHandler(eventName) === "function",
     );
 
     for (const eventName of this.canvasEvents) {
-      const handler = (
-        this as Record<string, (...args: Array<unknown>) => void>
-      )[eventName].bind(this);
+      const handler = this.getHandler(eventName);
 
-      (this as Record<string, unknown>)[eventName] = handler;
+      if (!handler) {
+        continue;
+      }
+
+      const boundHandler = handler.bind(this) as (payload: typeof eventName extends never
+        ? never
+        : ViewerInteractionEventMap[typeof eventName]) => void;
+
+      this.boundHandlers[eventName] = boundHandler;
       this.viewer.on(
-        eventName as keyof ViewerInteractionEventMap,
-        handler as (payload: ViewerInteractionEventMap[keyof ViewerInteractionEventMap]) => void,
+        eventName,
+        boundHandler as (payload: ViewerInteractionEventMap[typeof eventName]) => void,
       );
     }
 
@@ -69,10 +80,17 @@ export abstract class OdBaseDragger implements IDragger {
     }
 
     for (const eventName of this.canvasEvents) {
+      const handler = this.boundHandlers[eventName];
+
+      if (!handler) {
+        continue;
+      }
+
       this.viewer.off(
-        eventName as keyof ViewerInteractionEventMap,
-        (this as Record<string, (payload: unknown) => void>)[eventName],
+        eventName,
+        handler as (payload: ViewerInteractionEventMap[typeof eventName]) => void,
       );
+      delete this.boundHandlers[eventName];
     }
 
     this.initialized = false;
@@ -219,6 +237,14 @@ export abstract class OdBaseDragger implements IDragger {
 
     view?.delete?.();
   };
+
+  private getHandler<TName extends keyof ViewerInteractionEventMap>(eventName: TName) {
+    const candidate = this[eventName as keyof this];
+
+    return typeof candidate === "function"
+      ? (candidate as (payload: ViewerInteractionEventMap[TName]) => void)
+      : undefined;
+  }
 
   protected readonly endInteractivity = () => {
     const runtime = this.viewer as Viewer;
