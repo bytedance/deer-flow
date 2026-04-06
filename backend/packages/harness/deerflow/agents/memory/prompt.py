@@ -421,10 +421,7 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
                         remainder_category = str(remainder_fact.get("category", "context")).strip() or "context"
                         remainder_source_error = remainder_fact.get("sourceError")
                         if remainder_category == "correction" and isinstance(remainder_source_error, str) and remainder_source_error.strip():
-                            remainder_line = (
-                                f"- [{remainder_category} | {remainder_confidence:.2f}] "
-                                f"{remainder_content} (avoid: {remainder_source_error.strip()})"
-                            )
+                            remainder_line = f"- [{remainder_category} | {remainder_confidence:.2f}] {remainder_content} (avoid: {remainder_source_error.strip()})"
                         else:
                             remainder_line = f"- [{remainder_category} | {remainder_confidence:.2f}] {remainder_content}"
                         remainder_line_text = "\n" + remainder_line

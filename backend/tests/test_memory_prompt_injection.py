@@ -219,7 +219,4 @@ def test_build_memory_injection_result_marks_remaining_facts_as_skipped_after_bu
 
     assert result.trace is not None
     assert any(selection.fact_id == "fact_b" and selection.reason.value == "budget_exceeded" for selection in result.trace.selections)
-    assert any(
-        selection.fact_id == "fact_c" and selection.reason.value == "skipped_after_budget_exceeded"
-        for selection in result.trace.selections
-    )
+    assert any(selection.fact_id == "fact_c" and selection.reason.value == "skipped_after_budget_exceeded" for selection in result.trace.selections)

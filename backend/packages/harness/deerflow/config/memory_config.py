@@ -12,12 +12,7 @@ class RetrievalTraceConfig(BaseModel):
     )
     storage_path: str = Field(
         default="",
-        description=(
-            "Path to store retrieval trace JSONL data. "
-            "If empty, defaults to `retrieval_traces.jsonl` alongside the active memory file. "
-            "Absolute paths are used as-is. "
-            "Relative paths are resolved against `Paths.base_dir`."
-        ),
+        description=("Path to store retrieval trace JSONL data. If empty, defaults to `retrieval_traces.jsonl` alongside the active memory file. Absolute paths are used as-is. Relative paths are resolved against `Paths.base_dir`."),
     )
     max_file_bytes: int = Field(
         default=5 * 1024 * 1024,
