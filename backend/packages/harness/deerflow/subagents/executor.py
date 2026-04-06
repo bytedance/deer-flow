@@ -246,20 +246,22 @@ class SubagentExecutor:
             # Pre-check: bail out immediately if already cancelled before streaming starts
             if result.cancel_event.is_set():
                 logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming")
-                if result.status == SubagentStatus.RUNNING:
-                    result.status = SubagentStatus.FAILED
-                    result.error = "Cancelled by user"
-                    result.completed_at = datetime.now()
+                with _background_tasks_lock:
+                    if result.status == SubagentStatus.RUNNING:
+                        result.status = SubagentStatus.FAILED
+                        result.error = "Cancelled by user"
+                        result.completed_at = datetime.now()
                 return result
 
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
                 # Cooperative cancellation: check if parent requested stop
                 if result.cancel_event.is_set():
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
-                    if result.status == SubagentStatus.RUNNING:
-                        result.status = SubagentStatus.FAILED
-                        result.error = "Cancelled by user"
-                        result.completed_at = datetime.now()
+                    with _background_tasks_lock:
+                        if result.status == SubagentStatus.RUNNING:
+                            result.status = SubagentStatus.FAILED
+                            result.error = "Cancelled by user"
+                            result.completed_at = datetime.now()
                     return result
 
                 final_state = chunk
