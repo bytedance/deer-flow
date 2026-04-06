@@ -15,6 +15,22 @@ from deerflow.config.paths import get_paths
 logger = logging.getLogger(__name__)
 
 
+def get_memory_file_path(agent_name: str | None = None) -> Path:
+    """Resolve the effective memory file path for the given agent."""
+    if agent_name is not None:
+        if not agent_name:
+            raise ValueError("Agent name must be a non-empty string.")
+        if not AGENT_NAME_PATTERN.match(agent_name):
+            raise ValueError(f"Invalid agent name {agent_name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
+        return get_paths().agent_memory_file(agent_name)
+
+    config = get_memory_config()
+    if config.storage_path:
+        p = Path(config.storage_path)
+        return p if p.is_absolute() else get_paths().base_dir / p
+    return get_paths().memory_file
+
+
 def create_empty_memory() -> dict[str, Any]:
     """Create an empty memory structure."""
     return {
@@ -77,13 +93,7 @@ class FileMemoryStorage(MemoryStorage):
         """Get the path to the memory file."""
         if agent_name is not None:
             self._validate_agent_name(agent_name)
-            return get_paths().agent_memory_file(agent_name)
-
-        config = get_memory_config()
-        if config.storage_path:
-            p = Path(config.storage_path)
-            return p if p.is_absolute() else get_paths().base_dir / p
-        return get_paths().memory_file
+        return get_memory_file_path(agent_name)
 
     def _load_memory_from_file(self, agent_name: str | None = None) -> dict[str, Any]:
         """Load memory data from file."""

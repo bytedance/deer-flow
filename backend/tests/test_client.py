@@ -812,12 +812,14 @@ class TestMemoryManagement:
         config.fact_confidence_threshold = 0.7
         config.injection_enabled = True
         config.max_injection_tokens = 2000
+        config.retrieval_trace = MagicMock(enabled=False, storage_path="", max_file_bytes=5242880)
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=config):
             result = client.get_memory_config()
 
         assert result["enabled"] is True
         assert result["max_facts"] == 100
+        assert result["retrieval_trace"]["enabled"] is False
 
     def test_get_memory_status(self, client):
         config = MagicMock()
@@ -828,6 +830,7 @@ class TestMemoryManagement:
         config.fact_confidence_threshold = 0.7
         config.injection_enabled = True
         config.max_injection_tokens = 2000
+        config.retrieval_trace = MagicMock(enabled=False, storage_path="", max_file_bytes=5242880)
 
         data = {"version": "1.0", "facts": []}
 
@@ -1838,6 +1841,7 @@ class TestGatewayConformance:
         mem_cfg.fact_confidence_threshold = 0.7
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
+        mem_cfg.retrieval_trace = MagicMock(enabled=False, storage_path="", max_file_bytes=5242880)
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg):
             result = client.get_memory_config()
@@ -1845,6 +1849,7 @@ class TestGatewayConformance:
         parsed = MemoryConfigResponse(**result)
         assert parsed.enabled is True
         assert parsed.max_facts == 100
+        assert parsed.retrieval_trace.enabled is False
 
     def test_get_memory_status(self, client):
         mem_cfg = MagicMock()
@@ -1855,6 +1860,7 @@ class TestGatewayConformance:
         mem_cfg.fact_confidence_threshold = 0.7
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
+        mem_cfg.retrieval_trace = MagicMock(enabled=False, storage_path="", max_file_bytes=5242880)
 
         memory_data = {
             "version": "1.0",
