@@ -109,6 +109,7 @@ export function InputBox({
   threadId,
   initialValue,
   onContextChange,
+  onFollowupsVisibilityChange,
   onSubmit,
   onStop,
   ...props
@@ -136,6 +137,7 @@ export function InputBox({
       reasoning_effort?: "minimal" | "low" | "medium" | "high";
     },
   ) => void;
+  onFollowupsVisibilityChange?: (visible: boolean) => void;
   onSubmit?: (message: PromptInputMessage) => void;
   onStop?: () => void;
 }) {
@@ -185,6 +187,8 @@ export function InputBox({
     }
     return models.find((m) => m.name === context.model_name) ?? models[0];
   }, [context.model_name, models]);
+
+  const resolvedModelName = selectedModel?.name;
 
   const supportThinking = useMemo(
     () => selectedModel?.supports_thinking ?? false,
@@ -253,9 +257,33 @@ export function InputBox({
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
+
+      // Guard against submitting before the initial model auto-selection
+      // effect has flushed thread settings to storage/state.
+      if (resolvedModelName && context.model_name !== resolvedModelName) {
+        onContextChange?.({
+          ...context,
+          model_name: resolvedModelName,
+          mode: getResolvedMode(
+            context.mode,
+            selectedModel?.supports_thinking ?? false,
+          ),
+        });
+        setTimeout(() => onSubmit?.(message), 0);
+        return;
+      }
+
       onSubmit?.(message);
     },
-    [onSubmit, onStop, status],
+    [
+      context,
+      onContextChange,
+      onSubmit,
+      onStop,
+      resolvedModelName,
+      selectedModel?.supports_thinking,
+      status,
+    ],
   );
 
   const requestFormSubmit = useCallback(() => {
@@ -308,6 +336,26 @@ export function InputBox({
     setPendingSuggestion(null);
     setTimeout(() => requestFormSubmit(), 0);
   }, [pendingSuggestion, requestFormSubmit, textInput]);
+
+  const showFollowups =
+    !disabled &&
+    !isNewThread &&
+    !followupsHidden &&
+    (followupsLoading || followups.length > 0);
+
+  const followupsVisibilityChangeRef = useRef(onFollowupsVisibilityChange);
+
+  useEffect(() => {
+    followupsVisibilityChangeRef.current = onFollowupsVisibilityChange;
+  }, [onFollowupsVisibilityChange]);
+
+  useEffect(() => {
+    followupsVisibilityChangeRef.current?.(showFollowups);
+  }, [showFollowups]);
+
+  useEffect(() => {
+    return () => followupsVisibilityChangeRef.current?.(false);
+  }, []);
 
   useEffect(() => {
     const streaming = status === "streaming";
@@ -381,7 +429,38 @@ export function InputBox({
   }, [context.model_name, disabled, isMock, status, thread.messages, threadId]);
 
   return (
-    <div ref={promptRootRef} className="relative">
+    <div ref={promptRootRef} className="relative flex flex-col gap-4">
+      {showFollowups && (
+        <div className="flex items-center justify-center pb-2">
+          <div className="flex items-center gap-2">
+            {followupsLoading ? (
+              <div className="text-muted-foreground bg-background/80 rounded-full border px-4 py-2 text-xs backdrop-blur-sm">
+                {t.inputBox.followupLoading}
+              </div>
+            ) : (
+              <Suggestions className="min-h-16 w-fit items-start">
+                {followups.map((s) => (
+                  <Suggestion
+                    key={s}
+                    suggestion={s}
+                    onClick={() => handleFollowupClick(s)}
+                  />
+                ))}
+                <Button
+                  aria-label={t.common.close}
+                  className="text-muted-foreground cursor-pointer rounded-full px-3 text-xs font-normal"
+                  variant="outline"
+                  size="sm"
+                  type="button"
+                  onClick={() => setFollowupsHidden(true)}
+                >
+                  <XIcon className="size-4" />
+                </Button>
+              </Suggestions>
+            )}
+          </div>
+        </div>
+      )}
       <PromptInput
         className={cn(
           "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
@@ -759,50 +838,16 @@ export function InputBox({
             />
           </PromptInputTools>
         </PromptInputFooter>
-        {isNewThread && searchParams.get("mode") !== "skill" && (
-          <div className="absolute right-0 -bottom-20 left-0 z-0 flex items-center justify-center">
-            <SuggestionList />
-          </div>
-        )}
         {!isNewThread && (
           <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
         )}
       </PromptInput>
 
-      {!disabled &&
-        !isNewThread &&
-        !followupsHidden &&
-        (followupsLoading || followups.length > 0) && (
-          <div className="absolute -top-20 right-0 left-0 z-20 flex items-center justify-center">
-            <div className="flex items-center gap-2">
-              {followupsLoading ? (
-                <div className="text-muted-foreground bg-background/80 rounded-full border px-4 py-2 text-xs backdrop-blur-sm">
-                  {t.inputBox.followupLoading}
-                </div>
-              ) : (
-                <Suggestions className="min-h-16 w-fit items-start">
-                  {followups.map((s) => (
-                    <Suggestion
-                      key={s}
-                      suggestion={s}
-                      onClick={() => handleFollowupClick(s)}
-                    />
-                  ))}
-                  <Button
-                    aria-label={t.common.close}
-                    className="text-muted-foreground cursor-pointer rounded-full px-3 text-xs font-normal"
-                    variant="outline"
-                    size="sm"
-                    type="button"
-                    onClick={() => setFollowupsHidden(true)}
-                  >
-                    <XIcon className="size-4" />
-                  </Button>
-                </Suggestions>
-              )}
-            </div>
-          </div>
-        )}
+      {isNewThread && searchParams.get("mode") !== "skill" && (
+        <div className="flex items-center justify-center pt-2">
+          <SuggestionList />
+        </div>
+      )}
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>

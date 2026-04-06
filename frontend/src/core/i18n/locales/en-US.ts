@@ -51,6 +51,12 @@ export const enUS: Translations = {
     exportSuccess: "Conversation exported",
   },
 
+  // Home
+  home: {
+    docs: "Docs",
+    blog: "Blog",
+  },
+
   // Welcome
   welcome: {
     greeting: "Hello, again!",
@@ -199,6 +205,17 @@ export const enUS: Translations = {
     nameStepCheckError: "Could not verify name availability — please try again",
     nameStepBootstrapMessage:
       "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
+    save: "Save agent",
+    saving: "Saving agent...",
+    saveRequested:
+      "Save requested. DeerFlow is generating and saving an initial version now.",
+    saveHint:
+      "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
+    saveCommandMessage:
+      "Please save this custom agent now based on everything we have discussed so far. Treat this as my explicit confirmation to save. If some details are still missing, make reasonable assumptions, generate a concise first SOUL.md in English, and call setup_agent immediately without asking me for more confirmation.",
+    agentCreatedPendingRefresh:
+      "The agent was created, but DeerFlow could not load it yet. Please refresh this page in a moment.",
+    more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",

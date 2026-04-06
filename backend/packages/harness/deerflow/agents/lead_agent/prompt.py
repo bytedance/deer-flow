@@ -8,6 +8,14 @@ from deerflow.subagents import get_available_subagent_names
 logger = logging.getLogger(__name__)
 
 
+def _get_enabled_skills():
+    try:
+        return list(load_skills(enabled_only=True))
+    except Exception:
+        logger.exception("Failed to load enabled skills for prompt injection")
+        return []
+
+
 def _build_subagent_section(max_concurrent: int) -> str:
     """Build the subagent system prompt section with dynamic concurrency limit.
 
@@ -386,7 +394,7 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
     Returns the <skill_system>...</skill_system> block listing all enabled skills,
     suitable for injection into any agent's system prompt.
     """
-    skills = load_skills(enabled_only=True)
+    skills = _get_enabled_skills()
 
     try:
         from deerflow.config import get_app_config
@@ -401,6 +409,10 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
 
     if available_skills is not None:
         skills = [skill for skill in skills if skill.name in available_skills]
+
+    # Check again after filtering
+    if not skills:
+        return ""
 
     skill_items = "\n".join(
         f"    <skill>\n        <name>{skill.name}</name>\n        <description>{skill.description}</description>\n        <location>{skill.get_container_file_path(container_base_path)}</location>\n    </skill>" for skill in skills
@@ -446,7 +458,7 @@ def get_deferred_tools_prompt_section() -> str:
 
         if not get_app_config().tool_search.enabled:
             return ""
-    except FileNotFoundError:
+    except Exception:
         return ""
 
     registry = get_deferred_registry()

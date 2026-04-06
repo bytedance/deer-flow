@@ -14,6 +14,7 @@ dependencies = [
     "langchain-deepseek>=1.0.1",
     "langchain-mcp-adapters>=0.1.0",
     "langchain-openai>=1.1.7",
+    "langfuse>=3.4.1",
     "langgraph>=1.0.6,<1.0.10",
     "langgraph-api>=0.7.0,<0.8.0",
     "langgraph-cli>=0.4.14",
@@ -32,6 +33,9 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=3.0.3",
     "langgraph-sdk>=0.1.51",
 ]
+
+[project.optional-dependencies]
+pymupdf = ["pymupdf4llm>=0.0.17"]
 
 [build-system]
 requires = ["hatchling"]

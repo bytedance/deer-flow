@@ -164,6 +164,28 @@ class TestLoadAgentConfig:
 
         assert cfg.tool_groups == ["file:read", "file:write"]
 
+    def test_load_config_with_skills_empty_list(self, tmp_path):
+        config_dict = {"name": "no-skills-agent", "skills": []}
+        _write_agent(tmp_path, "no-skills-agent", config_dict)
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("no-skills-agent")
+
+        assert cfg.skills == []
+
+    def test_load_config_with_skills_omitted(self, tmp_path):
+        config_dict = {"name": "default-skills-agent"}
+        _write_agent(tmp_path, "default-skills-agent", config_dict)
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("default-skills-agent")
+
+        assert cfg.skills is None
+
     def test_legacy_prompt_file_field_ignored(self, tmp_path):
         """Unknown fields like the old prompt_file should be silently ignored."""
         agent_dir = tmp_path / "agents" / "legacy-agent"
@@ -416,6 +438,15 @@ class TestAgentsAPI:
         names = [a["name"] for a in response.json()["agents"]]
         assert "agent-one" in names
         assert "agent-two" in names
+
+    def test_list_agents_includes_soul(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "soul-agent", "soul": "My soul content"})
+
+        response = agent_client.get("/api/agents")
+        assert response.status_code == 200
+        agents = response.json()["agents"]
+        soul_agent = next(a for a in agents if a["name"] == "soul-agent")
+        assert soul_agent["soul"] == "My soul content"
 
     def test_get_agent(self, agent_client):
         agent_client.post("/api/agents", json={"name": "test-agent", "soul": "Hello world"})

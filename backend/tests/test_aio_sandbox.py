@@ -131,3 +131,53 @@ class TestListDirSerialization:
         result = sandbox.list_dir("/test")
         assert result == ["/a", "/b"]
         assert lock_was_held == [True], "list_dir must hold the lock during exec_command"
+
+
+class TestConcurrentFileWrites:
+    """Verify file write paths do not lose concurrent updates."""
+
+    def test_append_should_preserve_both_parallel_writes(self, sandbox):
+        storage = {"content": "seed\n"}
+        active_reads = 0
+        state_lock = threading.Lock()
+        overlap_detected = threading.Event()
+
+        def overlapping_read_file(path):
+            nonlocal active_reads
+            with state_lock:
+                active_reads += 1
+                snapshot = storage["content"]
+                if active_reads == 2:
+                    overlap_detected.set()
+
+            overlap_detected.wait(0.05)
+
+            with state_lock:
+                active_reads -= 1
+
+            return snapshot
+
+        def write_back(*, file, content, **kwargs):
+            storage["content"] = content
+            return SimpleNamespace(data=SimpleNamespace())
+
+        sandbox.read_file = overlapping_read_file
+        sandbox._client.file.write_file = write_back
+
+        barrier = threading.Barrier(2)
+
+        def writer(payload: str):
+            barrier.wait()
+            sandbox.write_file("/tmp/shared.log", payload, append=True)
+
+        threads = [
+            threading.Thread(target=writer, args=("A\n",)),
+            threading.Thread(target=writer, args=("B\n",)),
+        ]
+
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert storage["content"] in {"seed\nA\nB\n", "seed\nB\nA\n"}

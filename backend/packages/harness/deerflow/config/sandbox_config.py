@@ -64,4 +64,20 @@ class SandboxConfig(BaseModel):
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
     )
 
+    bash_output_max_chars: int = Field(
+        default=20000,
+        ge=0,
+        description="Maximum characters to keep from bash tool output. Output exceeding this limit is middle-truncated (head + tail), preserving the first and last half. Set to 0 to disable truncation.",
+    )
+    read_file_output_max_chars: int = Field(
+        default=50000,
+        ge=0,
+        description="Maximum characters to keep from read_file tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
+    )
+    ls_output_max_chars: int = Field(
+        default=20000,
+        ge=0,
+        description="Maximum characters to keep from ls tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
+    )
+
     model_config = ConfigDict(extra="allow")
