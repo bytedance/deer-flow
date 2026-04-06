@@ -6,7 +6,11 @@ import { hasToolCalls } from "../messages/utils";
 
 export function explainLastToolCall(message: AIMessage, t: Translations) {
   if (hasToolCalls(message)) {
-    const lastToolCall = message.tool_calls![message.tool_calls!.length - 1]!;
+    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    const lastToolCall = toolCalls[toolCalls.length - 1];
+    if (!lastToolCall) {
+      return t.common.thinking;
+    }
     return explainToolCall(lastToolCall, t);
   }
   return t.common.thinking;

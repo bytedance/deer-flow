@@ -26,6 +26,10 @@ type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
+function getToolCalls(message: Message | AIMessage) {
+  return Array.isArray(message.tool_calls) ? message.tool_calls : [];
+}
+
 export function groupMessages<T>(
   messages: Message[],
   mapper: (group: MessageGroup) => T,
@@ -270,15 +274,13 @@ export function hasReasoning(message: Message) {
 }
 
 export function hasToolCalls(message: Message) {
-  return (
-    message.type === "ai" && message.tool_calls && message.tool_calls.length > 0
-  );
+  return message.type === "ai" && getToolCalls(message).length > 0;
 }
 
 export function hasPresentFiles(message: Message) {
   return (
     message.type === "ai" &&
-    message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
+    getToolCalls(message).some((toolCall) => toolCall.name === "present_files")
   );
 }
 
@@ -291,7 +293,7 @@ export function extractPresentFilesFromMessage(message: Message) {
     return [];
   }
   const files: string[] = [];
-  for (const toolCall of message.tool_calls ?? []) {
+  for (const toolCall of getToolCalls(message)) {
     if (
       toolCall.name === "present_files" &&
       Array.isArray(toolCall.args.filepaths)
@@ -303,7 +305,7 @@ export function extractPresentFilesFromMessage(message: Message) {
 }
 
 export function hasSubagent(message: AIMessage) {
-  for (const toolCall of message.tool_calls ?? []) {
+  for (const toolCall of getToolCalls(message)) {
     if (toolCall.name === "task") {
       return true;
     }

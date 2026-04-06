@@ -35,8 +35,11 @@ export function loadArtifactContentFromToolCall({
   const messageId = url.searchParams.get("message_id");
   if (messageId && toolCallId) {
     const message = thread.messages.find((message) => message.id === messageId);
-    if (message?.type === "ai" && message.tool_calls) {
-      const toolCall = message.tool_calls.find(
+    if (message?.type === "ai") {
+      const toolCalls = Array.isArray(message.tool_calls)
+        ? message.tool_calls
+        : [];
+      const toolCall = toolCalls.find(
         (toolCall) => toolCall.id === toolCallId,
       );
       if (toolCall) {
