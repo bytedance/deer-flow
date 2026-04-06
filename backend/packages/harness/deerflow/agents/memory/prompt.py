@@ -432,7 +432,7 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
                             SelectionResult(
                                 fact_id=remainder_id,
                                 included=False,
-                                reason=RetrievalDecisionReason.BUDGET_EXCEEDED,
+                                reason=RetrievalDecisionReason.SKIPPED_AFTER_BUDGET_EXCEEDED,
                                 rank_position=remainder_rank,
                                 token_cost=_count_tokens(remainder_line_text),
                                 score_components={"confidence": remainder_confidence},

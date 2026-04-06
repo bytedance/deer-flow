@@ -78,21 +78,8 @@ class FileMemoryStorage(MemoryStorage):
         # Value: (memory_data, file_mtime)
         self._memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
 
-    def _validate_agent_name(self, agent_name: str) -> None:
-        """Validate that the agent name is safe to use in filesystem paths.
-
-        Uses the repository's established AGENT_NAME_PATTERN to ensure consistency
-        across the codebase and prevent path traversal or other problematic characters.
-        """
-        if not agent_name:
-            raise ValueError("Agent name must be a non-empty string.")
-        if not AGENT_NAME_PATTERN.match(agent_name):
-            raise ValueError(f"Invalid agent name {agent_name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
-
     def _get_memory_file_path(self, agent_name: str | None = None) -> Path:
         """Get the path to the memory file."""
-        if agent_name is not None:
-            self._validate_agent_name(agent_name)
         return get_memory_file_path(agent_name)
 
     def _load_memory_from_file(self, agent_name: str | None = None) -> dict[str, Any]:

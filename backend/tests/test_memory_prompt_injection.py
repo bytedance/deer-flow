@@ -192,3 +192,34 @@ def test_build_memory_injection_result_returns_trace_when_enabled(monkeypatch) -
     assert any(selection.fact_id == "fact_b" and selection.reason.value == "budget_exceeded" for selection in result.trace.selections)
     assert any(selection.fact_id == "fact_c" and selection.reason.value == "empty_content" for selection in result.trace.selections)
     assert result.trace.tokens_used <= 110
+
+
+def test_build_memory_injection_result_marks_remaining_facts_as_skipped_after_budget_break(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt.get_memory_config",
+        lambda: MemoryConfig(retrieval_trace=RetrievalTraceConfig(enabled=True)),
+    )
+    monkeypatch.setattr("deerflow.agents.memory.prompt._count_tokens", lambda text, encoding_name="cl100k_base": len(text))
+
+    first_fact = {"id": "fact_a", "content": "First fact fits", "category": "knowledge", "confidence": 0.95}
+    second_fact = {
+        "id": "fact_b",
+        "content": "Second fact is deliberately too long to fit in the remaining tiny budget",
+        "category": "context",
+        "confidence": 0.9,
+    }
+    third_fact = {"id": "fact_c", "content": "Tiny", "category": "context", "confidence": 0.85}
+    first_only_result = format_memory_for_injection({"facts": [first_fact]}, max_tokens=2000)
+    remaining_short_line = "\n- [context | 0.85] Tiny"
+
+    result = build_memory_injection_result(
+        {"facts": [first_fact, second_fact, third_fact]},
+        max_tokens=len(first_only_result) + len(remaining_short_line),
+    )
+
+    assert result.trace is not None
+    assert any(selection.fact_id == "fact_b" and selection.reason.value == "budget_exceeded" for selection in result.trace.selections)
+    assert any(
+        selection.fact_id == "fact_c" and selection.reason.value == "skipped_after_budget_exceeded"
+        for selection in result.trace.selections
+    )

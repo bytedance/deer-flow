@@ -26,6 +26,7 @@ class RetrievalDecisionReason(StrEnum):
 
     SELECTED = "selected"
     BUDGET_EXCEEDED = "budget_exceeded"
+    SKIPPED_AFTER_BUDGET_EXCEEDED = "skipped_after_budget_exceeded"
     EMPTY_CONTENT = "empty_content"
     INVALID_TYPE = "invalid_type"
 
@@ -155,4 +156,11 @@ def emit_retrieval_trace(
     except OSError as exc:
         logger.warning("Failed to persist memory retrieval trace to %s: %s", path, exc)
 
-    logger.debug("Memory retrieval trace: %s", payload_line.rstrip())
+    logger.debug(
+        "Persisted memory retrieval trace trace_id=%s path=%s selected=%d dropped=%d bytes=%d",
+        trace.trace_id,
+        path,
+        trace.selected_count,
+        trace.dropped_count,
+        len(payload_line.encode("utf-8")),
+    )
