@@ -80,7 +80,7 @@ export function ArtifactFileList({
           onClick={() => handleClick(file)}
         >
           <CardHeader className="grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 pr-2 pl-1">
-            <CardTitle className="relative min-w-0 break-words pl-8 leading-tight [overflow-wrap:anywhere]">
+            <CardTitle className="relative min-w-0 pl-8 leading-tight [overflow-wrap:anywhere] break-words">
               <div className="min-w-0">{getFileName(file)}</div>
               <div className="absolute top-2 -left-0.5">
                 {getFileIcon(file, "size-6")}
