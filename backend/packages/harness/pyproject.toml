@@ -34,6 +34,9 @@ dependencies = [
     "langgraph-sdk>=0.1.51",
 ]
 
+[project.optional-dependencies]
+pymupdf = ["pymupdf4llm>=0.0.17"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

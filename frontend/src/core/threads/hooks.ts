@@ -14,7 +14,7 @@ import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
-import { uploadFiles } from "../uploads";
+import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import type { AgentThread, AgentThreadState } from "./types";
 
@@ -30,6 +30,10 @@ export type ThreadStreamOptions = {
   onStart?: (threadId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
+};
+
+type SendMessageOptions = {
+  additionalKwargs?: Record<string, unknown>;
 };
 
 function getStreamErrorMessage(error: unknown): string {
@@ -218,6 +222,7 @@ export function useThreadStream({
       threadId: string,
       message: PromptInputMessage,
       extraContext?: Record<string, unknown>,
+      options?: SendMessageOptions,
     ) => {
       if (sendInFlightRef.current) {
         return;
@@ -238,17 +243,23 @@ export function useThreadStream({
         }),
       );
 
-      // Create optimistic human message (shown immediately)
-      const optimisticHumanMsg: Message = {
-        type: "human",
-        id: `opt-human-${Date.now()}`,
-        content: text ? [{ type: "text", text }] : "",
-        additional_kwargs:
-          optimisticFiles.length > 0 ? { files: optimisticFiles } : {},
+      const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
+      const optimisticAdditionalKwargs = {
+        ...options?.additionalKwargs,
+        ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
       };
 
-      const newOptimistic: Message[] = [optimisticHumanMsg];
-      if (optimisticFiles.length > 0) {
+      const newOptimistic: Message[] = [];
+      if (!hideFromUI) {
+        newOptimistic.push({
+          type: "human",
+          id: `opt-human-${Date.now()}`,
+          content: text ? [{ type: "text", text }] : "",
+          additional_kwargs: optimisticAdditionalKwargs,
+        });
+      }
+
+      if (optimisticFiles.length > 0 && !hideFromUI) {
         // Mock AI message while files are being uploaded
         newOptimistic.push({
           type: "ai",
@@ -268,28 +279,9 @@ export function useThreadStream({
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
           try {
-            // Convert FileUIPart to File objects by fetching blob URLs
-            const filePromises = message.files.map(async (fileUIPart) => {
-              if (fileUIPart.url && fileUIPart.filename) {
-                try {
-                  // Fetch the blob URL to get the file data
-                  const response = await fetch(fileUIPart.url);
-                  const blob = await response.blob();
-
-                  // Create a File object from the blob
-                  return new File([blob], fileUIPart.filename, {
-                    type: fileUIPart.mediaType || blob.type,
-                  });
-                } catch (error) {
-                  console.error(
-                    `Failed to fetch file ${fileUIPart.filename}:`,
-                    error,
-                  );
-                  return null;
-                }
-              }
-              return null;
-            });
+            const filePromises = message.files.map((fileUIPart) =>
+              promptInputFilePartToFile(fileUIPart),
+            );
 
             const conversionResults = await Promise.all(filePromises);
             const files = conversionResults.filter(
@@ -335,7 +327,6 @@ export function useThreadStream({
               });
             }
           } catch (error) {
-            console.error("Failed to upload files:", error);
             const errorMessage =
               error instanceof Error
                 ? error.message
@@ -369,8 +360,12 @@ export function useThreadStream({
                     text,
                   },
                 ],
-                additional_kwargs:
-                  filesForSubmit.length > 0 ? { files: filesForSubmit } : {},
+                additional_kwargs: {
+                  ...options?.additionalKwargs,
+                  ...(filesForSubmit.length > 0
+                    ? { files: filesForSubmit }
+                    : {}),
+                },
               },
             ],
           },

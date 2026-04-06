@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+from deerflow.sandbox.search import GrepMatch
+
 
 class Sandbox(ABC):
     """Abstract base class for sandbox environments"""
@@ -59,6 +61,25 @@ class Sandbox(ABC):
             content: The text content to write to the file.
             append: Whether to append the content to the file. If False, the file will be created or overwritten.
         """
+        pass
+
+    @abstractmethod
+    def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+        """Find paths that match a glob pattern under a root directory."""
+        pass
+
+    @abstractmethod
+    def grep(
+        self,
+        path: str,
+        pattern: str,
+        *,
+        glob: str | None = None,
+        literal: bool = False,
+        case_sensitive: bool = False,
+        max_results: int = 100,
+    ) -> tuple[list[GrepMatch], bool]:
+        """Search for matches inside text files under a directory."""
         pass
 
     @abstractmethod

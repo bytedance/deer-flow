@@ -16,6 +16,7 @@ dependencies = [
     "python-telegram-bot>=21.0",
     "langgraph-sdk>=0.1.51",
     "markdown-to-mrkdwn>=0.3.1",
+    "wecom-aibot-python-sdk>=0.1.6",
 ]
 
 [dependency-groups]

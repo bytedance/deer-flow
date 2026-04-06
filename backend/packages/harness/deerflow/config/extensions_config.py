@@ -80,6 +80,12 @@ class ExtensionsConfig(BaseModel):
         Args:
             config_path: Optional path to extensions config file.
 
+        Resolution order:
+            1. If provided `config_path` argument, use it.
+            2. If provided `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable, use it.
+            3. Otherwise, search backend/repository-root defaults for
+               `extensions_config.json`, then legacy `mcp_config.json`.
+
         Returns:
             Path to the extensions config file if found, otherwise None.
         """
@@ -94,24 +100,16 @@ class ExtensionsConfig(BaseModel):
                 raise FileNotFoundError(f"Extensions config file specified by environment variable `DEER_FLOW_EXTENSIONS_CONFIG_PATH` not found at {path}")
             return path
         else:
-            # Check if the extensions_config.json is in the current directory
-            path = Path(os.getcwd()) / "extensions_config.json"
-            if path.exists():
-                return path
-
-            # Check if the extensions_config.json is in the parent directory of CWD
-            path = Path(os.getcwd()).parent / "extensions_config.json"
-            if path.exists():
-                return path
-
-            # Backward compatibility: check for mcp_config.json
-            path = Path(os.getcwd()) / "mcp_config.json"
-            if path.exists():
-                return path
-
-            path = Path(os.getcwd()).parent / "mcp_config.json"
-            if path.exists():
-                return path
+            backend_dir = Path(__file__).resolve().parents[4]
+            repo_root = backend_dir.parent
+            for path in (
+                backend_dir / "extensions_config.json",
+                repo_root / "extensions_config.json",
+                backend_dir / "mcp_config.json",
+                repo_root / "mcp_config.json",
+            ):
+                if path.exists():
+                    return path
 
             # Extensions are optional, so return None if not found
             return None

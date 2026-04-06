@@ -60,3 +60,4 @@ config.yaml.bak
 docs/superpowers/
 test-results/
 .playwright-mcp
+.gstack/

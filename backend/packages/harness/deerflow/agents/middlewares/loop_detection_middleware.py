@@ -182,6 +182,23 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
         return None, False
 
+    @staticmethod
+    def _append_text(content: str | list | None, text: str) -> str | list:
+        """Append *text* to AIMessage content, handling str, list, and None.
+
+        When content is a list of content blocks (e.g. Anthropic thinking mode),
+        we append a new ``{"type": "text", ...}`` block instead of concatenating
+        a string to a list, which would raise ``TypeError``.
+        """
+        if content is None:
+            return text
+        if isinstance(content, list):
+            return [*content, {"type": "text", "text": f"\n\n{text}"}]
+        if isinstance(content, str):
+            return content + f"\n\n{text}"
+        # Fallback: coerce unexpected types to str to avoid TypeError
+        return str(content) + f"\n\n{text}"
+
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
         warning, hard_stop = self._track_and_check(state, runtime)
 
@@ -192,7 +209,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             stripped_msg = last_msg.model_copy(
                 update={
                     "tool_calls": [],
-                    "content": (last_msg.content or "") + f"\n\n{_HARD_STOP_MSG}",
+                    "content": self._append_text(last_msg.content, _HARD_STOP_MSG),
                 }
             )
             return {"messages": [stripped_msg]}
