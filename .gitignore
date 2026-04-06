@@ -54,5 +54,10 @@ web/
 # Deployment artifacts
 backend/Dockerfile.langgraph
 config.yaml.bak
+# Local session/debug artifacts
+.sisyphus/
+.worktrees/
+docs/superpowers/
+test-results/
 .playwright-mcp
 .gstack/
