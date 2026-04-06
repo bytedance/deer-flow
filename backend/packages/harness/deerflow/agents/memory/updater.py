@@ -64,7 +64,7 @@ def clear_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     cleared_memory = create_empty_memory()
     if not _save_memory_to_file(cleared_memory, agent_name):
         raise OSError("Failed to save cleared memory data")
-    return get_memory_data(agent_name)
+    return ensure_layer_index(cleared_memory)
 
 
 def _validate_confidence(confidence: float) -> float:
@@ -107,7 +107,7 @@ def create_memory_fact(
     if not _save_memory_to_file(updated_memory, agent_name):
         raise OSError("Failed to save memory data after creating fact")
 
-    return get_memory_data(agent_name)
+    return ensure_layer_index(updated_memory)
 
 
 def delete_memory_fact(fact_id: str, agent_name: str | None = None) -> dict[str, Any]:
@@ -124,7 +124,7 @@ def delete_memory_fact(fact_id: str, agent_name: str | None = None) -> dict[str,
     if not _save_memory_to_file(updated_memory, agent_name):
         raise OSError(f"Failed to save memory data after deleting fact '{fact_id}'")
 
-    return get_memory_data(agent_name)
+    return ensure_layer_index(updated_memory)
 
 
 def update_memory_fact(
@@ -166,7 +166,7 @@ def update_memory_fact(
     if not _save_memory_to_file(updated_memory, agent_name):
         raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
 
-    return get_memory_data(agent_name)
+    return ensure_layer_index(updated_memory)
 
 
 def _extract_text(content: Any) -> str:
