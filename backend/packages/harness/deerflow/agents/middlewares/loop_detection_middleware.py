@@ -34,29 +34,46 @@ _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
 
 
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
-    """Deterministic hash of a set of tool calls (name + args).
+    """Deterministic hash of a set of tool calls (name + stable key).
 
     This is intended to be order-independent: the same multiset of tool calls
     should always produce the same hash, regardless of their input order.
     """
-    # First normalize each tool call to a minimal (name, args) structure.
-    normalized: list[dict] = []
+    # Normalize each tool call to a stable (name, key) structure.
+    normalized: list[str] = []
+    bucket_size = 200
     for tc in tool_calls:
-        normalized.append(
-            {
-                "name": tc.get("name", ""),
-                "args": tc.get("args", {}),
-            }
-        )
+        name = tc.get("name", "")
+        args = tc.get("args", {}) or {}
 
-    # Sort by both name and a deterministic serialization of args so that
-    # permutations of the same multiset of calls yield the same ordering.
-    normalized.sort(
-        key=lambda tc: (
-            tc["name"],
-            json.dumps(tc["args"], sort_keys=True, default=str),
-        )
-    )
+        if name == "read_file":
+            path = args.get("path") or ""
+            start_line = args.get("start_line")
+            end_line = args.get("end_line")
+
+            try:
+                start_line = int(start_line) if start_line is not None else 1
+            except (TypeError, ValueError):
+                start_line = 1
+            try:
+                end_line = int(end_line) if end_line is not None else start_line
+            except (TypeError, ValueError):
+                end_line = start_line
+
+            bucket_start = max(start_line, 1)
+            bucket_end = max(end_line, 1)
+            bucket_start = (bucket_start - 1) // bucket_size
+            bucket_end = (bucket_end - 1) // bucket_size
+            key = f"{path}:{bucket_start}-{bucket_end}"
+        else:
+            key = args.get("path") or args.get("url") or args.get("query") or args.get("command")
+            if key is None:
+                key = json.dumps(args, sort_keys=True, default=str)
+
+        normalized.append(f"{name}:{key}")
+
+    # Sort so permutations of the same multiset of calls yield the same ordering.
+    normalized.sort()
     blob = json.dumps(normalized, sort_keys=True, default=str)
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
