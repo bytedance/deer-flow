@@ -39,9 +39,7 @@ export function loadArtifactContentFromToolCall({
       const toolCalls = Array.isArray(message.tool_calls)
         ? message.tool_calls
         : [];
-      const toolCall = toolCalls.find(
-        (toolCall) => toolCall.id === toolCallId,
-      );
+      const toolCall = toolCalls.find((toolCall) => toolCall.id === toolCallId);
       if (toolCall) {
         return toolCall.args.content;
       }
