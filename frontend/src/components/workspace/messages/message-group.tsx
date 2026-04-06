@@ -34,7 +34,7 @@ import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { useArtifacts } from "../artifacts";
+import { useOptionalArtifacts } from "../artifacts";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
@@ -202,8 +202,7 @@ function ToolCall({
   isLoading?: boolean;
 }) {
   const { t } = useI18n();
-  const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
-    useArtifacts();
+  const artifacts = useOptionalArtifacts();
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -336,16 +335,22 @@ function ToolCall({
       description = t.toolCalls.writeFile;
     }
     const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path) {
+    if (
+      isLoading &&
+      isLast &&
+      artifacts?.autoOpen &&
+      artifacts?.autoSelect &&
+      path
+    ) {
       setTimeout(() => {
         const url = new URL(
           `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
         ).toString();
-        if (selectedArtifact === url) {
+        if (artifacts.selectedArtifact === url) {
           return;
         }
-        select(url, true);
-        setOpen(true);
+        artifacts.select(url, true);
+        artifacts.setOpen(true);
       }, 100);
     }
 
@@ -356,12 +361,12 @@ function ToolCall({
         label={description}
         icon={NotebookPenIcon}
         onClick={() => {
-          select(
+          artifacts?.select(
             new URL(
               `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
             ).toString(),
           );
-          setOpen(true);
+          artifacts?.setOpen(true);
         }}
       >
         {path && (
