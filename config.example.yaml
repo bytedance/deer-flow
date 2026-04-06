@@ -392,10 +392,11 @@ sandbox:
 
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
-  # read_file uses head-truncation since source code context is front-loaded.
+  # read_file and ls use head-truncation since their content is front-loaded.
   # Set to 0 to disable truncation.
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
+  ls_output_max_chars: 20000
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
