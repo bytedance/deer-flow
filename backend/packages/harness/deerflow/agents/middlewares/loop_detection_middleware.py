@@ -84,9 +84,7 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
         return f"{path}:{bucket_start}-{bucket_end}"
 
     salient_fields = ("path", "url", "query", "command", "pattern", "glob", "cmd")
-    stable_args = {
-        field: args[field] for field in salient_fields if args.get(field) is not None
-    }
+    stable_args = {field: args[field] for field in salient_fields if args.get(field) is not None}
     if stable_args:
         return json.dumps(stable_args, sort_keys=True, default=str)
 
