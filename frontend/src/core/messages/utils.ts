@@ -44,7 +44,20 @@ function parseToolCallsString(toolCalls: string) {
     '"args":$1',
   );
   const repaired = tryParseJSON(repairedArgsObjects);
-  return Array.isArray(repaired) ? repaired : [];
+  if (Array.isArray(repaired)) {
+    return repaired;
+  }
+
+  const salvagedToolCalls = Array.from(
+    toolCalls.matchAll(
+      /(?:"id":"([^"]*)",)?\s*"name":"([^"]+)"\s*,\s*"args":"(\{[\s\S]*?\}|\[[\s\S]*?\])"/g,
+    ),
+  ).map((match) => ({
+    id: match[1] || undefined,
+    name: match[2]!,
+    args: match[3]!,
+  }));
+  return salvagedToolCalls;
 }
 
 function normalizeToolCallArgs(args: unknown): ToolCallArgs {
