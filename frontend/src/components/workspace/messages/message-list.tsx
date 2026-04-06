@@ -9,6 +9,7 @@ import {
   extractContentFromMessage,
   extractPresentFilesFromMessage,
   extractTextFromMessage,
+  getToolCalls,
   groupMessages,
   hasContent,
   hasPresentFiles,
@@ -104,7 +105,7 @@ export function MessageList({
             const tasks = new Set<Subtask>();
             for (const message of group.messages) {
               if (message.type === "ai") {
-                for (const toolCall of message.tool_calls ?? []) {
+                for (const toolCall of getToolCalls(message)) {
                   if (toolCall.name === "task") {
                     const task: Subtask = {
                       id: toolCall.id!,
@@ -171,8 +172,8 @@ export function MessageList({
                   {t.subtasks.executing(tasks.size)}
                 </div>,
               );
-              const taskIds = message.tool_calls
-                ?.filter((toolCall) => toolCall.name === "task")
+              const taskIds = getToolCalls(message)
+                .filter((toolCall) => toolCall.name === "task")
                 .map((toolCall) => toolCall.id);
               for (const taskId of taskIds ?? []) {
                 results.push(

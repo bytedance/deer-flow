@@ -27,6 +27,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   extractReasoningContentFromMessage,
   findToolCallResult,
+  getToolCalls,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
@@ -469,33 +470,17 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         steps.push(step);
       }
-      const toolCalls = Array.isArray(message.tool_calls)
-        ? message.tool_calls
-        : [];
+      const toolCalls = getToolCalls(message);
       for (const tool_call of toolCalls) {
-        if (!tool_call || typeof tool_call !== "object") {
-          continue;
-        }
         if (tool_call.name === "task") {
           continue;
         }
-        const rawArgs = tool_call.args;
-        const parsedArgs: Record<string, unknown> =
-          typeof rawArgs === "string"
-            ? (() => {
-                try {
-                  return JSON.parse(rawArgs) as Record<string, unknown>;
-                } catch {
-                  return {};
-                }
-              })()
-            : (rawArgs ?? {});
         const step: CoTToolCallStep = {
           id: tool_call.id,
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
-          args: parsedArgs,
+          args: tool_call.args,
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {

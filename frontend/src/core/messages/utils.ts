@@ -1,4 +1,5 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
+import { tryParseJSON } from "../utils/json";
 
 interface GenericMessageGroup<T = string> {
   type: T;
@@ -26,8 +27,66 @@ type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
-function getToolCalls(message: Message | AIMessage) {
-  return Array.isArray(message.tool_calls) ? message.tool_calls : [];
+type ToolCallArgs = Record<string, unknown>;
+type NormalizedToolCall = {
+  id?: string;
+  name: string;
+  args: ToolCallArgs;
+};
+
+function parseToolCallsString(toolCalls: string) {
+  const parsed = tryParseJSON(toolCalls);
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+  const repairedArgsObjects = toolCalls.replace(
+    /"args":"(\{[\s\S]*?\}|\[[\s\S]*?\])"/g,
+    '"args":$1',
+  );
+  const repaired = tryParseJSON(repairedArgsObjects);
+  return Array.isArray(repaired) ? repaired : [];
+}
+
+function normalizeToolCallArgs(args: unknown): ToolCallArgs {
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    return args as ToolCallArgs;
+  }
+  if (typeof args === "string") {
+    const parsed = tryParseJSON(args);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as ToolCallArgs;
+    }
+  }
+  return {};
+}
+
+export function getToolCalls(
+  message: Message | AIMessage,
+): NormalizedToolCall[] {
+  const rawToolCalls = Array.isArray(message.tool_calls)
+    ? message.tool_calls
+    : typeof message.tool_calls === "string"
+      ? parseToolCallsString(message.tool_calls)
+      : [];
+  if (!Array.isArray(rawToolCalls)) {
+    return [];
+  }
+  return rawToolCalls.flatMap((toolCall) => {
+    if (
+      !toolCall ||
+      typeof toolCall !== "object" ||
+      typeof toolCall.name !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: typeof toolCall.id === "string" ? toolCall.id : undefined,
+        name: toolCall.name,
+        args: normalizeToolCallArgs(toolCall.args),
+      },
+    ];
+  });
 }
 
 export function groupMessages<T>(
