@@ -182,6 +182,11 @@ async def task_tool(
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task failed. Error: {result.error}"
+            elif result.status == SubagentStatus.CANCELLED:
+                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error})
+                logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
+                cleanup_background_task(task_id)
+                return "Task cancelled by user."
             elif result.status == SubagentStatus.TIMED_OUT:
                 writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
@@ -219,7 +224,7 @@ async def task_tool(
                 if result is None:
                     return
 
-                if result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None:
+                if result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None:
                     cleanup_background_task(task_id)
                     return
 

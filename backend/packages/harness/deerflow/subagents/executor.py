@@ -30,6 +30,7 @@ class SubagentStatus(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
 
 
@@ -248,7 +249,7 @@ class SubagentExecutor:
                 logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming")
                 with _background_tasks_lock:
                     if result.status == SubagentStatus.RUNNING:
-                        result.status = SubagentStatus.FAILED
+                        result.status = SubagentStatus.CANCELLED
                         result.error = "Cancelled by user"
                         result.completed_at = datetime.now()
                 return result
@@ -259,7 +260,7 @@ class SubagentExecutor:
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
                     with _background_tasks_lock:
                         if result.status == SubagentStatus.RUNNING:
-                            result.status = SubagentStatus.FAILED
+                            result.status = SubagentStatus.CANCELLED
                             result.error = "Cancelled by user"
                             result.completed_at = datetime.now()
                     return result
@@ -544,6 +545,7 @@ def cleanup_background_task(task_id: str) -> None:
         is_terminal_status = result.status in {
             SubagentStatus.COMPLETED,
             SubagentStatus.FAILED,
+            SubagentStatus.CANCELLED,
             SubagentStatus.TIMED_OUT,
         }
         if is_terminal_status or result.completed_at is not None:
