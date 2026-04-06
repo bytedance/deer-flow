@@ -64,7 +64,7 @@ export const Suggestion = ({
   return (
     <Button
       className={cn(
-        "text-muted-foreground cursor-pointer rounded-full px-4 py-2 text-center text-xs font-normal whitespace-normal h-auto max-w-full",
+        "text-muted-foreground h-auto max-w-full cursor-pointer rounded-full px-4 py-2 text-center text-xs font-normal whitespace-normal",
         className,
       )}
       onClick={handleClick}
