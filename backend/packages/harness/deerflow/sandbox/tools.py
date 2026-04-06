@@ -963,6 +963,29 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
     return f"{output[:kept]}{marker}"
 
 
+def _truncate_ls_output(output: str, max_chars: int) -> str:
+    """Head-truncate ls output, preserving the beginning of the listing.
+
+    Directory listings are read top-to-bottom; the head shows the most
+    relevant structure.
+
+    The returned string (including the truncation marker) is guaranteed to be
+    no longer than max_chars characters. Pass max_chars=0 to disable truncation
+    and return the full output unchanged.
+    """
+    if max_chars == 0:
+        return output
+    if len(output) <= max_chars:
+        return output
+    total = len(output)
+    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars. Use a more specific path to see fewer results] ...")
+    kept = max(0, max_chars - marker_max_len)
+    if kept == 0:
+        return output[:max_chars]
+    marker = f"\n... [truncated: showing first {kept} of {total} chars. Use a more specific path to see fewer results] ..."
+    return f"{output[:kept]}{marker}"
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -1037,7 +1060,15 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
-        return "\n".join(children)
+        output = "\n".join(children)
+        try:
+            from deerflow.config.app_config import get_app_config
+
+            sandbox_cfg = get_app_config().sandbox
+            max_chars = sandbox_cfg.ls_output_max_chars if sandbox_cfg else 20000
+        except Exception:
+            max_chars = 20000
+        return _truncate_ls_output(output, max_chars)
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:

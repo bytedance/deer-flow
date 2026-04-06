@@ -245,6 +245,28 @@ models:
   #   max_tokens: 8192
   #   temperature: 0.7
 
+  # Example: vLLM 0.19.0 (OpenAI-compatible, with reasoning toggle)
+  # DeerFlow's vLLM provider preserves vLLM reasoning across tool-call turns and
+  # toggles Qwen-style reasoning by writing
+  # extra_body.chat_template_kwargs.enable_thinking=true/false.
+  # Some reasoning models also require the server to be started with
+  # `vllm serve ... --reasoning-parser <parser>`.
+  # - name: qwen3-32b-vllm
+  #   display_name: Qwen3 32B (vLLM)
+  #   use: deerflow.models.vllm_provider:VllmChatModel
+  #   model: Qwen/Qwen3-32B
+  #   api_key: $VLLM_API_KEY
+  #   base_url: http://localhost:8000/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       chat_template_kwargs:
+  #         enable_thinking: true
+
 # ============================================================================
 # Tool Groups Configuration
 # ============================================================================
@@ -392,10 +414,11 @@ sandbox:
 
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
-  # read_file uses head-truncation since source code context is front-loaded.
+  # read_file and ls use head-truncation since their content is front-loaded.
   # Set to 0 to disable truncation.
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
+  ls_output_max_chars: 20000
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
@@ -591,6 +614,14 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+
+# ============================================================================
+# Skill Self-Evolution Configuration
+# ============================================================================
+# Allow the agent to autonomously create and improve skills in skills/custom/.
+skill_evolution:
+  enabled: false                # Set to true to allow agent-managed writes under skills/custom
+  moderation_model_name: null  # Model for LLM-based security scanning (null = use default model)
 
 # ============================================================================
 # Checkpointer Configuration

@@ -51,6 +51,7 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "Content-Location": f"/api/threads/{thread_id}/runs/{record.run_id}",
         },
     )
 
