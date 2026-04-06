@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 from deerflow.config.agents_config import AgentConfig
@@ -41,6 +42,7 @@ def test_get_skills_prompt_section_returns_skills(monkeypatch):
     result = get_skills_prompt_section(available_skills={"skill1"})
     assert "skill1" in result
     assert "skill2" not in result
+    assert "[built-in]" in result
 
 
 def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(monkeypatch):
@@ -50,6 +52,52 @@ def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(mon
     result = get_skills_prompt_section(available_skills=None)
     assert "skill1" in result
     assert "skill2" in result
+
+
+def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
+    skills = [_make_skill("skill1")]
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: skills)
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            skill_evolution=SimpleNamespace(enabled=True),
+        ),
+    )
+
+    result = get_skills_prompt_section(available_skills=None)
+    assert "Skill Self-Evolution" in result
+
+
+def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(monkeypatch):
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: [])
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            skill_evolution=SimpleNamespace(enabled=True),
+        ),
+    )
+
+    result = get_skills_prompt_section(available_skills=None)
+    assert "Skill Self-Evolution" in result
+
+
+def test_get_skills_prompt_section_cache_respects_skill_evolution_toggle(monkeypatch):
+    skills = [_make_skill("skill1")]
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: skills)
+    config = SimpleNamespace(
+        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skill_evolution=SimpleNamespace(enabled=True),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+
+    enabled_result = get_skills_prompt_section(available_skills=None)
+    assert "Skill Self-Evolution" in enabled_result
+
+    config.skill_evolution.enabled = False
+    disabled_result = get_skills_prompt_section(available_skills=None)
+    assert "Skill Self-Evolution" not in disabled_result
 
 
 def test_make_lead_agent_empty_skills_passed_correctly(monkeypatch):
