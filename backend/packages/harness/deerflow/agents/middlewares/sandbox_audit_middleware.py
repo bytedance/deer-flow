@@ -23,19 +23,38 @@ logger = logging.getLogger(__name__)
 
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),  # rm -rf / /* ~ /home /root
-    re.compile(r"(curl|wget).+\|\s*(ba)?sh"),  # curl|sh, wget|sh
+    # --- original rules (retained) ---
+    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
     re.compile(r"cat\s+/etc/shadow"),
-    re.compile(r">\s*/etc/"),  # overwrite /etc/ files
+    re.compile(r">\s*/etc/"),
+    # --- pipe to sh/bash (generalised, replaces old curl|sh rule) ---
+    re.compile(r"\|\s*(ba)?sh\b"),
+    # --- command substitution (targeted – only dangerous executables) ---
+    re.compile(r"[`$]\(?\s*(curl|wget|bash|sh|python|ruby|perl|base64)"),
+    # --- base64 decode piped to execution ---
+    re.compile(r"base64\s+.*-d.*\|"),
+    # --- overwrite system binaries ---
+    re.compile(r">+\s*(/usr/bin/|/bin/|/sbin/)"),
+    # --- overwrite shell startup files ---
+    re.compile(r">+\s*~/?\.(bashrc|profile|zshrc|bash_profile)"),
+    # --- process environment leakage ---
+    re.compile(r"/proc/[^/]+/environ"),
+    # --- dynamic linker hijack (one-step escalation) ---
+    re.compile(r"\b(LD_PRELOAD|LD_LIBRARY_PATH)\s*="),
+    # --- bash built-in networking (bypasses tool allowlists) ---
+    re.compile(r"/dev/tcp/"),
 ]
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"chmod\s+777"),  # overly permissive, but reversible
-    re.compile(r"pip\s+install"),
-    re.compile(r"pip3\s+install"),
+    re.compile(r"chmod\s+777"),
+    re.compile(r"pip3?\s+install"),
     re.compile(r"apt(-get)?\s+install"),
+    # sudo/su: no-op under Docker root; warn so LLM is aware
+    re.compile(r"\b(sudo|su)\b"),
+    # PATH modification: long attack chain, warn rather than block
+    re.compile(r"\bPATH\s*="),
 ]
 
 
