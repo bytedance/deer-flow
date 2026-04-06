@@ -16,6 +16,7 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 **Runtime Modes**:
 - **Standard mode** (`make dev`): LangGraph Server handles agent execution as a separate process. 4 processes total.
 - **Gateway mode** (`make dev-pro`, experimental): Agent runtime embedded in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Service manages its own concurrency via async tasks. 3 processes total, no LangGraph Server.
+- **Railway backend mode**: Production-only gateway-mode deployment with a private FastAPI gateway plus a public Railway-specific nginx proxy. No DeerFlow frontend and no standalone LangGraph service.
 
 **Project Structure**:
 ```
@@ -61,6 +62,7 @@ deer-flow/
 │   ├── tests/                 # Test suite
 │   └── docs/                  # Documentation
 ├── frontend/                   # Next.js frontend application
+├── railway/                    # Railway deployment assets (Dockerfiles, bootstrap scripts, nginx/config templates)
 └── skills/                     # Agent skills directory
     ├── public/                # Public skills (committed)
     └── custom/                # Custom skills (gitignored)
@@ -98,6 +100,36 @@ make test       # Run all backend tests
 make lint       # Lint with ruff
 make format     # Format code with ruff
 ```
+
+## Railway Backend v1
+
+Railway deployment keeps DeerFlow in gateway mode and splits the backend into two services:
+
+- `deerflow-gateway`: private FastAPI runtime using [`railway/gateway.Dockerfile`](../railway/gateway.Dockerfile)
+- `deerflow-api`: public nginx proxy using [`railway/nginx.Dockerfile`](../railway/nginx.Dockerfile)
+
+Key deployment rules:
+
+- Do not reuse the stock nginx config. Use [`railway/templates/nginx.railway.conf.template`](../railway/templates/nginx.railway.conf.template), which removes the frontend upstream and keeps only backend routes.
+- Keep `gateway replicas = 1` and `GATEWAY_WORKERS = 1` while the run registry and stream bridge remain in-memory.
+- Keep `checkpointer/store = sqlite` in v1. Move to Postgres before increasing workers or replicas.
+- Mount `DEER_FLOW_HOME` on a Railway volume so memory, thread data, uploads, outputs, ACP workspace, and SQLite-backed runtime state persist across restarts.
+- Bake repo-root `skills/` into the gateway image. Do not rely on Docker bind mounts in Railway.
+- Set `PORT=8001` on `deerflow-gateway` as an explicit Railway service variable so `${{deerflow-gateway.PORT}}` resolves correctly for the public nginx proxy's `GATEWAY_UPSTREAM`.
+
+Gateway bootstrap is handled by [`app/gateway/railway_runtime.py`](app/gateway/railway_runtime.py):
+
+- renders the tracked Railway config template into the runtime `config.yaml`
+- copies the tracked `extensions_config.json` template into `DEER_FLOW_HOME` only if the persistent copy is missing
+- decodes `CODEX_AUTH_JSON_B64` into a runtime-only `CODEX_AUTH_PATH`
+- reorders configured models so the selected primary provider stays first while preserving fallback order
+
+Model/provider expectations for Railway v1:
+
+- Primary model: Codex (`gpt-5.4`) via `CODEX_AUTH_JSON_B64`
+- Fallback order: OpenAI API key, then Gemini API key
+- `DEER_FLOW_PRIMARY_MODEL` chooses which provider is first in the rendered config
+- `DEER_FLOW_ALLOW_HOST_BASH` defaults to `true` for the Railway bootstrap path
 
 Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)

@@ -54,7 +54,8 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Configuration](#configuration)
     - [Running the Application](#running-the-application)
       - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
-      - [Option 2: Local Development](#option-2-local-development)
+      - [Option 2: Railway Backend Deployment](#option-2-railway-backend-deployment)
+      - [Option 3: Local Development](#option-3-local-development)
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
@@ -243,7 +244,50 @@ Access: http://localhost:2026
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
-#### Option 2: Local Development
+#### Option 2: Railway Backend Deployment
+
+Railway v1 deployment keeps DeerFlow in **gateway mode** with **no DeerFlow frontend** and **no separate LangGraph service**:
+
+- `deerflow-gateway` is a **private** FastAPI gateway service built from [`railway/gateway.Dockerfile`](railway/gateway.Dockerfile)
+- `deerflow-api` is a **public** nginx proxy built from [`railway/nginx.Dockerfile`](railway/nginx.Dockerfile)
+- nginx preserves the DeerFlow API contract, including `/api/langgraph/*`, while returning a deliberate backend-only response for `/`
+- persistent runtime state lives under `DEER_FLOW_HOME` on a Railway volume
+
+The gateway bootstrap path is [`backend/app/gateway/railway_runtime.py`](backend/app/gateway/railway_runtime.py). On startup it:
+
+- renders [`railway/templates/config.railway.template.yaml`](railway/templates/config.railway.template.yaml) to the runtime `config.yaml`
+- seeds [`railway/templates/extensions_config.railway.template.json`](railway/templates/extensions_config.railway.template.json) into `DEER_FLOW_HOME` only when the volume copy is missing
+- decodes `CODEX_AUTH_JSON_B64` into a runtime-only `CODEX_AUTH_PATH`
+
+Recommended Railway variables for the gateway service:
+
+```bash
+PORT=8001
+DEER_FLOW_PRIMARY_MODEL=codex
+DEER_FLOW_ALLOW_HOST_BASH=true
+GATEWAY_WORKERS=1
+CODEX_AUTH_JSON_B64=<base64-encoded ~/.codex/auth.json>
+OPENAI_API_KEY=<optional fallback>
+GEMINI_API_KEY=<optional fallback>
+```
+
+Recommended Railway variable for the public `deerflow-api` service:
+
+```bash
+GATEWAY_UPSTREAM=${{deerflow-gateway.RAILWAY_PRIVATE_DOMAIN}}:${{deerflow-gateway.PORT}}
+```
+
+`PORT=8001` must be set as a **Railway service variable** on `deerflow-gateway`, not just relied on as a runtime default. Railway private networking expressions resolve `${{deerflow-gateway.PORT}}` from the service variable set, and the public nginx proxy depends on that value when routing to the private gateway.
+
+Railway v1 intentionally stays single-process:
+
+- `gateway replicas = 1`
+- `gateway workers = 1`
+- `checkpointer/store = sqlite`
+
+Do not scale workers or replicas while the runtime still uses the in-memory run registry and memory-backed stream bridge. Move persistence to Postgres before scaling out.
+
+#### Option 3: Local Development
 
 If you prefer running services locally:
 

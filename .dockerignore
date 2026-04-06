@@ -59,7 +59,6 @@ tests/
 scripts/
 logs/
 docker/
-skills/
 frontend/.next
 frontend/node_modules
 backend/.venv

@@ -1,0 +1,139 @@
+config_version: 1
+
+log_level: info
+
+models:
+  - name: gpt-5.4
+    display_name: GPT-5.4 (Codex CLI)
+    use: deerflow.models.openai_codex_provider:CodexChatModel
+    model: gpt-5.4
+    default_request_timeout: 600.0
+    max_retries: 3
+    supports_vision: true
+    supports_thinking: true
+    supports_reasoning_effort: true
+
+  - name: gpt-5
+    display_name: GPT-5 (OpenAI API)
+    use: langchain_openai:ChatOpenAI
+    model: gpt-5
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    use_responses_api: true
+    output_version: responses/v1
+    supports_vision: true
+    supports_thinking: true
+    supports_reasoning_effort: true
+
+  - name: gemini-2.5-pro
+    display_name: Gemini 2.5 Pro
+    use: langchain_google_genai:ChatGoogleGenerativeAI
+    model: gemini-2.5-pro
+    gemini_api_key: $GEMINI_API_KEY
+    timeout: 600.0
+    max_retries: 2
+    max_tokens: 8192
+    supports_vision: true
+
+tool_groups:
+  - name: web
+  - name: file:read
+  - name: file:write
+  - name: bash
+
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.ddg_search.tools:web_search_tool
+    max_results: 5
+
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+
+  - name: image_search
+    group: web
+    use: deerflow.community.image_search.tools:image_search_tool
+    max_results: 5
+
+  - name: ls
+    group: file:read
+    use: deerflow.sandbox.tools:ls_tool
+
+  - name: read_file
+    group: file:read
+    use: deerflow.sandbox.tools:read_file_tool
+
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+    max_results: 200
+
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+    max_results: 100
+
+  - name: write_file
+    group: file:write
+    use: deerflow.sandbox.tools:write_file_tool
+
+  - name: str_replace
+    group: file:write
+    use: deerflow.sandbox.tools:str_replace_tool
+
+  - name: bash
+    group: bash
+    use: deerflow.sandbox.tools:bash_tool
+
+tool_search:
+  enabled: false
+
+uploads:
+  pdf_converter: auto
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: true
+  bash_output_max_chars: 20000
+  read_file_output_max_chars: 50000
+
+skills:
+  container_path: /mnt/skills
+
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null
+
+summarization:
+  enabled: true
+  trigger:
+    - type: tokens
+      value: 15564
+  keep:
+    type: messages
+    value: 10
+  trim_tokens_to_summarize: 15564
+  summary_prompt: null
+
+memory:
+  enabled: true
+  storage_path: memory.json
+  debounce_seconds: 30
+  model_name: null
+  max_facts: 100
+  fact_confidence_threshold: 0.7
+  injection_enabled: true
+  max_injection_tokens: 2000
+
+checkpointer:
+  type: sqlite
+  connection_string: checkpoints.db
+
+stream_bridge:
+  type: memory
+  queue_maxsize: 256
