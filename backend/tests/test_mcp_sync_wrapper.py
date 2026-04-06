@@ -132,3 +132,50 @@ def test_get_mcp_tools_budgets_oversized_structured_results(tmp_path):
     assert "Full x-reader_read_url output saved to /mnt/user-data/outputs/.context/tool-results/" in result
     saved_files = list((tmp_path / "outputs" / ".context" / "tool-results").glob("x-reader_read_url-*.txt"))
     assert len(saved_files) == 1
+
+
+def test_get_mcp_tools_preserves_content_and_artifact_tuple_results(tmp_path):
+    set_context_management_config(
+        ContextManagementConfig(
+            tool_result_budget=ToolResultBudgetConfig(
+                enabled=True,
+                externalize_min_chars=20,
+                preview_head_chars=10,
+                preview_tail_chars=6,
+            )
+        )
+    )
+
+    artifact = {"url": "https://example.com", "status": 200}
+
+    async def mock_coro(x: int):
+        return ("y" * 120, artifact | {"index": x})
+
+    mock_tool = StructuredTool(
+        name="x-reader_read_url",
+        description="test description",
+        args_schema=MockArgs,
+        func=None,
+        coroutine=mock_coro,
+        response_format="content_and_artifact",
+    )
+    mock_client_instance = MagicMock()
+    mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool])
+
+    with (
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
+        patch("deerflow.mcp.tools.build_servers_config", return_value={"x-reader": {}}),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.resolve_thread_data_from_config", return_value={"outputs_path": str(tmp_path / "outputs")}),
+    ):
+        tools = asyncio.run(get_mcp_tools())
+        result = tools[0].func(x=7)
+
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    assert isinstance(result[0], str)
+    assert "Full x-reader_read_url output saved to /mnt/user-data/outputs/.context/tool-results/" in result[0]
+    assert result[1] == {"url": "https://example.com", "status": 200, "index": 7}
+    saved_files = list((tmp_path / "outputs" / ".context" / "tool-results").glob("x-reader_read_url-*.txt"))
+    assert len(saved_files) == 1

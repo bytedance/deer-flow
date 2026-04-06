@@ -167,8 +167,6 @@ def _detect_format_in_clause(clause: str) -> tuple[str, str] | tuple[None, None]
         if any(marker in lowered for marker in markers):
             return candidate_format, candidate_deliverable
     return None, None
-
-
 def _derive_task_contract(original_request: str | None, *, goal_limit: int) -> TaskContractData | None:
     if not original_request:
         return None
@@ -301,13 +299,10 @@ def build_session_state_snapshot(state: SessionStateMiddlewareState) -> SessionS
         return None
 
     messages = list(state.get("messages") or [])
-    original_request = _extract_original_user_request(messages, limit=config.max_goal_chars)
     current_goal = _extract_latest_user_goal(messages, limit=config.max_goal_chars)
-    original_contract = _derive_task_contract(original_request, goal_limit=config.max_goal_chars)
-    latest_contract = _derive_task_contract(current_goal, goal_limit=config.max_goal_chars)
     session_state: SessionStateData = {
         "current_goal": current_goal,
-        "task_contract": _merge_task_contracts(original_contract, latest_contract),
+        "task_contract": build_task_contract_snapshot(messages, goal_limit=config.max_goal_chars),
         "active_todos": _extract_active_todos(state.get("todos"), max_items=config.max_items),
         "recent_artifacts": _extract_recent_artifacts(state.get("artifacts"), max_items=config.max_items),
         "last_assistant_response": _extract_latest_final_ai(messages, limit=config.max_response_chars),
@@ -316,6 +311,63 @@ def build_session_state_snapshot(state: SessionStateMiddlewareState) -> SessionS
     if not any(session_state.values()):
         return None
     return session_state
+
+
+def build_task_contract_snapshot(messages: list[Any], *, goal_limit: int | None = None) -> TaskContractData | None:
+    if goal_limit is None:
+        goal_limit = get_context_management_config().session_state.max_goal_chars
+
+    original_request = _extract_original_user_request(messages, limit=goal_limit)
+    current_goal = _extract_latest_user_goal(messages, limit=goal_limit)
+    original_contract = _derive_task_contract(original_request, goal_limit=goal_limit)
+    latest_contract = _derive_task_contract(current_goal, goal_limit=goal_limit)
+    return _merge_task_contracts(original_contract, latest_contract)
+
+
+def _merge_session_states(
+    previous: SessionStateData | None,
+    latest: SessionStateData | None,
+) -> SessionStateData | None:
+    if not previous and not latest:
+        return None
+
+    previous = previous or {}
+    latest = latest or {}
+
+    previous_contract = previous.get("task_contract")
+    latest_contract = latest.get("task_contract")
+    merged_contract = _merge_task_contracts(previous_contract, latest_contract)
+    if previous_contract and merged_contract and not (latest_contract or {}).get("deliverable"):
+        if previous_contract.get("active_request"):
+            merged_contract["active_request"] = previous_contract["active_request"]
+        if previous_contract.get("output_format") and not merged_contract.get("output_format"):
+            merged_contract["output_format"] = previous_contract["output_format"]
+        if previous_contract.get("deliverable") and not merged_contract.get("deliverable"):
+            merged_contract["deliverable"] = previous_contract["deliverable"]
+        if previous_contract.get("must_save_output") is not None and merged_contract.get("must_save_output") is None:
+            merged_contract["must_save_output"] = previous_contract["must_save_output"]
+        if previous_contract.get("must_present_output") is not None and merged_contract.get("must_present_output") is None:
+            merged_contract["must_present_output"] = previous_contract["must_present_output"]
+
+    current_goal = latest.get("current_goal")
+    if not current_goal:
+        current_goal = previous.get("current_goal")
+    elif previous_contract and not (latest_contract or {}).get("deliverable"):
+        # Preserve the durable task objective when the newest turn is only
+        # meta feedback or clarification without a new actionable contract.
+        current_goal = previous.get("current_goal") or current_goal
+
+    merged: SessionStateData = {
+        "current_goal": current_goal,
+        "task_contract": merged_contract,
+        "active_todos": latest.get("active_todos") or previous.get("active_todos") or [],
+        "recent_artifacts": latest.get("recent_artifacts") or previous.get("recent_artifacts") or [],
+        "last_assistant_response": latest.get("last_assistant_response") or previous.get("last_assistant_response"),
+    }
+
+    if not any(merged.values()):
+        return None
+    return merged
 
 
 def _format_session_state(session_state: SessionStateData) -> str | None:
@@ -387,21 +439,25 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateMiddlewareState]):
         if not config.enabled:
             return None
 
+        session_state = _merge_session_states(state.get("session_state"), build_session_state_snapshot(state))
+        result: dict[str, Any] = {}
+        if session_state is not None and session_state != state.get("session_state"):
+            result["session_state"] = session_state
+
         messages = list(state.get("messages") or [])
         if len(messages) < config.inject_when_message_count_at_least:
-            return None
+            return result or None
         if _session_state_visible(messages):
-            return None
-
-        session_state = state.get("session_state")
+            return result or None
         if not session_state:
-            return None
+            return result or None
 
         content = _format_session_state(session_state)
         if not content:
-            return None
+            return result or None
 
-        return {"messages": [HumanMessage(content=content)]}
+        result["messages"] = [HumanMessage(content=content)]
+        return result or None
 
     @override
     async def abefore_model(self, state: SessionStateMiddlewareState, runtime: Runtime) -> dict[str, Any] | None:
@@ -409,7 +465,7 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateMiddlewareState]):
 
     @override
     def after_agent(self, state: SessionStateMiddlewareState, runtime: Runtime) -> dict | None:  # noqa: ARG002
-        session_state = build_session_state_snapshot(state)
+        session_state = _merge_session_states(state.get("session_state"), build_session_state_snapshot(state))
         if session_state is None:
             return None
         return {"session_state": session_state}

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
@@ -43,14 +43,32 @@ def _externalize_tool_output(content: str, *, tool_name: str, thread_data: Threa
         return None
 
     config = get_context_management_config().tool_result_budget
-    storage_dir = Path(outputs_path) / config.storage_subdir
+    try:
+        storage_parts = _sanitize_storage_subdir(config.storage_subdir)
+    except ValueError:
+        return None
+
+    storage_dir = Path(outputs_path).joinpath(*storage_parts)
     storage_dir.mkdir(parents=True, exist_ok=True)
 
     ext = "log" if tool_name in {"bash", "web_fetch"} else "txt"
     filename = f"{tool_name}-{uuid4().hex[:12]}.{ext}"
     host_path = storage_dir / filename
     host_path.write_text(content, encoding="utf-8")
-    return f"{VIRTUAL_PATH_PREFIX}/outputs/{config.storage_subdir}/{filename}"
+    virtual_storage_subdir = "/".join(storage_parts)
+    return f"{VIRTUAL_PATH_PREFIX}/outputs/{virtual_storage_subdir}/{filename}"
+
+
+def _sanitize_storage_subdir(storage_subdir: str) -> tuple[str, ...]:
+    candidate = PurePosixPath(storage_subdir)
+    if candidate.is_absolute():
+        raise ValueError("storage_subdir must be a relative path")
+
+    parts = tuple(part for part in candidate.parts if part not in {"", "."})
+    if not parts or any(part == ".." for part in parts):
+        raise ValueError("storage_subdir must not contain path traversal")
+
+    return parts
 
 
 def prepare_tool_output_for_context(
@@ -104,6 +122,18 @@ def prepare_tool_result_value_for_context(
     thread_data: ThreadDataState | None = None,
 ) -> Any:
     """Budget oversized tool results while keeping small structured payloads intact."""
+    if isinstance(result, tuple) and len(result) == 2:
+        content, artifact = result
+        if isinstance(content, str):
+            return (
+                prepare_tool_output_for_context(content, tool_name=tool_name, thread_data=thread_data),
+                artifact,
+            )
+        return (
+            prepare_tool_result_value_for_context(content, tool_name=tool_name, thread_data=thread_data),
+            artifact,
+        )
+
     if isinstance(result, str):
         return prepare_tool_output_for_context(result, tool_name=tool_name, thread_data=thread_data)
 

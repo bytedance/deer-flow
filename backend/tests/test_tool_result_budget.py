@@ -43,6 +43,30 @@ def test_prepare_tool_output_externalizes_oversized_result(tmp_path: Path):
     assert saved_files[0].read_text(encoding="utf-8") == "abcdefghijklmnopqrstuvwxyz"
 
 
+@pytest.mark.parametrize("storage_subdir", ["/tmp/outside", "../outside", ".context/../outside"])
+def test_prepare_tool_output_rejects_unsafe_storage_subdir(tmp_path: Path, storage_subdir: str):
+    set_context_management_config(
+        ContextManagementConfig(
+            tool_result_budget=ToolResultBudgetConfig(
+                enabled=True,
+                externalize_min_chars=20,
+                preview_head_chars=5,
+                preview_tail_chars=4,
+                storage_subdir=storage_subdir,
+            )
+        )
+    )
+    outputs_dir = tmp_path / "outputs"
+    thread_data = {"outputs_path": str(outputs_dir)}
+
+    result = prepare_tool_output_for_context("abcdefghijklmnopqrstuvwxyz", tool_name="bash", thread_data=thread_data)
+
+    assert "Full bash output saved to" not in result
+    assert "characters omitted from bash output" not in result
+    assert list(tmp_path.glob("outside*")) == []
+    assert not (outputs_dir / ".context" / "tool-results").exists()
+
+
 def test_prepare_tool_output_falls_back_to_truncation_when_budget_disabled():
     set_context_management_config(
         ContextManagementConfig(

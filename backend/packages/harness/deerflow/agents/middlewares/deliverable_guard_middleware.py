@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import Any, NotRequired, override
+from typing import NotRequired, override
 
 from langchain.agents import AgentState
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares.session_state_middleware import build_session_state_snapshot
-from deerflow.agents.thread_state import SessionStateData
+from deerflow.agents.middlewares.session_state_middleware import build_session_state_snapshot, build_task_contract_snapshot
+from deerflow.agents.thread_state import SessionStateData, TaskContractData
 
 
 class DeliverableGuardState(AgentState):
@@ -58,9 +58,17 @@ def _artifacts_satisfy_deliverable(artifacts: list[str], deliverable: str, outpu
     )
 
 
-def _deliverable_requirement_unmet(state: DeliverableGuardState) -> tuple[bool, str | None]:
+def _resolve_task_contract(state: DeliverableGuardState) -> TaskContractData:
     session_state = state.get("session_state") or build_session_state_snapshot(state) or {}
-    task_contract = session_state.get("task_contract") or {}
+    task_contract = session_state.get("task_contract")
+    if task_contract:
+        return task_contract
+
+    return build_task_contract_snapshot(list(state.get("messages") or [])) or {}
+
+
+def _deliverable_requirement_unmet(state: DeliverableGuardState) -> tuple[bool, str | None]:
+    task_contract = _resolve_task_contract(state)
     deliverable = task_contract.get("deliverable")
     output_format = task_contract.get("output_format")
 
@@ -82,6 +90,7 @@ class DeliverableGuardMiddleware(AgentMiddleware[DeliverableGuardState]):
 
     state_schema = DeliverableGuardState
 
+    @hook_config(can_jump_to=["model"])
     @override
     def after_model(self, state: DeliverableGuardState, runtime: Runtime) -> dict | None:  # noqa: ARG002
         messages = list(state.get("messages") or [])
@@ -109,7 +118,7 @@ class DeliverableGuardMiddleware(AgentMiddleware[DeliverableGuardState]):
                 f"\n</{_REMINDER_TAG[1:]}"
             ),
         )
-        return {"messages": [reminder]}
+        return {"messages": [reminder], "jump_to": "model"}
 
     @override
     async def aafter_model(self, state: DeliverableGuardState, runtime: Runtime) -> dict | None:

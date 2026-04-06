@@ -103,6 +103,7 @@ def test_before_model_injects_session_state_reminder_when_history_is_long():
     result = middleware.before_model(state, MagicMock())
 
     assert result is not None
+    assert result["session_state"]["current_goal"] == "Finish the refactor"
     reminder = result["messages"][0]
     assert "<session_state>" in reminder.content
     assert "Finish the refactor" in reminder.content
@@ -111,7 +112,7 @@ def test_before_model_injects_session_state_reminder_when_history_is_long():
     assert "/mnt/user-data/outputs/summary.md" in reminder.content
 
 
-def test_before_model_skips_short_histories():
+def test_before_model_skips_reminder_for_short_histories_but_still_captures_state():
     set_context_management_config(
         ContextManagementConfig(
             session_state=SessionStateConfig(enabled=True, inject_when_message_count_at_least=5),
@@ -119,11 +120,16 @@ def test_before_model_skips_short_histories():
     )
     middleware = SessionStateMiddleware()
     state = {
-        "messages": [HumanMessage(content="short"), AIMessage(content="history")],
-        "session_state": {"current_goal": "Stay quiet"},
+        "messages": [HumanMessage(content="请生成 html 报告"), AIMessage(content="history")],
+        "session_state": None,
     }
 
-    assert middleware.before_model(state, MagicMock()) is None
+    result = middleware.before_model(state, MagicMock())
+
+    assert result is not None
+    assert "messages" not in result
+    assert result["session_state"]["task_contract"]["deliverable"] == "HTML report"
+    assert result["session_state"]["task_contract"]["output_format"] == "html"
 
 
 def test_after_agent_ignores_summary_like_human_messages_when_extracting_goal():
@@ -199,7 +205,68 @@ def test_after_agent_allows_latest_user_requirement_to_override_deliverable_cont
     assert session_state["task_contract"]["deliverable"] == "HTML report"
     assert session_state["task_contract"]["output_format"] == "html"
 
+def test_after_agent_preserves_existing_contract_when_latest_turn_has_no_new_contract():
+    set_context_management_config(ContextManagementConfig(session_state=SessionStateConfig(enabled=True)))
+    middleware = SessionStateMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="我问你要的是html报告，不是随便一个总结。"),
+            AIMessage(content="抱歉，我刚才理解错了。"),
+        ],
+        "todos": [],
+        "artifacts": [],
+        "session_state": {
+            "current_goal": "深入研究这个项目并生成 HTML 报告。",
+            "task_contract": {
+                "original_request": "深入研究这个项目并生成 HTML 报告。",
+                "active_request": "深入研究这个项目并生成 HTML 报告。",
+                "deliverable": "HTML report",
+                "output_format": "html",
+                "must_save_output": True,
+                "must_present_output": True,
+            },
+        },
+    }
 
+    result = middleware.after_agent(state, MagicMock())
+
+    assert result is not None
+    session_state = result["session_state"]
+    assert session_state["current_goal"] == "深入研究这个项目并生成 HTML 报告。"
+    assert session_state["task_contract"]["deliverable"] == "HTML report"
+    assert session_state["task_contract"]["output_format"] == "html"
+
+
+def test_after_agent_preserves_existing_goal_when_latest_message_is_only_meta_feedback():
+    set_context_management_config(ContextManagementConfig(session_state=SessionStateConfig(enabled=True)))
+    middleware = SessionStateMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="我问你要的是什么报告"),
+            AIMessage(content="抱歉，我刚才理解错了。"),
+        ],
+        "todos": [],
+        "artifacts": [],
+        "session_state": {
+            "current_goal": "深入研究这个项目：https://github.com/HKUDS/CLI-Anything，给我一个html报告，要参考frontend-design-hub skill生成",
+            "task_contract": {
+                "original_request": "深入研究这个项目：https://github.com/HKUDS/CLI-Anything，给我一个html报告，要参考frontend-design-hub skill生成",
+                "active_request": "深入研究这个项目：https://github.com/HKUDS/CLI-Anything，给我一个html报告，要参考frontend-design-hub skill生成",
+                "deliverable": "HTML report",
+                "output_format": "html",
+                "must_save_output": True,
+                "must_present_output": True,
+            },
+        },
+    }
+
+    result = middleware.after_agent(state, MagicMock())
+
+    assert result is not None
+    session_state = result["session_state"]
+    assert session_state["current_goal"] == "深入研究这个项目：https://github.com/HKUDS/CLI-Anything，给我一个html报告，要参考frontend-design-hub skill生成"
+    assert session_state["task_contract"]["deliverable"] == "HTML report"
+    assert session_state["task_contract"]["output_format"] == "html"
 def test_after_agent_does_not_create_hard_deliverable_contract_for_incidental_format_mentions():
     set_context_management_config(ContextManagementConfig(session_state=SessionStateConfig(enabled=True)))
     middleware = SessionStateMiddleware()
@@ -216,7 +283,7 @@ def test_after_agent_does_not_create_hard_deliverable_contract_for_incidental_fo
 
     assert result is not None
     contract = result["session_state"]["task_contract"]
-    assert contract.get("output_format") is None
+    assert contract["output_format"] == "markdown"
     assert contract.get("deliverable") is None
     assert contract["must_save_output"] is False
     assert contract["must_present_output"] is False
@@ -242,8 +309,6 @@ def test_after_agent_distinguishes_input_format_mentions_from_output_requirement
     assert contract["deliverable"] == "HTML report"
     assert contract["must_save_output"] is True
     assert contract["must_present_output"] is True
-
-
 def test_before_model_surfaces_latest_user_requirement_when_it_differs_from_original_request():
     set_context_management_config(
         ContextManagementConfig(
@@ -275,6 +340,33 @@ def test_before_model_surfaces_latest_user_requirement_when_it_differs_from_orig
     assert "Original request contract: Analyze the repo and write a report." in reminder.content
     assert "Latest user requirement: Now convert the final deliverable to HTML." in reminder.content
     assert "Output format: HTML" in reminder.content
+
+
+def test_before_model_captures_contract_before_summarization_can_trim_raw_history():
+    set_context_management_config(
+        ContextManagementConfig(
+            session_state=SessionStateConfig(enabled=True, inject_when_message_count_at_least=99),
+        )
+    )
+    middleware = SessionStateMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="深入研究这个项目：https://github.com/HKUDS/CLI-Anything，给我一个html报告，要参考frontend-design-hub skill生成"),
+            AIMessage(content="I cloned the repository and started reading."),
+            HumanMessage(content="Here is a summary of the conversation to date: 继续研究项目架构。"),
+        ],
+        "session_state": None,
+        "todos": [],
+        "artifacts": [],
+    }
+
+    result = middleware.before_model(state, MagicMock())
+
+    assert result is not None
+    contract = result["session_state"]["task_contract"]
+    assert contract["deliverable"] == "HTML report"
+    assert contract["output_format"] == "html"
+    assert contract["original_request"] == "深入研究这个项目：https://github.com/HKUDS/CLI-Anything，给我一个html报告，要参考frontend-design-hub skill生成"
 
 
 @pytest.mark.parametrize(

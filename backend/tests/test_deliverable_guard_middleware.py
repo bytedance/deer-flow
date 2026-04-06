@@ -3,6 +3,15 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.deliverable_guard_middleware import DeliverableGuardMiddleware
+from deerflow.config.context_management_config import ContextManagementConfig, SessionStateConfig, set_context_management_config
+
+
+def setup_function():
+    set_context_management_config(ContextManagementConfig())
+
+
+def teardown_function():
+    set_context_management_config(ContextManagementConfig())
 
 
 def test_after_model_injects_reminder_when_deliverable_file_missing():
@@ -29,6 +38,7 @@ def test_after_model_injects_reminder_when_deliverable_file_missing():
     reminder = result["messages"][0]
     assert "Required deliverable: HTML report" in reminder.content
     assert "present_files" in reminder.content
+    assert result["jump_to"] == "model"
 
 
 def test_after_model_derives_contract_from_first_turn_when_session_state_not_persisted_yet():
@@ -48,6 +58,30 @@ def test_after_model_derives_contract_from_first_turn_when_session_state_not_per
     reminder = result["messages"][0]
     assert "Required deliverable: HTML report" in reminder.content
     assert "present_files" in reminder.content
+    assert result["jump_to"] == "model"
+
+
+def test_after_model_still_derives_contract_when_session_state_feature_is_disabled():
+    set_context_management_config(
+        ContextManagementConfig(
+            session_state=SessionStateConfig(enabled=False),
+        )
+    )
+    middleware = DeliverableGuardMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="深入研究这个项目的12个章节，并生成 HTML 报告。"),
+            AIMessage(content="I finished the research report."),
+        ],
+        "artifacts": ["/mnt/user-data/outputs/report.md"],
+        "todos": [],
+    }
+
+    result = middleware.after_model(state, MagicMock())
+
+    assert result is not None
+    assert "Required deliverable: HTML report" in result["messages"][0].content
+    assert result["jump_to"] == "model"
 
 
 def test_after_model_skips_when_artifact_is_already_presented():
@@ -94,6 +128,7 @@ def test_after_model_keeps_guarding_when_only_markdown_artifact_exists_for_html_
     assert result is not None
     reminder = result["messages"][0]
     assert "Required deliverable: HTML report" in reminder.content
+    assert result["jump_to"] == "model"
 
 
 def test_after_model_skips_when_model_is_still_calling_tools():
@@ -160,6 +195,7 @@ def test_after_model_keeps_guarding_when_ppt_contract_only_has_markdown_artifact
 
     assert result is not None
     assert "Required deliverable: Slide deck" in result["messages"][0].content
+    assert result["jump_to"] == "model"
 
 
 def test_after_model_rechecks_contract_after_prior_guard_reminder():
@@ -186,3 +222,4 @@ def test_after_model_rechecks_contract_after_prior_guard_reminder():
 
     assert result is not None
     assert "Required deliverable: HTML report" in result["messages"][0].content
+    assert result["jump_to"] == "model"

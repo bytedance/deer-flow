@@ -202,8 +202,8 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
 # ContextCompactionMiddleware should run before summarization to cheaply reduce noise
-# SummarizationMiddleware should be early to reduce context before other processing
-# SessionStateMiddleware should run after summarization so collapsed execution state is restored if old context was trimmed
+# SessionStateMiddleware should persist task contracts before summarization can trim raw user requests
+# SummarizationMiddleware should still run early once durable session state has been captured
 # DeliverableGuardMiddleware should prevent early final answers when file-based output contracts are still unmet
 # TodoListMiddleware should be before ClarificationMiddleware to allow todo management
 # TitleMiddleware generates title after first exchange
@@ -227,12 +227,14 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Low-cost message cleanup before heavier summarization.
     middlewares.append(ContextCompactionMiddleware())
 
+    # Persist structured session state before raw history may be summarized away.
+    middlewares.append(SessionStateMiddleware())
+
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
-    middlewares.append(SessionStateMiddleware())
     middlewares.append(DeliverableGuardMiddleware())
 
     # Add TodoList middleware if plan mode is enabled
