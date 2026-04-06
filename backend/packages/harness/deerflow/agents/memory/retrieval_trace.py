@@ -103,8 +103,6 @@ def build_empty_retrieval_trace(max_tokens: int) -> RetrievalTrace:
 
 
 def _json_default(value: Any) -> Any:
-    if isinstance(value, Enum):
-        return value.value
     if is_dataclass(value):
         return asdict(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
