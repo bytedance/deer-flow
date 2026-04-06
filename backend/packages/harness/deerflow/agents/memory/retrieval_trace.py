@@ -8,7 +8,7 @@ import threading
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _trace_write_lock = threading.Lock()
 
 
-class RetrievalDecisionReason(str, Enum):
+class RetrievalDecisionReason(StrEnum):
     """Stable reasons describing retrieval decisions."""
 
     SELECTED = "selected"
