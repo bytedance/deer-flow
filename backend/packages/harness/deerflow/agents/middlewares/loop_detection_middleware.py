@@ -33,6 +33,69 @@ _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
 
 
+def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
+    """Normalize tool call args to a dict plus an optional fallback key.
+
+    Some providers serialize ``args`` as a JSON string instead of a dict.
+    We defensively parse those cases so loop detection does not crash while
+    still preserving a stable fallback key for non-dict payloads.
+    """
+    if isinstance(raw_args, dict):
+        return raw_args, None
+
+    if isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}, raw_args
+
+        if isinstance(parsed, dict):
+            return parsed, None
+        return {}, json.dumps(parsed, sort_keys=True, default=str)
+
+    if raw_args is None:
+        return {}, None
+
+    return {}, json.dumps(raw_args, sort_keys=True, default=str)
+
+
+def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
+    """Derive a stable key from salient args without overfitting to noise."""
+    if name == "read_file" and fallback_key is None:
+        path = args.get("path") or ""
+        start_line = args.get("start_line")
+        end_line = args.get("end_line")
+
+        bucket_size = 200
+        try:
+            start_line = int(start_line) if start_line is not None else 1
+        except (TypeError, ValueError):
+            start_line = 1
+        try:
+            end_line = int(end_line) if end_line is not None else start_line
+        except (TypeError, ValueError):
+            end_line = start_line
+
+        start_line, end_line = sorted((start_line, end_line))
+        bucket_start = max(start_line, 1)
+        bucket_end = max(end_line, 1)
+        bucket_start = (bucket_start - 1) // bucket_size
+        bucket_end = (bucket_end - 1) // bucket_size
+        return f"{path}:{bucket_start}-{bucket_end}"
+
+    salient_fields = ("path", "url", "query", "command", "pattern", "glob", "cmd")
+    stable_args = {
+        field: args[field] for field in salient_fields if args.get(field) is not None
+    }
+    if stable_args:
+        return json.dumps(stable_args, sort_keys=True, default=str)
+
+    if fallback_key is not None:
+        return fallback_key
+
+    return json.dumps(args, sort_keys=True, default=str)
+
+
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
     """Deterministic hash of a set of tool calls (name + stable key).
 
@@ -41,34 +104,10 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     """
     # Normalize each tool call to a stable (name, key) structure.
     normalized: list[str] = []
-    bucket_size = 200
     for tc in tool_calls:
         name = tc.get("name", "")
-        args = tc.get("args", {}) or {}
-
-        if name == "read_file":
-            path = args.get("path") or ""
-            start_line = args.get("start_line")
-            end_line = args.get("end_line")
-
-            try:
-                start_line = int(start_line) if start_line is not None else 1
-            except (TypeError, ValueError):
-                start_line = 1
-            try:
-                end_line = int(end_line) if end_line is not None else start_line
-            except (TypeError, ValueError):
-                end_line = start_line
-
-            bucket_start = max(start_line, 1)
-            bucket_end = max(end_line, 1)
-            bucket_start = (bucket_start - 1) // bucket_size
-            bucket_end = (bucket_end - 1) // bucket_size
-            key = f"{path}:{bucket_start}-{bucket_end}"
-        else:
-            key = args.get("path") or args.get("url") or args.get("query") or args.get("command")
-            if key is None:
-                key = json.dumps(args, sort_keys=True, default=str)
+        args, fallback_key = _normalize_tool_call_args(tc.get("args", {}))
+        key = _stable_tool_key(name, args, fallback_key)
 
         normalized.append(f"{name}:{key}")
 
