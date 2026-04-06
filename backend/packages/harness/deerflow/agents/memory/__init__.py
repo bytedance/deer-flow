@@ -6,12 +6,6 @@ This module provides a global memory mechanism that:
 - Injects relevant memory into system prompts for personalized responses
 """
 
-from deerflow.agents.memory.prompt import (
-    FACT_EXTRACTION_PROMPT,
-    MEMORY_UPDATE_PROMPT,
-    format_conversation_for_update,
-    format_memory_for_injection,
-)
 from deerflow.agents.memory.layers import (
     classify_fact_layer,
     create_empty_layer_index,
@@ -19,6 +13,12 @@ from deerflow.agents.memory.layers import (
     group_facts_by_layer,
     layer_label,
     layer_order_for_context,
+)
+from deerflow.agents.memory.prompt import (
+    FACT_EXTRACTION_PROMPT,
+    MEMORY_UPDATE_PROMPT,
+    format_conversation_for_update,
+    format_memory_for_injection,
 )
 from deerflow.agents.memory.queue import (
     ConversationContext,

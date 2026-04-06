@@ -8,11 +8,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from deerflow.agents.memory.layers import classify_fact_layer, ensure_layer_index
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
-from deerflow.agents.memory.layers import classify_fact_layer, ensure_layer_index
 from deerflow.agents.memory.storage import create_empty_memory, get_memory_storage
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
@@ -204,6 +204,7 @@ def _extract_text(content: Any) -> str:
         flush_pending_str_parts()
         return "\n".join(pieces)
     return str(content)
+
 
 # Matches sentences that describe a file-upload *event* rather than general
 # file-related work.  Deliberately narrow to avoid removing legitimate facts

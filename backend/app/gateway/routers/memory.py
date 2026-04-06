@@ -337,14 +337,14 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     return MemoryConfigResponse(
         enabled=config.enabled,
         storage_path=config.storage_path,
-            debounce_seconds=config.debounce_seconds,
-            max_facts=config.max_facts,
-            fact_confidence_threshold=config.fact_confidence_threshold,
-            similarity_weight=config.similarity_weight,
-            confidence_weight=config.confidence_weight,
-            injection_enabled=config.injection_enabled,
-            max_injection_tokens=config.max_injection_tokens,
-        )
+        debounce_seconds=config.debounce_seconds,
+        max_facts=config.max_facts,
+        fact_confidence_threshold=config.fact_confidence_threshold,
+        similarity_weight=config.similarity_weight,
+        confidence_weight=config.confidence_weight,
+        injection_enabled=config.injection_enabled,
+        max_injection_tokens=config.max_injection_tokens,
+    )
 
 
 @router.get(

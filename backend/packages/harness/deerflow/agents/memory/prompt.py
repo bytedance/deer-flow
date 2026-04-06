@@ -5,7 +5,7 @@ import re
 from collections import Counter
 from typing import Any
 
-from deerflow.agents.memory.layers import group_facts_by_layer, layer_label, layer_order_for_context, ensure_layer_index
+from deerflow.agents.memory.layers import ensure_layer_index, group_facts_by_layer, layer_label, layer_order_for_context
 
 try:
     import tiktoken
