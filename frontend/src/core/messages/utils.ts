@@ -1,4 +1,5 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
+
 import { tryParseJSON } from "../utils/json";
 
 interface GenericMessageGroup<T = string> {
@@ -53,7 +54,7 @@ function parseToolCallsString(toolCalls: string) {
       /(?:"id":"([^"]*)",)?\s*"name":"([^"]+)"\s*,\s*"args":"(\{[\s\S]*?\}|\[[\s\S]*?\])"/g,
     ),
   ).map((match) => ({
-    id: match[1] || undefined,
+    id: match[1] ?? undefined,
     name: match[2]!,
     args: match[3]!,
   }));

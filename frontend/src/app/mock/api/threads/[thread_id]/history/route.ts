@@ -13,6 +13,8 @@ export async function POST(
     "utf8",
   );
   const json = JSON.parse(jsonString);
+  console.log("threadId:", threadId);
+  console.log("json:", json);
   if (Array.isArray(json.history)) {
     return Response.json(json);
   }
