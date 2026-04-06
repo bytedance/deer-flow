@@ -616,6 +616,14 @@ memory:
   max_injection_tokens: 2000 # Maximum tokens for memory injection
 
 # ============================================================================
+# Skill Self-Evolution Configuration
+# ============================================================================
+# Allow the agent to autonomously create and improve skills in skills/custom/.
+skill_evolution:
+  enabled: false                # Set to true to allow agent-managed writes under skills/custom
+  moderation_model_name: null  # Model for LLM-based security scanning (null = use default model)
+
+# ============================================================================
 # Checkpointer Configuration
 # ============================================================================
 # Configure state persistence for the embedded DeerFlowClient.
