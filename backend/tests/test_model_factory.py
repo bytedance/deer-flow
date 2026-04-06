@@ -604,6 +604,63 @@ def test_codex_provider_strips_unsupported_max_tokens(monkeypatch):
     assert "max_tokens" not in FakeChatModel.captured_kwargs
 
 
+def test_thinking_disabled_vllm_chat_template_format(monkeypatch):
+    wte = {"extra_body": {"chat_template_kwargs": {"thinking": True}}}
+    model = _make_model(
+        "vllm-qwen",
+        use="deerflow.models.vllm_provider:VllmChatModel",
+        supports_thinking=True,
+        when_thinking_enabled=wte,
+    )
+    model.extra_body = {"top_k": 20}
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="vllm-qwen", thinking_enabled=False)
+
+    assert captured.get("extra_body") == {"top_k": 20, "chat_template_kwargs": {"thinking": False}}
+    assert captured.get("reasoning_effort") is None
+
+
+def test_thinking_disabled_vllm_enable_thinking_format(monkeypatch):
+    wte = {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
+    model = _make_model(
+        "vllm-qwen-enable",
+        use="deerflow.models.vllm_provider:VllmChatModel",
+        supports_thinking=True,
+        when_thinking_enabled=wte,
+    )
+    model.extra_body = {"top_k": 20}
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="vllm-qwen-enable", thinking_enabled=False)
+
+    assert captured.get("extra_body") == {
+        "top_k": 20,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    assert captured.get("reasoning_effort") is None
+
+
 def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
     model = ModelConfig(
         name="gpt-5-responses",
