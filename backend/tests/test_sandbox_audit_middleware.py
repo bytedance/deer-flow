@@ -501,6 +501,44 @@ class TestSandboxAuditMiddlewareAwrapToolCall:
         assert called
         assert result == handler_mock.return_value
 
+    # --- Fork bomb (async) ---
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            ":(){ :|:& };:",
+            "bomb(){ bomb|bomb& };bomb",
+            "while true; do bash & done",
+        ],
+    )
+    async def test_fork_bomb_blocked(self, cmd):
+        result, called, _ = await self._call(cmd)
+        assert not called, f"handler should NOT be called for fork bomb: {cmd!r}"
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+
+    # --- Compound commands (async) ---
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "cmd,expect_blocked",
+        [
+            ("cd /workspace && rm -rf /", True),
+            ("echo hello ; cat /etc/shadow", True),
+            ("cd /workspace && pip install requests", False),  # warn, not block
+            ("cd /workspace && ls -la && python3 main.py", False),  # all safe
+        ],
+    )
+    async def test_compound_command_handling(self, cmd, expect_blocked):
+        result, called, _ = await self._call(cmd)
+        if expect_blocked:
+            assert not called, f"handler should NOT be called for: {cmd!r}"
+            assert isinstance(result, ToolMessage)
+            assert result.status == "error"
+        else:
+            assert called, f"handler SHOULD be called for: {cmd!r}"
+
 
 # ---------------------------------------------------------------------------
 # Input sanitisation via awrap_tool_call (async path)
