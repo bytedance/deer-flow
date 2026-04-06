@@ -50,6 +50,25 @@ class Fact(BaseModel):
     createdAt: str = Field(default="", description="Creation timestamp")
     source: str = Field(default="unknown", description="Source thread ID")
     sourceError: str | None = Field(default=None, description="Optional description of the prior mistake or wrong approach")
+    layer: str = Field(default="episodic", description="Layer assigned to the fact")
+
+
+class LayerState(BaseModel):
+    """Model for a memory layer bucket."""
+
+    summary: str = Field(default="", description="Layer summary")
+    updatedAt: str = Field(default="", description="Last update timestamp")
+    factIds: list[str] = Field(default_factory=list, description="Fact identifiers assigned to this layer")
+
+
+class LayerIndex(BaseModel):
+    """Model for layered memory metadata."""
+
+    working: LayerState = Field(default_factory=LayerState)
+    episodic: LayerState = Field(default_factory=LayerState)
+    semantic: LayerState = Field(default_factory=LayerState)
+    preference: LayerState = Field(default_factory=LayerState)
+    project: LayerState = Field(default_factory=LayerState)
 
 
 class MemoryResponse(BaseModel):
@@ -60,6 +79,7 @@ class MemoryResponse(BaseModel):
     user: UserContext = Field(default_factory=UserContext)
     history: HistoryContext = Field(default_factory=HistoryContext)
     facts: list[Fact] = Field(default_factory=list)
+    layers: LayerIndex = Field(default_factory=LayerIndex)
 
 
 def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
@@ -95,6 +115,8 @@ class MemoryConfigResponse(BaseModel):
     debounce_seconds: int = Field(..., description="Debounce time for memory updates")
     max_facts: int = Field(..., description="Maximum number of facts to store")
     fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
+    similarity_weight: float = Field(..., description="Weight applied to context similarity when ranking facts")
+    confidence_weight: float = Field(..., description="Weight applied to confidence when ranking facts")
     injection_enabled: bool = Field(..., description="Whether memory injection is enabled")
     max_injection_tokens: int = Field(..., description="Maximum tokens for memory injection")
 
@@ -315,12 +337,14 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     return MemoryConfigResponse(
         enabled=config.enabled,
         storage_path=config.storage_path,
-        debounce_seconds=config.debounce_seconds,
-        max_facts=config.max_facts,
-        fact_confidence_threshold=config.fact_confidence_threshold,
-        injection_enabled=config.injection_enabled,
-        max_injection_tokens=config.max_injection_tokens,
-    )
+            debounce_seconds=config.debounce_seconds,
+            max_facts=config.max_facts,
+            fact_confidence_threshold=config.fact_confidence_threshold,
+            similarity_weight=config.similarity_weight,
+            confidence_weight=config.confidence_weight,
+            injection_enabled=config.injection_enabled,
+            max_injection_tokens=config.max_injection_tokens,
+        )
 
 
 @router.get(
@@ -346,6 +370,8 @@ async def get_memory_status() -> MemoryStatusResponse:
             debounce_seconds=config.debounce_seconds,
             max_facts=config.max_facts,
             fact_confidence_threshold=config.fact_confidence_threshold,
+            similarity_weight=config.similarity_weight,
+            confidence_weight=config.confidence_weight,
             injection_enabled=config.injection_enabled,
             max_injection_tokens=config.max_injection_tokens,
         ),

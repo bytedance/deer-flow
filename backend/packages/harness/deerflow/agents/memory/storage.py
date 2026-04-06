@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from deerflow.agents.memory.layers import create_empty_layer_index, ensure_layer_index
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
@@ -31,6 +32,7 @@ def create_empty_memory() -> dict[str, Any]:
             "longTermBackground": {"summary": "", "updatedAt": ""},
         },
         "facts": [],
+        "layers": create_empty_layer_index(),
     }
 
 
@@ -95,7 +97,9 @@ class FileMemoryStorage(MemoryStorage):
         try:
             with open(file_path, encoding="utf-8") as f:
                 data = json.load(f)
-            return data
+            if not isinstance(data, dict):
+                return create_empty_memory()
+            return ensure_layer_index(data)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load memory file: %s", e)
             return create_empty_memory()
@@ -136,6 +140,7 @@ class FileMemoryStorage(MemoryStorage):
         file_path = self._get_memory_file_path(agent_name)
 
         try:
+            memory_data = ensure_layer_index(memory_data)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
 

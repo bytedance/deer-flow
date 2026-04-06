@@ -269,7 +269,10 @@ class TestStripUploadMentionsFromMemory:
     def test_empty_memory_handled_gracefully(self):
         mem = {"user": {}, "history": {}, "facts": []}
         result = _strip_upload_mentions_from_memory(mem)
-        assert result == {"user": {}, "history": {}, "facts": []}
+        assert result["user"] == {}
+        assert result["history"] == {}
+        assert result["facts"] == []
+        assert "layers" in result
 
 
 # ===========================================================================
