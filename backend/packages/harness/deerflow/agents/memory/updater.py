@@ -12,6 +12,7 @@ from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
+from deerflow.agents.memory.layers import classify_fact_layer, create_empty_layer_index, ensure_layer_index
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
@@ -56,6 +57,7 @@ def _create_empty_memory() -> dict[str, Any]:
             "longTermBackground": {"summary": "", "updatedAt": ""},
         },
         "facts": [],
+        "layers": create_empty_layer_index(),
     }
 
 
@@ -170,7 +172,9 @@ def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
     try:
         with open(file_path, encoding="utf-8") as f:
             data = json.load(f)
-        return data
+        if not isinstance(data, dict):
+            return _create_empty_memory()
+        return ensure_layer_index(data)
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to load memory file: %s", e)
         return _create_empty_memory()
@@ -210,6 +214,7 @@ def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str,
     if facts:
         memory_data["facts"] = [f for f in facts if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))]
 
+    ensure_layer_index(memory_data)
     return memory_data
 
 
@@ -235,6 +240,7 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
     file_path = _get_memory_file_path(agent_name)
 
     try:
+        memory_data = ensure_layer_index(memory_data)
         # Ensure directory exists
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -365,6 +371,7 @@ class MemoryUpdater:
         """
         config = get_memory_config()
         now = datetime.utcnow().isoformat() + "Z"
+        current_memory = ensure_layer_index(current_memory)
 
         # Update user sections
         user_updates = update_data.get("user", {})
@@ -410,6 +417,7 @@ class MemoryUpdater:
                 if fact_key is not None and fact_key in existing_fact_keys:
                     continue
 
+                layer_name = classify_fact_layer(fact)
                 fact_entry = {
                     "id": f"fact_{uuid.uuid4().hex[:8]}",
                     "content": normalized_content,
@@ -417,6 +425,7 @@ class MemoryUpdater:
                     "confidence": confidence,
                     "createdAt": now,
                     "source": thread_id or "unknown",
+                    "layer": layer_name,
                 }
                 current_memory["facts"].append(fact_entry)
                 if fact_key is not None:
@@ -431,6 +440,7 @@ class MemoryUpdater:
                 reverse=True,
             )[: config.max_facts]
 
+        ensure_layer_index(current_memory)
         return current_memory
 
 

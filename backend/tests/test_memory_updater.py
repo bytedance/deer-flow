@@ -92,6 +92,8 @@ def test_apply_updates_skips_same_batch_duplicates_and_keeps_source_metadata() -
     ]
     assert all(fact["id"].startswith("fact_") for fact in result["facts"])
     assert all(fact["source"] == "thread-42" for fact in result["facts"])
+    assert result["facts"][0]["layer"] == "preference"
+    assert result["facts"][1]["layer"] == "project"
 
 
 def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
@@ -136,6 +138,29 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
     ]
     assert all(fact["content"] != "User likes noisy logs" for fact in result["facts"])
     assert result["facts"][1]["source"] == "thread-9"
+    assert result["facts"][0]["layer"] == "preference"
+    assert result["facts"][1]["layer"] in {"project", "episodic", "semantic", "working"}
+
+
+def test_apply_updates_rebuilds_layer_index_from_new_facts() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "newFacts": [
+            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.95},
+            {"content": "User is debugging DeerFlow memory", "category": "context", "confidence": 0.88},
+        ]
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-layer")
+
+    assert result["layers"]["preference"]["factIds"]
+    assert result["layers"]["working"]["factIds"] or result["layers"]["project"]["factIds"] or result["layers"]["episodic"]["factIds"]
+    assert all(fact["layer"] in result["layers"] for fact in result["facts"])
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,14 @@ from deerflow.agents.memory.prompt import (
     format_conversation_for_update,
     format_memory_for_injection,
 )
+from deerflow.agents.memory.layers import (
+    classify_fact_layer,
+    create_empty_layer_index,
+    ensure_layer_index,
+    group_facts_by_layer,
+    layer_label,
+    layer_order_for_context,
+)
 from deerflow.agents.memory.queue import (
     ConversationContext,
     MemoryUpdateQueue,
@@ -31,6 +39,13 @@ __all__ = [
     "FACT_EXTRACTION_PROMPT",
     "format_memory_for_injection",
     "format_conversation_for_update",
+    # Layer helpers
+    "classify_fact_layer",
+    "create_empty_layer_index",
+    "ensure_layer_index",
+    "group_facts_by_layer",
+    "layer_label",
+    "layer_order_for_context",
     # Queue
     "ConversationContext",
     "MemoryUpdateQueue",

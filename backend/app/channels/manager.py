@@ -357,7 +357,12 @@ class ChannelManager:
         user_layer = _as_dict(users_layer.get(msg.user_id))
         return channel_layer, user_layer
 
-    def _resolve_run_params(self, msg: InboundMessage, thread_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    def _resolve_run_params(
+        self,
+        msg: InboundMessage,
+        thread_id: str,
+        extra_context: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         channel_layer, user_layer = self._resolve_session_layer(msg)
 
         assistant_id = user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
@@ -371,6 +376,12 @@ class ChannelManager:
             user_layer.get("config"),
         )
 
+        if extra_context:
+            run_config = dict(run_config)
+            configurable = _as_dict(run_config.get("configurable"))
+            configurable.update(extra_context)
+            run_config["configurable"] = configurable
+
         run_context = _merge_dicts(
             DEFAULT_RUN_CONTEXT,
             self._default_session.get("context"),
@@ -378,6 +389,9 @@ class ChannelManager:
             user_layer.get("context"),
             {"thread_id": thread_id},
         )
+
+        if extra_context:
+            run_context.update(extra_context)
 
         return assistant_id, run_config, run_context
 
@@ -490,9 +504,11 @@ class ChannelManager:
         if thread_id is None:
             thread_id = await self._create_thread(client, msg)
 
-        assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+        runtime_context = {"memory_context": msg.text or ""}
         if extra_context:
-            run_context.update(extra_context)
+            runtime_context.update(extra_context)
+
+        assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id, extra_context=runtime_context)
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
                 client,

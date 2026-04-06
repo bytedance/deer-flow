@@ -2,7 +2,10 @@
 
 import math
 import re
+from collections import Counter
 from typing import Any
+
+from deerflow.agents.memory.layers import group_facts_by_layer, layer_label, layer_order_for_context, ensure_layer_index
 
 try:
     import tiktoken
@@ -10,6 +13,87 @@ try:
     TIKTOKEN_AVAILABLE = True
 except ImportError:
     TIKTOKEN_AVAILABLE = False
+
+_SIMILARITY_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:[-/][A-Za-z0-9_]+)*")
+_CJK_RANGE = ("\u4e00", "\u9fff")
+_STOPWORDS = {
+    "a",
+    "about",
+    "after",
+    "again",
+    "all",
+    "also",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "because",
+    "been",
+    "before",
+    "but",
+    "by",
+    "can",
+    "could",
+    "do",
+    "does",
+    "doing",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "he",
+    "her",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "me",
+    "more",
+    "my",
+    "no",
+    "not",
+    "of",
+    "on",
+    "or",
+    "our",
+    "she",
+    "so",
+    "such",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "to",
+    "too",
+    "up",
+    "us",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+    "would",
+    "you",
+    "your",
+}
 
 # Prompt template for updating memory based on conversation
 MEMORY_UPDATE_PROMPT = """You are a memory management system. Your task is to analyze a conversation and update the user's memory profile.
@@ -183,12 +267,176 @@ def _coerce_confidence(value: Any, default: float = 0.0) -> float:
     return max(0.0, min(1.0, confidence))
 
 
-def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000) -> str:
+def _normalize_text(value: Any) -> str:
+    """Normalize arbitrary content into a plain text string."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        pieces: list[str] = []
+        for part in value:
+            if isinstance(part, str):
+                pieces.append(part)
+            elif isinstance(part, dict):
+                text_val = part.get("text")
+                if isinstance(text_val, str):
+                    pieces.append(text_val)
+                else:
+                    nested = part.get("content")
+                    if isinstance(nested, str):
+                        pieces.append(nested)
+        return " ".join(piece for piece in pieces if piece)
+    if isinstance(value, dict):
+        text_val = value.get("text")
+        if isinstance(text_val, str):
+            return text_val
+        nested = value.get("content")
+        if isinstance(nested, str):
+            return nested
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _tokenize_for_similarity(text: str) -> list[str]:
+    """Tokenize text for lightweight relevance scoring."""
+    if not text:
+        return []
+
+    tokens = [token for token in _SIMILARITY_TOKEN_RE.findall(text.lower()) if token not in _STOPWORDS and len(token) > 1]
+    if tokens:
+        return tokens
+
+    cjk_tokens = [char for char in text if _CJK_RANGE[0] <= char <= _CJK_RANGE[1]]
+    return [token for token in cjk_tokens if token.strip()]
+
+
+def _build_document_frequencies(memory_data: dict[str, Any]) -> tuple[Counter[str], int]:
+    """Build document frequencies across all stored memory text."""
+    documents: list[str] = []
+
+    user_data = memory_data.get("user", {})
+    if isinstance(user_data, dict):
+        for section in ("workContext", "personalContext", "topOfMind"):
+            section_data = user_data.get(section, {})
+            if isinstance(section_data, dict):
+                summary = section_data.get("summary", "")
+                if isinstance(summary, str) and summary.strip():
+                    documents.append(summary)
+
+    history_data = memory_data.get("history", {})
+    if isinstance(history_data, dict):
+        for section in ("recentMonths", "earlierContext", "longTermBackground"):
+            section_data = history_data.get(section, {})
+            if isinstance(section_data, dict):
+                summary = section_data.get("summary", "")
+                if isinstance(summary, str) and summary.strip():
+                    documents.append(summary)
+
+    facts_data = memory_data.get("facts", [])
+    if isinstance(facts_data, list):
+        for fact in facts_data:
+            if not isinstance(fact, dict):
+                continue
+            content = fact.get("content")
+            if isinstance(content, str) and content.strip():
+                documents.append(content)
+
+    doc_freq: Counter[str] = Counter()
+    for doc in documents:
+        terms = set(_tokenize_for_similarity(doc))
+        if not terms:
+            continue
+        doc_freq.update(terms)
+
+    return doc_freq, max(len(documents), 1)
+
+
+def _term_idf(term: str, doc_freq: Counter[str], total_docs: int) -> float:
+    """Compute a lightweight inverse document frequency for a term."""
+    return math.log((1.0 + total_docs) / (1.0 + doc_freq.get(term, 0))) + 1.0
+
+
+def _score_fact_for_context(
+    fact: dict[str, Any],
+    context_terms: set[str],
+    doc_freq: Counter[str],
+    total_docs: int,
+    similarity_weight: float,
+    confidence_weight: float,
+) -> float:
+    """Blend fact confidence with relevance to the supplied context."""
+    confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
+    if not context_terms:
+        return confidence
+
+    content = fact.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return confidence * confidence_weight
+
+    fact_terms = set(_tokenize_for_similarity(content))
+    if not fact_terms:
+        return confidence * confidence_weight
+
+    overlap = fact_terms & context_terms
+    if not overlap:
+        return confidence * confidence_weight
+
+    context_weight = sum(_term_idf(term, doc_freq, total_docs) for term in context_terms)
+    if context_weight <= 0:
+        similarity = 0.0
+    else:
+        overlap_weight = sum(_term_idf(term, doc_freq, total_docs) for term in overlap)
+        similarity = overlap_weight / context_weight
+
+    total_weight = similarity_weight + confidence_weight
+    if total_weight <= 0:
+        return confidence
+    return ((similarity * similarity_weight) + (confidence * confidence_weight)) / total_weight
+
+
+def _rank_facts_for_context(
+    facts: list[dict[str, Any]],
+    context_terms: set[str],
+    doc_freq: Counter[str],
+    total_docs: int,
+    similarity_weight: float,
+    confidence_weight: float,
+) -> list[dict[str, Any]]:
+    """Rank facts by a blended context score and stored confidence."""
+    return sorted(
+        facts,
+        key=lambda fact: (
+            _score_fact_for_context(
+                fact,
+                context_terms,
+                doc_freq,
+                total_docs,
+                similarity_weight,
+                confidence_weight,
+            ),
+            _coerce_confidence(fact.get("confidence"), default=0.0),
+            str(fact.get("content", "")).casefold(),
+        ),
+        reverse=True,
+    )
+
+
+def format_memory_for_injection(
+    memory_data: dict[str, Any],
+    max_tokens: int = 2000,
+    current_context: str | None = None,
+    similarity_weight: float = 0.35,
+    confidence_weight: float = 0.65,
+) -> str:
     """Format memory data for injection into system prompt.
 
     Args:
         memory_data: The memory data dictionary.
         max_tokens: Maximum tokens to use (counted via tiktoken for accuracy).
+        current_context: Optional current conversation context used to rank
+            facts by relevance instead of confidence alone.
+        similarity_weight: Weight used for context similarity when ranking facts.
+        confidence_weight: Weight used for stored fact confidence when ranking facts.
 
     Returns:
         Formatted memory string for system prompt injection.
@@ -196,6 +444,7 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
     if not memory_data:
         return ""
 
+    memory_data = ensure_layer_index(memory_data)
     sections = []
 
     # Format user context
@@ -234,54 +483,71 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
 
-    # Format facts (sorted by confidence; include as many as token budget allows)
+    # Format facts grouped by memory layer; include as many as token budget allows
     facts_data = memory_data.get("facts", [])
     if isinstance(facts_data, list) and facts_data:
-        ranked_facts = sorted(
-            (
-                f
-                for f in facts_data
-                if isinstance(f, dict)
-                and isinstance(f.get("content"), str)
-                and f.get("content").strip()
-            ),
-            key=lambda fact: _coerce_confidence(fact.get("confidence"), default=0.0),
-            reverse=True,
-        )
+        context_text = _normalize_text(current_context).strip()
+        context_terms = set(_tokenize_for_similarity(context_text))
+        doc_freq, total_docs = _build_document_frequencies(memory_data)
+        grouped_facts = group_facts_by_layer(memory_data)
+        preferred_layers = layer_order_for_context(context_text)
+        preferred_index = {layer: idx for idx, layer in enumerate(preferred_layers)}
 
-        # Compute token count for existing sections once, then account
-        # incrementally for each fact line to avoid full-string re-tokenization.
-        base_text = "\n\n".join(sections)
-        base_tokens = _count_tokens(base_text) if base_text else 0
-        # Account for the separator between existing sections and the facts section.
-        facts_header = "Facts:\n"
-        separator_tokens = _count_tokens("\n\n" + facts_header) if base_text else _count_tokens(facts_header)
-        running_tokens = base_tokens + separator_tokens
-
-        fact_lines: list[str] = []
-        for fact in ranked_facts:
-            content_value = fact.get("content")
-            if not isinstance(content_value, str):
+        layer_candidates: list[tuple[float, str, list[dict[str, Any]]]] = []
+        for layer_name in preferred_layers:
+            layer_facts = grouped_facts.get(layer_name, [])
+            if not layer_facts:
                 continue
-            content = content_value.strip()
-            if not content:
-                continue
-            category = str(fact.get("category", "context")).strip() or "context"
-            confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
-            line = f"- [{category} | {confidence:.2f}] {content}"
+            ranked_layer_facts = _rank_facts_for_context(
+                layer_facts,
+                context_terms,
+                doc_freq,
+                total_docs,
+                similarity_weight,
+                confidence_weight,
+            )
+            top_score = _score_fact_for_context(
+                ranked_layer_facts[0],
+                context_terms,
+                doc_freq,
+                total_docs,
+                similarity_weight,
+                confidence_weight,
+            )
+            layer_candidates.append((top_score, layer_name, ranked_layer_facts))
 
-            # Each additional line is preceded by a newline (except the first).
-            line_text = ("\n" + line) if fact_lines else line
-            line_tokens = _count_tokens(line_text)
+        layer_candidates.sort(key=lambda item: (-item[0], preferred_index.get(item[1], len(preferred_layers))))
 
-            if running_tokens + line_tokens <= max_tokens:
-                fact_lines.append(line)
-                running_tokens += line_tokens
-            else:
-                break
+        layer_blocks: list[str] = []
+        for _layer_score, layer_name, ranked_layer_facts in layer_candidates:
+            block_text = f"- {layer_label(layer_name)}:"
+            block_updated = False
 
-        if fact_lines:
-            sections.append("Facts:\n" + "\n".join(fact_lines))
+            for fact in ranked_layer_facts:
+                content_value = fact.get("content")
+                if not isinstance(content_value, str):
+                    continue
+                content = content_value.strip()
+                if not content:
+                    continue
+                category = str(fact.get("category", "context")).strip() or "context"
+                confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
+                line = f"  - [{category} | {confidence:.2f}] {content}"
+                candidate_block = f"{block_text}\n{line}"
+                candidate_sections = sections + ["Layered Memory:\n" + "\n".join(layer_blocks + [candidate_block])]
+                candidate_result = "\n\n".join(candidate_sections)
+
+                if _count_tokens(candidate_result) <= max_tokens:
+                    block_text = candidate_block
+                    block_updated = True
+                else:
+                    break
+
+            if block_updated:
+                layer_blocks.append(block_text)
+
+        if layer_blocks:
+            sections.append("Layered Memory:\n" + "\n".join(layer_blocks))
 
     if not sections:
         return ""

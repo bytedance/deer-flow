@@ -45,6 +45,18 @@ class MemoryConfig(BaseModel):
         le=1.0,
         description="Minimum confidence threshold for storing facts",
     )
+    similarity_weight: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description="Weight applied to context similarity when ranking memory facts",
+    )
+    confidence_weight: float = Field(
+        default=0.65,
+        ge=0.0,
+        le=1.0,
+        description="Weight applied to fact confidence when ranking memory facts",
+    )
     injection_enabled: bool = Field(
         default=True,
         description="Whether to inject memory into system prompt",
