@@ -7,7 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "skills-icad" / "public" / "site-wind-snow-lookup" / "scripts" / "query_wind_snow.py"
 
