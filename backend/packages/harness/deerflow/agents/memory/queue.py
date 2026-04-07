@@ -21,6 +21,7 @@ class ConversationContext:
     timestamp: datetime = field(default_factory=datetime.utcnow)
     agent_name: str | None = None
     correction_detected: bool = False
+    reinforcement_detected: bool = False
 
 
 class MemoryUpdateQueue:
@@ -44,6 +45,7 @@ class MemoryUpdateQueue:
         messages: list[Any],
         agent_name: str | None = None,
         correction_detected: bool = False,
+        reinforcement_detected: bool = False,
     ) -> None:
         """Add a conversation to the update queue.
 
@@ -52,6 +54,7 @@ class MemoryUpdateQueue:
             messages: The conversation messages.
             agent_name: If provided, memory is stored per-agent. If None, uses global memory.
             correction_detected: Whether recent turns include an explicit correction signal.
+            reinforcement_detected: Whether recent turns include a positive reinforcement signal.
         """
         config = get_memory_config()
         if not config.enabled:
@@ -63,11 +66,13 @@ class MemoryUpdateQueue:
                 None,
             )
             merged_correction_detected = correction_detected or (existing_context.correction_detected if existing_context is not None else False)
+            merged_reinforcement_detected = reinforcement_detected or (existing_context.reinforcement_detected if existing_context is not None else False)
             context = ConversationContext(
                 thread_id=thread_id,
                 messages=messages,
                 agent_name=agent_name,
                 correction_detected=merged_correction_detected,
+                reinforcement_detected=merged_reinforcement_detected,
             )
 
             # Check if this thread already has a pending update
@@ -130,6 +135,7 @@ class MemoryUpdateQueue:
                         thread_id=context.thread_id,
                         agent_name=context.agent_name,
                         correction_detected=context.correction_detected,
+                        reinforcement_detected=context.reinforcement_detected,
                     )
                     if success:
                         logger.info("Memory updated successfully for thread %s", context.thread_id)

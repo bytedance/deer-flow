@@ -345,6 +345,7 @@ class DeerFlowClient:
         Yields:
             StreamEvent with one of:
             - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...]}
+            - type="custom"          data={...}
             - type="messages-tuple"  data={"type": "ai", "content": str, "id": str}
             - type="messages-tuple"  data={"type": "ai", "content": str, "id": str, "usage_metadata": {...}}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
@@ -365,7 +366,22 @@ class DeerFlowClient:
         seen_ids: set[str] = set()
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-        for chunk in self._agent.stream(state, config=config, context=context, stream_mode="values"):
+        for item in self._agent.stream(
+            state,
+            config=config,
+            context=context,
+            stream_mode=["values", "custom"],
+        ):
+            if isinstance(item, tuple) and len(item) == 2:
+                mode, chunk = item
+                mode = str(mode)
+            else:
+                mode, chunk = "values", item
+
+            if mode == "custom":
+                yield StreamEvent(type="custom", data=chunk)
+                continue
+
             messages = chunk.get("messages", [])
 
             for msg in messages:

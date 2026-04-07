@@ -3,6 +3,7 @@ from .context_management_config import ContextManagementConfig, get_context_mana
 from .extensions_config import ExtensionsConfig, get_extensions_config
 from .memory_config import MemoryConfig, get_memory_config
 from .paths import Paths, get_paths
+from .skill_evolution_config import SkillEvolutionConfig
 from .skills_config import SkillsConfig
 from .tracing_config import (
     get_enabled_tracing_providers,
@@ -14,6 +15,7 @@ from .tracing_config import (
 
 __all__ = [
     "get_app_config",
+    "SkillEvolutionConfig",
     "Paths",
     "get_paths",
     "SkillsConfig",
