@@ -56,6 +56,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "supports_thinking",
             "supports_reasoning_effort",
             "when_thinking_enabled",
+            "when_thinking_disabled",
             "thinking",
             "supports_vision",
         },
@@ -73,7 +74,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         if effective_wte:
             model_settings_from_config.update(effective_wte)
     if not thinking_enabled and has_thinking_settings:
-        if effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
+        if model_config.when_thinking_disabled:
+            # User-provided disable settings take full precedence
+            model_settings_from_config.update(model_config.when_thinking_disabled)
+        elif effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
             # OpenAI-compatible gateway: thinking is nested under extra_body
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
                 model_settings_from_config.get("extra_body"),
