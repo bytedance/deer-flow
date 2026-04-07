@@ -159,8 +159,6 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         assistant_idx = messages.index(last_assistant_msg)
         for msg in messages[assistant_idx + 1 :]:
             if isinstance(msg, HumanMessage):
-                if msg.additional_kwargs.get("hide_from_ui") is True:
-                    return False
                 if msg.additional_kwargs.get(VIEW_IMAGE_INJECTION_MARKER) is True:
                     return False
                 content_str = str(msg.content)
