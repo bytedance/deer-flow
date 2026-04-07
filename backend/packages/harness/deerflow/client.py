@@ -117,6 +117,7 @@ class DeerFlowClient:
         subagent_enabled: bool = False,
         plan_mode: bool = False,
         agent_name: str | None = None,
+        available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
     ):
         """Initialize the client.
@@ -133,6 +134,7 @@ class DeerFlowClient:
             subagent_enabled: Enable subagent delegation.
             plan_mode: Enable TodoList middleware for plan mode.
             agent_name: Name of the agent to use.
+            available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
         """
         if config_path is not None:
@@ -148,6 +150,7 @@ class DeerFlowClient:
         self._subagent_enabled = subagent_enabled
         self._plan_mode = plan_mode
         self._agent_name = agent_name
+        self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
 
         # Lazy agent — created on first call, recreated when config changes.
@@ -208,6 +211,8 @@ class DeerFlowClient:
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
+            self._agent_name,
+            frozenset(self._available_skills) if self._available_skills is not None else None,
         )
 
         if self._agent is not None and self._agent_config_key == key:
@@ -226,6 +231,7 @@ class DeerFlowClient:
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
+                available_skills=self._available_skills,
             ),
             "state_schema": ThreadState,
         }
@@ -339,6 +345,7 @@ class DeerFlowClient:
         Yields:
             StreamEvent with one of:
             - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...]}
+            - type="custom"          data={...}
             - type="messages-tuple"  data={"type": "ai", "content": str, "id": str}
             - type="messages-tuple"  data={"type": "ai", "content": str, "id": str, "usage_metadata": {...}}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
@@ -359,7 +366,22 @@ class DeerFlowClient:
         seen_ids: set[str] = set()
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-        for chunk in self._agent.stream(state, config=config, context=context, stream_mode="values"):
+        for item in self._agent.stream(
+            state,
+            config=config,
+            context=context,
+            stream_mode=["values", "custom"],
+        ):
+            if isinstance(item, tuple) and len(item) == 2:
+                mode, chunk = item
+                mode = str(mode)
+            else:
+                mode, chunk = "values", item
+
+            if mode == "custom":
+                yield StreamEvent(type="custom", data=chunk)
+                continue
+
             messages = chunk.get("messages", [])
 
             for msg in messages:

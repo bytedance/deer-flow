@@ -30,7 +30,7 @@ class SlackChannel(Channel):
         self._socket_client = None
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._allowed_users: set[str] = set(config.get("allowed_users", []))
+        self._allowed_users: set[str] = {str(user_id) for user_id in config.get("allowed_users", [])}
 
     async def start(self) -> None:
         if self._running:
@@ -126,7 +126,9 @@ class SlackChannel(Channel):
                 )
             except Exception:
                 pass
-        raise last_exc  # type: ignore[misc]
+        if last_exc is None:
+            raise RuntimeError("Slack send failed without an exception from any attempt")
+        raise last_exc
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._web_client:

@@ -43,5 +43,5 @@ You have access to the sandbox environment:
     tools=["bash", "ls", "read_file", "write_file", "str_replace"],  # Sandbox tools only
     disallowed_tools=["task", "ask_clarification", "present_files"],
     model="inherit",
-    max_turns=30,
+    max_turns=60,
 )

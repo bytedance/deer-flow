@@ -3,9 +3,10 @@
 These functions truncate long tool outputs to prevent context window overflow.
 - _truncate_bash_output: middle-truncation (head + tail), for bash tool
 - _truncate_read_file_output: head-truncation, for read_file tool
+- _truncate_ls_output: head-truncation, for ls tool
 """
 
-from deerflow.sandbox.tools import _truncate_bash_output, _truncate_read_file_output
+from deerflow.sandbox.tools import _truncate_bash_output, _truncate_ls_output, _truncate_read_file_output
 
 # ---------------------------------------------------------------------------
 # _truncate_bash_output
@@ -158,4 +159,72 @@ class TestTruncateReadFileOutput:
         output = "X" * 50000
         for max_chars in [100, 1000, 5000, 20000, 49999]:
             result = _truncate_read_file_output(output, max_chars)
+            assert len(result) <= max_chars, f"failed for max_chars={max_chars}"
+
+
+# ---------------------------------------------------------------------------
+# _truncate_ls_output
+# ---------------------------------------------------------------------------
+
+
+class TestTruncateLsOutput:
+    def test_short_output_returned_unchanged(self):
+        output = "dir1\ndir2\nfile1.txt"
+        assert _truncate_ls_output(output, 20000) == output
+
+    def test_output_equal_to_limit_returned_unchanged(self):
+        output = "X" * 20000
+        assert _truncate_ls_output(output, 20000) == output
+
+    def test_long_output_is_truncated(self):
+        output = "\n".join(f"file_{i}.txt" for i in range(5000))
+        result = _truncate_ls_output(output, 20000)
+        assert len(result) < len(output)
+
+    def test_result_never_exceeds_max_chars(self):
+        output = "\n".join(f"subdir/file_{i}.txt" for i in range(5000))
+        max_chars = 20000
+        result = _truncate_ls_output(output, max_chars)
+        assert len(result) <= max_chars
+
+    def test_head_is_preserved(self):
+        head = "first_dir\nsecond_dir\n"
+        output = head + "\n".join(f"file_{i}" for i in range(5000))
+        result = _truncate_ls_output(output, 20000)
+        assert result.startswith(head)
+
+    def test_truncation_marker_present(self):
+        output = "\n".join(f"file_{i}.txt" for i in range(5000))
+        result = _truncate_ls_output(output, 20000)
+        assert "[truncated:" in result
+        assert "showing first" in result
+
+    def test_total_chars_reported_correctly(self):
+        output = "X" * 30000
+        result = _truncate_ls_output(output, 20000)
+        assert "of 30000 chars" in result
+
+    def test_hint_suggests_specific_path(self):
+        output = "X" * 30000
+        result = _truncate_ls_output(output, 20000)
+        assert "Use a more specific path" in result
+
+    def test_max_chars_zero_disables_truncation(self):
+        output = "\n".join(f"file_{i}.txt" for i in range(10000))
+        assert _truncate_ls_output(output, 0) == output
+
+    def test_tail_is_not_preserved(self):
+        output = "H" * 20000 + "TAIL_SHOULD_NOT_APPEAR"
+        result = _truncate_ls_output(output, 20000)
+        assert "TAIL_SHOULD_NOT_APPEAR" not in result
+
+    def test_small_max_chars_does_not_crash(self):
+        output = "\n".join(f"file_{i}.txt" for i in range(100))
+        result = _truncate_ls_output(output, 10)
+        assert len(result) <= 10
+
+    def test_result_never_exceeds_max_chars_various_sizes(self):
+        output = "\n".join(f"file_{i}.txt" for i in range(5000))
+        for max_chars in [100, 1000, 5000, 20000, len(output) - 1]:
+            result = _truncate_ls_output(output, max_chars)
             assert len(result) <= max_chars, f"failed for max_chars={max_chars}"
