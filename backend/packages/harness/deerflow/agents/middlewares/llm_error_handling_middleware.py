@@ -58,6 +58,16 @@ _AUTH_PATTERNS = (
     "无权",
     "未授权",
 )
+_TRANSIENT_PATTERNS = (
+    "peer closed connection",
+    "incomplete chunked read",
+    "server disconnected",
+    "connection reset",
+    "connection aborted",
+    "connection dropped",
+    "broken pipe",
+    "eof occurred",
+)
 
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -83,12 +93,18 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             "APITimeoutError",
             "APIConnectionError",
             "InternalServerError",
+            "ReadError",
+            "RemoteProtocolError",
+            "ConnectError",
+            "ReadTimeout",
         }:
             return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:
             return True, "transient"
         if _matches_any(lowered, _BUSY_PATTERNS):
             return True, "busy"
+        if _matches_any(lowered, _TRANSIENT_PATTERNS):
+            return True, "transient"
 
         return False, "generic"
 

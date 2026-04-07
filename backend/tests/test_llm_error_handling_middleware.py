@@ -88,6 +88,38 @@ def test_async_model_call_returns_user_message_for_quota_errors() -> None:
     assert "out of quota" in str(result.content)
 
 
+def test_async_model_call_retries_incomplete_chunked_read_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=25, retry_cap_delay_ms=25)
+    attempts = 0
+    waits: list[float] = []
+
+    class ReadError(Exception):
+        pass
+
+    async def fake_sleep(delay: float) -> None:
+        waits.append(delay)
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ReadError(
+                "peer closed connection without sending complete message body (incomplete chunked read)"
+            )
+        return AIMessage(content="ok")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    assert attempts == 2
+    assert waits == [0.025]
+
+
 def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
     middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
     waits: list[float] = []
