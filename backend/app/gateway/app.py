@@ -12,6 +12,7 @@ from app.gateway.routers import (
     artifacts,
     assistants_compat,
     channels,
+    feedback,
     mcp,
     memory,
     models,
@@ -212,6 +213,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Assistants compatibility API (LangGraph Platform stub)
     app.include_router(assistants_compat.router)
+
+    # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
+    app.include_router(feedback.router)
 
     # Thread Runs API (LangGraph Platform-compatible runs lifecycle)
     app.include_router(thread_runs.router)

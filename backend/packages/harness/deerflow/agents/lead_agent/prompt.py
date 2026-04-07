@@ -123,31 +123,6 @@ async def refresh_skills_system_prompt_cache_async() -> None:
     await asyncio.to_thread(_invalidate_enabled_skills_cache().wait)
 
 
-def _reset_skills_system_prompt_cache_state() -> None:
-    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_refresh_version
-
-    _get_cached_skills_prompt_section.cache_clear()
-    with _enabled_skills_lock:
-        _enabled_skills_cache = None
-        _enabled_skills_refresh_active = False
-        _enabled_skills_refresh_version = 0
-        _enabled_skills_refresh_event.clear()
-
-
-def _refresh_enabled_skills_cache() -> None:
-    """Backward-compatible test helper for direct synchronous reload."""
-    try:
-        skills = _load_enabled_skills_sync()
-    except Exception:
-        logger.exception("Failed to load enabled skills for prompt injection")
-        skills = []
-
-    with _enabled_skills_lock:
-        _enabled_skills_cache = skills
-        _enabled_skills_refresh_active = False
-        _enabled_skills_refresh_event.set()
-
-
 def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:
     if not skill_evolution_enabled:
         return ""

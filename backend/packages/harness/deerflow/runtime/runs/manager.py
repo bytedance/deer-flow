@@ -1,4 +1,4 @@
-"""In-memory run registry."""
+"""In-memory run registry with optional persistent RunStore backing."""
 
 from __future__ import annotations
 
@@ -7,8 +7,12 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from .schemas import DisconnectMode, RunStatus
+
+if TYPE_CHECKING:
+    from deerflow.runtime.runs.store.base import RunStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +42,44 @@ class RunRecord:
 
 
 class RunManager:
-    """In-memory run registry.  All mutations are protected by an asyncio lock."""
+    """In-memory run registry with optional persistent RunStore backing.
 
-    def __init__(self) -> None:
+    All mutations are protected by an asyncio lock. When a ``store`` is
+    provided, serializable metadata is also persisted to the store so
+    that run history survives process restarts.
+    """
+
+    def __init__(self, store: RunStore | None = None) -> None:
         self._runs: dict[str, RunRecord] = {}
         self._lock = asyncio.Lock()
+        self._store = store
+
+    async def _persist_to_store(self, record: RunRecord, *, follow_up_to_run_id: str | None = None) -> None:
+        """Best-effort persist run record to backing store."""
+        if self._store is None:
+            return
+        try:
+            await self._store.put(
+                record.run_id,
+                thread_id=record.thread_id,
+                assistant_id=record.assistant_id,
+                status=record.status.value,
+                multitask_strategy=record.multitask_strategy,
+                metadata=record.metadata or {},
+                kwargs=record.kwargs or {},
+                created_at=record.created_at,
+                follow_up_to_run_id=follow_up_to_run_id,
+            )
+        except Exception:
+            logger.warning("Failed to persist run %s to store", record.run_id, exc_info=True)
+
+    async def update_run_completion(self, run_id: str, **kwargs) -> None:
+        """Persist token usage and completion data to the backing store."""
+        if self._store is not None:
+            try:
+                await self._store.update_run_completion(run_id, **kwargs)
+            except Exception:
+                logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
 
     async def create(
         self,
@@ -53,6 +90,7 @@ class RunManager:
         metadata: dict | None = None,
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
+        follow_up_to_run_id: str | None = None,
     ) -> RunRecord:
         """Create a new pending run and register it."""
         run_id = str(uuid.uuid4())
@@ -71,6 +109,7 @@ class RunManager:
         )
         async with self._lock:
             self._runs[run_id] = record
+        await self._persist_to_store(record, follow_up_to_run_id=follow_up_to_run_id)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -96,6 +135,11 @@ class RunManager:
             record.updated_at = _now_iso()
             if error is not None:
                 record.error = error
+        if self._store is not None:
+            try:
+                await self._store.update_status(run_id, status.value, error=error)
+            except Exception:
+                logger.warning("Failed to persist status update for run %s", run_id, exc_info=True)
         logger.info("Run %s -> %s", run_id, status.value)
 
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> bool:
@@ -132,6 +176,7 @@ class RunManager:
         metadata: dict | None = None,
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
+        follow_up_to_run_id: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -185,6 +230,7 @@ class RunManager:
             )
             self._runs[run_id] = record
 
+        await self._persist_to_store(record, follow_up_to_run_id=follow_up_to_run_id)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 

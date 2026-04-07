@@ -137,7 +137,16 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # Enforce max_retries constraint to prevent cascading timeouts.
         model_settings_from_config["max_retries"] = model_settings_from_config.get("max_retries", 1)
 
-    model_instance = model_class(**{**model_settings_from_config, **kwargs})
+    # Ensure stream_usage is enabled so that token usage metadata is available
+    # in streaming responses.  LangChain's BaseChatOpenAI only defaults
+    # stream_usage=True when no custom base_url/api_base is set, so models
+    # hitting third-party endpoints (e.g. doubao, deepseek) silently lose
+    # usage data.  We default it to True unless explicitly configured.
+    if "stream_usage" not in model_settings_from_config and "stream_usage" not in kwargs:
+        if "stream_usage" in getattr(model_class, "model_fields", {}):
+            model_settings_from_config["stream_usage"] = True
+
+    model_instance = model_class(**kwargs, **model_settings_from_config)
 
     callbacks = build_tracing_callbacks()
     if callbacks:

@@ -68,13 +68,15 @@ def _create_summarization_middleware() -> DeerFlowSummarizationMiddleware | None
     # Prepare keep parameter
     keep = config.keep.to_tuple()
 
-    # Prepare model parameter
+    # Prepare model parameter.
+    # Bind "middleware:summarize" tag so RunJournal identifies these LLM calls
+    # as middleware rather than lead_agent (SummarizationMiddleware is a
+    # LangChain built-in, so we tag the model at creation time).
     if config.model_name:
         model = create_chat_model(name=config.model_name, thinking_enabled=False)
     else:
-        # Use a lightweight model for summarization to save costs
-        # Falls back to default model if not explicitly specified
         model = create_chat_model(thinking_enabled=False)
+    model = model.with_config(tags=["middleware:summarize"])
 
     # Prepare kwargs
     kwargs = {

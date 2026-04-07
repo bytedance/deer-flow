@@ -84,23 +84,76 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
 
 
 @contextlib.asynccontextmanager
-async def make_checkpointer() -> AsyncIterator[Checkpointer]:
-    """Async context manager that yields a checkpointer for the caller's lifetime.
-    Resources are opened on enter and closed on exit — no global state::
-
-        async with make_checkpointer() as checkpointer:
-            app.state.checkpointer = checkpointer
-
-    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
-    """
-
-    config = get_app_config()
-
-    if config.checkpointer is None:
+async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpointer]:
+    """Async context manager that constructs a checkpointer from unified DatabaseConfig."""
+    if db_config.backend == "memory":
         from langgraph.checkpoint.memory import InMemorySaver
 
         yield InMemorySaver()
         return
 
-    async with _async_checkpointer(config.checkpointer) as saver:
-        yield saver
+    if db_config.backend == "sqlite":
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        except ImportError as exc:
+            raise ImportError(SQLITE_INSTALL) from exc
+
+        conn_str = db_config.checkpointer_sqlite_path
+        ensure_sqlite_parent_dir(conn_str)
+        async with AsyncSqliteSaver.from_conn_string(conn_str) as saver:
+            await saver.setup()
+            yield saver
+        return
+
+    if db_config.backend == "postgres":
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        except ImportError as exc:
+            raise ImportError(POSTGRES_INSTALL) from exc
+
+        if not db_config.postgres_url:
+            raise ValueError("database.postgres_url is required for the postgres backend")
+
+        async with AsyncPostgresSaver.from_conn_string(db_config.postgres_url) as saver:
+            await saver.setup()
+            yield saver
+        return
+
+    raise ValueError(f"Unknown database backend: {db_config.backend!r}")
+
+
+@contextlib.asynccontextmanager
+async def make_checkpointer() -> AsyncIterator[Checkpointer]:
+    """Async context manager that yields a checkpointer for the caller's lifetime.
+    Resources are opened on enter and closed on exit -- no global state::
+
+        async with make_checkpointer() as checkpointer:
+            app.state.checkpointer = checkpointer
+
+    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+
+    Priority:
+    1. Legacy ``checkpointer:`` config section (backward compatible)
+    2. Unified ``database:`` config section
+    3. Default InMemorySaver
+    """
+
+    config = get_app_config()
+
+    # Legacy: standalone checkpointer config takes precedence
+    if config.checkpointer is not None:
+        async with _async_checkpointer(config.checkpointer) as saver:
+            yield saver
+            return
+
+    # Unified database config
+    db_config = getattr(config, "database", None)
+    if db_config is not None and db_config.backend != "memory":
+        async with _async_checkpointer_from_database(db_config) as saver:
+            yield saver
+            return
+
+    # Default: in-memory
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    yield InMemorySaver()

@@ -19,7 +19,11 @@ import asyncio
 import copy
 import inspect
 import logging
-from typing import Any, Literal
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from langchain_core.messages import HumanMessage
 
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
@@ -33,13 +37,29 @@ logger = logging.getLogger(__name__)
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 
 
+@dataclass(frozen=True)
+class RunContext:
+    """Infrastructure dependencies for a single agent run.
+
+    Groups checkpointer, store, and persistence-related singletons so that
+    ``run_agent`` (and any future callers) receive one object instead of a
+    growing list of keyword arguments.
+    """
+
+    checkpointer: Any
+    store: Any | None = field(default=None)
+    event_store: Any | None = field(default=None)
+    run_events_config: Any | None = field(default=None)
+    thread_meta_repo: Any | None = field(default=None)
+    follow_up_to_run_id: str | None = field(default=None)
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
     record: RunRecord,
     *,
-    checkpointer: Any,
-    store: Any | None = None,
+    ctx: RunContext,
     agent_factory: Any,
     graph_input: dict,
     config: dict,
@@ -50,12 +70,49 @@ async def run_agent(
 ) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
+    # Unpack infrastructure dependencies from RunContext.
+    checkpointer = ctx.checkpointer
+    store = ctx.store
+    event_store = ctx.event_store
+    run_events_config = ctx.run_events_config
+    thread_meta_repo = ctx.thread_meta_repo
+    follow_up_to_run_id = ctx.follow_up_to_run_id
+
     run_id = record.run_id
     thread_id = record.thread_id
     requested_modes: set[str] = set(stream_modes or ["values"])
     pre_run_checkpoint_id: str | None = None
     pre_run_snapshot: dict[str, Any] | None = None
     snapshot_capture_failed = False
+
+    # Initialize RunJournal for event capture
+    journal = None
+    if event_store is not None:
+        from deerflow.runtime.journal import RunJournal
+
+        journal = RunJournal(
+            run_id=run_id,
+            thread_id=thread_id,
+            event_store=event_store,
+            track_token_usage=getattr(run_events_config, "track_token_usage", True),
+        )
+
+        # Write human_message event (model_dump format, aligned with checkpoint)
+        human_msg = _extract_human_message(graph_input)
+        if human_msg is not None:
+            msg_metadata = {}
+            if follow_up_to_run_id:
+                msg_metadata["follow_up_to_run_id"] = follow_up_to_run_id
+            await event_store.put(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type="human_message",
+                category="message",
+                content=human_msg.model_dump(),
+                metadata=msg_metadata or None,
+            )
+            content = human_msg.content
+            journal.set_first_human_message(content if isinstance(content, str) else str(content))
 
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
@@ -109,6 +166,11 @@ async def run_agent(
         if "context" in config and isinstance(config["context"], dict):
             config["context"].setdefault("thread_id", thread_id)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
+
+        # Inject RunJournal as a LangChain callback handler.
+        # on_llm_end captures token usage; on_chain_start/end captures lifecycle.
+        if journal is not None:
+            config.setdefault("callbacks", []).append(journal)
 
         runnable_config = RunnableConfig(**config)
         agent = agent_factory(config=runnable_config)
@@ -236,6 +298,37 @@ async def run_agent(
         )
 
     finally:
+        # Flush any buffered journal events and persist completion data
+        if journal is not None:
+            try:
+                await journal.flush()
+            except Exception:
+                logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
+
+            # Persist token usage + convenience fields to RunStore
+            completion = journal.get_completion_data()
+            await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
+
+        # Sync title from checkpoint to threads_meta.display_name
+        if checkpointer is not None:
+            try:
+                ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+                ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
+                if ckpt_tuple is not None:
+                    ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
+                    title = ckpt.get("channel_values", {}).get("title")
+                    if title:
+                        await thread_meta_repo.update_display_name(thread_id, title)
+            except Exception:
+                logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
+
+        # Update threads_meta status based on run outcome
+        try:
+            final_status = "idle" if record.status == RunStatus.success else record.status.value
+            await thread_meta_repo.update_status(thread_id, final_status)
+        except Exception:
+            logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
 
@@ -353,6 +446,31 @@ def _lg_mode_to_sse_event(mode: str) -> str:
     """
     # All LG modes map 1:1 to SSE event names — "messages" stays "messages"
     return mode
+
+
+def _extract_human_message(graph_input: dict) -> HumanMessage | None:
+    """Extract or construct a HumanMessage from graph_input for event recording.
+
+    Returns a LangChain HumanMessage so callers can use .model_dump() to get
+    the checkpoint-aligned serialization format.
+    """
+    from langchain_core.messages import HumanMessage
+
+    messages = graph_input.get("messages")
+    if not messages:
+        return None
+    last = messages[-1] if isinstance(messages, list) else messages
+    if isinstance(last, HumanMessage):
+        return last
+    if isinstance(last, str):
+        return HumanMessage(content=last) if last else None
+    if hasattr(last, "content"):
+        content = last.content
+        return HumanMessage(content=content)
+    if isinstance(last, dict):
+        content = last.get("content", "")
+        return HumanMessage(content=content) if content else None
+    return None
 
 
 def _unpack_stream_item(

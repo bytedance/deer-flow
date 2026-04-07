@@ -14,9 +14,10 @@ class TestCheckpointerNoneFix:
         """make_checkpointer should return InMemorySaver when config.checkpointer is None."""
         from deerflow.agents.checkpointer.async_provider import make_checkpointer
 
-        # Mock get_app_config to return a config with checkpointer=None
+        # Mock get_app_config to return a config with checkpointer=None and database=None
         mock_config = MagicMock()
         mock_config.checkpointer = None
+        mock_config.database = None
 
         with patch("deerflow.agents.checkpointer.async_provider.get_app_config", return_value=mock_config):
             async with make_checkpointer() as checkpointer:

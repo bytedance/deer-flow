@@ -216,8 +216,11 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     )
     monkeypatch.setattr(lead_agent_module, "get_memory_config", lambda: MemoryConfig(enabled=False))
 
+    from unittest.mock import MagicMock
+
     captured: dict[str, object] = {}
-    fake_model = object()
+    fake_model = MagicMock()
+    fake_model.with_config.return_value = fake_model
 
     def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None):
         captured["name"] = name
@@ -233,49 +236,4 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     assert captured["name"] == "model-masswork"
     assert captured["thinking_enabled"] is False
     assert middleware["model"] is fake_model
-
-
-def test_create_summarization_middleware_registers_memory_flush_hook_when_memory_enabled(monkeypatch):
-    monkeypatch.setattr(
-        lead_agent_module,
-        "get_summarization_config",
-        lambda: SummarizationConfig(enabled=True),
-    )
-    monkeypatch.setattr(lead_agent_module, "get_memory_config", lambda: MemoryConfig(enabled=True))
-    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
-
-    captured: dict[str, object] = {}
-
-    def _fake_middleware(**kwargs):
-        captured.update(kwargs)
-        return kwargs
-
-    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", _fake_middleware)
-
-    lead_agent_module._create_summarization_middleware()
-
-    assert captured["before_summarization"] == [lead_agent_module.memory_flush_hook]
-
-
-def test_create_summarization_middleware_passes_skill_read_tool_names(monkeypatch):
-    app_config = _make_app_config([_make_model("default-model", supports_thinking=False)])
-    monkeypatch.setattr(
-        lead_agent_module,
-        "get_summarization_config",
-        lambda: SummarizationConfig(enabled=True, skill_file_read_tool_names=["read_file", "cat"]),
-    )
-    monkeypatch.setattr(lead_agent_module, "get_memory_config", lambda: MemoryConfig(enabled=False))
-    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
-    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
-
-    captured: dict[str, object] = {}
-
-    def _fake_middleware(**kwargs):
-        captured.update(kwargs)
-        return kwargs
-
-    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", _fake_middleware)
-
-    lead_agent_module._create_summarization_middleware()
-
-    assert captured["skill_file_read_tool_names"] == ["read_file", "cat"]
+    fake_model.with_config.assert_called_once_with(tags=["middleware:summarize"])

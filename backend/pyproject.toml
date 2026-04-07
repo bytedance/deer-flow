@@ -19,6 +19,11 @@ dependencies = [
     "wecom-aibot-python-sdk>=0.1.6",
 ]
 
+[project.optional-dependencies]
+postgres = [
+    "deerflow-harness[postgres]",
+]
+
 [dependency-groups]
 dev = [
     "prompt-toolkit>=3.0.0",

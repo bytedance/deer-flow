@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.gateway.deps import get_checkpointer, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
 from deerflow.runtime import RunRecord, serialize_channel_values
 
@@ -53,6 +53,7 @@ class RunCreateRequest(BaseModel):
     after_seconds: float | None = Field(default=None, description="Delayed execution")
     if_not_exists: Literal["reject", "create"] = Field(default="create", description="Thread creation policy")
     feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
+    follow_up_to_run_id: str | None = Field(default=None, description="Run ID this message follows up on. Auto-detected from latest successful run if not provided.")
 
 
 class RunResponse(BaseModel):
@@ -265,3 +266,50 @@ async def stream_existing_run(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Messages / Events / Token usage endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{thread_id}/messages")
+async def list_thread_messages(
+    thread_id: str,
+    request: Request,
+    limit: int = Query(default=50, le=200),
+    before_seq: int | None = Query(default=None),
+    after_seq: int | None = Query(default=None),
+) -> list[dict]:
+    """Return displayable messages for a thread (across all runs)."""
+    event_store = get_run_event_store(request)
+    return await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
+
+
+@router.get("/{thread_id}/runs/{run_id}/messages")
+async def list_run_messages(thread_id: str, run_id: str, request: Request) -> list[dict]:
+    """Return displayable messages for a specific run."""
+    event_store = get_run_event_store(request)
+    return await event_store.list_messages_by_run(thread_id, run_id)
+
+
+@router.get("/{thread_id}/runs/{run_id}/events")
+async def list_run_events(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    event_types: str | None = Query(default=None),
+    limit: int = Query(default=500, le=2000),
+) -> list[dict]:
+    """Return the full event stream for a run (debug/audit)."""
+    event_store = get_run_event_store(request)
+    types = event_types.split(",") if event_types else None
+    return await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)
+
+
+@router.get("/{thread_id}/token-usage")
+async def thread_token_usage(thread_id: str, request: Request) -> dict:
+    """Thread-level token usage aggregation."""
+    run_store = get_run_store(request)
+    agg = await run_store.aggregate_tokens_by_thread(thread_id)
+    return {"thread_id": thread_id, **agg}
