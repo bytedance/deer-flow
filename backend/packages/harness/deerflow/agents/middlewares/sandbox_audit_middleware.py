@@ -23,25 +23,119 @@ logger = logging.getLogger(__name__)
 
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),  # rm -rf / /* ~ /home /root
-    re.compile(r"(curl|wget).+\|\s*(ba)?sh"),  # curl|sh, wget|sh
+    # --- original rules (retained) ---
+    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
     re.compile(r"cat\s+/etc/shadow"),
-    re.compile(r">\s*/etc/"),  # overwrite /etc/ files
+    re.compile(r">+\s*/etc/"),
+    # --- pipe to sh/bash (generalised, replaces old curl|sh rule) ---
+    re.compile(r"\|\s*(ba)?sh\b"),
+    # --- command substitution (targeted – only dangerous executables) ---
+    re.compile(r"[`$]\(?\s*(curl|wget|bash|sh|python|ruby|perl|base64)"),
+    # --- base64 decode piped to execution ---
+    re.compile(r"base64\s+.*-d.*\|"),
+    # --- overwrite system binaries ---
+    re.compile(r">+\s*(/usr/bin/|/bin/|/sbin/)"),
+    # --- overwrite shell startup files ---
+    re.compile(r">+\s*~/?\.(bashrc|profile|zshrc|bash_profile)"),
+    # --- process environment leakage ---
+    re.compile(r"/proc/[^/]+/environ"),
+    # --- dynamic linker hijack (one-step escalation) ---
+    re.compile(r"\b(LD_PRELOAD|LD_LIBRARY_PATH)\s*="),
+    # --- bash built-in networking (bypasses tool allowlists) ---
+    re.compile(r"/dev/tcp/"),
+    # --- fork bomb ---
+    re.compile(r"\S+\(\)\s*\{[^}]*\|\s*\S+\s*&"),  # :(){ :|:& };:
+    re.compile(r"while\s+true.*&\s*done"),  # while true; do bash & done
 ]
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"chmod\s+777"),  # overly permissive, but reversible
-    re.compile(r"pip\s+install"),
-    re.compile(r"pip3\s+install"),
+    re.compile(r"chmod\s+777"),
+    re.compile(r"pip3?\s+install"),
     re.compile(r"apt(-get)?\s+install"),
+    # sudo/su: no-op under Docker root; warn so LLM is aware
+    re.compile(r"\b(sudo|su)\b"),
+    # PATH modification: long attack chain, warn rather than block
+    re.compile(r"\bPATH\s*="),
 ]
 
 
-def _classify_command(command: str) -> str:
-    """Return 'block', 'warn', or 'pass'."""
-    # Normalize for matching (collapse whitespace)
+def _split_compound_command(command: str) -> list[str]:
+    """Split a compound command into sub-commands (quote-aware).
+
+    Scans the raw command string so unquoted shell control operators are
+    recognised even when they are not surrounded by whitespace
+    (e.g. ``safe;rm -rf /`` or ``rm -rf /&&echo ok``). Operators inside
+    quotes are ignored. If the command ends with an unclosed quote or a
+    dangling escape, return the whole command unchanged (fail-closed —
+    safer to classify the unsplit string than silently drop parts).
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    in_single_quote = False
+    in_double_quote = False
+    escaping = False
+    index = 0
+
+    while index < len(command):
+        char = command[index]
+
+        if escaping:
+            current.append(char)
+            escaping = False
+            index += 1
+            continue
+
+        if char == "\\" and not in_single_quote:
+            current.append(char)
+            escaping = True
+            index += 1
+            continue
+
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(char)
+            index += 1
+            continue
+
+        if char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(char)
+            index += 1
+            continue
+
+        if not in_single_quote and not in_double_quote:
+            if command.startswith("&&", index) or command.startswith("||", index):
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                index += 2
+                continue
+            if char == ";":
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                index += 1
+                continue
+
+        current.append(char)
+        index += 1
+
+    # Unclosed quote or dangling escape → fail-closed, return whole command
+    if in_single_quote or in_double_quote or escaping:
+        return [command]
+
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+    return parts if parts else [command]
+
+
+def _classify_single_command(command: str) -> str:
+    """Classify a single (non-compound) command. Return 'block', 'warn', or 'pass'."""
     normalized = " ".join(command.split())
 
     for pattern in _HIGH_RISK_PATTERNS:
@@ -64,6 +158,35 @@ def _classify_command(command: str) -> str:
             return "warn"
 
     return "pass"
+
+
+def _classify_command(command: str) -> str:
+    """Return 'block', 'warn', or 'pass'.
+
+    Strategy:
+    1. First scan the *whole* raw command against high-risk patterns. This
+       catches structural attacks like ``while true; do bash & done`` or
+       ``:(){ :|:& };:`` that span multiple shell statements — splitting them
+       on ``;`` would destroy the pattern context.
+    2. Then split compound commands (e.g. ``cmd1 && cmd2 ; cmd3``) and
+       classify each sub-command independently. The most severe verdict wins.
+    """
+    # Pass 1: whole-command high-risk scan (catches multi-statement patterns)
+    normalized = " ".join(command.split())
+    for pattern in _HIGH_RISK_PATTERNS:
+        if pattern.search(normalized):
+            return "block"
+
+    # Pass 2: per-sub-command classification
+    sub_commands = _split_compound_command(command)
+    worst = "pass"
+    for sub in sub_commands:
+        verdict = _classify_single_command(sub)
+        if verdict == "block":
+            return "block"  # short-circuit: can't get worse
+        if verdict == "warn":
+            worst = "warn"
+    return worst
 
 
 # ---------------------------------------------------------------------------
