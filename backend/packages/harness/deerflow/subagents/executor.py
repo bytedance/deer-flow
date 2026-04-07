@@ -374,11 +374,41 @@ class SubagentExecutor:
 
         return result
 
+    def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+        """Execute the subagent in a completely fresh event loop.
+
+        This method is designed to run in a separate thread to ensure complete
+        isolation from any parent event loop, preventing conflicts with asyncio
+        primitives that may be bound to the parent loop (e.g., httpx clients).
+        """
+        # Create and set a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._aexecute(task, result_holder))
+        finally:
+            # Clean up the loop
+            try:
+                # Cancel any pending tasks
+                pending = asyncio.all_tasks(loop)
+                if pending:
+                    for task_obj in pending:
+                        task_obj.cancel()
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.close()
+            except Exception:
+                pass
+
     def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task synchronously (wrapper around async execution).
 
         This method runs the async execution in a new event loop, allowing
         asynchronous tools (like MCP tools) to be used within the thread pool.
+
+        When called from within an already-running event loop (e.g., when the
+        parent agent is async), this method isolates the subagent execution in
+        a separate thread to avoid event loop conflicts with shared async
+        primitives like httpx clients.
 
         Args:
             task: The task description for the subagent.
@@ -387,16 +417,26 @@ class SubagentExecutor:
         Returns:
             SubagentResult with the execution result.
         """
-        # Run the async execution in a new event loop
-        # This is necessary because:
-        # 1. We may have async-only tools (like MCP tools)
-        # 2. We're running inside a ThreadPoolExecutor which doesn't have an event loop
-        #
-        # Note: _aexecute() catches all exceptions internally, so this outer
-        # try-except only handles asyncio.run() failures (e.g., if called from
-        # an async context where an event loop already exists). Subagent execution
-        # errors are handled within _aexecute() and returned as FAILED status.
         try:
+            # Check if we're already in a running event loop
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_running():
+                    # We're being called from within a running event loop.
+                    # We cannot use asyncio.run() here because it would create a new
+                    # loop and conflict with any asyncio primitives (like httpx clients
+                    # or locks) that were created in and bound to the parent loop.
+                    # Instead, run the subagent in a separate thread to ensure it has
+                    # its own isolated event loop.
+                    logger.debug(f"[trace={self.trace_id}] Subagent {self.config.name} detected running event loop, using isolated thread")
+                    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="subagent-isolated-") as executor:
+                        future = executor.submit(self._execute_in_isolated_loop, task, result_holder)
+                        return future.result()
+            except RuntimeError:
+                # No event loop running in this thread, safe to use asyncio.run
+                pass
+
+            # Standard path: no running event loop, use asyncio.run
             return asyncio.run(self._aexecute(task, result_holder))
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
