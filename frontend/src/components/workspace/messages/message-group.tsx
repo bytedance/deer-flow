@@ -27,13 +27,14 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   extractReasoningContentFromMessage,
   findToolCallResult,
+  getToolCalls,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { useArtifacts } from "../artifacts";
+import { useOptionalArtifacts } from "../artifacts";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
@@ -201,8 +202,7 @@ function ToolCall({
   isLoading?: boolean;
 }) {
   const { t } = useI18n();
-  const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
-    useArtifacts();
+  const artifacts = useOptionalArtifacts();
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -280,17 +280,16 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
+        className="cursor-pointer"
         label={t.toolCalls.viewWebPage}
         icon={GlobeIcon}
+        onClick={() => {
+          window.open(url, "_blank");
+        }}
       >
         <ChainOfThoughtSearchResult>
           {url && (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="cursor-pointer"
-            >
+            <a href={url} target="_blank" rel="noopener noreferrer">
               {title}
             </a>
           )}
@@ -336,16 +335,22 @@ function ToolCall({
       description = t.toolCalls.writeFile;
     }
     const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path) {
+    if (
+      isLoading &&
+      isLast &&
+      artifacts?.autoOpen &&
+      artifacts?.autoSelect &&
+      path
+    ) {
       setTimeout(() => {
         const url = new URL(
           `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
         ).toString();
-        if (selectedArtifact === url) {
+        if (artifacts.selectedArtifact === url) {
           return;
         }
-        select(url, true);
-        setOpen(true);
+        artifacts.select(url, true);
+        artifacts.setOpen(true);
       }, 100);
     }
 
@@ -356,12 +361,12 @@ function ToolCall({
         label={description}
         icon={NotebookPenIcon}
         onClick={() => {
-          select(
+          artifacts?.select(
             new URL(
               `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
             ).toString(),
           );
-          setOpen(true);
+          artifacts?.setOpen(true);
         }}
       >
         {path && (
@@ -374,10 +379,25 @@ function ToolCall({
   } else if (name === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
-    if (!description) {
-      return t.toolCalls.executeCommand;
-    }
     const command: string | undefined = (args as { command: string })?.command;
+    if (!description) {
+      return (
+        <ChainOfThoughtStep
+          key={id}
+          label={t.toolCalls.executeCommand}
+          icon={SquareTerminalIcon}
+        >
+          {command && (
+            <CodeBlock
+              className="mx-0 cursor-pointer border-none px-0"
+              showLineNumbers={false}
+              language="bash"
+              code={command}
+            />
+          )}
+        </ChainOfThoughtStep>
+      );
+    }
     return (
       <ChainOfThoughtStep
         key={id}
@@ -455,7 +475,8 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         steps.push(step);
       }
-      for (const tool_call of message.tool_calls ?? []) {
+      const toolCalls = getToolCalls(message);
+      for (const tool_call of toolCalls) {
         if (tool_call.name === "task") {
           continue;
         }

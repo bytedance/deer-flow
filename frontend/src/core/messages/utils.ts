@@ -1,5 +1,7 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
+import { tryParseJSON } from "../utils/json";
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
@@ -25,6 +27,81 @@ type MessageGroup =
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
+
+type ToolCallArgs = Record<string, unknown>;
+type NormalizedToolCall = {
+  id?: string;
+  name: string;
+  args: ToolCallArgs;
+};
+
+function parseToolCallsString(toolCalls: string) {
+  const parsed = tryParseJSON(toolCalls);
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+  const repairedArgsObjects = toolCalls.replace(
+    /"args":"(\{[\s\S]*?\}|\[[\s\S]*?\])"/g,
+    '"args":$1',
+  );
+  const repaired = tryParseJSON(repairedArgsObjects);
+  if (Array.isArray(repaired)) {
+    return repaired;
+  }
+
+  const salvagedToolCalls = Array.from(
+    toolCalls.matchAll(
+      /(?:"id":"([^"]*)",)?\s*"name":"([^"]+)"\s*,\s*"args":"(\{[\s\S]*?\}|\[[\s\S]*?\])"/g,
+    ),
+  ).map((match) => ({
+    id: match[1] ?? undefined,
+    name: match[2]!,
+    args: match[3]!,
+  }));
+  return salvagedToolCalls;
+}
+
+function normalizeToolCallArgs(args: unknown): ToolCallArgs {
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    return args as ToolCallArgs;
+  }
+  if (typeof args === "string") {
+    const parsed = tryParseJSON(args);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as ToolCallArgs;
+    }
+  }
+  return {};
+}
+
+export function getToolCalls(
+  message: Message | AIMessage,
+): NormalizedToolCall[] {
+  const rawToolCalls = Array.isArray(message.tool_calls)
+    ? message.tool_calls
+    : typeof message.tool_calls === "string"
+      ? parseToolCallsString(message.tool_calls)
+      : [];
+  if (!Array.isArray(rawToolCalls)) {
+    return [];
+  }
+  return rawToolCalls.flatMap((toolCall) => {
+    if (
+      !toolCall ||
+      typeof toolCall !== "object" ||
+      typeof toolCall.name !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: typeof toolCall.id === "string" ? toolCall.id : undefined,
+        name: toolCall.name,
+        args: normalizeToolCallArgs(toolCall.args),
+      },
+    ];
+  });
+}
 
 export function groupMessages<T>(
   messages: Message[],
@@ -274,15 +351,13 @@ export function hasReasoning(message: Message) {
 }
 
 export function hasToolCalls(message: Message) {
-  return (
-    message.type === "ai" && message.tool_calls && message.tool_calls.length > 0
-  );
+  return message.type === "ai" && getToolCalls(message).length > 0;
 }
 
 export function hasPresentFiles(message: Message) {
   return (
     message.type === "ai" &&
-    message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
+    getToolCalls(message).some((toolCall) => toolCall.name === "present_files")
   );
 }
 
@@ -295,7 +370,7 @@ export function extractPresentFilesFromMessage(message: Message) {
     return [];
   }
   const files: string[] = [];
-  for (const toolCall of message.tool_calls ?? []) {
+  for (const toolCall of getToolCalls(message)) {
     if (
       toolCall.name === "present_files" &&
       Array.isArray(toolCall.args.filepaths)
@@ -307,7 +382,7 @@ export function extractPresentFilesFromMessage(message: Message) {
 }
 
 export function hasSubagent(message: AIMessage) {
-  for (const toolCall of message.tool_calls ?? []) {
+  for (const toolCall of getToolCalls(message)) {
     if (toolCall.name === "task") {
       return true;
     }

@@ -2,11 +2,15 @@ import type { ToolCall } from "@langchain/core/messages";
 import type { AIMessage } from "@langchain/langgraph-sdk";
 
 import type { Translations } from "../i18n";
-import { hasToolCalls } from "../messages/utils";
+import { getToolCalls, hasToolCalls } from "../messages/utils";
 
 export function explainLastToolCall(message: AIMessage, t: Translations) {
   if (hasToolCalls(message)) {
-    const lastToolCall = message.tool_calls![message.tool_calls!.length - 1]!;
+    const toolCalls = getToolCalls(message);
+    const lastToolCall = toolCalls[toolCalls.length - 1];
+    if (!lastToolCall) {
+      return t.common.thinking;
+    }
     return explainToolCall(lastToolCall, t);
   }
   return t.common.thinking;
