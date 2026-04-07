@@ -63,8 +63,6 @@ def test_strip_does_not_mutate_original_payload():
     """The original payload dict is never mutated — a new dict is returned."""
     original_extra = {"thinking": {"type": "enabled"}}
     payload = {"messages": [], "extra_body": original_extra}
-    result = _strip_unsupported_extra_body(payload)
-    # Original dict and its nested extra_body are untouched.
     assert "thinking" in original_extra
     assert payload["extra_body"] is original_extra
 
