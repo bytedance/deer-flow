@@ -1,3 +1,4 @@
+import type { ToolCall } from "@langchain/core/messages";
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
 import { tryParseJSON } from "../utils/json";
@@ -28,12 +29,8 @@ type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
-type ToolCallArgs = Record<string, unknown>;
-type NormalizedToolCall = {
-  id?: string;
-  name: string;
-  args: ToolCallArgs;
-};
+type ToolCallArgs = ToolCall["args"];
+type NormalizedToolCall = Pick<ToolCall, "id" | "name" | "args">;
 
 function parseToolCallsString(toolCalls: string) {
   const parsed = tryParseJSON(toolCalls);

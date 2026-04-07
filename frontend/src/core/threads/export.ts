@@ -93,14 +93,15 @@ export function formatThreadAsJSON(
     thread_id: thread.thread_id,
     created_at: thread.created_at,
     exported_at: new Date().toISOString(),
-    messages: messages.map((msg) => ({
-      type: msg.type,
-      id: msg.id,
-      content: typeof msg.content === "string" ? msg.content : msg.content,
-      ...(msg.type === "ai" && getToolCalls(msg).length
-        ? { tool_calls: getToolCalls(msg) }
-        : {}),
-    })),
+    messages: messages.map((msg) => {
+      const toolCalls = msg.type === "ai" ? getToolCalls(msg) : [];
+      return {
+        type: msg.type,
+        id: msg.id,
+        content: typeof msg.content === "string" ? msg.content : msg.content,
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+      };
+    }),
   };
   return JSON.stringify(exportData, null, 2);
 }

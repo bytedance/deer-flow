@@ -33,6 +33,14 @@ import { SubtaskCard } from "./subtask-card";
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 160;
 export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
 
+function readStringArg(
+  args: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = args[key];
+  return typeof value === "string" ? value : undefined;
+}
+
 export function MessageList({
   className,
   threadId,
@@ -107,11 +115,28 @@ export function MessageList({
               if (message.type === "ai") {
                 for (const toolCall of getToolCalls(message)) {
                   if (toolCall.name === "task") {
+                    const subagentType = readStringArg(
+                      toolCall.args,
+                      "subagent_type",
+                    );
+                    const description = readStringArg(
+                      toolCall.args,
+                      "description",
+                    );
+                    const prompt = readStringArg(toolCall.args, "prompt");
+                    if (
+                      !toolCall.id ||
+                      !subagentType ||
+                      !description ||
+                      !prompt
+                    ) {
+                      continue;
+                    }
                     const task: Subtask = {
-                      id: toolCall.id!,
-                      subagent_type: toolCall.args.subagent_type,
-                      description: toolCall.args.description,
-                      prompt: toolCall.args.prompt,
+                      id: toolCall.id,
+                      subagent_type: subagentType,
+                      description,
+                      prompt,
                       status: "in_progress",
                     };
                     updateSubtask(task);

@@ -280,16 +280,29 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
+        className={url ? "cursor-pointer" : undefined}
         label={t.toolCalls.viewWebPage}
         icon={GlobeIcon}
         onClick={() => {
-          window.open(url, "_blank");
+          if (!url) {
+            return;
+          }
+          const newWindow = window.open(url, "_blank", "noopener,noreferrer");
+          if (newWindow) {
+            newWindow.opener = null;
+          }
         }}
       >
         <ChainOfThoughtSearchResult>
           {url && (
-            <a href={url} target="_blank" rel="noopener noreferrer">
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+            >
               {title}
             </a>
           )}
@@ -338,19 +351,21 @@ function ToolCall({
     if (
       isLoading &&
       isLast &&
-      artifacts?.autoOpen &&
-      artifacts?.autoSelect &&
+      artifacts &&
+      artifacts.autoOpen &&
+      artifacts.autoSelect &&
       path
     ) {
+      const artifactsContext = artifacts;
       setTimeout(() => {
         const url = new URL(
           `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
         ).toString();
-        if (artifacts.selectedArtifact === url) {
+        if (artifactsContext.selectedArtifact === url) {
           return;
         }
-        artifacts.select(url, true);
-        artifacts.setOpen(true);
+        artifactsContext.select(url, true);
+        artifactsContext.setOpen(true);
       }, 100);
     }
 

@@ -41,7 +41,10 @@ export function loadArtifactContentFromToolCall({
         (toolCall) => toolCall.id === toolCallId,
       );
       if (toolCall) {
-        return toolCall.args.content;
+        const content = toolCall.args.content;
+        if (typeof content === "string") {
+          return content;
+        }
       }
     }
   }
