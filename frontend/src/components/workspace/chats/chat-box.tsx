@@ -13,11 +13,9 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import {
-  ArtifactFileDetail,
-  ArtifactFileList,
-  useArtifacts,
-} from "../artifacts";
+import { ArtifactFileList } from "../artifacts/artifact-file-list";
+import { useArtifacts } from "../artifacts/context";
+import { LazyArtifactFileDetail } from "../artifacts/lazy-artifact-file-detail";
 import { useThread } from "../messages/context";
 
 const CLOSE_MODE = { chat: 100, artifacts: 0 };
@@ -131,7 +129,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
           )}
         >
           {selectedArtifact ? (
-            <ArtifactFileDetail
+            <LazyArtifactFileDetail
               className="size-full"
               filepath={selectedArtifact}
               threadId={threadId}

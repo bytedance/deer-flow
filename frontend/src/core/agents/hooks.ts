@@ -4,16 +4,13 @@ import {
   createAgent,
   deleteAgent,
   getAgent,
-  listAgents,
   updateAgent,
 } from "./api";
+import { agentsQueryOptions } from "./query";
 import type { CreateAgentRequest, UpdateAgentRequest } from "./types";
 
 export function useAgents() {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["agents"],
-    queryFn: () => listAgents(),
-  });
+  const { data, isLoading, error } = useQuery(agentsQueryOptions());
   return { agents: data ?? [], isLoading, error };
 }
 

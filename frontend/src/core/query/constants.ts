@@ -1,0 +1,1 @@
+export const WORKSPACE_NAV_DATA_STALE_TIME_MS = 60_000;
