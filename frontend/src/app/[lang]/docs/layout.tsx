@@ -6,7 +6,12 @@ import { Header } from "@/components/landing/header";
 import { getLocaleByLang } from "@/core/i18n/locale";
 import "nextra-theme-docs/style.css";
 
-const footer = <Footer>MIT {new Date().getFullYear()} © Nextra.</Footer>;
+const footer = (
+  <Footer>
+    Licensed under MIT License
+    <br />© {new Date().getFullYear()} DeerFlow
+  </Footer>
+);
 
 const i18n = [
   { locale: "en", name: "English" },
@@ -15,7 +20,7 @@ const i18n = [
 
 function formatPageRoute(base: string, items: PageMapItem[]): PageMapItem[] {
   return items.map((item) => {
-    if ("route" in item) {
+    if ("route" in item && !item.route.startsWith(base)) {
       item.route = `${base}${item.route}`;
     }
     if ("children" in item && item.children) {
@@ -29,6 +34,7 @@ export default async function DocLayout({ children, params }) {
   const { lang } = await params;
   const locale = getLocaleByLang(lang);
   const pages = await getPageMap(`/${lang}`);
+  const pageMap = formatPageRoute(`/${lang}/docs`, pages);
 
   return (
     <Layout
@@ -39,7 +45,7 @@ export default async function DocLayout({ children, params }) {
           locale={locale}
         />
       }
-      pageMap={formatPageRoute(`/${lang}/docs`, pages)}
+      pageMap={pageMap}
       docsRepositoryBase="https://github.com/bytedance/deerflow/tree/main/frontend/src/app/content"
       footer={footer}
       i18n={i18n}
