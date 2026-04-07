@@ -1,14 +1,9 @@
-import { Footer, Layout } from "nextra-theme-docs";
+import { Layout } from "nextra-theme-docs";
 
+import { Footer } from "@/components/landing/footer";
 import { Header } from "@/components/landing/header";
 import { getBlogIndexData } from "@/core/blog";
 import "nextra-theme-docs/style.css";
-
-const footer = (
-  <Footer>
-    Licensed under MIT License © {new Date().getFullYear()} DeerFlow
-  </Footer>
-);
 
 export default async function BlogLayout({ children }) {
   const { pageMap } = await getBlogIndexData();
@@ -19,7 +14,7 @@ export default async function BlogLayout({ children }) {
       pageMap={pageMap}
       sidebar={{ defaultOpen: true }}
       docsRepositoryBase="https://github.com/bytedance/deerflow/tree/main/frontend/src/content"
-      footer={footer}
+      footer={<Footer />}
     >
       {children}
     </Layout>

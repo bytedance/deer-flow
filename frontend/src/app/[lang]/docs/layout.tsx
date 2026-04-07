@@ -1,17 +1,11 @@
 import type { PageMapItem } from "nextra";
 import { getPageMap } from "nextra/page-map";
-import { Footer, Layout } from "nextra-theme-docs";
+import { Layout } from "nextra-theme-docs";
 
+import { Footer } from "@/components/landing/footer";
 import { Header } from "@/components/landing/header";
 import { getLocaleByLang } from "@/core/i18n/locale";
 import "nextra-theme-docs/style.css";
-
-const footer = (
-  <Footer>
-    Licensed under MIT License
-    <br />© {new Date().getFullYear()} DeerFlow
-  </Footer>
-);
 
 const i18n = [
   { locale: "en", name: "English" },
@@ -47,7 +41,7 @@ export default async function DocLayout({ children, params }) {
       }
       pageMap={pageMap}
       docsRepositoryBase="https://github.com/bytedance/deerflow/tree/main/frontend/src/app/content"
-      footer={footer}
+      footer={<Footer />}
       i18n={i18n}
       // ... Your additional layout options
     >

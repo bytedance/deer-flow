@@ -2,9 +2,10 @@ import { notFound } from "next/navigation";
 import { importPage } from "nextra/pages";
 import { cache } from "react";
 
-import { PostList } from "@/components/landing/post-list";
+import { PostList, PostMeta, PostTags } from "@/components/landing/post-list";
 import {
   BLOG_LANGS,
+  type BlogLang,
   formatTagName,
   getAllPosts,
   getBlogIndexData,
@@ -16,6 +17,10 @@ import { useMDXComponents as getMDXComponents } from "../../../mdx-components";
 
 // eslint-disable-next-line @typescript-eslint/unbound-method
 const Wrapper = getMDXComponents().wrapper;
+
+function isBlogLang(value: string): value is BlogLang {
+  return BLOG_LANGS.includes(value as BlogLang);
+}
 
 const loadBlogPage = cache(async function loadBlogPage(
   mdxPath: string[] | undefined,
@@ -92,9 +97,15 @@ export async function generateMetadata(props) {
 
 export default async function Page(props) {
   const params = await props.params;
+  const searchParams = await props.searchParams;
   const mdxPath = params.mdxPath ?? [];
   const { locale } = await getI18n();
-  const preferredLang = getPreferredBlogLang(locale);
+  const localePreferredLang = getPreferredBlogLang(locale);
+  const queryLang = searchParams?.lang;
+  const preferredLang =
+    typeof queryLang === "string" && isBlogLang(queryLang)
+      ? queryLang
+      : localePreferredLang;
 
   if (mdxPath.length === 0) {
     const posts = await getAllPosts(preferredLang);
@@ -140,9 +151,22 @@ export default async function Page(props) {
   }
 
   const { default: MDXContent, toc, metadata, sourceCode, lang, slug } = page;
+  const postMetaData = metadata as {
+    date?: string;
+    languages?: string[];
+    tags?: unknown;
+  };
 
   return (
     <Wrapper toc={toc} metadata={metadata} sourceCode={sourceCode}>
+      <PostMeta
+        currentLang={lang}
+        date={
+          typeof postMetaData.date === "string" ? postMetaData.date : undefined
+        }
+        languages={postMetaData.languages}
+        pathname={slug.length === 0 ? "/blog" : `/blog/${slug.join("/")}`}
+      />
       <MDXContent {...props} params={{ ...params, lang, mdxPath: slug }} />
     </Wrapper>
   );
