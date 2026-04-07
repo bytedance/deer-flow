@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+import deerflow.config.app_config as app_config_module
 from deerflow.config.app_config import get_app_config, reset_app_config
 
 
@@ -79,3 +80,27 @@ def test_get_app_config_reloads_when_config_path_changes(tmp_path, monkeypatch):
         assert second is not first
     finally:
         reset_app_config()
+
+
+def test_default_config_candidates_do_not_call_resolve(monkeypatch):
+    original_file = app_config_module.__file__
+
+    def fail_resolve(self, *args, **kwargs):
+        raise AssertionError("Path.resolve() should not be called")
+
+    monkeypatch.setattr(Path, "resolve", fail_resolve)
+    monkeypatch.setattr(
+        app_config_module,
+        "__file__",
+        str(Path("E:/repo/backend/packages/harness/deerflow/config/app_config.py")),
+    )
+
+    try:
+        candidates = app_config_module._default_config_candidates()
+    finally:
+        monkeypatch.setattr(app_config_module, "__file__", original_file)
+
+    assert candidates == (
+        Path("E:/repo/backend/config.yaml"),
+        Path("E:/repo/config.yaml"),
+    )

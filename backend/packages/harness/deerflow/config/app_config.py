@@ -32,7 +32,9 @@ logger = logging.getLogger(__name__)
 
 def _default_config_candidates() -> tuple[Path, ...]:
     """Return deterministic config.yaml locations without relying on cwd."""
-    backend_dir = Path(__file__).resolve().parents[4]
+    # Avoid Path.resolve() here: on some runtimes (notably Windows + langgraph dev)
+    # it can hit os.getcwd() via realpath and trigger blockbuster on the event loop.
+    backend_dir = Path(__file__).parents[4]
     repo_root = backend_dir.parent
     return (backend_dir / "config.yaml", repo_root / "config.yaml")
 
