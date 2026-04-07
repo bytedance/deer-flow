@@ -76,6 +76,14 @@ export const enUS: Translations = {
     linkCopied: "Link copied to clipboard",
   },
 
+  // Message Actions
+  messageActions: {
+    edit: "Edit message",
+    regenerate: "Regenerate response",
+    previousVersion: "Previous version",
+    nextVersion: "Next version",
+  },
+
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",

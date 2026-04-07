@@ -65,6 +65,8 @@ async function getAgentWithRetry(agentName: string) {
   return null;
 }
 
+const noopAsync = () => Promise.resolve();
+
 export default function NewAgentPage() {
   const { t } = useI18n();
   const router = useRouter();
@@ -304,7 +306,16 @@ export default function NewAgentPage() {
   }
 
   return (
-    <ThreadContext.Provider value={{ thread }}>
+    <ThreadContext.Provider
+      value={{
+        thread,
+        editHumanMessage: noopAsync,
+        regenerateTurn: noopAsync,
+        selectAssistantVersion: noopAsync,
+        stopThread: thread.stop,
+        isThreadStreaming: thread.isLoading,
+      }}
+    >
       <ArtifactsProvider>
         <div className="flex size-full flex-col">
           {header}

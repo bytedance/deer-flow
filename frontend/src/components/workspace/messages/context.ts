@@ -5,6 +5,19 @@ import type { AgentThreadState } from "@/core/threads";
 
 export interface ThreadContextType {
   thread: BaseStream<AgentThreadState>;
+  editHumanMessage: (
+    threadId: string,
+    messageId: string,
+    text: string,
+  ) => Promise<void>;
+  regenerateTurn: (threadId: string, messageId: string) => Promise<void>;
+  selectAssistantVersion: (
+    threadId: string,
+    messageId: string,
+    versionId: string,
+  ) => Promise<void>;
+  stopThread: () => Promise<void>;
+  isThreadStreaming: boolean;
   isMock?: boolean;
 }
 

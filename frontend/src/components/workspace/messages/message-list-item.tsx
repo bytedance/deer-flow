@@ -1,7 +1,15 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { FileIcon, Loader2Icon } from "lucide-react";
-import { useParams } from "next/navigation";
-import { memo, useMemo, type ImgHTMLAttributes } from "react";
+import {
+  CheckIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  FileIcon,
+  Loader2Icon,
+  PencilIcon,
+  RotateCcwIcon,
+  XIcon,
+} from "lucide-react";
+import { memo, useEffect, useMemo, useState, type ImgHTMLAttributes } from "react";
 import rehypeKatex from "rehype-katex";
 
 import { Loader } from "@/components/ai-elements/loader";
@@ -18,33 +26,137 @@ import {
 } from "@/components/ai-elements/reasoning";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
+  isEditableHumanMessage,
+  isRegeneratableMessage,
   parseUploadedFiles,
+  resolveThreadIdForMessageActions,
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { humanMessagePlugins } from "@/core/streamdown";
+import type { AssistantVersion } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
 import { CopyButton } from "../copy-button";
+import { Tooltip } from "../tooltip";
 
+import { useThread } from "./context";
 import { MarkdownContent } from "./markdown-content";
+
+function resolveMessageFiles(message: Message, rawContent: string) {
+  const files = message.additional_kwargs?.files;
+  if (!Array.isArray(files) || files.length === 0) {
+    if (rawContent.includes("<uploaded_files>")) {
+      return parseUploadedFiles(rawContent);
+    }
+    return null;
+  }
+  return files as FileInMessage[];
+}
+
+function getEditableMessageText(message: Message) {
+  return stripUploadedFilesTag(extractContentFromMessage(message));
+}
 
 export function MessageListItem({
   className,
+  threadId,
   message,
   isLoading,
 }: {
   className?: string;
+  threadId: string;
   message: Message;
   isLoading?: boolean;
 }) {
+  const { t } = useI18n();
+  const actionThreadId = resolveThreadIdForMessageActions(threadId);
+  const {
+    thread,
+    editHumanMessage,
+    regenerateTurn,
+    selectAssistantVersion,
+    isThreadStreaming,
+  } = useThread();
   const isHuman = message.type === "human";
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(() => getEditableMessageText(message));
+
+  useEffect(() => {
+    if (!isEditing) {
+      setDraft(getEditableMessageText(message));
+    }
+  }, [isEditing, message]);
+
+  const assistantVersions = useMemo<AssistantVersion[]>(() => {
+    if (!message.id || message.type !== "ai") {
+      return [];
+    }
+    return thread.values.assistant_versions?.[message.id] ?? [];
+  }, [message.id, message.type, thread.values.assistant_versions]);
+
+  const activeVersionIndex = useMemo(() => {
+    if (!message.id || assistantVersions.length === 0) {
+      return 0;
+    }
+    const activeVersionId = thread.values.active_version_map?.[message.id];
+    const index = assistantVersions.findIndex(
+      (version) => version.id === activeVersionId,
+    );
+    return index >= 0 ? index : assistantVersions.length - 1;
+  }, [assistantVersions, message.id, thread.values.active_version_map]);
+
+  const canEdit = isEditableHumanMessage(message) && !isThreadStreaming && !isLoading;
+  const canRegenerate =
+    !isThreadStreaming &&
+    !isLoading &&
+    !!message.id &&
+    isRegeneratableMessage(thread.messages, message.id);
+  const isSaveDisabled = !draft.trim() || draft.trim() === getEditableMessageText(message).trim();
+
+  const handleSave = async () => {
+    if (!message.id) {
+      return;
+    }
+    try {
+      await editHumanMessage(actionThreadId, message.id, draft);
+      setIsEditing(false);
+    } catch {
+      // The hook already shows a toast.
+    }
+  };
+
+  const handleRegenerate = () => {
+    if (!message.id) {
+      return;
+    }
+    void regenerateTurn(actionThreadId, message.id).catch(() => undefined);
+  };
+
+  const handleSelectVersion = (offset: number) => {
+    if (!message.id || assistantVersions.length <= 1) {
+      return;
+    }
+    const nextIndex =
+      (activeVersionIndex + offset + assistantVersions.length) %
+      assistantVersions.length;
+    const nextVersion = assistantVersions[nextIndex];
+    if (!nextVersion) {
+      return;
+    }
+    void selectAssistantVersion(actionThreadId, message.id, nextVersion.id).catch(
+      () => undefined,
+    );
+  };
+
   return (
     <AIElementMessage
       className={cn("group/conversation-message relative w-full", className)}
@@ -52,10 +164,31 @@ export function MessageListItem({
     >
       <MessageContent
         className={isHuman ? "w-fit" : "w-full"}
+        threadId={threadId}
         message={message}
         isLoading={isLoading}
+        isEditing={isEditing}
+        draft={draft}
+        onDraftChange={setDraft}
+        onCancelEdit={() => {
+          setDraft(getEditableMessageText(message));
+          setIsEditing(false);
+        }}
+        onSaveEdit={handleSave}
+        isSaveDisabled={isSaveDisabled}
+        assistantVersionState={
+          !isHuman && assistantVersions.length > 1
+            ? {
+                activeIndex: activeVersionIndex,
+                total: assistantVersions.length,
+                onPrevious: () => handleSelectVersion(-1),
+                onNext: () => handleSelectVersion(1),
+                disabled: Boolean(isThreadStreaming || isLoading),
+              }
+            : undefined
+        }
       />
-      {!isLoading && (
+      {!isLoading && !isEditing && (
         <MessageToolbar
           className={cn(
             isHuman ? "-bottom-9 justify-end" : "-bottom-8",
@@ -70,6 +203,30 @@ export function MessageListItem({
                 ""
               }
             />
+            {isHuman && (
+              <Tooltip content={t.messageActions.edit}>
+                <Button
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
+                  disabled={!canEdit}
+                  onClick={() => setIsEditing(true)}
+                >
+                  <PencilIcon size={12} />
+                </Button>
+              </Tooltip>
+            )}
+            <Tooltip content={t.messageActions.regenerate}>
+              <Button
+                size="icon-sm"
+                type="button"
+                variant="ghost"
+                disabled={!canRegenerate}
+                onClick={handleRegenerate}
+              >
+                <RotateCcwIcon size={12} />
+              </Button>
+            </Tooltip>
           </div>
         </MessageToolbar>
       )}
@@ -77,9 +234,6 @@ export function MessageListItem({
   );
 }
 
-/**
- * Custom image component that handles artifact URLs
- */
 function MessageImage({
   src,
   alt,
@@ -107,41 +261,35 @@ function MessageImage({
   );
 }
 
-function MessageContent_({
+function BaseMessageContent({
   className,
+  threadId,
   message,
   isLoading = false,
 }: {
   className?: string;
+  threadId: string;
   message: Message;
   isLoading?: boolean;
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
-  const { thread_id } = useParams<{ thread_id: string }>();
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
-        <MessageImage {...props} threadId={thread_id} maxWidth="90%" />
+        <MessageImage {...props} threadId={threadId} maxWidth="90%" />
       ),
     }),
-    [thread_id],
+    [threadId],
   );
 
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
 
-  const files = useMemo(() => {
-    const files = message.additional_kwargs?.files;
-    if (!Array.isArray(files) || files.length === 0) {
-      if (rawContent.includes("<uploaded_files>")) {
-        // If the content contains the <uploaded_files> tag, we return the parsed files from the content for backward compatibility.
-        return parseUploadedFiles(rawContent);
-      }
-      return null;
-    }
-    return files as FileInMessage[];
-  }, [message.additional_kwargs?.files, rawContent]);
+  const files = useMemo(
+    () => resolveMessageFiles(message, rawContent),
+    [message, rawContent],
+  );
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
@@ -151,11 +299,10 @@ function MessageContent_({
   }, [rawContent, isHuman]);
 
   const filesList =
-    files && files.length > 0 && thread_id ? (
-      <RichFilesList files={files} threadId={thread_id} />
+    files && files.length > 0 && threadId ? (
+      <RichFilesList files={files} threadId={threadId} />
     ) : null;
 
-  // Uploading state: mock AI message shown while files upload
   if (message.additional_kwargs?.element === "task") {
     return (
       <AIElementMessageContent className={className}>
@@ -171,7 +318,6 @@ function MessageContent_({
     );
   }
 
-  // Reasoning-only AI message (no main response content yet)
   if (!isHuman && reasoningContent && !rawContent) {
     return (
       <AIElementMessageContent className={className}>
@@ -218,6 +364,123 @@ function MessageContent_({
     </AIElementMessageContent>
   );
 }
+
+function MessageContent_({
+  className,
+  threadId,
+  message,
+  isLoading = false,
+  isEditing = false,
+  draft = "",
+  onDraftChange,
+  onCancelEdit,
+  onSaveEdit,
+  isSaveDisabled = false,
+  assistantVersionState,
+}: {
+  className?: string;
+  threadId: string;
+  message: Message;
+  isLoading?: boolean;
+  isEditing?: boolean;
+  draft?: string;
+  onDraftChange?: (value: string) => void;
+  onCancelEdit?: () => void;
+  onSaveEdit?: () => void;
+  isSaveDisabled?: boolean;
+  assistantVersionState?: {
+    activeIndex: number;
+    total: number;
+    onPrevious: () => void;
+    onNext: () => void;
+    disabled: boolean;
+  };
+}) {
+  const { t } = useI18n();
+  const rawContent = extractContentFromMessage(message);
+  const files = useMemo(
+    () => resolveMessageFiles(message, rawContent),
+    [message, rawContent],
+  );
+
+  if (message.type === "human" && isEditing) {
+    return (
+      <div className={cn("ml-auto flex w-full max-w-(--container-width-sm) flex-col gap-2", className)}>
+        {files && files.length > 0 && threadId ? (
+          <RichFilesList files={files} threadId={threadId} />
+        ) : null}
+        <AIElementMessageContent className="w-fit min-w-80 max-w-full">
+          <div className="flex flex-col gap-3">
+            <Textarea
+              value={draft}
+              onChange={(event) => onDraftChange?.(event.target.value)}
+              className="min-h-28 resize-y"
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" size="sm" onClick={onCancelEdit}>
+                <XIcon size={14} />
+                {t.common.cancel}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={onSaveEdit}
+                disabled={isSaveDisabled}
+              >
+                <CheckIcon size={14} />
+                {t.common.save}
+              </Button>
+            </div>
+          </div>
+        </AIElementMessageContent>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full">
+      <BaseMessageContent
+        className={className}
+        threadId={threadId}
+        message={message}
+        isLoading={isLoading}
+      />
+      {message.type === "ai" && assistantVersionState && assistantVersionState.total > 1 && (
+        <div className="text-muted-foreground mt-2 flex items-center justify-end gap-1 text-xs">
+          <Tooltip content={t.messageActions.previousVersion}>
+            <Button
+              size="icon-sm"
+              type="button"
+              variant="ghost"
+              disabled={assistantVersionState.disabled}
+              onClick={assistantVersionState.onPrevious}
+            >
+              <ChevronLeftIcon size={14} />
+            </Button>
+          </Tooltip>
+          <span className="min-w-20 text-center">
+            {t.common.version} {assistantVersionState.activeIndex + 1}/
+            {assistantVersionState.total}
+          </span>
+          <Tooltip content={t.messageActions.nextVersion}>
+            <Button
+              size="icon-sm"
+              type="button"
+              variant="ghost"
+              disabled={assistantVersionState.disabled}
+              onClick={assistantVersionState.onNext}
+            >
+              <ChevronRightIcon size={14} />
+            </Button>
+          </Tooltip>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const MessageContent = memo(MessageContent_);
 
 /**
  * Get file extension and check helpers
@@ -384,4 +647,3 @@ function RichFileCard({
   );
 }
 
-const MessageContent = memo(MessageContent_);

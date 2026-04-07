@@ -390,3 +390,98 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
 
   return files;
 }
+
+
+export interface ThreadTurn {
+  turnId: string;
+  humanMessageId: string;
+  assistantMessageId?: string;
+  startIndex: number;
+  endIndex: number;
+}
+
+function isTurnAssistantMessage(message: Message) {
+  return message.type === "ai" && hasContent(message) && !hasToolCalls(message);
+}
+
+function buildTurns(messages: Message[]): ThreadTurn[] {
+  const turns: ThreadTurn[] = [];
+  let currentTurn: ThreadTurn | null = null;
+
+  for (const [index, message] of messages.entries()) {
+    if (!message.id) {
+      continue;
+    }
+
+    if (message.type === "human") {
+      currentTurn = {
+        turnId: message.id,
+        humanMessageId: message.id,
+        startIndex: index,
+        endIndex: index,
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+
+    if (!currentTurn) {
+      continue;
+    }
+
+    if (isTurnAssistantMessage(message) && !currentTurn.assistantMessageId) {
+      currentTurn.assistantMessageId = message.id;
+      currentTurn.endIndex = index;
+    }
+  }
+
+  return turns;
+}
+
+export function resolveTurnForMessage(
+  messages: Message[],
+  messageId: string,
+): ThreadTurn | null {
+  return (
+    buildTurns(messages).find(
+      (turn) =>
+        turn.humanMessageId === messageId || turn.assistantMessageId === messageId,
+    ) ?? null
+  );
+}
+
+export function getMessagesUpToTurn(
+  messages: Message[],
+  turnId: string,
+  options?: {
+    includeAssistant?: boolean;
+  },
+): Message[] {
+  const turn = buildTurns(messages).find((candidate) => candidate.turnId === turnId);
+  if (!turn) {
+    return [];
+  }
+
+  const endIndex =
+    options?.includeAssistant === false || !turn.assistantMessageId
+      ? turn.startIndex
+      : turn.endIndex;
+
+  return messages.slice(0, endIndex + 1);
+}
+
+export function isEditableHumanMessage(message: Message) {
+  return message.type === "human";
+}
+
+export function isRegeneratableMessage(messages: Message[], messageId: string) {
+  const turn = resolveTurnForMessage(messages, messageId);
+  return Boolean(turn?.assistantMessageId);
+}
+
+
+export function resolveThreadIdForMessageActions(
+  threadId: string,
+  routeThreadId?: string,
+) {
+  return threadId.trim() !== "" ? threadId : (routeThreadId ?? "");
+}

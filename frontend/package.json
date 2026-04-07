@@ -14,7 +14,8 @@
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
     "preview": "next build && next start",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node --experimental-strip-types --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "@codemirror/lang-css": "^6.3.1",

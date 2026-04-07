@@ -61,6 +61,14 @@ export interface Translations {
     linkCopied: string;
   };
 
+  // Message Actions
+  messageActions: {
+    edit: string;
+    regenerate: string;
+    previousVersion: string;
+    nextVersion: string;
+  };
+
   // Input Box
   inputBox: {
     placeholder: string;

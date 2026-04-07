@@ -76,6 +76,14 @@ export const zhCN: Translations = {
     linkCopied: "链接已复制到剪贴板",
   },
 
+  // Message Actions
+  messageActions: {
+    edit: "编辑消息",
+    regenerate: "重新生成回复",
+    previousVersion: "上一版本",
+    nextVersion: "下一版本",
+  },
+
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",

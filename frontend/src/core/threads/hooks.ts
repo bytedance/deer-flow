@@ -10,13 +10,26 @@ import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { getAPIClient } from "../api";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
-import type { FileInMessage } from "../messages/utils";
+import {
+  extractTextFromMessage,
+  getMessagesUpToTurn,
+  hasContent,
+  isRegeneratableMessage,
+  resolveTurnForMessage,
+  type FileInMessage,
+} from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import type { AgentThread, AgentThreadState } from "./types";
+import {
+  applyHumanEdit,
+  appendAssistantVersion,
+  buildSubmissionMessages,
+  selectAssistantVersion,
+} from "./versioning";
 
 export type ToolEndEvent = {
   name: string;
@@ -134,6 +147,62 @@ function getStreamErrorMessage(error: unknown): string {
   return "Request failed.";
 }
 
+function resolveReasoningEffort(context: LocalSettings["context"]) {
+  return (
+    context.reasoning_effort ??
+    (context.mode === "ultra"
+      ? "high"
+      : context.mode === "pro"
+        ? "medium"
+        : context.mode === "thinking"
+          ? "low"
+          : undefined)
+  );
+}
+
+function buildRunContext(
+  context: LocalSettings["context"],
+  options?: {
+    threadId?: string;
+    extraContext?: Record<string, unknown>;
+  },
+) {
+  const nextContext = {
+    ...options?.extraContext,
+    ...context,
+    thinking_enabled: context.mode !== "flash",
+    is_plan_mode: context.mode === "pro" || context.mode === "ultra",
+    subagent_enabled: context.mode === "ultra",
+    reasoning_effort: resolveReasoningEffort(context),
+  };
+
+  if (!options?.threadId) {
+    return nextContext;
+  }
+
+  return {
+    ...nextContext,
+    thread_id: options.threadId,
+  };
+}
+
+function extractLatestAssistantText(messages: Message[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || message.type !== "ai") {
+      continue;
+    }
+    if (!hasContent(message) || message.tool_calls?.length) {
+      continue;
+    }
+    const text = extractTextFromMessage(message).trim();
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
 export function useThreadStream({
   threadId,
   context,
@@ -143,12 +212,15 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
+  const apiClient = getAPIClient(isMock);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
+  const [localStateOverride, setLocalStateOverride] = useState<AgentThreadState | null>(null);
   // Ref to track current thread ID across async callbacks without causing re-renders,
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
+  const effectiveStateRef = useRef<AgentThreadState | null>(null);
 
   const listeners = useRef({
     onStart,
@@ -169,6 +241,7 @@ export function useThreadStream({
       setOnStreamThreadId(normalizedThreadId);
     }
     threadIdRef.current = normalizedThreadId;
+    setLocalStateOverride(null);
   }, [threadId]);
 
   const _handleOnStart = useCallback((id: string) => {
@@ -200,7 +273,7 @@ export function useThreadStream({
   }
 
   const thread = useStream<AgentThreadState>({
-    client: getAPIClient(isMock),
+    client: apiClient,
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
     reconnectOnMount: runMetadataStorageRef.current
@@ -282,31 +355,221 @@ export function useThreadStream({
       toast.error(getStreamErrorMessage(error));
     },
     onFinish(state) {
+      setLocalStateOverride(state.values);
       listeners.current.onFinish?.(state.values);
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });
+
+  const effectiveState = localStateOverride ?? thread.values;
+  const effectiveMessages = localStateOverride
+    ? thread.isLoading
+      ? [
+          ...localStateOverride.messages,
+          ...thread.messages.slice(localStateOverride.messages.length),
+        ]
+      : localStateOverride.messages
+    : thread.messages;
+
+  useEffect(() => {
+    effectiveStateRef.current = effectiveState;
+  }, [effectiveState]);
+
+  const updateThreadSearchCache = useCallback(
+    (targetThreadId: string, nextState: AgentThreadState) => {
+      queryClient.setQueriesData(
+        {
+          queryKey: ["threads", "search"],
+          exact: false,
+        },
+        (oldData: Array<AgentThread> | undefined) => {
+          return oldData?.map((candidate) => {
+            if (candidate.thread_id !== targetThreadId) {
+              return candidate;
+            }
+            return {
+              ...candidate,
+              values: nextState,
+            };
+          });
+        },
+      );
+    },
+    [queryClient],
+  );
+
+  const getCurrentThreadState = useCallback(
+    async (targetThreadId: string) => {
+      const currentState = effectiveStateRef.current;
+      if (
+        threadIdRef.current === targetThreadId &&
+        currentState &&
+        Array.isArray(currentState.messages)
+      ) {
+        return currentState;
+      }
+
+      const state = await apiClient.threads.getState<AgentThreadState>(targetThreadId);
+      return state.values;
+    },
+    [apiClient],
+  );
+
+  const persistThreadState = useCallback(
+    async (targetThreadId: string, nextState: AgentThreadState) => {
+      const previousState = effectiveStateRef.current;
+      setLocalStateOverride(nextState);
+      try {
+        await apiClient.threads.updateState(targetThreadId, {
+          values: nextState,
+        });
+        updateThreadSearchCache(targetThreadId, nextState);
+      } catch (error) {
+        setLocalStateOverride(previousState);
+        throw error;
+      }
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+    },
+    [apiClient, queryClient, updateThreadSearchCache],
+  );
+
+  const editHumanMessage = useCallback(
+    async (targetThreadId: string, messageId: string, text: string) => {
+      const nextText = text.trim();
+      if (!nextText || thread.isLoading) {
+        return;
+      }
+
+      try {
+        const currentState = await getCurrentThreadState(targetThreadId);
+        const currentMessage = currentState.messages.find(
+          (message) => message.id === messageId,
+        );
+        if (!currentMessage || currentMessage.type !== "human") {
+          return;
+        }
+        if (extractTextFromMessage(currentMessage).trim() === nextText) {
+          return;
+        }
+
+        const nextState = applyHumanEdit(currentState, {
+          messageId,
+          text: nextText,
+        });
+        await persistThreadState(targetThreadId, nextState);
+      } catch (error) {
+        toast.error(getStreamErrorMessage(error));
+        throw error;
+      }
+    },
+    [getCurrentThreadState, persistThreadState, thread.isLoading],
+  );
+
+  const setAssistantVersion = useCallback(
+    async (targetThreadId: string, messageId: string, versionId: string) => {
+      if (thread.isLoading) {
+        return;
+      }
+
+      try {
+        const currentState = await getCurrentThreadState(targetThreadId);
+        const activeVersionId = currentState.active_version_map?.[messageId];
+        if (activeVersionId === versionId) {
+          return;
+        }
+        const nextState = selectAssistantVersion(currentState, {
+          messageId,
+          versionId,
+        });
+        await persistThreadState(targetThreadId, nextState);
+      } catch (error) {
+        toast.error(getStreamErrorMessage(error));
+        throw error;
+      }
+    },
+    [getCurrentThreadState, persistThreadState, thread.isLoading],
+  );
+
+  const regenerateTurn = useCallback(
+    async (targetThreadId: string, messageId: string) => {
+      if (thread.isLoading) {
+        return;
+      }
+
+      try {
+        const currentState = await getCurrentThreadState(targetThreadId);
+        const visibleMessages = buildSubmissionMessages(currentState);
+        if (!isRegeneratableMessage(visibleMessages, messageId)) {
+          return;
+        }
+
+        const turn = resolveTurnForMessage(visibleMessages, messageId);
+        if (!turn?.assistantMessageId) {
+          return;
+        }
+
+        const inputMessages = getMessagesUpToTurn(visibleMessages, turn.turnId, {
+          includeAssistant: false,
+        });
+        const regeneratedValues = (await apiClient.runs.wait(null, "lead_agent", {
+          input: {
+            messages: inputMessages,
+          },
+          context: buildRunContext(context),
+          config: {
+            recursion_limit: 1000,
+          },
+        })) as AgentThreadState;
+
+        const regeneratedText = extractLatestAssistantText(
+          regeneratedValues.messages ?? [],
+        );
+        if (!regeneratedText) {
+          throw new Error("Failed to regenerate assistant response.");
+        }
+
+        const nextState = appendAssistantVersion(currentState, {
+          turnId: turn.turnId,
+          messageId: turn.assistantMessageId,
+          text: regeneratedText,
+          contextSnapshot: {
+            model_name:
+              typeof context.model_name === "string"
+                ? context.model_name
+                : undefined,
+            mode: typeof context.mode === "string" ? context.mode : undefined,
+            reasoning_effort: resolveReasoningEffort(context),
+          },
+        });
+        await persistThreadState(targetThreadId, nextState);
+      } catch (error) {
+        toast.error(getStreamErrorMessage(error));
+        throw error;
+      }
+    },
+    [apiClient, context, getCurrentThreadState, persistThreadState, thread.isLoading],
+  );
 
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const sendInFlightRef = useRef(false);
   // Track message count before sending so we know when server has responded
-  const prevMsgCountRef = useRef(thread.messages.length);
+  const prevMsgCountRef = useRef(effectiveMessages.length);
 
   // Clear optimistic when server messages arrive (count increases)
   useEffect(() => {
     if (
       optimisticMessages.length > 0 &&
-      thread.messages.length > prevMsgCountRef.current
+      effectiveMessages.length > prevMsgCountRef.current
     ) {
       setOptimisticMessages([]);
     }
-  }, [thread.messages.length, optimisticMessages.length]);
+  }, [effectiveMessages.length, optimisticMessages.length]);
 
   const sendMessage = useCallback(
     async (
-      threadId: string,
+      targetThreadId: string,
       message: PromptInputMessage,
       extraContext?: Record<string, unknown>,
       options?: SendMessageOptions,
@@ -319,7 +582,7 @@ export function useThreadStream({
       const text = message.text.trim();
 
       // Capture current count before showing optimistic messages
-      prevMsgCountRef.current = thread.messages.length;
+      prevMsgCountRef.current = effectiveMessages.length;
 
       // Build optimistic files list with uploading status
       const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
@@ -357,7 +620,7 @@ export function useThreadStream({
       }
       setOptimisticMessages(newOptimistic);
 
-      _handleOnStart(threadId);
+      _handleOnStart(targetThreadId);
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
@@ -382,12 +645,12 @@ export function useThreadStream({
               );
             }
 
-            if (!threadId) {
+            if (!targetThreadId) {
               throw new Error("Thread is not ready for file upload.");
             }
 
             if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
+              const uploadResponse = await uploadFiles(targetThreadId, files);
               uploadedFileInfo = uploadResponse.files;
 
               // Update optimistic human message with uploaded status + paths
@@ -457,29 +720,16 @@ export function useThreadStream({
             ],
           },
           {
-            threadId: threadId,
+            threadId: targetThreadId,
             streamSubgraphs: true,
             streamResumable: true,
             config: {
               recursion_limit: 1000,
             },
-            context: {
-              ...extraContext,
-              ...context,
-              thinking_enabled: context.mode !== "flash",
-              is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-              subagent_enabled: context.mode === "ultra",
-              reasoning_effort:
-                context.reasoning_effort ??
-                (context.mode === "ultra"
-                  ? "high"
-                  : context.mode === "pro"
-                    ? "medium"
-                    : context.mode === "thinking"
-                      ? "low"
-                      : undefined),
-              thread_id: threadId,
-            },
+            context: buildRunContext(context, {
+              threadId: targetThreadId,
+              extraContext,
+            }),
           },
         );
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -491,19 +741,36 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
+    [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient, effectiveMessages.length],
   );
+
+  const displayThread = {
+    ...thread,
+    values: effectiveState,
+    messages: effectiveMessages,
+  } as typeof thread;
 
   // Merge thread with optimistic messages for display
   const mergedThread =
     optimisticMessages.length > 0
       ? ({
-          ...thread,
-          messages: [...thread.messages, ...optimisticMessages],
+          ...displayThread,
+          messages: [...displayThread.messages, ...optimisticMessages],
         } as typeof thread)
-      : thread;
+      : displayThread;
 
-  return [mergedThread, sendMessage, isUploading] as const;
+  return [
+    mergedThread,
+    sendMessage,
+    isUploading,
+    {
+      editHumanMessage,
+      regenerateTurn,
+      selectAssistantVersion: setAssistantVersion,
+      stopThread: thread.stop,
+      isThreadStreaming: thread.isLoading,
+    },
+  ] as const;
 }
 
 export function useThreads(
