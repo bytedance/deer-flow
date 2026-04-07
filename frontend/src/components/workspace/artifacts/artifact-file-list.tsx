@@ -104,21 +104,21 @@ export function ArtifactFileList({
                   {t.common.install}
                 </Button>
               )}
-              <a
-                href={urlOfArtifact({
-                  filepath: file,
-                  threadId: threadId,
-                  download: true,
-                })}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <Button variant="ghost">
+              <Button variant="ghost" asChild>
+                <a
+                  href={urlOfArtifact({
+                    filepath: file,
+                    threadId: threadId,
+                    download: true,
+                  })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                >
                   <DownloadIcon className="size-4" />
                   {t.common.download}
-                </Button>
-              </a>
+                </a>
+              </Button>
             </CardAction>
           </CardHeader>
         </Card>
