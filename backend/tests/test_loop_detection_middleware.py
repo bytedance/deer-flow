@@ -103,6 +103,22 @@ class TestHashToolCalls:
 
         assert _hash_tool_calls([glob_py]) != _hash_tool_calls([glob_ts])
 
+    def test_write_file_content_affects_hash(self):
+        v1 = {"name": "write_file", "args": {"path": "/tmp/a.py", "content": "v1"}}
+        v2 = {"name": "write_file", "args": {"path": "/tmp/a.py", "content": "v2"}}
+        assert _hash_tool_calls([v1]) != _hash_tool_calls([v2])
+
+    def test_str_replace_content_affects_hash(self):
+        a = {
+            "name": "str_replace",
+            "args": {"path": "/tmp/a.py", "old_str": "foo", "new_str": "bar"},
+        }
+        b = {
+            "name": "str_replace",
+            "args": {"path": "/tmp/a.py", "old_str": "foo", "new_str": "baz"},
+        }
+        assert _hash_tool_calls([a]) != _hash_tool_calls([b])
+
 
 class TestLoopDetection:
     def test_no_tool_calls_returns_none(self):

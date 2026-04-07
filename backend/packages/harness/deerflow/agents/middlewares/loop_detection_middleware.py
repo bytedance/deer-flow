@@ -83,6 +83,14 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
         bucket_end = (bucket_end - 1) // bucket_size
         return f"{path}:{bucket_start}-{bucket_end}"
 
+    # write_file / str_replace are content-sensitive: same path may be updated
+    # with different payloads during iteration. Using only salient fields (path)
+    # can collapse distinct calls, so we hash full args to reduce false positives.
+    if name in {"write_file", "str_replace"}:
+        if fallback_key is not None:
+            return fallback_key
+        return json.dumps(args, sort_keys=True, default=str)
+
     salient_fields = ("path", "url", "query", "command", "pattern", "glob", "cmd")
     stable_args = {field: args[field] for field in salient_fields if args.get(field) is not None}
     if stable_args:
