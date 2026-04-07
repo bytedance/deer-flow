@@ -238,3 +238,34 @@ def test_codex_provider_orders_streamed_output_items_by_output_index(monkeypatch
         "First",
         "Second",
     ]
+
+
+def test_codex_provider_preserves_completed_output_when_stream_only_has_placeholder(monkeypatch):
+    monkeypatch.setattr(
+        CodexChatModel,
+        "_load_codex_auth",
+        lambda self: CodexCliCredential(access_token="token", account_id="acct"),
+    )
+
+    lines = [
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","status":"in_progress","content":[]}}',
+        'data: {"type":"response.completed","response":{"model":"gpt-5.4","output":[{"type":"message","content":[{"type":"output_text","text":"Final from completed"}]}],"usage":{}}}',
+    ]
+
+    monkeypatch.setattr(
+        codex_provider_module.httpx,
+        "Client",
+        lambda *args, **kwargs: _FakeHttpxClient(lines, *args, **kwargs),
+    )
+
+    model = CodexChatModel()
+    response = model._stream_response(headers={}, payload={})
+    parsed = model._parse_response(response)
+
+    assert response["output"] == [
+        {
+            "type": "message",
+            "content": [{"type": "output_text", "text": "Final from completed"}],
+        }
+    ]
+    assert parsed.generations[0].message.content == "Final from completed"

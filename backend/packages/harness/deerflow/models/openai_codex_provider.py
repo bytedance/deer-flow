@@ -227,7 +227,7 @@ class CodexChatModel(BaseChatModel):
                         continue
 
                     event_type = data.get("type")
-                    if event_type in {"response.output_item.added", "response.output_item.done"}:
+                    if event_type == "response.output_item.done":
                         output_index = data.get("output_index")
                         output_item = data.get("item")
                         if isinstance(output_index, int) and isinstance(output_item, dict):
@@ -251,7 +251,9 @@ class CodexChatModel(BaseChatModel):
                 merged_output.extend([None] * (max_index + 1 - len(merged_output)))
 
             for output_index, output_item in streamed_output_items.items():
-                merged_output[output_index] = output_item
+                existing_item = merged_output[output_index]
+                if not isinstance(existing_item, dict):
+                    merged_output[output_index] = output_item
 
             completed_response = dict(completed_response)
             completed_response["output"] = [item for item in merged_output if isinstance(item, dict)]
