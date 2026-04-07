@@ -55,6 +55,70 @@ class TestHashToolCalls:
         assert isinstance(h, str)
         assert len(h) > 0
 
+    def test_stringified_dict_args_match_dict_args(self):
+        dict_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "start_line": "1", "end_line": "150"},
+        }
+        string_call = {
+            "name": "read_file",
+            "args": '{"path":"/tmp/demo.py","start_line":"1","end_line":"150"}',
+        }
+
+        assert _hash_tool_calls([dict_call]) == _hash_tool_calls([string_call])
+
+    def test_reversed_read_file_range_matches_forward_range(self):
+        forward_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "start_line": 10, "end_line": 300},
+        }
+        reversed_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "start_line": 300, "end_line": 10},
+        }
+
+        assert _hash_tool_calls([forward_call]) == _hash_tool_calls([reversed_call])
+
+    def test_stringified_non_dict_args_do_not_crash(self):
+        non_dict_json_call = {"name": "bash", "args": '"echo hello"'}
+        plain_string_call = {"name": "bash", "args": "echo hello"}
+
+        json_hash = _hash_tool_calls([non_dict_json_call])
+        plain_hash = _hash_tool_calls([plain_string_call])
+
+        assert isinstance(json_hash, str)
+        assert isinstance(plain_hash, str)
+        assert json_hash
+        assert plain_hash
+
+    def test_grep_pattern_affects_hash(self):
+        grep_foo = {"name": "grep", "args": {"path": "/tmp", "pattern": "foo"}}
+        grep_bar = {"name": "grep", "args": {"path": "/tmp", "pattern": "bar"}}
+
+        assert _hash_tool_calls([grep_foo]) != _hash_tool_calls([grep_bar])
+
+    def test_glob_pattern_affects_hash(self):
+        glob_py = {"name": "glob", "args": {"path": "/tmp", "pattern": "*.py"}}
+        glob_ts = {"name": "glob", "args": {"path": "/tmp", "pattern": "*.ts"}}
+
+        assert _hash_tool_calls([glob_py]) != _hash_tool_calls([glob_ts])
+
+    def test_write_file_content_affects_hash(self):
+        v1 = {"name": "write_file", "args": {"path": "/tmp/a.py", "content": "v1"}}
+        v2 = {"name": "write_file", "args": {"path": "/tmp/a.py", "content": "v2"}}
+        assert _hash_tool_calls([v1]) != _hash_tool_calls([v2])
+
+    def test_str_replace_content_affects_hash(self):
+        a = {
+            "name": "str_replace",
+            "args": {"path": "/tmp/a.py", "old_str": "foo", "new_str": "bar"},
+        }
+        b = {
+            "name": "str_replace",
+            "args": {"path": "/tmp/a.py", "old_str": "foo", "new_str": "baz"},
+        }
+        assert _hash_tool_calls([a]) != _hash_tool_calls([b])
+
 
 class TestLoopDetection:
     def test_no_tool_calls_returns_none(self):

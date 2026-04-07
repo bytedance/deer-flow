@@ -30,7 +30,7 @@
 
 ### 2. 配置文件
 
-#### [`config.yaml`](../config.yaml)
+#### [`config.yaml`](../../config.example.yaml)
 - ✅ 添加 title 配置段：
 ```yaml
 title:
@@ -51,7 +51,7 @@ title:
 - ✅ 故障排查指南
 - ✅ State vs Metadata 对比
 
-#### [`BACKEND_TODO.md`](../BACKEND_TODO.md)
+#### [`TODO.md`](TODO.md)
 - ✅ 添加功能完成记录
 
 ### 4. 测试

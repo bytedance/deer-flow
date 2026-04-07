@@ -280,16 +280,17 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
         label={t.toolCalls.viewWebPage}
         icon={GlobeIcon}
-        onClick={() => {
-          window.open(url, "_blank");
-        }}
       >
         <ChainOfThoughtSearchResult>
           {url && (
-            <a href={url} target="_blank" rel="noopener noreferrer">
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="cursor-pointer"
+            >
               {title}
             </a>
           )}

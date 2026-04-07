@@ -7,7 +7,7 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -414,6 +414,62 @@ def _make_async_iterator(items):
 
 
 class TestChannelManager:
+    def test_handle_chat_calls_channel_receive_file_for_inbound_files(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            modified_msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="with /mnt/user-data/uploads/demo.png",
+                files=[{"image_key": "img_1"}],
+            )
+            mock_channel = MagicMock()
+            mock_channel.receive_file = AsyncMock(return_value=modified_msg)
+            mock_service = MagicMock()
+            mock_service.get_channel.return_value = mock_channel
+            monkeypatch.setattr("app.channels.service.get_channel_service", lambda: mock_service)
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi [image]",
+                files=[{"image_key": "img_1"}],
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_channel.receive_file.assert_awaited_once()
+            called_msg, called_thread_id = mock_channel.receive_file.await_args.args
+            assert called_msg.text == "hi [image]"
+            assert isinstance(called_thread_id, str)
+            assert called_thread_id
+
+            mock_client.runs.wait.assert_called_once()
+            run_call_args = mock_client.runs.wait.call_args
+            assert run_call_args[1]["input"]["messages"][0]["content"] == "with /mnt/user-data/uploads/demo.png"
+
+        _run(go())
+
     def test_handle_chat_creates_thread(self):
         from app.channels.manager import ChannelManager
 
@@ -1987,6 +2043,47 @@ class TestSlackSendRetry:
             assert call_count == 3
 
         _run(go())
+
+
+class TestSlackAllowedUsers:
+    def test_numeric_allowed_users_match_string_event_user_id(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(
+            bus=bus,
+            config={"allowed_users": [123456]},
+        )
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "user": "123456",
+            "text": "hello from slack",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        def submit_coro(coro, loop):
+            coro.close()
+            return MagicMock()
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=submit_coro,
+        ) as submit:
+            channel._handle_message_event(event)
+
+        channel._add_reaction.assert_called_once_with("C123", "1710000000.000100", "eyes")
+        channel._send_running_reply.assert_called_once_with("C123", "1710000000.000100")
+        submit.assert_called_once()
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.user_id == "123456"
+        assert inbound.chat_id == "C123"
+        assert inbound.text == "hello from slack"
 
     def test_raises_after_all_retries_exhausted(self):
         from app.channels.slack import SlackChannel
