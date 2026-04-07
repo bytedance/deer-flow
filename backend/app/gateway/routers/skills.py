@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.gateway.path_utils import resolve_thread_virtual_path
-from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache
+from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.skills import Skill, load_skills
 from deerflow.skills.installer import SkillAlreadyExistsError, install_skill_from_archive
@@ -119,6 +119,7 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
     try:
         skill_file_path = resolve_thread_virtual_path(request.thread_id, request.path)
         result = install_skill_from_archive(skill_file_path)
+        await refresh_skills_system_prompt_cache_async()
         return SkillInstallResponse(**result)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -181,7 +182,7 @@ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest
                 "scanner": {"decision": scan.decision, "reason": scan.reason},
             },
         )
-        clear_skills_system_prompt_cache()
+        await refresh_skills_system_prompt_cache_async()
         return await get_custom_skill(skill_name)
     except HTTPException:
         raise
@@ -213,7 +214,7 @@ async def delete_custom_skill(skill_name: str) -> dict[str, bool]:
             },
         )
         shutil.rmtree(skill_dir)
-        clear_skills_system_prompt_cache()
+        await refresh_skills_system_prompt_cache_async()
         return {"success": True}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -268,7 +269,7 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest) 
             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
         atomic_write(skill_file, target_content)
         append_history(skill_name, history_entry)
-        clear_skills_system_prompt_cache()
+        await refresh_skills_system_prompt_cache_async()
         return await get_custom_skill(skill_name)
     except HTTPException:
         raise
@@ -337,6 +338,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
 
         logger.info(f"Skills configuration updated and saved to: {config_path}")
         reload_extensions_config()
+        await refresh_skills_system_prompt_cache_async()
 
         skills = load_skills(enabled_only=False)
         updated_skill = next((s for s in skills if s.name == skill_name), None)

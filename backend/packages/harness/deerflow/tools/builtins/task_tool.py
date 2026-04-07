@@ -14,7 +14,7 @@ from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 from deerflow.agents.thread_state import ThreadState
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
+from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result, request_cancel_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,11 @@ async def task_tool(
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task failed. Error: {result.error}"
+            elif result.status == SubagentStatus.CANCELLED:
+                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error})
+                logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
+                cleanup_background_task(task_id)
+                return "Task cancelled by user."
             elif result.status == SubagentStatus.TIMED_OUT:
                 writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
@@ -204,6 +209,11 @@ async def task_tool(
                 writer({"type": "task_timed_out", "task_id": task_id})
                 return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
     except asyncio.CancelledError:
+        # Signal the background subagent thread to stop cooperatively.
+        # Without this, the thread (running in ThreadPoolExecutor with its
+        # own event loop via asyncio.run) would continue executing even
+        # after the parent task is cancelled.
+        request_cancel_background_task(task_id)
 
         async def cleanup_when_done() -> None:
             max_cleanup_polls = max_poll_count
@@ -214,7 +224,7 @@ async def task_tool(
                 if result is None:
                     return
 
-                if result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None:
+                if result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None:
                     cleanup_background_task(task_id)
                     return
 
