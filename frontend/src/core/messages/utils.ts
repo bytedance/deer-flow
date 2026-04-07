@@ -72,8 +72,11 @@ function normalizeToolCallArgs(args: unknown): ToolCallArgs {
 }
 
 export function getToolCalls(
-  message: Message | AIMessage,
+  message: Message ,
 ): NormalizedToolCall[] {
+  if (message.type !== "ai") {
+  return [];
+}
   const rawToolCalls = Array.isArray(message.tool_calls)
     ? message.tool_calls
     : typeof message.tool_calls === "string"
