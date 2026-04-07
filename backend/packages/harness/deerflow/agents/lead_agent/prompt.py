@@ -164,6 +164,30 @@ Skip simple one-off tasks.
 """
 
 
+def _skill_mutability_label(category: str) -> str:
+    return "[custom, editable]" if category == "custom" else "[built-in]"
+
+
+def clear_skills_system_prompt_cache() -> None:
+    _get_cached_skills_prompt_section.cache_clear()
+
+
+def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:
+    if not skill_evolution_enabled:
+        return ""
+    return """
+## Skill Self-Evolution
+After completing a task, consider creating or updating a skill when:
+- The task required 5+ tool calls to resolve
+- You overcame non-obvious errors or pitfalls
+- The user corrected your approach and the corrected version worked
+- You discovered a non-trivial, recurring workflow
+If you used a skill and encountered issues not covered by it, patch it immediately.
+Prefer patch over edit. Before creating a new skill, confirm with the user first.
+Skip simple one-off tasks.
+"""
+
+
 def _build_subagent_section(max_concurrent: int) -> str:
     """Build the subagent system prompt section with dynamic concurrency limit.
 
