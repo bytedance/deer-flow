@@ -164,8 +164,10 @@ export function useThreadStream({
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
     if (!normalizedThreadId) {
-      // Just reset for new thread creation when threadId becomes null/undefined
+      // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
+      setOnStreamThreadId(normalizedThreadId);
+    } else {
       setOnStreamThreadId(normalizedThreadId);
     }
     threadIdRef.current = normalizedThreadId;
@@ -294,6 +296,16 @@ export function useThreadStream({
   // Track message count before sending so we know when server has responded
   const prevMsgCountRef = useRef(thread.messages.length);
 
+  // Reset thread-local pending UI state when switching between threads so
+  // optimistic messages and in-flight guards do not leak across chat views.
+  useEffect(() => {
+    startedRef.current = false;
+    sendInFlightRef.current = false;
+    prevMsgCountRef.current = 0;
+    setOptimisticMessages([]);
+    setIsUploading(false);
+  }, [threadId]);
+
   // Clear optimistic when server messages arrive (count increases)
   useEffect(() => {
     if (
@@ -357,7 +369,12 @@ export function useThreadStream({
       }
       setOptimisticMessages(newOptimistic);
 
-      _handleOnStart(threadId);
+      // Only fire onStart immediately for an existing persisted thread.
+      // Brand-new chats should wait for onCreated(meta.thread_id) so URL sync
+      // uses the real server-generated thread id.
+      if (threadIdRef.current) {
+        _handleOnStart(threadId);
+      }
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
 

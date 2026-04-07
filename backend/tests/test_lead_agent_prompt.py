@@ -1,6 +1,10 @@
+import threading
 from types import SimpleNamespace
 
+import anyio
+
 from deerflow.agents.lead_agent import prompt as prompt_module
+from deerflow.skills.types import Skill
 
 
 def test_build_custom_mounts_section_returns_empty_when_no_mounts(monkeypatch):
@@ -34,7 +38,7 @@ def test_apply_prompt_template_includes_custom_mounts(monkeypatch):
         skills=SimpleNamespace(container_path="/mnt/skills"),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr(prompt_module, "load_skills", lambda enabled_only=True: [])
+    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
     monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda: "")
     monkeypatch.setattr(prompt_module, "_build_acp_section", lambda: "")
     monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None: "")
@@ -44,3 +48,100 @@ def test_apply_prompt_template_includes_custom_mounts(monkeypatch):
 
     assert "`/home/user/shared`" in prompt
     assert "Custom Mounted Directories" in prompt
+
+
+def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatch, tmp_path):
+    def make_skill(name: str) -> Skill:
+        skill_dir = tmp_path / name
+        return Skill(
+            name=name,
+            description=f"Description for {name}",
+            license="MIT",
+            skill_dir=skill_dir,
+            skill_file=skill_dir / "SKILL.md",
+            relative_path=skill_dir.relative_to(tmp_path),
+            category="custom",
+            enabled=True,
+        )
+
+    state = {"skills": [make_skill("first-skill")]}
+    monkeypatch.setattr(prompt_module, "load_skills", lambda enabled_only=True: list(state["skills"]))
+    prompt_module._reset_skills_system_prompt_cache_state()
+
+    try:
+        prompt_module.warm_enabled_skills_cache()
+        assert [skill.name for skill in prompt_module._get_enabled_skills()] == ["first-skill"]
+
+        state["skills"] = [make_skill("second-skill")]
+        anyio.run(prompt_module.refresh_skills_system_prompt_cache_async)
+
+        assert [skill.name for skill in prompt_module._get_enabled_skills()] == ["second-skill"]
+    finally:
+        prompt_module._reset_skills_system_prompt_cache_state()
+
+
+def test_clear_cache_does_not_spawn_parallel_refresh_workers(monkeypatch, tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+    active_loads = 0
+    max_active_loads = 0
+    call_count = 0
+    lock = threading.Lock()
+
+    def make_skill(name: str) -> Skill:
+        skill_dir = tmp_path / name
+        return Skill(
+            name=name,
+            description=f"Description for {name}",
+            license="MIT",
+            skill_dir=skill_dir,
+            skill_file=skill_dir / "SKILL.md",
+            relative_path=skill_dir.relative_to(tmp_path),
+            category="custom",
+            enabled=True,
+        )
+
+    def fake_load_skills(enabled_only=True):
+        nonlocal active_loads, max_active_loads, call_count
+        with lock:
+            active_loads += 1
+            max_active_loads = max(max_active_loads, active_loads)
+            call_count += 1
+            current_call = call_count
+
+        started.set()
+        if current_call == 1:
+            release.wait(timeout=5)
+
+        with lock:
+            active_loads -= 1
+
+        return [make_skill(f"skill-{current_call}")]
+
+    monkeypatch.setattr(prompt_module, "load_skills", fake_load_skills)
+    prompt_module._reset_skills_system_prompt_cache_state()
+
+    try:
+        prompt_module.clear_skills_system_prompt_cache()
+        assert started.wait(timeout=5)
+
+        prompt_module.clear_skills_system_prompt_cache()
+        release.set()
+        prompt_module.warm_enabled_skills_cache()
+
+        assert max_active_loads == 1
+        assert [skill.name for skill in prompt_module._get_enabled_skills()] == ["skill-2"]
+    finally:
+        release.set()
+        prompt_module._reset_skills_system_prompt_cache_state()
+
+
+def test_warm_enabled_skills_cache_logs_on_timeout(monkeypatch, caplog):
+    event = threading.Event()
+    monkeypatch.setattr(prompt_module, "_ensure_enabled_skills_cache", lambda: event)
+
+    with caplog.at_level("WARNING"):
+        warmed = prompt_module.warm_enabled_skills_cache(timeout_seconds=0.01)
+
+    assert warmed is False
+    assert "Timed out waiting" in caplog.text
