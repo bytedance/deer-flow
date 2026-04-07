@@ -28,7 +28,7 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
     re.compile(r"cat\s+/etc/shadow"),
-    re.compile(r">\s*/etc/"),
+    re.compile(r">+\s*/etc/"),
     # --- pipe to sh/bash (generalised, replaces old curl|sh rule) ---
     re.compile(r"\|\s*(ba)?sh\b"),
     # --- command substitution (targeted – only dangerous executables) ---
@@ -64,28 +64,73 @@ _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
 def _split_compound_command(command: str) -> list[str]:
     """Split a compound command into sub-commands (quote-aware).
 
-    Uses shlex to correctly handle quoted strings so that operators
-    inside quotes (e.g. ``echo "a && b"``) are not treated as separators.
-    Falls back to returning the whole command if shlex fails (fail-closed:
-    the caller will classify the unsplit command, which is safer than
-    silently dropping parts).
+    Scans the raw command string so unquoted shell control operators are
+    recognised even when they are not surrounded by whitespace
+    (e.g. ``safe;rm -rf /`` or ``rm -rf /&&echo ok``). Operators inside
+    quotes are ignored. If the command ends with an unclosed quote or a
+    dangling escape, return the whole command unchanged (fail-closed —
+    safer to classify the unsplit string than silently drop parts).
     """
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return [command]
-
     parts: list[str] = []
     current: list[str] = []
-    for token in tokens:
-        if token in ("&&", "||", ";"):
-            if current:
-                parts.append(" ".join(current))
+    in_single_quote = False
+    in_double_quote = False
+    escaping = False
+    index = 0
+
+    while index < len(command):
+        char = command[index]
+
+        if escaping:
+            current.append(char)
+            escaping = False
+            index += 1
+            continue
+
+        if char == "\\" and not in_single_quote:
+            current.append(char)
+            escaping = True
+            index += 1
+            continue
+
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(char)
+            index += 1
+            continue
+
+        if char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(char)
+            index += 1
+            continue
+
+        if not in_single_quote and not in_double_quote:
+            if command.startswith("&&", index) or command.startswith("||", index):
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
                 current = []
-        else:
-            current.append(token)
-    if current:
-        parts.append(" ".join(current))
+                index += 2
+                continue
+            if char == ";":
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                index += 1
+                continue
+
+        current.append(char)
+        index += 1
+
+    # Unclosed quote or dangling escape → fail-closed, return whole command
+    if in_single_quote or in_double_quote or escaping:
+        return [command]
+
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
     return parts if parts else [command]
 
 
@@ -118,9 +163,21 @@ def _classify_single_command(command: str) -> str:
 def _classify_command(command: str) -> str:
     """Return 'block', 'warn', or 'pass'.
 
-    Splits compound commands (e.g. ``cmd1 && cmd2 ; cmd3``) and classifies
-    each sub-command independently. The most severe verdict wins.
+    Strategy:
+    1. First scan the *whole* raw command against high-risk patterns. This
+       catches structural attacks like ``while true; do bash & done`` or
+       ``:(){ :|:& };:`` that span multiple shell statements — splitting them
+       on ``;`` would destroy the pattern context.
+    2. Then split compound commands (e.g. ``cmd1 && cmd2 ; cmd3``) and
+       classify each sub-command independently. The most severe verdict wins.
     """
+    # Pass 1: whole-command high-risk scan (catches multi-statement patterns)
+    normalized = " ".join(command.split())
+    for pattern in _HIGH_RISK_PATTERNS:
+        if pattern.search(normalized):
+            return "block"
+
+    # Pass 2: per-sub-command classification
     sub_commands = _split_compound_command(command)
     worst = "pass"
     for sub in sub_commands:

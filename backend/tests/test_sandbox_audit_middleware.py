@@ -175,9 +175,9 @@ class TestClassifyCommand:
             "tar -czf /mnt/user-data/outputs/archive.tar.gz /mnt/user-data/workspace",
             "chmod 644 /mnt/user-data/outputs/report.md",
             # --- false-positive guards: must NOT be blocked ---
-            'echo "Today is $(date)"',           # safe $() — date is not in dangerous list
-            "echo `whoami`",                      # safe backtick — whoami is not in dangerous list
-            "mkdir -p src/{components,utils}",    # brace expansion
+            'echo "Today is $(date)"',  # safe $() — date is not in dangerous list
+            "echo `whoami`",  # safe backtick — whoami is not in dangerous list
+            "mkdir -p src/{components,utils}",  # brace expansion
         ],
     )
     def test_safe_classified_as_pass(self, cmd):
@@ -198,6 +198,10 @@ class TestClassifyCommand:
             # All safe sub-commands → pass
             ("cd /workspace && ls -la && python3 main.py", "pass"),
             ("mkdir -p /tmp/out ; echo done", "pass"),
+            # No-whitespace operators must also be split (bash allows these forms)
+            ("safe;rm -rf /", "block"),
+            ("rm -rf /&&echo ok", "block"),
+            ("cd /workspace&&cat /etc/shadow", "block"),
             # Operators inside quotes are not split, but regex still matches
             # the dangerous pattern inside the string — this is fail-closed
             # behavior (false positive is safer than false negative).
@@ -214,14 +218,27 @@ class TestSplitCompoundCommand:
     def test_simple_and(self):
         assert _split_compound_command("cmd1 && cmd2") == ["cmd1", "cmd2"]
 
+    def test_simple_and_without_whitespace(self):
+        assert _split_compound_command("cmd1&&cmd2") == ["cmd1", "cmd2"]
+
     def test_simple_or(self):
         assert _split_compound_command("cmd1 || cmd2") == ["cmd1", "cmd2"]
+
+    def test_simple_or_without_whitespace(self):
+        assert _split_compound_command("cmd1||cmd2") == ["cmd1", "cmd2"]
 
     def test_simple_semicolon(self):
         assert _split_compound_command("cmd1 ; cmd2") == ["cmd1", "cmd2"]
 
+    def test_simple_semicolon_without_whitespace(self):
+        assert _split_compound_command("cmd1;cmd2") == ["cmd1", "cmd2"]
+
     def test_mixed_operators(self):
         result = _split_compound_command("a && b || c ; d")
+        assert result == ["a", "b", "c", "d"]
+
+    def test_mixed_operators_without_whitespace(self):
+        result = _split_compound_command("a&&b||c;d")
         assert result == ["a", "b", "c", "d"]
 
     def test_quoted_operators_not_split(self):
