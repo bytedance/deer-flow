@@ -30,7 +30,7 @@ class SlackChannel(Channel):
         self._socket_client = None
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._allowed_users: set[str] = set(config.get("allowed_users", []))
+        self._allowed_users: set[str] = {str(user_id) for user_id in config.get("allowed_users", [])}
 
     async def start(self) -> None:
         if self._running:

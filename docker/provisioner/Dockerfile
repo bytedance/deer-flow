@@ -1,6 +1,7 @@
 FROM python:3.12-slim-bookworm
 
 ARG APT_MIRROR
+ARG PIP_INDEX_URL
 
 # Optionally override apt mirror for restricted networks (e.g. APT_MIRROR=mirrors.aliyun.com)
 RUN if [ -n "${APT_MIRROR}" ]; then \
@@ -15,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies
 RUN pip install --no-cache-dir \
+    ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
     fastapi \
     "uvicorn[standard]" \
     kubernetes

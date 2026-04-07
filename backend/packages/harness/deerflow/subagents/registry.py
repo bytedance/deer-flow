@@ -28,9 +28,27 @@ def get_subagent_config(name: str) -> SubagentConfig | None:
 
     app_config = get_subagents_app_config()
     effective_timeout = app_config.get_timeout_for(name)
+    effective_max_turns = app_config.get_max_turns_for(name, config.max_turns)
+
+    overrides = {}
     if effective_timeout != config.timeout_seconds:
-        logger.debug(f"Subagent '{name}': timeout overridden by config.yaml ({config.timeout_seconds}s -> {effective_timeout}s)")
-        config = replace(config, timeout_seconds=effective_timeout)
+        logger.debug(
+            "Subagent '%s': timeout overridden by config.yaml (%ss -> %ss)",
+            name,
+            config.timeout_seconds,
+            effective_timeout,
+        )
+        overrides["timeout_seconds"] = effective_timeout
+    if effective_max_turns != config.max_turns:
+        logger.debug(
+            "Subagent '%s': max_turns overridden by config.yaml (%s -> %s)",
+            name,
+            config.max_turns,
+            effective_max_turns,
+        )
+        overrides["max_turns"] = effective_max_turns
+    if overrides:
+        config = replace(config, **overrides)
 
     return config
 

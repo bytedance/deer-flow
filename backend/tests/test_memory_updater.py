@@ -619,3 +619,156 @@ class TestUpdateMemoryStructuredResponse:
         assert result is True
         prompt = model.invoke.call_args[0][0]
         assert "Explicit correction signals were detected" not in prompt
+
+
+class TestFactDeduplicationCaseInsensitive:
+    """Tests that fact deduplication is case-insensitive."""
+
+    def test_duplicate_fact_different_case_not_stored(self):
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            facts=[
+                {
+                    "id": "fact_1",
+                    "content": "User prefers Python",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "source": "thread-a",
+                },
+            ]
+        )
+        # Same fact with different casing should be treated as duplicate
+        update_data = {
+            "factsToRemove": [],
+            "newFacts": [
+                {"content": "user prefers python", "category": "preference", "confidence": 0.95},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+        ):
+            result = updater._apply_updates(current_memory, update_data, thread_id="thread-b")
+
+        # Should still have only 1 fact (duplicate rejected)
+        assert len(result["facts"]) == 1
+        assert result["facts"][0]["content"] == "User prefers Python"
+
+    def test_unique_fact_different_case_and_content_stored(self):
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            facts=[
+                {
+                    "id": "fact_1",
+                    "content": "User prefers Python",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "source": "thread-a",
+                },
+            ]
+        )
+        update_data = {
+            "factsToRemove": [],
+            "newFacts": [
+                {"content": "User prefers Go", "category": "preference", "confidence": 0.85},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+        ):
+            result = updater._apply_updates(current_memory, update_data, thread_id="thread-b")
+
+        assert len(result["facts"]) == 2
+
+
+class TestReinforcementHint:
+    """Tests that reinforcement_detected injects the correct hint into the prompt."""
+
+    @staticmethod
+    def _make_mock_model(json_response: str):
+        model = MagicMock()
+        response = MagicMock()
+        response.content = f"```json\n{json_response}\n```"
+        model.invoke.return_value = response
+        return model
+
+    def test_reinforcement_hint_injected_when_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Yes, exactly! That's what I needed."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Great to hear!"
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], reinforcement_detected=True)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Positive reinforcement signals were detected" in prompt
+
+    def test_reinforcement_hint_absent_when_not_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Tell me more."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Sure."
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], reinforcement_detected=False)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Positive reinforcement signals were detected" not in prompt
+
+    def test_both_hints_present_when_both_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "No wait, that's wrong. Actually yes, exactly right."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Got it."
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], correction_detected=True, reinforcement_detected=True)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Explicit correction signals were detected" in prompt
+        assert "Positive reinforcement signals were detected" in prompt

@@ -675,6 +675,18 @@ class ChannelManager:
             thread_id = await self._create_thread(client, msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+
+        # If the inbound message contains file attachments, let the channel
+        # materialize (download) them and update msg.text to include sandbox file paths.
+        # This enables downstream models to access user-uploaded files by path.
+        # Channels that do not support file download will simply return the original message.
+        if msg.files:
+            from .service import get_channel_service
+
+            service = get_channel_service()
+            channel = service.get_channel(msg.channel_name) if service else None
+            logger.info("[Manager] preparing receive file context for %d attachments", len(msg.files))
+            msg = await channel.receive_file(msg, thread_id) if channel else msg
         if extra_context:
             run_context.update(extra_context)
 

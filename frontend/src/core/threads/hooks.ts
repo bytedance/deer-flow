@@ -36,6 +36,81 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
+function normalizeStoredRunId(runId: string | null): string | null {
+  if (!runId) {
+    return null;
+  }
+
+  const trimmed = runId.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const queryIndex = trimmed.indexOf("?");
+  if (queryIndex >= 0) {
+    const params = new URLSearchParams(trimmed.slice(queryIndex + 1));
+    const queryRunId = params.get("run_id")?.trim();
+    if (queryRunId) {
+      return queryRunId;
+    }
+  }
+
+  const pathWithoutQueryOrHash = trimmed.split(/[?#]/, 1)[0]?.trim() ?? "";
+  if (!pathWithoutQueryOrHash) {
+    return null;
+  }
+
+  const runsMarker = "/runs/";
+  const runsIndex = pathWithoutQueryOrHash.lastIndexOf(runsMarker);
+  if (runsIndex >= 0) {
+    const runIdAfterMarker = pathWithoutQueryOrHash
+      .slice(runsIndex + runsMarker.length)
+      .split("/", 1)[0]
+      ?.trim();
+    if (runIdAfterMarker) {
+      return runIdAfterMarker;
+    }
+    return null;
+  }
+
+  const segments = pathWithoutQueryOrHash
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  return segments.at(-1) ?? null;
+}
+
+function getRunMetadataStorage(): {
+  getItem(key: `lg:stream:${string}`): string | null;
+  setItem(key: `lg:stream:${string}`, value: string): void;
+  removeItem(key: `lg:stream:${string}`): void;
+} {
+  return {
+    getItem(key) {
+      const normalized = normalizeStoredRunId(
+        window.sessionStorage.getItem(key),
+      );
+      if (normalized) {
+        window.sessionStorage.setItem(key, normalized);
+        return normalized;
+      }
+      window.sessionStorage.removeItem(key);
+      return null;
+    },
+    setItem(key, value) {
+      const normalized = normalizeStoredRunId(value);
+      if (normalized) {
+        window.sessionStorage.setItem(key, normalized);
+        return;
+      }
+      window.sessionStorage.removeItem(key);
+    },
+    removeItem(key) {
+      window.sessionStorage.removeItem(key);
+    },
+  };
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -89,8 +164,10 @@ export function useThreadStream({
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
     if (!normalizedThreadId) {
-      // Just reset for new thread creation when threadId becomes null/undefined
+      // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
+      setOnStreamThreadId(normalizedThreadId);
+    } else {
       setOnStreamThreadId(normalizedThreadId);
     }
     threadIdRef.current = normalizedThreadId;
@@ -113,12 +190,24 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const runMetadataStorageRef = useRef<
+    ReturnType<typeof getRunMetadataStorage> | undefined
+  >(undefined);
+
+  if (
+    typeof window !== "undefined" &&
+    runMetadataStorageRef.current === undefined
+  ) {
+    runMetadataStorageRef.current = getRunMetadataStorage();
+  }
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
-    reconnectOnMount: true,
+    reconnectOnMount: runMetadataStorageRef.current
+      ? () => runMetadataStorageRef.current!
+      : false,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id);
@@ -207,6 +296,16 @@ export function useThreadStream({
   // Track message count before sending so we know when server has responded
   const prevMsgCountRef = useRef(thread.messages.length);
 
+  // Reset thread-local pending UI state when switching between threads so
+  // optimistic messages and in-flight guards do not leak across chat views.
+  useEffect(() => {
+    startedRef.current = false;
+    sendInFlightRef.current = false;
+    prevMsgCountRef.current = 0;
+    setOptimisticMessages([]);
+    setIsUploading(false);
+  }, [threadId]);
+
   // Clear optimistic when server messages arrive (count increases)
   useEffect(() => {
     if (
@@ -270,7 +369,12 @@ export function useThreadStream({
       }
       setOptimisticMessages(newOptimistic);
 
-      _handleOnStart(threadId);
+      // Only fire onStart immediately for an existing persisted thread.
+      // Brand-new chats should wait for onCreated(meta.thread_id) so URL sync
+      // uses the real server-generated thread id.
+      if (threadIdRef.current) {
+        _handleOnStart(threadId);
+      }
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
 

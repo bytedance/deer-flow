@@ -19,8 +19,6 @@ services:
   # cluster via the K8s API.
   # Backend accesses sandboxes directly via host.docker.internal:{NodePort}.
   provisioner:
-    profiles:
-      - provisioner
     build:
       context: ./provisioner
       dockerfile: Dockerfile
@@ -59,20 +57,25 @@ services:
 
   # ── Reverse Proxy ──────────────────────────────────────────────────────
   # Routes API traffic to gateway/langgraph and (optionally) provisioner.
-  # Select nginx config via NGINX_CONF:
-  # - nginx.local.conf (default): no provisioner route (local/aio modes)
-  # - nginx.conf: includes provisioner route (provisioner mode)
+  # LANGGRAPH_UPSTREAM and LANGGRAPH_REWRITE control gateway vs standard
+  # routing (processed by envsubst at container start).
   nginx:
     image: nginx:alpine
     container_name: deer-flow-nginx
     ports:
       - "2026:2026"
     volumes:
-      - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/nginx.conf:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
+    environment:
+      - LANGGRAPH_UPSTREAM=${LANGGRAPH_UPSTREAM:-langgraph:2024}
+      - LANGGRAPH_REWRITE=${LANGGRAPH_REWRITE:-/}
+    command: >
+      sh -c "envsubst '$$LANGGRAPH_UPSTREAM $$LANGGRAPH_REWRITE'
+      < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+      && nginx -g 'daemon off;'"
     depends_on:
       - frontend
       - gateway
-      - langgraph
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -113,13 +116,14 @@ services:
     build:
       context: ../
       dockerfile: backend/Dockerfile
+      target: dev
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-gateway
       args:
         APT_MIRROR: ${APT_MIRROR:-}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
     container_name: deer-flow-gateway
-    command: sh -c "cd backend && uv sync && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
+    command: sh -c "{ cd backend && (uv sync || (echo '[startup] uv sync failed; recreating .venv and retrying once' && uv venv --allow-existing .venv && uv sync)) && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env'; } > /app/logs/gateway.log 2>&1"
     volumes:
       - ../backend/:/app/backend/
       # Preserve the .venv built during Docker image build — mounting the full backend/
@@ -169,13 +173,14 @@ services:
     build:
       context: ../
       dockerfile: backend/Dockerfile
+      target: dev
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-langgraph
       args:
         APT_MIRROR: ${APT_MIRROR:-}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
     container_name: deer-flow-langgraph
-    command: sh -c "cd backend && uv sync && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 --n-jobs-per-worker 10 > /app/logs/langgraph.log 2>&1"
+    command: sh -c "cd backend && { (uv sync || (echo '[startup] uv sync failed; recreating .venv and retrying once' && uv venv --allow-existing .venv && uv sync)) && allow_blocking='' && if [ \"\${LANGGRAPH_ALLOW_BLOCKING:-0}\" = '1' ]; then allow_blocking='--allow-blocking'; fi && uv run langgraph dev --no-browser \${allow_blocking} --host 0.0.0.0 --port 2024 --n-jobs-per-worker \${LANGGRAPH_JOBS_PER_WORKER:-10}; } > /app/logs/langgraph.log 2>&1"
     volumes:
       - ../backend/:/app/backend/
       # Preserve the .venv built during Docker image build — mounting the full backend/
