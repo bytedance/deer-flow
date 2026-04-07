@@ -71,12 +71,10 @@ function normalizeToolCallArgs(args: unknown): ToolCallArgs {
   return {};
 }
 
-export function getToolCalls(
-  message: Message ,
-): NormalizedToolCall[] {
+export function getToolCalls(message: Message): NormalizedToolCall[] {
   if (message.type !== "ai") {
-  return [];
-}
+    return [];
+  }
   const rawToolCalls = Array.isArray(message.tool_calls)
     ? message.tool_calls
     : typeof message.tool_calls === "string"
