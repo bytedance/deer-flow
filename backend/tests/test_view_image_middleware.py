@@ -84,6 +84,30 @@ class TestViewImageMiddleware:
 
         assert middleware.before_model(state, _make_runtime()) is None
 
+    def test_hidden_non_view_image_message_does_not_block_injection(self):
+        middleware = ViewImageMiddleware()
+        unrelated_hidden_message = HumanMessage(
+            content="some other hidden context",
+            additional_kwargs={
+                "hide_from_ui": True,
+            },
+        )
+        state = {
+            "messages": [
+                HumanMessage(content="Please inspect this chart"),
+                _view_image_ai_message(),
+                _view_image_tool_result(),
+                unrelated_hidden_message,
+            ],
+            "viewed_images": _viewed_images_state(),
+        }
+
+        result = middleware.before_model(state, _make_runtime())
+
+        assert result is not None
+        injected = result["messages"][0]
+        assert injected.additional_kwargs[VIEW_IMAGE_INJECTION_MARKER] is True
+
     def test_abefore_model_matches_sync_behavior(self):
         middleware = ViewImageMiddleware()
         state = {
