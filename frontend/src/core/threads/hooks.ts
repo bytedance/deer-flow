@@ -164,8 +164,10 @@ export function useThreadStream({
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
     if (!normalizedThreadId) {
-      // Just reset for new thread creation when threadId becomes null/undefined
+      // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
+      setOnStreamThreadId(normalizedThreadId);
+    } else {
       setOnStreamThreadId(normalizedThreadId);
     }
     threadIdRef.current = normalizedThreadId;
