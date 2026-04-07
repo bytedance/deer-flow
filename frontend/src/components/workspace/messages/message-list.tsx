@@ -63,6 +63,7 @@ export function MessageList({
                   key={`${group.id}/${msg.id}`}
                   message={msg}
                   isLoading={thread.isLoading}
+                  threadId={threadId}
                 />
               );
             });
