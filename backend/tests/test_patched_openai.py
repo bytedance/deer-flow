@@ -8,8 +8,6 @@ request is sent while leaving all other extra_body content intact.
 
 from __future__ import annotations
 
-import pytest
-
 from deerflow.models.patched_openai import _strip_unsupported_extra_body
 
 
