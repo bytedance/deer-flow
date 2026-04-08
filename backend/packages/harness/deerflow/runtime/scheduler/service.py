@@ -73,7 +73,12 @@ class CronSchedulerService:
         results = []
 
         for job in jobs:
-            record = await self._launch_job(job)
+            try:
+                record = await self._launch_job(job)
+            except Exception:
+                logger.exception("Cron scheduler failed to dispatch job %s", job.job_id)
+                continue
+
             run_id = getattr(record, "run_id", None)
             scheduled_fire_at = job.next_fire_at if job.next_fire_at is not None else (now if now is not None else time.time())
             await mark_cron_job_fired(

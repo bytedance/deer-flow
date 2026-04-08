@@ -111,6 +111,60 @@ async def test_scheduler_dispatch_respects_enqueue_strategy():
 
 
 @pytest.mark.anyio
+async def test_scheduler_dispatch_continues_after_job_failure(caplog: pytest.LogCaptureFixture):
+    from deerflow.runtime.scheduler import CronJobCreate, CronSchedulerService, create_cron_job, get_cron_job
+
+    store = InMemoryStore()
+    launched: list[str] = []
+
+    async def fake_run_launcher(thread_id, payload):
+        launched.append(thread_id)
+        if thread_id == "thread-fail":
+            raise RuntimeError("boom")
+        return SimpleNamespace(run_id=f"run-{thread_id}")
+
+    await create_cron_job(
+        store,
+        CronJobCreate(
+            thread_id="thread-fail",
+            cron="*/30 * * * *",
+            timezone="UTC",
+        ),
+        job_id="job-fail",
+        now=_ts(2026, 4, 8, 10, 0),
+    )
+    await create_cron_job(
+        store,
+        CronJobCreate(
+            thread_id="thread-ok",
+            cron="*/30 * * * *",
+            timezone="UTC",
+        ),
+        job_id="job-ok",
+        now=_ts(2026, 4, 8, 10, 0),
+    )
+
+    service = CronSchedulerService(store, fake_run_launcher)
+
+    with caplog.at_level("ERROR"):
+        records = await service.dispatch_due_jobs(now=_ts(2026, 4, 8, 10, 30))
+
+    failed = await get_cron_job(store, "job-fail")
+    succeeded = await get_cron_job(store, "job-ok")
+
+    assert launched == ["thread-fail", "thread-ok"]
+    assert [record.run_id for record in records] == ["run-thread-ok"]
+    assert failed is not None
+    assert failed.last_run_id is None
+    assert failed.last_fire_at is None
+    assert failed.next_fire_at == _ts(2026, 4, 8, 10, 30)
+    assert succeeded is not None
+    assert succeeded.last_run_id == "run-thread-ok"
+    assert succeeded.next_fire_at == _ts(2026, 4, 8, 11, 0)
+    assert any("failed to dispatch job job-fail" in record.message for record in caplog.records)
+
+
+@pytest.mark.anyio
 async def test_scheduler_run_loop_can_start_and_stop():
     from deerflow.runtime.scheduler import CronSchedulerService
 
