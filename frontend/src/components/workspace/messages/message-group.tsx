@@ -373,10 +373,25 @@ function ToolCall({
   } else if (name === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
-    if (!description) {
-      return t.toolCalls.executeCommand;
-    }
     const command: string | undefined = (args as { command: string })?.command;
+    if (!description) {
+      return (
+        <ChainOfThoughtStep
+          key={id}
+          label={t.toolCalls.executeCommand}
+          icon={SquareTerminalIcon}
+        >
+          {command && (
+            <CodeBlock
+              className="mx-0 cursor-pointer border-none px-0"
+              showLineNumbers={false}
+              language="bash"
+              code={command}
+            />
+          )}
+        </ChainOfThoughtStep>
+      );
+    }
     return (
       <ChainOfThoughtStep
         key={id}
@@ -454,16 +469,32 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         steps.push(step);
       }
-      for (const tool_call of message.tool_calls ?? []) {
+      for (const tool_call of Array.isArray(message.tool_calls)
+        ? message.tool_calls
+        : []) {
+        if (!tool_call || typeof tool_call !== "object") {
+          continue;
+        }
         if (tool_call.name === "task") {
           continue;
         }
+        const rawArgs = tool_call.args;
+        const parsedArgs: Record<string, unknown> =
+          typeof rawArgs === "string"
+            ? (() => {
+                try {
+                  return JSON.parse(rawArgs) as Record<string, unknown>;
+                } catch {
+                  return {};
+                }
+              })()
+            : (rawArgs ?? {});
         const step: CoTToolCallStep = {
           id: tool_call.id,
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
-          args: tool_call.args,
+          args: parsedArgs,
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {

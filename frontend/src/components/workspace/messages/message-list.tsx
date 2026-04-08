@@ -101,13 +101,28 @@ export function MessageList({
             const tasks = new Set<Subtask>();
             for (const message of group.messages) {
               if (message.type === "ai") {
-                for (const toolCall of message.tool_calls ?? []) {
+                for (const toolCall of Array.isArray(message.tool_calls)
+                  ? message.tool_calls
+                  : []) {
+                  if (!toolCall || typeof toolCall !== "object") {
+                    continue;
+                  }
                   if (toolCall.name === "task") {
+                    const rawArgs =
+                      typeof toolCall.args === "string"
+                        ? (() => {
+                            try {
+                              return JSON.parse(toolCall.args);
+                            } catch {
+                              return {};
+                            }
+                          })()
+                        : (toolCall.args ?? {});
                     const task: Subtask = {
                       id: toolCall.id!,
-                      subagent_type: toolCall.args.subagent_type,
-                      description: toolCall.args.description,
-                      prompt: toolCall.args.prompt,
+                      subagent_type: rawArgs.subagent_type,
+                      description: rawArgs.description,
+                      prompt: rawArgs.prompt,
                       status: "in_progress",
                     };
                     updateSubtask(task);
@@ -168,9 +183,11 @@ export function MessageList({
                   {t.subtasks.executing(tasks.size)}
                 </div>,
               );
-              const taskIds = message.tool_calls
-                ?.filter((toolCall) => toolCall.name === "task")
-                .map((toolCall) => toolCall.id);
+              const taskIds = Array.isArray(message.tool_calls)
+                ? message.tool_calls
+                    .filter((toolCall) => toolCall.name === "task")
+                    .map((toolCall) => toolCall.id)
+                : [];
               for (const taskId of taskIds ?? []) {
                 results.push(
                   <SubtaskCard
