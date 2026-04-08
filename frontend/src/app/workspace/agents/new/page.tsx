@@ -349,7 +349,7 @@ export default function NewAgentPage() {
   }
 
   return (
-    <ThreadContext.Provider value={{ thread }}>
+    <ThreadContext.Provider value={{ thread, threadId }}>
       <ArtifactsProvider>
         <div className="flex size-full flex-col">
           {header}

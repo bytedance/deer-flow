@@ -1,8 +1,7 @@
 "use client";
 
-import { useMemo } from "react";
+import { useContext, useMemo } from "react";
 import type { AnchorHTMLAttributes, ImgHTMLAttributes } from "react";
-import { useParams } from "next/navigation";
 
 import {
   MessageResponse,
@@ -16,6 +15,7 @@ import { streamdownPlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
+import { ThreadContext } from "./context";
 
 function isExternalUrl(href: string | undefined): boolean {
   return !!href && /^https?:\/\//.test(href);
@@ -35,6 +35,7 @@ export type MarkdownContentProps = {
   className?: string;
   remarkPlugins?: MessageResponseProps["remarkPlugins"];
   components?: MessageResponseProps["components"];
+  threadId?: string;
 };
 
 /** Renders markdown content. */
@@ -44,8 +45,10 @@ export function MarkdownContent({
   className,
   remarkPlugins = streamdownPlugins.remarkPlugins,
   components: componentsFromProps,
+  threadId,
 }: MarkdownContentProps) {
-  const { thread_id } = useParams<{ thread_id?: string }>();
+  const threadContext = useContext(ThreadContext);
+  const resolvedThreadId = threadId ?? threadContext?.threadId;
   const components = useMemo(() => {
     return {
       a: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => {
@@ -57,7 +60,7 @@ export function MarkdownContent({
           }
         }
         const { className, target, rel, ...rest } = props;
-        const href = resolveThreadAssetURL(props.href, thread_id);
+        const href = resolveThreadAssetURL(props.href, resolvedThreadId);
         const external = isExternalUrl(href);
         return (
           <a
@@ -75,7 +78,9 @@ export function MarkdownContent({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => {
         const { className: imageClassName, src, alt, ...rest } = props;
         const resolvedSrc =
-          typeof src === "string" ? resolveThreadAssetURL(src, thread_id) : src;
+          typeof src === "string"
+            ? resolveThreadAssetURL(src, resolvedThreadId)
+            : src;
 
         if (!resolvedSrc) {
           return null;
@@ -111,7 +116,7 @@ export function MarkdownContent({
       },
       ...componentsFromProps,
     };
-  }, [componentsFromProps, thread_id]);
+  }, [componentsFromProps, resolvedThreadId]);
 
   if (!content) return null;
 

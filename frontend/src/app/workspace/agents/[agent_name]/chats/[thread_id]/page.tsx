@@ -94,7 +94,7 @@ export default function AgentChatPage() {
     : undefined;
 
   return (
-    <ThreadContext.Provider value={{ thread }}>
+    <ThreadContext.Provider value={{ thread, threadId }}>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
