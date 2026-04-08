@@ -103,15 +103,26 @@ def test_raises_when_model_not_found(monkeypatch):
         factory_module.create_chat_model(name="ghost-model")
 
 
-def test_appends_all_tracing_callbacks(monkeypatch):
+def test_appends_tracing_callbacks_by_default(monkeypatch):
+    """Standalone models (default attach_tracing=True) get tracing callbacks."""
     cfg = _make_app_config([_make_model("alpha")])
     _patch_factory(monkeypatch, cfg)
-    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: ["smith-callback", "langfuse-callback"])
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: ["cb1", "cb2"])
 
-    FakeChatModel.captured_kwargs = {}
     model = factory_module.create_chat_model(name="alpha")
 
-    assert model.callbacks == ["smith-callback", "langfuse-callback"]
+    assert model.callbacks == ["cb1", "cb2"]
+
+
+def test_skips_tracing_callbacks_when_attach_tracing_false(monkeypatch):
+    """Graph-internal models (attach_tracing=False) must not get tracing callbacks."""
+    cfg = _make_app_config([_make_model("alpha")])
+    _patch_factory(monkeypatch, cfg)
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: ["cb1", "cb2"])
+
+    model = factory_module.create_chat_model(name="alpha", attach_tracing=False)
+
+    assert not model.callbacks
 
 
 # ---------------------------------------------------------------------------
