@@ -8,8 +8,9 @@ Covers:
 """
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
@@ -468,3 +469,398 @@ class TestBeforeAgent:
         assert "report__image1.png" in content
         assert "view_image" in content
         assert "- report__image1.png" not in content
+
+    def test_historical_docx_includes_persisted_image_descriptions(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        source = uploads_dir / "report.docx"
+        source.write_bytes(b"docx")
+        (uploads_dir / "report.md").write_text("converted", encoding="utf-8")
+        image = uploads_dir / "report__image1.png"
+        image.write_bytes(b"png")
+        write_docx_sidecar_manifest(source, [image])
+
+        result = mw.before_agent(
+            {
+                "messages": [_human("analyse historical uploads")],
+                "uploaded_image_descriptions": {
+                    "report.docx": {
+                        "status": "parsed",
+                        "document": "report.docx",
+                        "markdown_path": "/mnt/user-data/uploads/report.md",
+                        "images": [
+                            {
+                                "filename": "report__image1.png",
+                                "path": "/mnt/user-data/uploads/report__image1.png",
+                                "description": "A workflow diagram with arrows between processing steps.",
+                            }
+                        ],
+                    }
+                },
+            },
+            _runtime(),
+        )
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Persisted image descriptions:" in content
+        assert "A workflow diagram with arrows between processing steps." in content
+        assert "report__image1.png" not in content
+        assert "view_image" not in content
+
+    def test_historical_docx_failed_descriptions_keep_paths_and_view_image(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        source = uploads_dir / "report.docx"
+        source.write_bytes(b"docx")
+        image = uploads_dir / "report__image1.png"
+        image.write_bytes(b"png")
+        write_docx_sidecar_manifest(source, [image])
+
+        result = mw.before_agent(
+            {
+                "messages": [_human("analyse historical uploads")],
+                "uploaded_image_descriptions": {
+                    "report.docx": {
+                        "status": "failed",
+                        "document": "report.docx",
+                        "images": [
+                            {
+                                "filename": "report__image1.png",
+                                "path": "/mnt/user-data/uploads/report__image1.png",
+                                "description": "Image descriptions unavailable. Use view_image on the extracted image paths if visual details matter.",
+                            }
+                        ],
+                    }
+                },
+            },
+            _runtime(),
+        )
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Image descriptions unavailable" in content
+        assert "report__image1.png" in content
+        assert "view_image" in content
+
+    def test_reupload_clears_persisted_descriptions_for_same_docx(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.docx").write_bytes(b"docx")
+
+        msg = _human(
+            "review updated upload",
+            files=[
+                {
+                    "filename": "report.docx",
+                    "size": 5,
+                    "path": "/mnt/user-data/uploads/report.docx",
+                }
+            ],
+        )
+        result = mw.before_agent(
+            {
+                "messages": [msg],
+                "uploaded_image_descriptions": {
+                    "report.docx": {
+                        "status": "parsed",
+                        "document": "report.docx",
+                        "images": [{"filename": "report__image1.png", "description": "old"}],
+                    }
+                },
+            },
+            _runtime(),
+        )
+
+        assert result is not None
+        assert result["uploaded_image_descriptions"] == {}
+
+
+# ---------------------------------------------------------------------------
+# wrap_model_call
+# ---------------------------------------------------------------------------
+
+
+class TestWrapModelCall:
+    def _state(self, *messages, uploaded_files=None, uploaded_image_descriptions=None):
+        state = {"messages": list(messages)}
+        if uploaded_files is not None:
+            state["uploaded_files"] = uploaded_files
+        if uploaded_image_descriptions is not None:
+            state["uploaded_image_descriptions"] = uploaded_image_descriptions
+        return state
+
+    def _request(self, state):
+        request = MagicMock()
+        request.state = state
+        request.runtime = _runtime()
+        request.messages = list(state["messages"])
+        request.override.return_value = MagicMock()
+        return request
+
+    def test_injects_multimodal_context_for_new_docx_images_without_mutating_state_messages(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.docx").write_bytes(b"docx")
+        (uploads_dir / "report.md").write_text("converted", encoding="utf-8")
+        (uploads_dir / "report__image1.png").write_bytes(b"png")
+
+        state = self._state(
+            _human("review the document"),
+            uploaded_files=[
+                {
+                    "filename": "report.docx",
+                    "size": 5,
+                    "path": "/mnt/user-data/uploads/report.docx",
+                    "markdown_file": "report.md",
+                    "markdown_path": "/mnt/user-data/uploads/report.md",
+                    "extracted_images": [
+                        {
+                            "filename": "report__image1.png",
+                            "size": 3,
+                            "path": "/mnt/user-data/uploads/report__image1.png",
+                        }
+                    ],
+                }
+            ],
+        )
+        request = self._request(state)
+        handler = MagicMock(return_value="response")
+
+        with patch.object(mw, "_runtime_supports_vision", return_value=True):
+            result = mw.wrap_model_call(request, handler)
+
+        assert result == "response"
+        request.override.assert_called_once()
+        passed_messages = request.override.call_args.kwargs["messages"]
+        content = passed_messages[-1].content
+        assert isinstance(content, list)
+        assert content[0]["type"] == "text"
+        assert "report.docx" in content[0]["text"]
+        assert "report.md" in content[0]["text"]
+        assert "Summarize the relevant visual information" in content[0]["text"]
+        assert "<document_image_descriptions>" in content[0]["text"]
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+        assert request.messages == state["messages"]
+        handler.assert_called_once_with(request.override.return_value)
+
+    def test_does_not_inject_images_once_descriptions_exist_for_docx(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report__image1.png").write_bytes(b"png")
+
+        state = self._state(
+            _human("review the document"),
+            uploaded_files=[
+                {
+                    "filename": "report.docx",
+                    "size": 5,
+                    "path": "/mnt/user-data/uploads/report.docx",
+                    "extracted_images": [{"filename": "report__image1.png", "size": 3, "path": "/mnt/user-data/uploads/report__image1.png"}],
+                }
+            ],
+            uploaded_image_descriptions={
+                "report.docx": {
+                    "status": "parsed",
+                    "document": "report.docx",
+                    "images": [{"filename": "report__image1.png", "description": "A user interface screenshot."}],
+                }
+            },
+        )
+        request = self._request(state)
+        handler = MagicMock(return_value="response")
+
+        with patch.object(mw, "_runtime_supports_vision", return_value=True):
+            result = mw.wrap_model_call(request, handler)
+
+        assert result == "response"
+        request.override.assert_not_called()
+        handler.assert_called_once_with(request)
+
+    def test_does_not_inject_images_once_failure_placeholder_exists(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report__image1.png").write_bytes(b"png")
+
+        state = self._state(
+            _human("review the document"),
+            uploaded_files=[
+                {
+                    "filename": "report.docx",
+                    "size": 5,
+                    "path": "/mnt/user-data/uploads/report.docx",
+                    "extracted_images": [{"filename": "report__image1.png", "size": 3, "path": "/mnt/user-data/uploads/report__image1.png"}],
+                }
+            ],
+            uploaded_image_descriptions={
+                "report.docx": {
+                    "status": "failed",
+                    "document": "report.docx",
+                    "images": [
+                        {
+                            "filename": "report__image1.png",
+                            "path": "/mnt/user-data/uploads/report__image1.png",
+                            "description": "Image descriptions unavailable. Use view_image on the extracted image paths if visual details matter.",
+                        }
+                    ],
+                }
+            },
+        )
+        request = self._request(state)
+        handler = MagicMock(return_value="response")
+
+        with patch.object(mw, "_runtime_supports_vision", return_value=True):
+            result = mw.wrap_model_call(request, handler)
+
+        assert result == "response"
+        request.override.assert_not_called()
+        handler.assert_called_once_with(request)
+
+
+class TestAwrapModelCall:
+    @pytest.mark.anyio
+    async def test_async_wrap_model_call_injects_visual_message(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.docx").write_bytes(b"docx")
+        (uploads_dir / "report__image1.png").write_bytes(b"png")
+
+        state = {
+            "messages": [_human("review the document")],
+            "uploaded_files": [
+                {
+                    "filename": "report.docx",
+                    "size": 5,
+                    "path": "/mnt/user-data/uploads/report.docx",
+                    "extracted_images": [{"filename": "report__image1.png", "size": 3, "path": "/mnt/user-data/uploads/report__image1.png"}],
+                }
+            ],
+        }
+        request = MagicMock()
+        request.state = state
+        request.runtime = _runtime()
+        request.messages = list(state["messages"])
+        request.override.return_value = MagicMock()
+        handler = AsyncMock(return_value="response")
+
+        with patch.object(mw, "_runtime_supports_vision", return_value=True):
+            result = await mw.awrap_model_call(request, handler)
+
+        assert result == "response"
+        request.override.assert_called_once()
+        handler.assert_called_once_with(request.override.return_value)
+
+
+# ---------------------------------------------------------------------------
+# after_model
+# ---------------------------------------------------------------------------
+
+
+class TestAfterModel:
+    def _state(self, *messages, uploaded_files=None, uploaded_image_descriptions=None):
+        state = {"messages": list(messages)}
+        if uploaded_files is not None:
+            state["uploaded_files"] = uploaded_files
+        if uploaded_image_descriptions is not None:
+            state["uploaded_image_descriptions"] = uploaded_image_descriptions
+        return state
+
+    def test_persists_valid_document_image_description_payload_and_strips_it(self, tmp_path):
+        mw = _middleware(tmp_path)
+        ai = AIMessage(content=[{"type": "output_text", "text": (
+            "Final answer.\n\n"
+            "<document_image_descriptions>\n"
+            '{"documents":[{"document":"report.docx","markdown_path":"/mnt/user-data/uploads/report.md","images":[{"filename":"report__image1.png","description":"A workflow diagram with three connected stages."}]}]}\n'
+            "</document_image_descriptions>"
+        )}])
+        state = self._state(
+            _human("review"),
+            ai,
+            uploaded_files=[
+                {
+                    "filename": "report.docx",
+                    "markdown_path": "/mnt/user-data/uploads/report.md",
+                    "extracted_images": [
+                        {
+                            "filename": "report__image1.png",
+                            "path": "/mnt/user-data/uploads/report__image1.png",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        with patch.object(mw, "_runtime_supports_vision", return_value=True):
+            result = mw.after_model(state, _runtime())
+
+        assert result is not None
+        assert result["uploaded_image_descriptions"]["report.docx"]["status"] == "parsed"
+        assert result["uploaded_image_descriptions"]["report.docx"]["images"][0]["description"] == (
+            "A workflow diagram with three connected stages."
+        )
+        assert result["messages"][0].content == [{"type": "output_text", "text": "Final answer."}]
+
+    def test_malformed_payload_persists_failed_placeholder(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.docx").write_bytes(b"docx")
+        (uploads_dir / "report__image1.png").write_bytes(b"png")
+        ai = AIMessage(
+            content=(
+                "Final answer.\n"
+                "<document_image_descriptions>\n"
+                '{"documents":[{"document":"report.docx","images":[{"filename":"report__image1.png"}]}]}\n'
+                "</document_image_descriptions>"
+            )
+        )
+        state = self._state(
+            _human("review"),
+            ai,
+            uploaded_files=[
+                {
+                    "filename": "report.docx",
+                    "extracted_images": [{"filename": "report__image1.png"}],
+                }
+            ],
+        )
+
+        with patch.object(mw, "_runtime_supports_vision", return_value=True):
+            result = mw.after_model(state, _runtime())
+
+        assert result is not None
+        assert result["uploaded_image_descriptions"]["report.docx"]["status"] == "failed"
+        assert "Image descriptions unavailable" in result["uploaded_image_descriptions"]["report.docx"]["images"][0]["description"]
+        assert result["messages"][0].content == "Final answer."
+
+    def test_missing_payload_after_visual_attempt_persists_failed_placeholder(self, tmp_path):
+        mw = _middleware(tmp_path)
+        ai = AIMessage(content="Final answer without payload.")
+        state = self._state(
+            _human("review"),
+            ai,
+            uploaded_files=[
+                {
+                    "filename": "report.docx",
+                    "markdown_path": "/mnt/user-data/uploads/report.md",
+                    "extracted_images": [
+                        {
+                            "filename": "report__image1.png",
+                            "path": "/mnt/user-data/uploads/report__image1.png",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        with patch.object(mw, "_runtime_supports_vision", return_value=True), patch.object(
+            mw,
+            "_create_uploaded_visual_context_message",
+            return_value=HumanMessage(content="visual"),
+        ):
+            result = mw.after_model(state, _runtime())
+
+        assert result is not None
+        assert result["uploaded_image_descriptions"]["report.docx"]["status"] == "failed"
+        assert result["uploaded_image_descriptions"]["report.docx"]["images"][0]["path"] == "/mnt/user-data/uploads/report__image1.png"
+        assert "messages" not in result
