@@ -172,6 +172,8 @@ export const enUS: Translations = {
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
+    searchThreads: "Search threads",
+    noMatchingThreads: "No matching threads",
   },
 
   // Agents

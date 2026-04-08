@@ -116,6 +116,8 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    searchThreads: string;
+    noMatchingThreads: string;
   };
 
   // Agents
