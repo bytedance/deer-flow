@@ -1,7 +1,8 @@
 from unittest.mock import patch
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from _router_auth_helpers import make_authed_test_app
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import threads
@@ -54,7 +55,7 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
     paths.sandbox_work_dir("thread-route").mkdir(parents=True, exist_ok=True)
     (paths.sandbox_work_dir("thread-route") / "notes.txt").write_text("hello", encoding="utf-8")
 
-    app = FastAPI()
+    app = make_authed_test_app()
     app.include_router(threads.router)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
@@ -69,7 +70,7 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
     paths = Paths(tmp_path)
 
-    app = FastAPI()
+    app = make_authed_test_app()
     app.include_router(threads.router)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
@@ -82,7 +83,7 @@ def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
 def test_delete_thread_route_returns_422_for_route_safe_invalid_id(tmp_path):
     paths = Paths(tmp_path)
 
-    app = FastAPI()
+    app = make_authed_test_app()
     app.include_router(threads.router)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
@@ -107,3 +108,34 @@ def test_delete_thread_data_returns_generic_500_error(tmp_path):
     assert exc_info.value.detail == "Failed to delete local thread data."
     assert "/secret/path" not in exc_info.value.detail
     log_exception.assert_called_once_with("Failed to delete thread data for %s", "thread-cleanup")
+
+
+# ── Server-reserved metadata key stripping ──────────────────────────────────
+
+
+def test_strip_reserved_metadata_removes_owner_id():
+    """Client-supplied owner_id is dropped to prevent reflection attacks."""
+    out = threads._strip_reserved_metadata({"owner_id": "victim-id", "title": "ok"})
+    assert out == {"title": "ok"}
+
+
+def test_strip_reserved_metadata_removes_user_id():
+    """user_id is also reserved (defense in depth for any future use)."""
+    out = threads._strip_reserved_metadata({"user_id": "victim-id", "title": "ok"})
+    assert out == {"title": "ok"}
+
+
+def test_strip_reserved_metadata_passes_through_safe_keys():
+    """Non-reserved keys are preserved verbatim."""
+    md = {"title": "ok", "tags": ["a", "b"], "custom": {"x": 1}}
+    assert threads._strip_reserved_metadata(md) == md
+
+
+def test_strip_reserved_metadata_empty_input():
+    """Empty / None metadata returns same object — no crash."""
+    assert threads._strip_reserved_metadata({}) == {}
+
+
+def test_strip_reserved_metadata_strips_both_simultaneously():
+    out = threads._strip_reserved_metadata({"owner_id": "x", "user_id": "y", "keep": "me"})
+    assert out == {"keep": "me"}

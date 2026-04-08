@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from _router_auth_helpers import call_unwrapped
 from fastapi import UploadFile
 
 from app.gateway.routers import uploads
@@ -24,7 +25,7 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
     ):
         file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
-        result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file]))
 
     assert result.success is True
     assert len(result.files) == 1
@@ -55,7 +56,7 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
         patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
     ):
         file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
-        result = asyncio.run(uploads.upload_files("thread-aio", files=[file]))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file]))
 
     assert result.success is True
     assert len(result.files) == 1
@@ -92,7 +93,7 @@ def test_upload_files_makes_non_local_files_sandbox_writable(tmp_path):
         patch.object(uploads, "_make_file_sandbox_writable") as make_writable,
     ):
         file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
-        result = asyncio.run(uploads.upload_files("thread-aio", files=[file]))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file]))
 
     assert result.success is True
     make_writable.assert_any_call(thread_uploads_dir / "report.pdf")
@@ -115,7 +116,7 @@ def test_upload_files_does_not_adjust_permissions_for_local_sandbox(tmp_path):
         patch.object(uploads, "_make_file_sandbox_writable") as make_writable,
     ):
         file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
-        result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file]))
 
     assert result.success is True
     make_writable.assert_not_called()
@@ -166,13 +167,13 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
         # These filenames must be rejected outright
         for bad_name in ["..", "."]:
             file = UploadFile(filename=bad_name, file=BytesIO(b"data"))
-            result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+            result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file]))
             assert result.success is True
             assert result.files == [], f"Expected no files for unsafe filename {bad_name!r}"
 
         # Path-traversal prefixes are stripped to the basename and accepted safely
         file = UploadFile(filename="../etc/passwd", file=BytesIO(b"data"))
-        result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file]))
         assert result.success is True
         assert len(result.files) == 1
         assert result.files[0]["filename"] == "passwd"
@@ -188,7 +189,7 @@ def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
     (thread_uploads_dir / "report.md").write_text("converted", encoding="utf-8")
 
     with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
-        result = asyncio.run(uploads.delete_uploaded_file("thread-aio", "report.pdf"))
+        result = asyncio.run(call_unwrapped(uploads.delete_uploaded_file, "thread-aio", "report.pdf", request=MagicMock()))
 
     assert result == {"success": True, "message": "Deleted report.pdf"}
     assert not (thread_uploads_dir / "report.pdf").exists()

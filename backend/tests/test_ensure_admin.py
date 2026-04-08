@@ -212,3 +212,108 @@ def test_migration_failure_is_non_fatal():
             asyncio.run(_ensure_admin_user(app))
 
     provider.create_user.assert_called_once()
+
+
+# ── Section 5.1-5.6 upgrade path: orphan thread migration ────────────────
+
+
+def test_migrate_orphaned_threads_stamps_owner_id_on_unowned_rows():
+    """First boot finds Store-only legacy threads → stamps admin's id.
+
+    Validates the **TC-UPG-02 upgrade story**: an operator running main
+    (no auth) accumulates threads in the LangGraph Store namespace
+    ``("threads",)`` with no ``metadata.owner_id``. After upgrading to
+    feat/auth-on-2.0-rc, the first ``_ensure_admin_user`` boot should
+    rewrite each unowned item with the freshly created admin's id.
+    """
+    from app.gateway.app import _migrate_orphaned_threads
+
+    # Three orphan items + one already-owned item that should be left alone.
+    items = [
+        SimpleNamespace(key="t1", value={"metadata": {"title": "old-thread-1"}}),
+        SimpleNamespace(key="t2", value={"metadata": {"title": "old-thread-2"}}),
+        SimpleNamespace(key="t3", value={"metadata": {}}),
+        SimpleNamespace(key="t4", value={"metadata": {"owner_id": "someone-else", "title": "preserved"}}),
+    ]
+    store = AsyncMock()
+    # asearch returns the entire batch on first call, then an empty page
+    # to terminate _iter_store_items.
+    store.asearch = AsyncMock(side_effect=[items, []])
+    aput_calls: list[tuple[tuple, str, dict]] = []
+
+    async def _record_aput(namespace, key, value):
+        aput_calls.append((namespace, key, value))
+
+    store.aput = AsyncMock(side_effect=_record_aput)
+
+    migrated = asyncio.run(_migrate_orphaned_threads(store, "admin-id-42"))
+
+    # Three orphan rows migrated, one preserved.
+    assert migrated == 3
+    assert len(aput_calls) == 3
+    rewritten_keys = {call[1] for call in aput_calls}
+    assert rewritten_keys == {"t1", "t2", "t3"}
+    # Each rewrite carries the new owner_id; titles preserved where present.
+    by_key = {call[1]: call[2] for call in aput_calls}
+    assert by_key["t1"]["metadata"]["owner_id"] == "admin-id-42"
+    assert by_key["t1"]["metadata"]["title"] == "old-thread-1"
+    assert by_key["t3"]["metadata"]["owner_id"] == "admin-id-42"
+    # The pre-owned item must NOT have been rewritten.
+    assert "t4" not in rewritten_keys
+
+
+def test_migrate_orphaned_threads_empty_store_is_noop():
+    """A store with no threads → migrated == 0, no aput calls."""
+    from app.gateway.app import _migrate_orphaned_threads
+
+    store = AsyncMock()
+    store.asearch = AsyncMock(return_value=[])
+    store.aput = AsyncMock()
+
+    migrated = asyncio.run(_migrate_orphaned_threads(store, "admin-id-42"))
+
+    assert migrated == 0
+    store.aput.assert_not_called()
+
+
+def test_iter_store_items_walks_multiple_pages():
+    """Cursor-style iterator pulls every page until a short page terminates.
+
+    Closes the regression where the old hardcoded ``limit=1000`` could
+    silently drop orphans on a large pre-upgrade dataset. The migration
+    code path uses the default ``page_size=500``; this test pins the
+    iterator with ``page_size=2`` so it stays fast.
+    """
+    from app.gateway.app import _iter_store_items
+
+    page_a = [SimpleNamespace(key=f"t{i}", value={"metadata": {}}) for i in range(2)]
+    page_b = [SimpleNamespace(key=f"t{i + 2}", value={"metadata": {}}) for i in range(2)]
+    page_c: list = []  # short page → loop terminates
+
+    store = AsyncMock()
+    store.asearch = AsyncMock(side_effect=[page_a, page_b, page_c])
+
+    async def _collect():
+        return [item.key async for item in _iter_store_items(store, ("threads",), page_size=2)]
+
+    keys = asyncio.run(_collect())
+    assert keys == ["t0", "t1", "t2", "t3"]
+    # Three asearch calls: full batch, full batch, empty terminator
+    assert store.asearch.await_count == 3
+
+
+def test_iter_store_items_terminates_on_short_page():
+    """A short page (len < page_size) ends the loop without an extra call."""
+    from app.gateway.app import _iter_store_items
+
+    page = [SimpleNamespace(key=f"t{i}", value={}) for i in range(3)]
+    store = AsyncMock()
+    store.asearch = AsyncMock(return_value=page)
+
+    async def _collect():
+        return [item.key async for item in _iter_store_items(store, ("threads",), page_size=10)]
+
+    keys = asyncio.run(_collect())
+    assert keys == ["t0", "t1", "t2"]
+    # Only one call — no terminator probe needed because len(batch) < page_size
+    assert store.asearch.await_count == 1

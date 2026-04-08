@@ -314,6 +314,59 @@ def test_sqlite_round_trip_new_fields():
     asyncio.run(_run())
 
 
+def test_update_user_raises_when_row_concurrently_deleted(tmp_path):
+    """Concurrent-delete during update_user must hard-fail, not silently no-op.
+
+    Earlier the SQLite repo returned the input unchanged when the row was
+    missing, making a phantom success path that admin password reset
+    callers (`reset_admin`, `_ensure_admin_user`) would happily log as
+    'password reset'. The new contract: raise ``UserNotFoundError`` so
+    a vanished row never looks like a successful update.
+    """
+    import asyncio
+    import tempfile
+
+    from app.gateway.auth.repositories.base import UserNotFoundError
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import (
+            close_engine,
+            get_session_factory,
+            init_engine,
+        )
+        from deerflow.persistence.user.model import UserRow
+
+        with tempfile.TemporaryDirectory() as d:
+            url = f"sqlite+aiosqlite:///{d}/scratch.db"
+            await init_engine("sqlite", url=url, sqlite_dir=d)
+            try:
+                sf = get_session_factory()
+                repo = SQLiteUserRepository(sf)
+                user = User(
+                    email="ghost@test.com",
+                    password_hash="fakehash",
+                    system_role="user",
+                )
+                created = await repo.create_user(user)
+
+                # Simulate "row vanished underneath us" by deleting the row
+                # via the raw ORM session, then attempt to update.
+                async with sf() as session:
+                    row = await session.get(UserRow, str(created.id))
+                    assert row is not None
+                    await session.delete(row)
+                    await session.commit()
+
+                created.needs_setup = True
+                with pytest.raises(UserNotFoundError):
+                    await repo.update_user(created)
+            finally:
+                await close_engine()
+
+    asyncio.run(_run())
+
+
 # ── Token Versioning ───────────────────────────────────────────────────────
 
 
@@ -443,8 +496,9 @@ def test_rate_limiter_resets_on_success():
 # ── Client IP extraction ─────────────────────────────────────────────────
 
 
-def test_get_client_ip_direct_connection():
-    """Without nginx (no X-Real-IP), falls back to request.client.host."""
+def test_get_client_ip_direct_connection_no_proxy(monkeypatch):
+    """Direct mode (no AUTH_TRUSTED_PROXIES): use TCP peer regardless of X-Real-IP."""
+    monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
     from app.gateway.routers.auth import _get_client_ip
 
     req = MagicMock()
@@ -453,44 +507,129 @@ def test_get_client_ip_direct_connection():
     assert _get_client_ip(req) == "203.0.113.42"
 
 
-def test_get_client_ip_uses_x_real_ip():
-    """X-Real-IP (set by nginx) is used when present."""
-    from app.gateway.routers.auth import _get_client_ip
+def test_get_client_ip_x_real_ip_ignored_when_no_trusted_proxy(monkeypatch):
+    """X-Real-IP is silently ignored if AUTH_TRUSTED_PROXIES is unset.
 
-    req = MagicMock()
-    req.client.host = "10.0.0.1"  # uvicorn may have replaced this with XFF[0]
-    req.headers = {"x-real-ip": "203.0.113.42"}
-    assert _get_client_ip(req) == "203.0.113.42"
-
-
-def test_get_client_ip_xff_ignored():
-    """X-Forwarded-For is never used; only X-Real-IP matters."""
-    from app.gateway.routers.auth import _get_client_ip
-
-    req = MagicMock()
-    req.client.host = "10.0.0.1"
-    req.headers = {"x-forwarded-for": "10.0.0.1, 198.51.100.5", "x-real-ip": "198.51.100.5"}
-    assert _get_client_ip(req) == "198.51.100.5"
-
-
-def test_get_client_ip_no_real_ip_fallback():
-    """No X-Real-IP → falls back to client.host (direct connection)."""
+    This closes the bypass where any client could rotate X-Real-IP per
+    request to dodge per-IP rate limits in dev / direct mode.
+    """
+    monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
     from app.gateway.routers.auth import _get_client_ip
 
     req = MagicMock()
     req.client.host = "127.0.0.1"
-    req.headers = {}
+    req.headers = {"x-real-ip": "203.0.113.42"}
     assert _get_client_ip(req) == "127.0.0.1"
 
 
-def test_get_client_ip_x_real_ip_always_preferred():
-    """X-Real-IP is always preferred over client.host regardless of IP."""
+def test_get_client_ip_x_real_ip_honored_from_trusted_proxy(monkeypatch):
+    """X-Real-IP is honored when the TCP peer matches AUTH_TRUSTED_PROXIES."""
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
     from app.gateway.routers.auth import _get_client_ip
 
     req = MagicMock()
-    req.client.host = "203.0.113.99"
-    req.headers = {"x-real-ip": "198.51.100.7"}
-    assert _get_client_ip(req) == "198.51.100.7"
+    req.client.host = "10.5.6.7"  # in trusted CIDR
+    req.headers = {"x-real-ip": "203.0.113.42"}
+    assert _get_client_ip(req) == "203.0.113.42"
+
+
+def test_get_client_ip_x_real_ip_rejected_from_untrusted_peer(monkeypatch):
+    """X-Real-IP is rejected when the TCP peer is NOT in the trusted list."""
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
+    from app.gateway.routers.auth import _get_client_ip
+
+    req = MagicMock()
+    req.client.host = "8.8.8.8"  # NOT in trusted CIDR
+    req.headers = {"x-real-ip": "203.0.113.42"}  # client trying to spoof
+    assert _get_client_ip(req) == "8.8.8.8"
+
+
+def test_get_client_ip_xff_never_honored(monkeypatch):
+    """X-Forwarded-For is never used; only X-Real-IP from a trusted peer."""
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
+    from app.gateway.routers.auth import _get_client_ip
+
+    req = MagicMock()
+    req.client.host = "10.0.0.1"
+    req.headers = {"x-forwarded-for": "198.51.100.5"}  # no x-real-ip
+    assert _get_client_ip(req) == "10.0.0.1"
+
+
+def test_get_client_ip_invalid_trusted_proxy_entry_skipped(monkeypatch, caplog):
+    """Garbage entries in AUTH_TRUSTED_PROXIES are warned and skipped."""
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "not-an-ip,10.0.0.0/8")
+    from app.gateway.routers.auth import _get_client_ip
+
+    req = MagicMock()
+    req.client.host = "10.5.6.7"
+    req.headers = {"x-real-ip": "203.0.113.42"}
+    assert _get_client_ip(req) == "203.0.113.42"  # valid entry still works
+
+
+def test_get_client_ip_no_client_returns_unknown(monkeypatch):
+    """No request.client → 'unknown' marker (no crash)."""
+    monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
+    from app.gateway.routers.auth import _get_client_ip
+
+    req = MagicMock()
+    req.client = None
+    req.headers = {}
+    assert _get_client_ip(req) == "unknown"
+
+
+# ── Common-password blocklist ────────────────────────────────────────────────
+
+
+def test_register_rejects_literal_password():
+    """Pydantic validator rejects 'password' as a registration password."""
+    from pydantic import ValidationError
+
+    from app.gateway.routers.auth import RegisterRequest
+
+    with pytest.raises(ValidationError) as exc:
+        RegisterRequest(email="x@example.com", password="password")
+    assert "too common" in str(exc.value)
+
+
+def test_register_rejects_common_password_case_insensitive():
+    """Case variants of common passwords are also rejected."""
+    from pydantic import ValidationError
+
+    from app.gateway.routers.auth import RegisterRequest
+
+    for variant in ["PASSWORD", "Password1", "qwerty123", "letmein1"]:
+        with pytest.raises(ValidationError):
+            RegisterRequest(email="x@example.com", password=variant)
+
+
+def test_register_accepts_strong_password():
+    """A non-blocklisted password of length >=8 is accepted."""
+    from app.gateway.routers.auth import RegisterRequest
+
+    req = RegisterRequest(email="x@example.com", password="Tr0ub4dor&3-Horse")
+    assert req.password == "Tr0ub4dor&3-Horse"
+
+
+def test_change_password_rejects_common_password():
+    """The same blocklist applies to change-password."""
+    from pydantic import ValidationError
+
+    from app.gateway.routers.auth import ChangePasswordRequest
+
+    with pytest.raises(ValidationError):
+        ChangePasswordRequest(current_password="anything", new_password="iloveyou")
+
+
+def test_password_blocklist_keeps_short_passwords_for_length_check():
+    """Short passwords still fail the min_length check (not the blocklist)."""
+    from pydantic import ValidationError
+
+    from app.gateway.routers.auth import RegisterRequest
+
+    with pytest.raises(ValidationError) as exc:
+        RegisterRequest(email="x@example.com", password="abc")
+    # the length check should fire, not the blocklist
+    assert "at least 8 characters" in str(exc.value)
 
 
 # ── Weak JWT secret warning ──────────────────────────────────────────────────

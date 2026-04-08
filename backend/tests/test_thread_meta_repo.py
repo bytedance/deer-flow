@@ -111,6 +111,45 @@ class TestThreadMetaRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_check_access_strict_missing_row_denied(self, tmp_path):
+        """require_existing=True flips the missing-row case to *denied*.
+
+        Closes the delete-idempotence cross-user gap: after a thread is
+        deleted, the row is gone, and the permissive default would let any
+        caller "claim" it as untracked. The strict mode demands a row.
+        """
+        repo = await _make_repo(tmp_path)
+        assert await repo.check_access("never-existed", "user1", require_existing=True) is False
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_check_access_strict_owner_match_allowed(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", owner_id="user1")
+        assert await repo.check_access("t1", "user1", require_existing=True) is True
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_check_access_strict_owner_mismatch_denied(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", owner_id="user1")
+        assert await repo.check_access("t1", "user2", require_existing=True) is False
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_check_access_strict_null_owner_still_allowed(self, tmp_path):
+        """Even in strict mode, a row with NULL owner_id stays shared.
+
+        The strict flag tightens the *missing row* case, not the *shared
+        row* case — legacy pre-auth rows that survived a clean migration
+        without an owner are still everyone's.
+        """
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", owner_id=None)
+        assert await repo.check_access("t1", "anyone", require_existing=True) is True
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_update_status(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.create("t1")
