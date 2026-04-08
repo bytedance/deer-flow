@@ -282,6 +282,23 @@ export function ArtifactFilePreview({
   content: string;
   language: string;
 }) {
+  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+
+  useEffect(() => {
+    if (language !== "html") {
+      setHtmlPreviewUrl(undefined);
+      return;
+    }
+
+    const blob = new Blob([content ?? ""], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    setHtmlPreviewUrl(url);
+
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [content, language]);
+
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
@@ -300,8 +317,8 @@ export function ArtifactFilePreview({
       <iframe
         className="size-full"
         title="Artifact preview"
-        sandbox="allow-scripts allow-forms allow-same-origin"
-        srcDoc={content ?? ""}
+        sandbox="allow-scripts allow-forms"
+        src={htmlPreviewUrl}
       />
     );
   }
