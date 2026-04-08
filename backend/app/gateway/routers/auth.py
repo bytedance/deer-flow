@@ -1,11 +1,13 @@
 """Authentication endpoints."""
 
 import logging
+import os
 import time
+from ipaddress import ip_address, ip_network
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.gateway.auth import (
     UserResponse,
@@ -31,11 +33,83 @@ class LoginResponse(BaseModel):
     needs_setup: bool = False
 
 
+# Top common-password blocklist. Drawn from the public SecLists "10k worst
+# passwords" set, lowercased + length>=8 only (shorter ones already fail
+# the min_length check). Kept tight on purpose: this is the **lower bound**
+# defense, not a full HIBP / passlib check, and runs in-process per request.
+_COMMON_PASSWORDS: frozenset[str] = frozenset(
+    {
+        "password",
+        "password1",
+        "password12",
+        "password123",
+        "password1234",
+        "12345678",
+        "123456789",
+        "1234567890",
+        "qwerty12",
+        "qwertyui",
+        "qwerty123",
+        "abc12345",
+        "abcd1234",
+        "iloveyou",
+        "letmein1",
+        "welcome1",
+        "welcome123",
+        "admin123",
+        "administrator",
+        "passw0rd",
+        "p@ssw0rd",
+        "monkey12",
+        "trustno1",
+        "sunshine",
+        "princess",
+        "football",
+        "baseball",
+        "superman",
+        "batman123",
+        "starwars",
+        "dragon123",
+        "master123",
+        "shadow12",
+        "michael1",
+        "jennifer",
+        "computer",
+    }
+)
+
+
+def _password_is_common(password: str) -> bool:
+    """Case-insensitive blocklist check.
+
+    Lowercases the input so trivial mutations like ``Password`` /
+    ``PASSWORD`` are also rejected. Does not normalize digit substitutions
+    (``p@ssw0rd`` is included as a literal entry instead) — keeping the
+    rule cheap and predictable.
+    """
+    return password.lower() in _COMMON_PASSWORDS
+
+
+def _validate_strong_password(value: str) -> str:
+    """Pydantic field-validator body shared by Register + ChangePassword.
+
+    Constraint = function, not type-level mixin. The two request models
+    have no "is-a" relationship; they only share the password-strength
+    rule. Lifting it into a free function lets each model bind it via
+    ``@field_validator(field_name)`` without inheritance gymnastics.
+    """
+    if _password_is_common(value):
+        raise ValueError("Password is too common; choose a stronger password.")
+    return value
+
+
 class RegisterRequest(BaseModel):
     """Request model for user registration."""
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+
+    _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
 
 class ChangePasswordRequest(BaseModel):
@@ -44,6 +118,8 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
     new_email: EmailStr | None = None
+
+    _strong_password = field_validator("new_password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
 
 class MessageResponse(BaseModel):
@@ -79,26 +155,65 @@ _LOCKOUT_SECONDS = 300  # 5 minutes
 _login_attempts: dict[str, tuple[int, float]] = {}
 
 
+def _trusted_proxies() -> list:
+    """Parse ``AUTH_TRUSTED_PROXIES`` env var into a list of ip_network objects.
+
+    Comma-separated CIDR or single-IP entries. Empty / unset = no proxy is
+    trusted (direct mode). Invalid entries are skipped with a logger warning.
+    Read live so env-var overrides take effect immediately and tests can
+    ``monkeypatch.setenv`` without poking a module-level cache.
+    """
+    raw = os.getenv("AUTH_TRUSTED_PROXIES", "").strip()
+    if not raw:
+        return []
+    nets = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            nets.append(ip_network(entry, strict=False))
+        except ValueError:
+            logger.warning("AUTH_TRUSTED_PROXIES: ignoring invalid entry %r", entry)
+    return nets
+
+
 def _get_client_ip(request: Request) -> str:
     """Extract the real client IP for rate limiting.
 
-    Uses ``X-Real-IP`` header set by nginx (``proxy_set_header X-Real-IP
-    $remote_addr``).  Nginx unconditionally overwrites any client-supplied
-    ``X-Real-IP``, so the value seen by Gateway is always the TCP peer IP
-    that nginx observed — it cannot be spoofed by the client.
+    Trust model:
 
-    ``request.client.host`` is NOT reliable because uvicorn's default
-    ``proxy_headers=True`` replaces it with the *first* entry from
-    ``X-Forwarded-For``, which IS client-spoofable.
+    - The TCP peer (``request.client.host``) is always the baseline. It is
+      whatever the kernel reports as the connecting socket — unforgeable
+      by the client itself.
+    - ``X-Real-IP`` is **only** honored if the TCP peer is in the
+      ``AUTH_TRUSTED_PROXIES`` allowlist (set via env var, comma-separated
+      CIDR or single IPs). When set, the gateway is assumed to be behind a
+      reverse proxy (nginx, Cloudflare, ALB, …) that overwrites
+      ``X-Real-IP`` with the original client address.
+    - With no ``AUTH_TRUSTED_PROXIES`` set, ``X-Real-IP`` is silently
+      ignored — closing the bypass where any client could rotate the
+      header to dodge per-IP rate limits in dev / direct-gateway mode.
 
-    ``X-Forwarded-For`` is intentionally NOT used for the same reason.
+    ``X-Forwarded-For`` is intentionally NOT used because it is naturally
+    client-controlled at the *first* hop and the trust chain is harder to
+    audit per-request.
     """
-    real_ip = request.headers.get("x-real-ip", "").strip()
-    if real_ip:
-        return real_ip
+    peer_host = request.client.host if request.client else None
 
-    # Fallback: direct connection without nginx (e.g. unit tests, dev).
-    return request.client.host if request.client else "unknown"
+    trusted = _trusted_proxies()
+    if trusted and peer_host:
+        try:
+            peer_ip = ip_address(peer_host)
+            if any(peer_ip in net for net in trusted):
+                real_ip = request.headers.get("x-real-ip", "").strip()
+                if real_ip:
+                    return real_ip
+        except ValueError:
+            # peer_host wasn't a parseable IP (e.g. "unknown") — fall through
+            pass
+
+    return peer_host or "unknown"
 
 
 def _check_rate_limit(ip: str) -> None:

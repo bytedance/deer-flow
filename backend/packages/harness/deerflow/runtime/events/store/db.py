@@ -149,7 +149,7 @@ class DbRunEventStore(RunEventStore):
         limit=50,
         before_seq=None,
         after_seq=None,
-        owner_id: "str | None | _AutoSentinel" = AUTO,
+        owner_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.list_messages")
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
@@ -181,7 +181,7 @@ class DbRunEventStore(RunEventStore):
         *,
         event_types=None,
         limit=500,
-        owner_id: "str | None | _AutoSentinel" = AUTO,
+        owner_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.list_events")
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
@@ -199,7 +199,7 @@ class DbRunEventStore(RunEventStore):
         thread_id,
         run_id,
         *,
-        owner_id: "str | None | _AutoSentinel" = AUTO,
+        owner_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.list_messages_by_run")
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id, RunEventRow.category == "message")
@@ -214,7 +214,7 @@ class DbRunEventStore(RunEventStore):
         self,
         thread_id,
         *,
-        owner_id: "str | None | _AutoSentinel" = AUTO,
+        owner_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.count_messages")
         stmt = select(func.count()).select_from(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
@@ -227,7 +227,7 @@ class DbRunEventStore(RunEventStore):
         self,
         thread_id,
         *,
-        owner_id: "str | None | _AutoSentinel" = AUTO,
+        owner_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.delete_by_thread")
         async with self._sf() as session:
@@ -246,7 +246,7 @@ class DbRunEventStore(RunEventStore):
         thread_id,
         run_id,
         *,
-        owner_id: "str | None | _AutoSentinel" = AUTO,
+        owner_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.delete_by_run")
         async with self._sf() as session:

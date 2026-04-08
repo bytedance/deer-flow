@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
-from app.gateway.auth.repositories.base import UserRepository
+from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import UserRow
 
 
@@ -92,7 +92,13 @@ class SQLiteUserRepository(UserRepository):
         async with self._sf() as session:
             row = await session.get(UserRow, str(user.id))
             if row is None:
-                return user
+                # Hard fail on concurrent delete: callers (reset_admin,
+                # password change handlers, _ensure_admin_user) all
+                # fetched the user just before this call, so a missing
+                # row here means the row vanished underneath us. Silent
+                # success would let the caller log "password reset" for
+                # a row that no longer exists.
+                raise UserNotFoundError(f"User {user.id} no longer exists")
             row.email = user.email
             row.password_hash = user.password_hash
             row.system_role = user.system_role

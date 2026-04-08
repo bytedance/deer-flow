@@ -169,8 +169,7 @@ def require_permission(
     resource: str,
     action: str,
     owner_check: bool = False,
-    owner_filter_key: str = "owner_id",
-    inject_record: bool = False,
+    require_existing: bool = False,
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
     """Decorator that checks permission for resource:action.
 
@@ -181,25 +180,22 @@ def require_permission(
         action: Action name (e.g., "read", "write", "delete")
         owner_check: If True, validates that the current user owns the resource.
                      Requires 'thread_id' path parameter and performs ownership check.
-        owner_filter_key: Field name for ownership filter (default: "owner_id")
-        inject_record: If True and owner_check is True, injects the thread record
-                      into kwargs['thread_record'] for use in the handler.
+        require_existing: Only meaningful with ``owner_check=True``. If True, a
+                          missing ``threads_meta`` row counts as a denial (404)
+                          instead of "untracked legacy thread, allow". Use on
+                          **destructive / mutating** routes (DELETE, PATCH,
+                          state-update) so a deleted thread can't be re-targeted
+                          by another user via the missing-row code path.
 
     Usage:
-        # Simple permission check
-        @require_permission("threads", "read")
+        # Read-style: legacy untracked threads are allowed
+        @require_permission("threads", "read", owner_check=True)
         async def get_thread(thread_id: str, request: Request):
             ...
 
-        # With ownership check (for /threads/{thread_id} endpoints)
-        @require_permission("threads", "delete", owner_check=True)
+        # Destructive: thread row MUST exist and be owned by caller
+        @require_permission("threads", "delete", owner_check=True, require_existing=True)
         async def delete_thread(thread_id: str, request: Request):
-            ...
-
-        # With ownership check and record injection
-        @require_permission("threads", "delete", owner_check=True, inject_record=True)
-        async def delete_thread(thread_id: str, request: Request, thread_record: dict = None):
-            # thread_record is injected if found
             ...
 
     Raises:
@@ -235,18 +231,11 @@ def require_permission(
             #
             # 2.0-rc moved thread metadata into the SQL persistence layer
             # (``threads_meta`` table). We verify ownership via
-            # ``ThreadMetaStore.check_access`` instead of the LangGraph
-            # store path that the original PR #1728 used. ``check_access``
-            # returns True for missing rows (untracked legacy thread) and
-            # for rows whose ``owner_id`` is NULL (shared / pre-auth data),
-            # so this is a strict-deny check rather than strict-allow:
-            # only an *existing* row with a *different* owner_id triggers
-            # 404.
-            #
-            # ``inject_record`` is no longer supported — it was a
-            # convenience for handlers that wanted the LangGraph store
-            # blob; the SQL repo would need a different shape and no
-            # caller in 2.0 needs it.
+            # ``ThreadMetaStore.check_access``: it returns True for
+            # missing rows (untracked legacy thread) and for rows whose
+            # ``owner_id`` is NULL (shared / pre-auth data), so this is
+            # strict-deny rather than strict-allow — only an *existing*
+            # row with a *different* owner_id triggers 404.
             if owner_check:
                 thread_id = kwargs.get("thread_id")
                 if thread_id is None:
@@ -255,7 +244,11 @@ def require_permission(
                 from app.gateway.deps import get_thread_meta_repo
 
                 thread_meta_repo = get_thread_meta_repo(request)
-                allowed = await thread_meta_repo.check_access(thread_id, str(auth.user.id))
+                allowed = await thread_meta_repo.check_access(
+                    thread_id,
+                    str(auth.user.id),
+                    require_existing=require_existing,
+                )
                 if not allowed:
                     raise HTTPException(
                         status_code=404,

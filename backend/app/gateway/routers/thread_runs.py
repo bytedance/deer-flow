@@ -94,7 +94,7 @@ def _record_to_response(record: RunRecord) -> RunResponse:
 
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
-@require_permission("runs", "create", owner_check=True)
+@require_permission("runs", "create", owner_check=True, require_existing=True)
 async def create_run(thread_id: str, body: RunCreateRequest, request: Request) -> RunResponse:
     """Create a background run (returns immediately)."""
     record = await start_run(body, thread_id, request)
@@ -102,7 +102,7 @@ async def create_run(thread_id: str, body: RunCreateRequest, request: Request) -
 
 
 @router.post("/{thread_id}/runs/stream")
-@require_permission("runs", "create", owner_check=True)
+@require_permission("runs", "create", owner_check=True, require_existing=True)
 async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
@@ -130,7 +130,7 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
 
 
 @router.post("/{thread_id}/runs/wait", response_model=dict)
-@require_permission("runs", "create", owner_check=True)
+@require_permission("runs", "create", owner_check=True, require_existing=True)
 async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until it completes, returning the final state."""
     record = await start_run(body, thread_id, request)
@@ -176,7 +176,7 @@ async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
 
 
 @router.post("/{thread_id}/runs/{run_id}/cancel")
-@require_permission("runs", "cancel", owner_check=True)
+@require_permission("runs", "cancel", owner_check=True, require_existing=True)
 async def cancel_run(
     thread_id: str,
     run_id: str,

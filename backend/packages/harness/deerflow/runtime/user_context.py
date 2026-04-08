@@ -138,5 +138,11 @@ def resolve_owner_id(
         user = _current_user.get()
         if user is None:
             raise RuntimeError(f"{method_name} called with owner_id=AUTO but no user context is set; pass an explicit owner_id, set the contextvar via auth middleware, or opt out with owner_id=None for migration/CLI paths.")
-        return user.id
+        # Coerce to ``str`` at the boundary: ``User.id`` is typed as
+        # ``UUID`` for the API surface, but the persistence layer
+        # stores ``owner_id`` as ``String(64)`` and aiosqlite cannot
+        # bind a raw UUID object to a VARCHAR column ("type 'UUID' is
+        # not supported"). Honour the documented return type here
+        # rather than ripple a type change through every caller.
+        return str(user.id)
     return value

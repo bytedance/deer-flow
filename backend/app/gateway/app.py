@@ -61,21 +61,30 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     """
     import secrets
 
+    from app.gateway.auth.credential_file import write_initial_credentials
     from app.gateway.deps import get_local_provider
+
+    def _announce_credentials(email: str, password: str, *, label: str, headline: str) -> None:
+        """Write the password to a 0600 file and log the path (never the secret)."""
+        cred_path = write_initial_credentials(email, password, label=label)
+        logger.info("=" * 60)
+        logger.info("  %s", headline)
+        logger.info("  Credentials written to: %s (mode 0600)", cred_path)
+        logger.info("  Change it after login: Settings -> Account")
+        logger.info("=" * 60)
 
     provider = get_local_provider()
     user_count = await provider.count_users()
 
     admin = None
-    fresh_admin_created = False
 
     if user_count == 0:
         password = secrets.token_urlsafe(16)
         try:
             admin = await provider.create_user(email="admin@deerflow.dev", password=password, system_role="admin", needs_setup=True)
-            fresh_admin_created = True
         except ValueError:
             return  # Another worker already created the admin.
+        _announce_credentials(admin.email, password, label="initial", headline="Admin account created on first boot")
     else:
         # Admin exists but setup never completed — reset password so operator
         # can always find it in the console without needing the CLI.
@@ -87,20 +96,13 @@ async def _ensure_admin_user(app: FastAPI) -> None:
 
             age = time.time() - admin.created_at.replace(tzinfo=UTC).timestamp()
             if age >= 30:
-                from app.gateway.auth.credential_file import write_initial_credentials
                 from app.gateway.auth.password import hash_password_async
 
                 password = secrets.token_urlsafe(16)
                 admin.password_hash = await hash_password_async(password)
                 admin.token_version += 1
                 await provider.update_user(admin)
-
-                cred_path = write_initial_credentials(admin.email, password, label="reset")
-                logger.info("=" * 60)
-                logger.info("  Admin account setup incomplete — password reset")
-                logger.info("  Credentials written to: %s (mode 0600)", cred_path)
-                logger.info("  Change it after login: Settings -> Account")
-                logger.info("=" * 60)
+                _announce_credentials(admin.email, password, label="reset", headline="Admin account setup incomplete — password reset")
 
     if admin is None:
         return  # Nothing to bind orphans to.
@@ -118,16 +120,6 @@ async def _ensure_admin_user(app: FastAPI) -> None:
                 logger.info("Migrated %d orphan LangGraph thread(s) to admin", migrated)
         except Exception:
             logger.exception("LangGraph thread migration failed (non-fatal)")
-
-    if fresh_admin_created:
-        from app.gateway.auth.credential_file import write_initial_credentials
-
-        cred_path = write_initial_credentials(admin.email, password, label="initial")  # noqa: F821 — defined in the fresh_admin branch
-        logger.info("=" * 60)
-        logger.info("  Admin account created on first boot")
-        logger.info("  Credentials written to: %s (mode 0600)", cred_path)
-        logger.info("  Change it after login: Settings -> Account")
-        logger.info("=" * 60)
 
 
 async def _iter_store_items(store, namespace, *, page_size: int = 500):

@@ -11,12 +11,13 @@ Fine-grained permission checks remain in authz.py decorators.
 
 from collections.abc import Callable
 
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
-from app.gateway.auth.errors import AuthErrorCode
+from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # Paths that never require authentication.
@@ -78,10 +79,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return JSONResponse(
                 status_code=401,
                 content={
-                    "detail": {
-                        "code": AuthErrorCode.NOT_AUTHENTICATED,
-                        "message": "Authentication required",
-                    }
+                    "detail": AuthErrorResponse(
+                        code=AuthErrorCode.NOT_AUTHENTICATED,
+                        message="Authentication required",
+                    ).model_dump()
                 },
             )
 
@@ -96,12 +97,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # propagate from AuthErrorCode, not get flattened into one
         # generic code. BaseHTTPMiddleware doesn't let HTTPException
         # bubble up, so we catch and render it as JSONResponse here.
-        #
-        # On success we stamp request.state.user and the contextvar
-        # so repository-layer owner filters work downstream without
-        # every route needing a decorator.
-        from fastapi import HTTPException
-
         from app.gateway.deps import get_current_user_from_request
 
         try:
@@ -109,7 +104,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
+        # Stamp both request.state.user (for the contextvar pattern)
+        # and request.state.auth (so @require_permission's "auth is
+        # None" branch short-circuits instead of running the entire
+        # JWT-decode + DB-lookup pipeline a second time per request).
         request.state.user = user
+        request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
         token = set_current_user(user)
         try:
             return await call_next(request)

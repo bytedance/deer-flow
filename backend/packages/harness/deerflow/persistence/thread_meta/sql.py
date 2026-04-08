@@ -77,16 +77,32 @@ class ThreadMetaRepository(ThreadMetaStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def check_access(self, thread_id: str, owner_id: str) -> bool:
-        """Check if owner_id has access to thread_id.
+    async def check_access(self, thread_id: str, owner_id: str, *, require_existing: bool = False) -> bool:
+        """Check if ``owner_id`` has access to ``thread_id``.
 
-        Returns True if: row doesn't exist (untracked thread), owner_id
-        is None on the row (shared thread), or owner_id matches.
+        Two modes — one row, two distinct semantics depending on what
+        the caller is about to do:
+
+        - ``require_existing=False`` (default, permissive):
+          Returns True for: row missing (untracked legacy thread),
+          ``row.owner_id`` is None (shared / pre-auth data),
+          or ``row.owner_id == owner_id``. Use for **read-style**
+          decorators where treating an untracked thread as accessible
+          preserves backward-compat.
+
+        - ``require_existing=True`` (strict):
+          Returns True **only** when the row exists AND
+          (``row.owner_id == owner_id`` OR ``row.owner_id is None``).
+          Use for **destructive / mutating** decorators (DELETE, PATCH,
+          state-update) so a thread that has *already been deleted*
+          cannot be re-targeted by any caller — closing the
+          delete-idempotence cross-user gap where the row vanishing
+          made every other user appear to "own" it.
         """
         async with self._sf() as session:
             row = await session.get(ThreadMetaRow, thread_id)
             if row is None:
-                return True
+                return not require_existing
             if row.owner_id is None:
                 return True
             return row.owner_id == owner_id

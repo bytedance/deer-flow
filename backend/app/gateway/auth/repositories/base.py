@@ -5,6 +5,16 @@ from abc import ABC, abstractmethod
 from app.gateway.auth.models import User
 
 
+class UserNotFoundError(LookupError):
+    """Raised when a user repository operation targets a non-existent row.
+
+    Subclass of :class:`LookupError` so callers that already catch
+    ``LookupError`` for "missing entity" can keep working unchanged,
+    while specific call sites can pin to this class to distinguish
+    "concurrent delete during update" from other lookups.
+    """
+
+
 class UserRepository(ABC):
     """Abstract interface for user data storage.
 
@@ -60,6 +70,11 @@ class UserRepository(ABC):
 
         Returns:
             Updated User
+
+        Raises:
+            UserNotFoundError: If no row exists for ``user.id``. This is
+                a hard failure (not a no-op) so callers cannot mistake a
+                concurrent-delete race for a successful update.
         """
         ...
 

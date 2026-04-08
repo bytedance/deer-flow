@@ -55,7 +55,7 @@ def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
 
 
 @router.post("", response_model=UploadResponse)
-@require_permission("threads", "write", owner_check=True)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
 async def upload_files(
     thread_id: str,
     request: Request,
@@ -155,7 +155,7 @@ async def list_uploaded_files(thread_id: str, request: Request) -> dict:
 
 
 @router.delete("/{filename}")
-@require_permission("threads", "delete", owner_check=True)
+@require_permission("threads", "delete", owner_check=True, require_existing=True)
 async def delete_uploaded_file(thread_id: str, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
