@@ -62,12 +62,18 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         options = args.get("options", [])
 
         # Some models (e.g. Qwen3-Max) serialize array parameters as JSON strings
-        # instead of native arrays. Deserialize to avoid per-character iteration.
+        # instead of native arrays. Deserialize and normalize so `options`
+        # is always a list for the rendering logic below.
         if isinstance(options, str):
             try:
                 options = json.loads(options)
             except (json.JSONDecodeError, TypeError):
                 options = [options]
+
+        if options is None:
+            options = []
+        elif not isinstance(options, list):
+            options = [options]
 
         # Type-specific icons
         type_icons = {

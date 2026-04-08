@@ -42,6 +42,18 @@ class TestFormatClarificationMessage:
         assert "1. [" not in result
         assert '2. "' not in result
 
+    def test_options_as_json_string_scalar(self, middleware):
+        """JSON string decoding to a non-list scalar is treated as one option."""
+        args = {
+            "question": "Which env?",
+            "clarification_type": "approach_choice",
+            "options": json.dumps("development"),
+        }
+        result = middleware._format_clarification_message(args)
+        assert "1. development" in result
+        # Must be a single option, not per-character iteration.
+        assert "2." not in result
+
     def test_options_as_plain_string(self, middleware):
         """Edge case: options is a non-JSON string, treated as single option."""
         args = {
@@ -94,13 +106,15 @@ class TestFormatClarificationMessage:
         assert "Which env?" in result
         assert "1. dev" in result
 
-    def test_json_string_with_nested_objects(self, middleware):
+    def test_json_string_with_mixed_types(self, middleware):
         """JSON string containing non-string elements still works."""
         args = {
             "question": "Pick one",
             "clarification_type": "approach_choice",
-            "options": json.dumps(["Option A", "Option B"]),
+            "options": json.dumps(["Option A", 2, True, None]),
         }
         result = middleware._format_clarification_message(args)
         assert "1. Option A" in result
-        assert "2. Option B" in result
+        assert "2. 2" in result
+        assert "3. True" in result
+        assert "4. None" in result
