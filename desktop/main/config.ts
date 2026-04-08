@@ -4,9 +4,94 @@ import type { DesktopPaths } from "./paths.js";
 
 export type DesktopProviderSetting = {
   id: string;
+  providerType: string;
   label: string;
   apiKeyEnv: string;
   baseUrl: string;
+  defaultModel: string;
+};
+
+export type ProviderPreset = {
+  label: string;
+  apiKeyEnv: string;
+  use: string;
+  baseUrl: string;
+  defaultModel: string;
+  apiKeyField?: string;
+};
+
+export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
+  openai: {
+    label: "OpenAI",
+    apiKeyEnv: "OPENAI_API_KEY",
+    use: "langchain_openai:ChatOpenAI",
+    baseUrl: "",
+    defaultModel: "gpt-4o",
+  },
+  anthropic: {
+    label: "Anthropic",
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    use: "langchain_anthropic:ChatAnthropic",
+    baseUrl: "",
+    defaultModel: "claude-sonnet-4-20250514",
+  },
+  google: {
+    label: "Google Gemini",
+    apiKeyEnv: "GEMINI_API_KEY",
+    use: "langchain_google_genai:ChatGoogleGenerativeAI",
+    baseUrl: "",
+    defaultModel: "gemini-2.5-pro",
+    apiKeyField: "gemini_api_key",
+  },
+  deepseek: {
+    label: "DeepSeek",
+    apiKeyEnv: "DEEPSEEK_API_KEY",
+    use: "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+    baseUrl: "https://api.deepseek.com/v1",
+    defaultModel: "deepseek-chat",
+  },
+  volcengine: {
+    label: "Volcengine (Doubao)",
+    apiKeyEnv: "VOLCENGINE_API_KEY",
+    use: "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    defaultModel: "doubao-seed-1-8-251228",
+  },
+  moonshot: {
+    label: "Moonshot (Kimi)",
+    apiKeyEnv: "MOONSHOT_API_KEY",
+    use: "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+    baseUrl: "https://api.moonshot.cn/v1",
+    defaultModel: "kimi-k2.5",
+  },
+  minimax: {
+    label: "MiniMax",
+    apiKeyEnv: "MINIMAX_API_KEY",
+    use: "langchain_openai:ChatOpenAI",
+    baseUrl: "https://api.minimax.io/v1",
+    defaultModel: "MiniMax-M2.5",
+  },
+  openrouter: {
+    label: "OpenRouter",
+    apiKeyEnv: "OPENROUTER_API_KEY",
+    use: "langchain_openai:ChatOpenAI",
+    baseUrl: "https://openrouter.ai/api/v1",
+    defaultModel: "",
+  },
+  novita: {
+    label: "Novita AI",
+    apiKeyEnv: "NOVITA_API_KEY",
+    use: "langchain_openai:ChatOpenAI",
+    baseUrl: "https://api.novita.ai/openai",
+    defaultModel: "",
+  },
+  "openai-compatible": {
+    label: "OpenAI-Compatible",
+    apiKeyEnv: "",
+    use: "langchain_openai:ChatOpenAI",
+    baseUrl: "",
+    defaultModel: "",
+  },
 };
 
 export type DesktopSettings = {
@@ -16,26 +101,7 @@ export type DesktopSettings = {
 
 const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   defaultModel: null,
-  providers: [
-    {
-      id: "openai",
-      label: "OpenAI",
-      apiKeyEnv: "OPENAI_API_KEY",
-      baseUrl: "",
-    },
-    {
-      id: "anthropic",
-      label: "Anthropic",
-      apiKeyEnv: "ANTHROPIC_API_KEY",
-      baseUrl: "",
-    },
-    {
-      id: "deepseek",
-      label: "DeepSeek",
-      apiKeyEnv: "DEEPSEEK_API_KEY",
-      baseUrl: "",
-    },
-  ],
+  providers: [],
 };
 
 export async function ensureDesktopDirectories(paths: DesktopPaths) {
