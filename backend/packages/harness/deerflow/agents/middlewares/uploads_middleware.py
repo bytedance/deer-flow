@@ -1,14 +1,22 @@
 """Middleware to inject uploaded files information into agent context."""
 
+import base64
+import json
 import logging
+import mimetypes
+import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.thread_state import UploadedImageDescriptionDocument
+from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import Paths, get_paths
 from deerflow.uploads.manager import enrich_file_listing, list_files_in_dir
 
@@ -17,12 +25,22 @@ logger = logging.getLogger(__name__)
 _VIEW_IMAGE_GUIDANCE = (
     "  This .docx includes extracted images. Before answering questions that depend on screenshots, diagrams, flowcharts, or other visual details, use `view_image` on those image paths instead of relying on markdown alone."
 )
+_DESCRIPTION_TAG = "document_image_descriptions"
+_DESCRIPTION_BLOCK_RE = re.compile(
+    rf"<{_DESCRIPTION_TAG}>\s*(.*?)\s*</{_DESCRIPTION_TAG}>",
+    re.DOTALL,
+)
+_FAILED_DESCRIPTION_TEXT = (
+    "Image descriptions unavailable. This document's extracted images were not successfully described during the "
+    "automatic vision pass. Use `view_image` on the extracted image paths if visual details matter."
+)
 
 
 class UploadsMiddlewareState(AgentState):
     """State schema for uploads middleware."""
 
     uploaded_files: NotRequired[list[dict] | None]
+    uploaded_image_descriptions: NotRequired[dict[str, UploadedImageDescriptionDocument] | None]
 
 
 class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
@@ -43,6 +61,28 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """
         super().__init__()
         self._paths = Paths(base_dir) if base_dir else get_paths()
+
+    def _append_file_details(self, lines: list[str], file: dict) -> None:
+        """Append per-file details based on image description state."""
+        image_status = file.get("image_description_status")
+
+        if image_status == "parsed" and file.get("image_descriptions"):
+            lines.append("  Persisted image descriptions:")
+            for index, image in enumerate(file["image_descriptions"], start=1):
+                lines.append(f"    {index}. {image['description']}")
+            return
+
+        if image_status == "failed":
+            lines.append(f"  {_FAILED_DESCRIPTION_TEXT}")
+
+        extracted_images = file.get("extracted_images", [])
+        for image in extracted_images:
+            lines.append("  Extracted images for vision analysis:")
+            lines.append(f"  Image: {image['filename']}")
+            lines.append(f"    Path: {image['path']}")
+
+        if extracted_images:
+            lines.append(_VIEW_IMAGE_GUIDANCE)
 
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
         """Create a formatted message listing uploaded files.
@@ -67,12 +107,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 if file.get("markdown_file") and file.get("markdown_path"):
                     lines.append(f"  Converted Markdown: {file['markdown_file']}")
                     lines.append(f"    Path: {file['markdown_path']}")
-                for image in file.get("extracted_images", []):
-                    lines.append("  Extracted images for vision analysis:")
-                    lines.append(f"  Image: {image['filename']}")
-                    lines.append(f"    Path: {image['path']}")
-                if file.get("extracted_images"):
-                    lines.append(_VIEW_IMAGE_GUIDANCE)
+                self._append_file_details(lines, file)
                 lines.append("")
         else:
             lines.append("(empty)")
@@ -85,12 +120,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
                 lines.append(f"- {file['filename']} ({size_str})")
                 lines.append(f"  Path: {file['path']}")
-                for image in file.get("extracted_images", []):
-                    lines.append("  Extracted images for vision analysis:")
-                    lines.append(f"  Image: {image['filename']}")
-                    lines.append(f"    Path: {image['path']}")
-                if file.get("extracted_images"):
-                    lines.append(_VIEW_IMAGE_GUIDANCE)
+                self._append_file_details(lines, file)
                 lines.append("")
 
         lines.append("You can read these files using the `read_file` tool with the paths shown above.")
@@ -211,6 +241,298 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             historical_files.append(historical_file)
         return historical_files
 
+    def _attach_image_descriptions(
+        self,
+        files: list[dict],
+        uploaded_image_descriptions: dict[str, UploadedImageDescriptionDocument] | None,
+    ) -> list[dict]:
+        """Attach persisted image descriptions onto matching document entries."""
+        descriptions = uploaded_image_descriptions or {}
+        for file in files:
+            doc_description = descriptions.get(file["filename"])
+            if not doc_description:
+                continue
+            file["image_description_status"] = doc_description.get("status", "parsed")
+            images = doc_description.get("images")
+            if isinstance(images, list) and images:
+                file["image_descriptions"] = images
+        return files
+
+    def _clear_reuploaded_doc_descriptions(
+        self,
+        uploaded_image_descriptions: dict[str, UploadedImageDescriptionDocument] | None,
+        new_files: list[dict],
+    ) -> tuple[dict[str, UploadedImageDescriptionDocument], bool]:
+        """Drop persisted descriptions for newly uploaded docx files."""
+        cleaned = dict(uploaded_image_descriptions or {})
+        changed = False
+        for file in new_files:
+            if Path(file["filename"]).suffix.lower() != ".docx":
+                continue
+            if file["filename"] in cleaned:
+                cleaned.pop(file["filename"], None)
+                changed = True
+        return cleaned, changed
+
+    def _runtime_supports_vision(self, runtime: Runtime) -> bool:
+        """Return whether the active runtime model supports image inputs."""
+        app_config = get_app_config()
+        runtime_context = runtime.context or {}
+        model_name = runtime_context.get("model_name")
+        if model_name is None and app_config.models:
+            model_name = app_config.models[0].name
+        model_config = app_config.get_model_config(model_name) if model_name else None
+        return bool(model_config and model_config.supports_vision)
+
+    def _get_pending_docx_files(self, state: UploadsMiddlewareState) -> list[dict]:
+        """Return newly uploaded docx files that do not yet have persisted results."""
+        uploaded_image_descriptions = state.get("uploaded_image_descriptions") or {}
+        pending_files = []
+        for file in state.get("uploaded_files") or []:
+            if Path(file["filename"]).suffix.lower() != ".docx":
+                continue
+            if not file.get("extracted_images"):
+                continue
+            if uploaded_image_descriptions.get(file["filename"]):
+                continue
+            pending_files.append(file)
+        return pending_files
+
+    def _get_visual_context_documents(self, state: UploadsMiddlewareState, runtime: Runtime) -> list[dict]:
+        """Return docx files whose extracted images can be injected for vision analysis."""
+        thread_id = (runtime.context or {}).get("thread_id")
+        if not thread_id:
+            return []
+
+        uploads_dir = self._paths.sandbox_uploads_dir(thread_id)
+        if not uploads_dir.exists():
+            return []
+
+        visual_documents: list[dict] = []
+        for file in self._get_pending_docx_files(state):
+            validated_images = []
+            for image in file.get("extracted_images") or []:
+                image_filename = image.get("filename")
+                if not image_filename:
+                    continue
+
+                actual_path = uploads_dir / image_filename
+                if not actual_path.is_file():
+                    continue
+
+                mime_type, _ = mimetypes.guess_type(actual_path.name)
+                if not mime_type or not mime_type.startswith("image/"):
+                    continue
+
+                validated_images.append(
+                    {
+                        **image,
+                        "mime_type": mime_type,
+                        "actual_path": actual_path,
+                    }
+                )
+            if validated_images:
+                visual_documents.append({**file, "validated_images": validated_images})
+        return visual_documents
+
+    def _create_uploaded_visual_context_message(self, state: UploadsMiddlewareState, runtime: Runtime) -> HumanMessage | None:
+        """Build a multimodal message for extracted document images."""
+        visual_documents = self._get_visual_context_documents(state, runtime)
+        if not visual_documents:
+            return None
+
+        content_blocks: list[dict] = []
+        text_sections = [
+            "<document_visual_context>",
+            "The following images were extracted from uploaded documents in this turn.",
+            "Use direct vision analysis on them.",
+            "Summarize the relevant visual information and treat that summary as part of the corresponding document context before answering.",
+            "You must include a machine-parseable JSON payload inside the tags below.",
+            f"<{_DESCRIPTION_TAG}>",
+            '{"documents":[{"document":"<docx filename>","markdown_path":"<optional markdown path>","images":[{"filename":"<image filename>","description":"<short factual description>"}]}]}',
+            f"</{_DESCRIPTION_TAG}>",
+            "Keep your normal user-facing answer outside those tags.",
+            "",
+        ]
+
+        for file in visual_documents:
+            file_lines = [f"Document: {file['filename']}"]
+            markdown_path = file.get("markdown_path")
+            if markdown_path:
+                file_lines.append(f"Converted markdown: {markdown_path}")
+
+            for image in file["validated_images"]:
+                image_base64 = base64.b64encode(image["actual_path"].read_bytes()).decode("utf-8")
+                file_lines.append(f"Image path: {image.get('path', f'/mnt/user-data/uploads/{image['filename']}')}")
+                content_blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{image['mime_type']};base64,{image_base64}"},
+                    }
+                )
+            text_sections.extend(file_lines)
+            text_sections.append("")
+
+        text_sections.append("</document_visual_context>")
+        content_blocks.insert(0, {"type": "text", "text": "\n".join(text_sections)})
+        return HumanMessage(content=content_blocks, name="uploaded_document_visual_context")
+
+    def _normalize_content(self, content: object) -> str:
+        """Flatten structured model content into plain text for payload parsing."""
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            parts = [self._normalize_content(item) for item in content]
+            return "\n".join(part for part in parts if part)
+
+        if isinstance(content, dict):
+            text_value = content.get("text")
+            if isinstance(text_value, str):
+                return text_value
+
+            nested_content = content.get("content")
+            if nested_content is not None:
+                return self._normalize_content(nested_content)
+
+        return ""
+
+    def _strip_description_payload(self, content: object) -> object:
+        """Remove the machine payload from visible assistant content."""
+        if isinstance(content, str):
+            return _DESCRIPTION_BLOCK_RE.sub("", content).strip()
+        if isinstance(content, list):
+            stripped_blocks: list[object] = []
+            for block in content:
+                cleaned_block = self._strip_description_payload(block)
+                if cleaned_block in ("", None, []):
+                    continue
+                stripped_blocks.append(cleaned_block)
+            return stripped_blocks
+        if isinstance(content, dict):
+            updated = dict(content)
+
+            text = updated.get("text")
+            if isinstance(text, str):
+                cleaned_text = _DESCRIPTION_BLOCK_RE.sub("", text).strip()
+                if not cleaned_text:
+                    return None
+                updated["text"] = cleaned_text
+
+            nested_content = updated.get("content")
+            if nested_content is not None:
+                cleaned_nested = self._strip_description_payload(nested_content)
+                if cleaned_nested in ("", None, []):
+                    updated.pop("content", None)
+                else:
+                    updated["content"] = cleaned_nested
+
+            return updated
+        return content
+
+    def _build_parsed_uploaded_image_descriptions(
+        self,
+        parsed_documents: dict[str, UploadedImageDescriptionDocument],
+        uploaded_files: list[dict] | None,
+    ) -> dict[str, UploadedImageDescriptionDocument]:
+        """Attach known extracted-image paths onto parsed descriptions."""
+        file_lookup = {file["filename"]: file for file in uploaded_files or []}
+        enriched: dict[str, UploadedImageDescriptionDocument] = {}
+        for document_name, document in parsed_documents.items():
+            file_info = file_lookup.get(document_name) or {}
+            image_lookup = {
+                image["filename"]: image
+                for image in file_info.get("extracted_images", [])
+                if isinstance(image, dict) and image.get("filename")
+            }
+
+            enriched_images = []
+            for image in document["images"]:
+                image_info = image_lookup.get(image["filename"], {})
+                enriched_image = dict(image)
+                if image_info.get("path"):
+                    enriched_image["path"] = image_info["path"]
+                enriched_images.append(enriched_image)
+
+            enriched[document_name] = {
+                "status": "parsed",
+                "document": document["document"],
+                "markdown_path": document.get("markdown_path"),
+                "images": enriched_images,
+            }
+        return enriched
+
+    def _build_failed_uploaded_image_descriptions(self, state: UploadsMiddlewareState) -> dict[str, UploadedImageDescriptionDocument]:
+        """Create placeholder results for docx images whose automatic vision pass failed."""
+        failed_documents: dict[str, UploadedImageDescriptionDocument] = {}
+        for file in self._get_pending_docx_files(state):
+            failed_documents[file["filename"]] = {
+                "status": "failed",
+                "document": file["filename"],
+                "markdown_path": file.get("markdown_path"),
+                "images": [
+                    {
+                        "filename": image["filename"],
+                        "path": image.get("path"),
+                        "description": _FAILED_DESCRIPTION_TEXT,
+                    }
+                    for image in file.get("extracted_images", [])
+                ],
+            }
+        return failed_documents
+
+    def _parse_uploaded_image_descriptions(self, content: object) -> dict[str, UploadedImageDescriptionDocument] | None:
+        """Parse a deterministic document-image-description payload from assistant output."""
+        normalized_content = self._normalize_content(content)
+        match = _DESCRIPTION_BLOCK_RE.search(normalized_content)
+        if not match:
+            return None
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None
+        documents = payload.get("documents")
+        if not isinstance(documents, list):
+            return None
+
+        parsed: dict[str, UploadedImageDescriptionDocument] = {}
+        for document in documents:
+            if not isinstance(document, dict):
+                return None
+            filename = document.get("document")
+            if not isinstance(filename, str) or not filename or Path(filename).name != filename:
+                return None
+            images = document.get("images")
+            if not isinstance(images, list) or not images:
+                return None
+            parsed_images: list[dict] = []
+            for image in images:
+                if not isinstance(image, dict):
+                    return None
+                image_filename = image.get("filename")
+                description = image.get("description")
+                if (
+                    not isinstance(image_filename, str)
+                    or not image_filename
+                    or Path(image_filename).name != image_filename
+                    or not isinstance(description, str)
+                    or not description.strip()
+                ):
+                    return None
+                parsed_images.append(
+                    {
+                        "filename": image_filename,
+                        "description": description.strip(),
+                    }
+                )
+            parsed[filename] = {
+                "status": "parsed",
+                "document": filename,
+                "markdown_path": document.get("markdown_path"),
+                "images": parsed_images,
+            }
+        return parsed or None
+
     @override
     def before_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
         """Inject uploaded files information before agent execution.
@@ -246,11 +568,17 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
+        uploaded_image_descriptions, descriptions_changed = self._clear_reuploaded_doc_descriptions(
+            state.get("uploaded_image_descriptions"),
+            new_files,
+        )
+        self._attach_image_descriptions(new_files, uploaded_image_descriptions)
 
         # Collect historical files from the uploads directory (all except the new ones)
         historical_files: list[dict] = []
         if uploads_dir and uploads_dir.exists() and thread_id:
             historical_files = self._load_historical_files(uploads_dir, thread_id, self._collect_related_new_filenames(new_files))
+        self._attach_image_descriptions(historical_files, uploaded_image_descriptions)
 
         if not new_files and not historical_files:
             return None
@@ -282,7 +610,71 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         messages[last_message_index] = updated_message
 
-        return {
+        result = {
             "uploaded_files": new_files,
             "messages": messages,
         }
+        if descriptions_changed:
+            result["uploaded_image_descriptions"] = uploaded_image_descriptions
+        return result
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        """Temporarily append docx images to the current model request only."""
+        if self._runtime_supports_vision(request.runtime):
+            visual_message = self._create_uploaded_visual_context_message(request.state, request.runtime)
+            if visual_message is not None:
+                request = request.override(messages=[*request.messages, visual_message])
+        return handler(request)
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        """Async version of wrap_model_call."""
+        if self._runtime_supports_vision(request.runtime):
+            visual_message = self._create_uploaded_visual_context_message(request.state, request.runtime)
+            if visual_message is not None:
+                request = request.override(messages=[*request.messages, visual_message])
+        return await handler(request)
+
+    @override
+    def after_model(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
+        """Persist deterministic image descriptions emitted by the first multimodal turn."""
+        messages = state.get("messages", [])
+        if not messages:
+            return None
+        last_message = messages[-1]
+        if not isinstance(last_message, AIMessage):
+            return None
+
+        stripped_content = self._strip_description_payload(last_message.content)
+        parsed = self._parse_uploaded_image_descriptions(last_message.content)
+        updates: dict[str, object] = {}
+
+        if stripped_content != last_message.content:
+            updates["messages"] = [last_message.model_copy(update={"content": stripped_content})]
+
+        if parsed:
+            merged = dict(state.get("uploaded_image_descriptions") or {})
+            merged.update(self._build_parsed_uploaded_image_descriptions(parsed, state.get("uploaded_files")))
+            updates["uploaded_image_descriptions"] = merged
+        elif self._runtime_supports_vision(runtime) and self._create_uploaded_visual_context_message(state, runtime) is not None:
+            failed = self._build_failed_uploaded_image_descriptions(state)
+            if failed:
+                merged = dict(state.get("uploaded_image_descriptions") or {})
+                merged.update(failed)
+                updates["uploaded_image_descriptions"] = merged
+
+        return updates or None
+
+    @override
+    async def aafter_model(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
+        """Async version of after_model."""
+        return self.after_model(state, runtime)
