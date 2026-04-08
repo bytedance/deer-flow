@@ -15,6 +15,11 @@ class SubagentOverrideConfig(BaseModel):
         ge=1,
         description="Timeout in seconds for this subagent (None = use global default)",
     )
+    max_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum turns for this subagent (None = use global or builtin default)",
+    )
 
 
 class SubagentsAppConfig(BaseModel):
@@ -24,6 +29,11 @@ class SubagentsAppConfig(BaseModel):
         default=900,
         ge=1,
         description="Default timeout in seconds for all subagents (default: 900 = 15 minutes)",
+    )
+    max_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional default max-turn override for all subagents (None = keep builtin defaults)",
     )
     agents: dict[str, SubagentOverrideConfig] = Field(
         default_factory=dict,
@@ -44,6 +54,15 @@ class SubagentsAppConfig(BaseModel):
             return override.timeout_seconds
         return self.timeout_seconds
 
+    def get_max_turns_for(self, agent_name: str, builtin_default: int) -> int:
+        """Get the effective max_turns for a specific agent."""
+        override = self.agents.get(agent_name)
+        if override is not None and override.max_turns is not None:
+            return override.max_turns
+        if self.max_turns is not None:
+            return self.max_turns
+        return builtin_default
+
 
 _subagents_config: SubagentsAppConfig = SubagentsAppConfig()
 
@@ -58,8 +77,26 @@ def load_subagents_config_from_dict(config_dict: dict) -> None:
     global _subagents_config
     _subagents_config = SubagentsAppConfig(**config_dict)
 
-    overrides_summary = {name: f"{override.timeout_seconds}s" for name, override in _subagents_config.agents.items() if override.timeout_seconds is not None}
+    overrides_summary = {}
+    for name, override in _subagents_config.agents.items():
+        parts = []
+        if override.timeout_seconds is not None:
+            parts.append(f"timeout={override.timeout_seconds}s")
+        if override.max_turns is not None:
+            parts.append(f"max_turns={override.max_turns}")
+        if parts:
+            overrides_summary[name] = ", ".join(parts)
+
     if overrides_summary:
-        logger.info(f"Subagents config loaded: default timeout={_subagents_config.timeout_seconds}s, per-agent overrides={overrides_summary}")
+        logger.info(
+            "Subagents config loaded: default timeout=%ss, default max_turns=%s, per-agent overrides=%s",
+            _subagents_config.timeout_seconds,
+            _subagents_config.max_turns,
+            overrides_summary,
+        )
     else:
-        logger.info(f"Subagents config loaded: default timeout={_subagents_config.timeout_seconds}s, no per-agent overrides")
+        logger.info(
+            "Subagents config loaded: default timeout=%ss, default max_turns=%s, no per-agent overrides",
+            _subagents_config.timeout_seconds,
+            _subagents_config.max_turns,
+        )

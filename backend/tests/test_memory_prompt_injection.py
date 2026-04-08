@@ -154,3 +154,22 @@ def test_format_memory_renders_correction_without_source_error_normally() -> Non
 
     assert "Use make dev for local development." in result
     assert "avoid:" not in result
+
+
+def test_format_memory_includes_long_term_background() -> None:
+    """longTermBackground in history must be injected into the prompt."""
+    memory_data = {
+        "user": {},
+        "history": {
+            "recentMonths": {"summary": "Recent activity summary"},
+            "earlierContext": {"summary": "Earlier context summary"},
+            "longTermBackground": {"summary": "Core expertise in distributed systems"},
+        },
+        "facts": [],
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "Background: Core expertise in distributed systems" in result
+    assert "Recent: Recent activity summary" in result
+    assert "Earlier: Earlier context summary" in result
