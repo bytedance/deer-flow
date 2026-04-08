@@ -118,13 +118,16 @@ class CronSchedulerService:
     async def run_forever(self) -> None:
         """Run the scheduler loop until stopped."""
         while not self._stop_event.is_set():
+            # Clear before doing work so wake() calls that arrive during dispatch or
+            # sleep computation are preserved and can short-circuit the upcoming wait.
+            self._wake_event.clear()
+
             try:
                 await self.dispatch_due_jobs()
             except Exception:
                 logger.exception("Cron scheduler dispatch failed")
 
             sleep_seconds = await self.compute_sleep_seconds()
-            self._wake_event.clear()
 
             try:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=sleep_seconds)
