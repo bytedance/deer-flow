@@ -69,10 +69,7 @@ export function Hero({ className }: { className?: string }) {
             </div>
           </a>
         )}
-        <p
-          className="mt-8 scale-105 text-center text-2xl text-shadow-sm"
-          style={{ color: "rgb(184,184,192)" }}
-        >
+        <p className="text-muted-foreground mt-8 scale-105 text-center text-2xl text-shadow-sm">
           An open-source SuperAgent harness that researches, codes, and creates.
           With
           <br />
