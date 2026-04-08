@@ -15,7 +15,7 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 
 **Runtime Modes**:
 - **Standard mode** (`make dev`): LangGraph Server handles agent execution as a separate process. 4 processes total.
-- **Gateway mode** (`make dev-pro`, experimental): Agent runtime embedded in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Service manages its own concurrency via async tasks. 3 processes total, no LangGraph Server.
+- **Gateway mode** (`make dev-pro`, experimental): Agent runtime embedded in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Service manages its own concurrency via async tasks. Delayed runs created with `after_seconds` stay `pending` until the delay elapses, and cancelling before startup still closes the SSE stream cleanly. 3 processes total, no LangGraph Server.
 
 **Project Structure**:
 ```

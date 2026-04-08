@@ -328,7 +328,7 @@ DeerFlow supports multiple startup modes across two dimensions:
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
-> **Gateway mode** eliminates the LangGraph server process — the Gateway API handles agent execution directly via async tasks, managing its own concurrency.
+> **Gateway mode** eliminates the LangGraph server process — the Gateway API handles agent execution directly via async tasks, managing its own concurrency. The LangGraph-compatible runs API also honors `after_seconds` for delayed execution; delayed runs stay `pending` until the embedded runtime actually starts them.
 
 #### Why Gateway Mode?
 
