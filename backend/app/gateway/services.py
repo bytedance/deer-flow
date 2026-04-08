@@ -13,6 +13,7 @@ import logging
 import re
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -33,6 +34,52 @@ from deerflow.runtime import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CONTEXT_CONFIGURABLE_KEYS = {
+    "model_name",
+    "mode",
+    "thinking_enabled",
+    "reasoning_effort",
+    "is_plan_mode",
+    "subagent_enabled",
+    "max_concurrent_subagents",
+    "agent_name",
+    "is_bootstrap",
+}
+
+
+@dataclass(slots=True)
+class RunLaunchRequest:
+    """Non-HTTP payload that mirrors the run creation fields."""
+
+    assistant_id: str | None = None
+    input: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    config: dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
+    interrupt_before: Any = None
+    interrupt_after: Any = None
+    stream_mode: list[str] | str | None = None
+    stream_subgraphs: bool = False
+    on_disconnect: str = "cancel"
+    multitask_strategy: str = "reject"
+
+    @classmethod
+    def from_body(cls, body: Any) -> RunLaunchRequest:
+        """Build a dependency-free payload from the router request body."""
+        return cls(
+            assistant_id=getattr(body, "assistant_id", None),
+            input=getattr(body, "input", None),
+            metadata=getattr(body, "metadata", None),
+            config=getattr(body, "config", None),
+            context=getattr(body, "context", None),
+            interrupt_before=getattr(body, "interrupt_before", None),
+            interrupt_after=getattr(body, "interrupt_after", None),
+            stream_mode=getattr(body, "stream_mode", None),
+            stream_subgraphs=getattr(body, "stream_subgraphs", False),
+            on_disconnect=getattr(body, "on_disconnect", "cancel"),
+            multitask_strategy=getattr(body, "multitask_strategy", "reject"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +230,18 @@ def build_run_config(
     return config
 
 
+def apply_context_overrides(config: dict[str, Any], context: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge DeerFlow context into ``configurable`` without overriding caller values."""
+    if not context:
+        return config
+
+    configurable = config.setdefault("configurable", {})
+    for key in _CONTEXT_CONFIGURABLE_KEYS:
+        if key in context:
+            configurable.setdefault(key, context[key])
+    return config
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
@@ -258,7 +317,7 @@ async def start_run(
     thread_id: str,
     request: Request,
 ) -> RunRecord:
-    """Create a RunRecord and launch the background agent task.
+    """HTTP wrapper around :func:`start_run_with_deps`.
 
     Parameters
     ----------
@@ -270,60 +329,62 @@ async def start_run(
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
-    bridge = get_stream_bridge(request)
-    run_mgr = get_run_manager(request)
-    checkpointer = get_checkpointer(request)
-    store = get_store(request)
-
-    disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
-
     try:
-        record = await run_mgr.create_or_reject(
+        return await start_run_with_deps(
+            RunLaunchRequest.from_body(body),
             thread_id,
-            body.assistant_id,
-            on_disconnect=disconnect,
-            metadata=body.metadata or {},
-            kwargs={"input": body.input, "config": body.config},
-            multitask_strategy=body.multitask_strategy,
+            bridge=get_stream_bridge(request),
+            run_mgr=get_run_manager(request),
+            checkpointer=get_checkpointer(request),
+            store=get_store(request),
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except UnsupportedStrategyError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
 
+
+async def start_run_with_deps(
+    payload: RunLaunchRequest,
+    thread_id: str,
+    *,
+    bridge: StreamBridge,
+    run_mgr: RunManager,
+    checkpointer: Any,
+    store: Any,
+) -> RunRecord:
+    """Create a RunRecord and launch the background task without FastAPI request state."""
+    disconnect = DisconnectMode.cancel if payload.on_disconnect == "cancel" else DisconnectMode.continue_
+    record = await run_mgr.create_or_reject(
+        thread_id,
+        payload.assistant_id,
+        on_disconnect=disconnect,
+        metadata=payload.metadata or {},
+        kwargs={"input": payload.input, "config": payload.config},
+        multitask_strategy=payload.multitask_strategy,
+    )
+
     # Ensure the thread is visible in /threads/search, even for threads that
     # were never explicitly created via POST /threads (e.g. stateless runs).
-    store = get_store(request)
     if store is not None:
-        await _upsert_thread_in_store(store, thread_id, body.metadata)
+        await _upsert_thread_in_store(store, thread_id, payload.metadata)
 
-    agent_factory = resolve_agent_factory(body.assistant_id)
-    graph_input = normalize_input(body.input)
-    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+    agent_factory = resolve_agent_factory(payload.assistant_id)
+    graph_input = normalize_input(payload.input)
+    config = build_run_config(
+        thread_id,
+        payload.config,
+        payload.metadata,
+        assistant_id=payload.assistant_id,
+    )
 
     # Merge DeerFlow-specific context overrides into configurable.
     # The ``context`` field is a custom extension for the langgraph-compat layer
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-    context = getattr(body, "context", None)
-    if context:
-        _CONTEXT_CONFIGURABLE_KEYS = {
-            "model_name",
-            "mode",
-            "thinking_enabled",
-            "reasoning_effort",
-            "is_plan_mode",
-            "subagent_enabled",
-            "max_concurrent_subagents",
-            "agent_name",
-            "is_bootstrap",
-        }
-        configurable = config.setdefault("configurable", {})
-        for key in _CONTEXT_CONFIGURABLE_KEYS:
-            if key in context:
-                configurable.setdefault(key, context[key])
+    apply_context_overrides(config, payload.context)
 
-    stream_modes = normalize_stream_modes(body.stream_mode)
+    stream_modes = normalize_stream_modes(payload.stream_mode)
 
     task = asyncio.create_task(
         run_agent(
@@ -336,9 +397,9 @@ async def start_run(
             graph_input=graph_input,
             config=config,
             stream_modes=stream_modes,
-            stream_subgraphs=body.stream_subgraphs,
-            interrupt_before=body.interrupt_before,
-            interrupt_after=body.interrupt_after,
+            stream_subgraphs=payload.stream_subgraphs,
+            interrupt_before=payload.interrupt_before,
+            interrupt_after=payload.interrupt_after,
         )
     )
     record.task = task
