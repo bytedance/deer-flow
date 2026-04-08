@@ -8,7 +8,13 @@ import {
   SquareArrowOutUpRightIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ImgHTMLAttributes,
+} from "react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 
@@ -251,7 +257,7 @@ export function ArtifactFileDetail({
               content={displayContent}
               isWriteFile={isWriteFile}
               language={language ?? "text"}
-              url={url}
+              threadId={threadId}
             />
           )}
         {isCodeFile && viewMode === "code" && (
@@ -276,12 +282,12 @@ export function ArtifactFilePreview({
   content,
   isWriteFile,
   language,
-  url,
+  threadId,
 }: {
   content: string;
   isWriteFile: boolean;
   language: string;
-  url?: string;
+  threadId: string;
 }) {
   if (language === "markdown") {
     return (
@@ -289,7 +295,12 @@ export function ArtifactFilePreview({
         <Streamdown
           className="size-full"
           {...streamdownPlugins}
-          components={{ a: ArtifactLink }}
+          components={{
+            a: ArtifactLink,
+            img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
+              <ArtifactPreviewImage {...props} threadId={threadId} />
+            ),
+          }}
         >
           {content ?? ""}
         </Streamdown>
@@ -307,4 +318,47 @@ export function ArtifactFilePreview({
     );
   }
   return null;
+}
+
+type MarkdownImageProps = ImgHTMLAttributes<HTMLImageElement> & {
+  node?: unknown;
+};
+
+function ArtifactPreviewImage({
+  src,
+  alt,
+  threadId,
+  node: _node,
+  onClick,
+  ...props
+}: MarkdownImageProps & {
+  threadId: string;
+}) {
+  if (!src) return null;
+
+  const url =
+    typeof src === "string" && src.startsWith("/mnt/")
+      ? urlOfArtifact({ filepath: src, threadId })
+      : src;
+
+  return (
+    <img
+      {...props}
+      alt={alt}
+      className={cn(
+        "max-w-full overflow-hidden rounded-lg",
+        typeof url === "string" && "cursor-pointer",
+        props.className,
+      )}
+      onClick={(event) => {
+        onClick?.(event);
+        if (event.defaultPrevented || typeof url !== "string") return;
+        if (event.currentTarget.closest("a")) return;
+        if (typeof window !== "undefined") {
+          window.open(url, "_blank", "noopener,noreferrer");
+        }
+      }}
+      src={url}
+    />
+  );
 }
