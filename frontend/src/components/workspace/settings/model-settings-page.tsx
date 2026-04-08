@@ -107,7 +107,7 @@ export function ModelSettingsPage() {
   useEffect(() => {
     void bridge?.getDesktopSettings?.().then((value) => {
       if (!value) return;
-      setProviders(value.providers ?? []);
+      setProviders((value.providers ?? []).filter((p) => p.providerType));
     });
     void bridge?.getSecretStatuses?.().then((value) => setSecretStatuses(value ?? {}));
   }, [bridge]);
