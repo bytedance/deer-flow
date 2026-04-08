@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -217,3 +218,38 @@ async def test_scheduler_run_loop_can_start_and_stop():
 
     assert wake_count >= 1
     assert service.task is None
+
+
+@pytest.mark.anyio
+async def test_scheduler_preserves_wake_signal_during_dispatch():
+    from deerflow.runtime.scheduler import CronSchedulerService
+
+    store = InMemoryStore()
+    dispatch_count = 0
+
+    async def fake_run_launcher(thread_id, payload):
+        return SimpleNamespace(run_id="run-loop")
+
+    service = CronSchedulerService(store, fake_run_launcher, poll_interval=10.0)
+
+    async def fake_dispatch(*, now=None, limit=100):
+        nonlocal dispatch_count
+        dispatch_count += 1
+        if dispatch_count == 1:
+            service.wake()
+        else:
+            service._stop_event.set()
+            service.wake()
+        return []
+
+    async def fake_compute_sleep_seconds(*, now=None, scan_limit=1000):
+        return 10.0
+
+    service.dispatch_due_jobs = fake_dispatch  # type: ignore[method-assign]
+    service.compute_sleep_seconds = fake_compute_sleep_seconds  # type: ignore[method-assign]
+
+    service.start()
+    await asyncio.sleep(0.05)
+    await service.stop()
+
+    assert dispatch_count >= 2
