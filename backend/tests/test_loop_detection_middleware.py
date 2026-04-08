@@ -7,8 +7,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
-    _TOOL_FREQ_HARD_STOP_MSG,
-    _TOOL_FREQ_WARNING_MSG,
     LoopDetectionMiddleware,
     _hash_tool_calls,
 )
