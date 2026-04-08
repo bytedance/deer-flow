@@ -112,6 +112,9 @@ class AioSandboxProvider(SandboxProvider):
         atexit.register(self.shutdown)
         self._register_signal_handlers()
 
+        # Reconcile orphaned containers from previous process lifecycles
+        self._reconcile_orphans()
+
         # Start idle checker if enabled
         if self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT) > 0:
             self._start_idle_checker()
@@ -174,6 +177,58 @@ class AioSandboxProvider(SandboxProvider):
             else:
                 resolved[key] = str(value)
         return resolved
+
+    # ── Startup reconciliation ────────────────────────────────────────────
+
+    def _reconcile_orphans(self) -> None:
+        """Reconcile orphaned containers left by previous process lifecycles.
+
+        On startup, enumerate all running containers matching our prefix.
+        Containers older than idle_timeout are destroyed immediately (they are
+        definitely orphaned). Younger containers are adopted into the warm pool
+        so the idle checker can reclaim them if nobody re-acquires them.
+
+        This closes the fundamental gap where in-memory state loss (process
+        restart, crash, SIGKILL) leaves Docker containers running forever.
+        """
+        try:
+            running = self._backend.list_running()
+        except Exception as e:
+            logger.warning(f"Failed to enumerate running containers during startup reconciliation: {e}")
+            return
+
+        if not running:
+            return
+
+        idle_timeout = self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT)
+        current_time = time.time()
+        adopted = 0
+        destroyed = 0
+
+        for info in running:
+            # Skip containers already tracked (shouldn't happen at startup, but be safe)
+            with self._lock:
+                if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
+                    continue
+
+            age = current_time - info.created_at if info.created_at > 0 else float("inf")
+
+            if idle_timeout > 0 and age > idle_timeout:
+                # Container is older than idle_timeout — definitely orphaned, destroy it
+                try:
+                    self._backend.destroy(info)
+                    destroyed += 1
+                    logger.info(f"Destroyed orphaned container {info.sandbox_id} (age: {age:.0f}s > idle_timeout: {idle_timeout}s)")
+                except Exception as e:
+                    logger.error(f"Failed to destroy orphaned container {info.sandbox_id}: {e}")
+            else:
+                # Container is young enough — adopt into warm pool for potential reuse
+                with self._lock:
+                    self._warm_pool[info.sandbox_id] = (info, current_time)
+                adopted += 1
+                logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
+
+        logger.info(f"Startup reconciliation complete: {destroyed} destroyed, {adopted} adopted, {len(running)} total found")
 
     # ── Deterministic ID ─────────────────────────────────────────────────
 
@@ -316,13 +371,23 @@ class AioSandboxProvider(SandboxProvider):
     # ── Signal handling ──────────────────────────────────────────────────
 
     def _register_signal_handlers(self) -> None:
-        """Register signal handlers for graceful shutdown."""
+        """Register signal handlers for graceful shutdown.
+
+        Handles SIGTERM, SIGINT, and SIGHUP (terminal close) to ensure
+        sandbox containers are cleaned up even when the user closes the terminal.
+        """
         self._original_sigterm = signal.getsignal(signal.SIGTERM)
         self._original_sigint = signal.getsignal(signal.SIGINT)
+        self._original_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
 
         def signal_handler(signum, frame):
             self.shutdown()
-            original = self._original_sigterm if signum == signal.SIGTERM else self._original_sigint
+            if signum == signal.SIGTERM:
+                original = self._original_sigterm
+            elif hasattr(signal, "SIGHUP") and signum == signal.SIGHUP:
+                original = self._original_sighup
+            else:
+                original = self._original_sigint
             if callable(original):
                 original(signum, frame)
             elif original == signal.SIG_DFL:
@@ -332,6 +397,8 @@ class AioSandboxProvider(SandboxProvider):
         try:
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
+            if hasattr(signal, "SIGHUP"):
+                signal.signal(signal.SIGHUP, signal_handler)
         except ValueError:
             logger.debug("Could not register signal handlers (not main thread)")
 

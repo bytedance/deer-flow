@@ -172,8 +172,12 @@ class LocalContainerBackend(SandboxBackend):
 
     def destroy(self, info: SandboxInfo) -> None:
         """Stop the container and release its port."""
-        if info.container_id:
-            self._stop_container(info.container_id)
+        # Prefer container_id, fall back to container_name (both accepted by docker stop).
+        # This ensures containers discovered via list_running() (which only has the name)
+        # can also be stopped.
+        stop_target = info.container_id or info.container_name
+        if stop_target:
+            self._stop_container(stop_target)
         # Extract port from sandbox_url for release
         try:
             from urllib.parse import urlparse
@@ -221,6 +225,97 @@ class LocalContainerBackend(SandboxBackend):
             sandbox_url=sandbox_url,
             container_name=container_name,
         )
+
+    def list_running(self) -> list[SandboxInfo]:
+        """Enumerate all running containers matching the configured prefix.
+
+        Uses ``docker ps --filter`` to find containers by name pattern,
+        then inspects each to build SandboxInfo with creation timestamp.
+
+        Note: Docker's ``--filter name=`` performs *substring* matching,
+        so a secondary ``startswith`` check is applied to ensure only
+        containers with the exact prefix are included.
+
+        Containers without port mappings are still included (with empty
+        sandbox_url) so that startup reconciliation can destroy orphans
+        regardless of their port state.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    self._runtime,
+                    "ps",
+                    "--filter",
+                    f"name={self._container_prefix}-",
+                    "--format",
+                    "{{.Names}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return []
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            logger.warning(f"Failed to list running containers: {e}")
+            return []
+
+        infos: list[SandboxInfo] = []
+        for container_name in result.stdout.strip().splitlines():
+            container_name = container_name.strip()
+            if not container_name.startswith(self._container_prefix + "-"):
+                continue
+
+            sandbox_id = container_name[len(self._container_prefix) + 1 :]
+            port = self._get_container_port(container_name)
+            created_at = self._get_container_created_at(container_name)
+            sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+            sandbox_url = f"http://{sandbox_host}:{port}" if port else ""
+
+            infos.append(
+                SandboxInfo(
+                    sandbox_id=sandbox_id,
+                    sandbox_url=sandbox_url,
+                    container_name=container_name,
+                    created_at=created_at,
+                )
+            )
+
+        logger.info(f"Found {len(infos)} running sandbox container(s)")
+        return infos
+
+    def _get_container_created_at(self, container_name: str) -> float:
+        """Get the creation timestamp of a container via inspect."""
+        try:
+            result = subprocess.run(
+                [self._runtime, "inspect", "-f", "{{.Created}}", container_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                from datetime import datetime
+
+                raw = result.stdout.strip()
+                # Docker returns ISO 8601 with nanoseconds, e.g. "2026-04-08T01:22:50.123456789Z"
+                # Truncate nanoseconds to microseconds for fromisoformat compatibility.
+                if "." in raw:
+                    dot_pos = raw.index(".")
+                    # Find the timezone suffix after fractional seconds
+                    tz_start = dot_pos + 1
+                    while tz_start < len(raw) and raw[tz_start].isdigit():
+                        tz_start += 1
+                    frac = raw[dot_pos + 1 : tz_start][:6]  # truncate to microseconds
+                    tz_suffix = raw[tz_start:]
+                    raw = raw[: dot_pos + 1] + frac + tz_suffix
+                # Replace trailing 'Z' with '+00:00' for fromisoformat
+                if raw.endswith("Z"):
+                    raw = raw[:-1] + "+00:00"
+                dt = datetime.fromisoformat(raw)
+                return dt.timestamp()
+        except Exception as e:
+            logger.debug(f"Could not get created_at for {container_name}: {e}")
+        return 0.0
 
     # ── Container operations ─────────────────────────────────────────────
 
