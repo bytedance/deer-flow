@@ -421,9 +421,9 @@ async def test_start_run_enqueue_waits_for_previous_run(monkeypatch: pytest.Monk
         request,
     )
 
-    await asyncio.sleep(0.05)
     assert second.status.value == "pending"
-    assert second_started.is_set() is False
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(second_started.wait(), timeout=0.05)
     assert started == [first.run_id]
 
     allow_first_to_finish.set()
@@ -448,6 +448,7 @@ async def test_start_run_enqueue_cancelled_before_start_does_not_run_agent(monke
     first_started = asyncio.Event()
     allow_first_to_finish = asyncio.Event()
     started: list[str] = []
+    queued_started = asyncio.Event()
 
     async def fake_run_agent(bridge_obj, run_manager, record, **kwargs):
         started.append(record.run_id)
@@ -455,6 +456,8 @@ async def test_start_run_enqueue_cancelled_before_start_does_not_run_agent(monke
         if len(started) == 1:
             first_started.set()
             await allow_first_to_finish.wait()
+        else:
+            queued_started.set()
         await run_manager.set_status(record.run_id, RunStatus.success)
         await bridge_obj.publish_end(record.run_id)
 
@@ -473,7 +476,8 @@ async def test_start_run_enqueue_cancelled_before_start_does_not_run_agent(monke
         request,
     )
 
-    await asyncio.sleep(0.05)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(queued_started.wait(), timeout=0.05)
     assert await run_mgr.cancel(queued.run_id) is True
     await asyncio.wait_for(queued.task, timeout=1)
 
@@ -490,3 +494,38 @@ async def test_start_run_enqueue_cancelled_before_start_does_not_run_agent(monke
 
     allow_first_to_finish.set()
     await asyncio.wait_for(first.task, timeout=1)
+
+
+@pytest.mark.anyio
+async def test_start_run_schedules_run_manager_cleanup(monkeypatch: pytest.MonkeyPatch):
+    """Completed gateway tasks should schedule RunManager cleanup to bound registry growth."""
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunStatus
+
+    request = _make_gateway_request()
+    run_mgr = request.app.state.run_manager
+    cleanup_calls: list[tuple[str, float]] = []
+    cleanup_called = asyncio.Event()
+
+    async def fake_run_agent(bridge, run_manager, record, **kwargs):
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        await bridge.publish_end(record.run_id)
+
+    async def fake_cleanup(run_id: str, *, delay: float = 300):
+        cleanup_calls.append((run_id, delay))
+        cleanup_called.set()
+
+    monkeypatch.setattr("app.gateway.services.run_agent", fake_run_agent)
+    monkeypatch.setattr("app.gateway.services.resolve_agent_factory", lambda assistant_id: object())
+    monkeypatch.setattr(run_mgr, "cleanup", fake_cleanup)
+
+    record = await start_run(
+        RunCreateRequest(input={"messages": [{"role": "user", "content": "cleanup"}]}),
+        "thread-1",
+        request,
+    )
+
+    await asyncio.wait_for(record.task, timeout=1)
+    await asyncio.wait_for(cleanup_called.wait(), timeout=1)
+    assert cleanup_calls == [(record.run_id, 300)]
