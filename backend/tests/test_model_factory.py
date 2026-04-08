@@ -690,3 +690,49 @@ def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
 
     assert captured.get("use_responses_api") is True
     assert captured.get("output_version") == "responses/v1"
+
+
+def test_thinking_model_auto_upgraded_to_patched_openai(monkeypatch):
+    """When supports_thinking=True and use=ChatOpenAI, factory should auto-upgrade to PatchedChatOpenAI."""
+    from deerflow.models.patched_openai import PatchedChatOpenAI
+
+    model = _make_model(
+        name="gemini-thinking",
+        use="langchain_openai:ChatOpenAI",
+        supports_thinking=True,
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    resolved_classes = []
+
+    original_resolve = factory_module.resolve_class
+
+    def tracking_resolve(path, base):
+        cls = original_resolve(path, base)
+        resolved_classes.append(cls)
+        return cls
+
+    monkeypatch.setattr(factory_module, "resolve_class", tracking_resolve)
+
+    instance = factory_module.create_chat_model(name="gemini-thinking", thinking_enabled=True)
+    assert isinstance(instance, PatchedChatOpenAI)
+
+
+def test_non_thinking_model_not_upgraded(monkeypatch):
+    """When supports_thinking=False, factory should NOT upgrade to PatchedChatOpenAI."""
+    model = _make_model(
+        name="gpt-4",
+        use="langchain_openai:ChatOpenAI",
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    instance = factory_module.create_chat_model(name="gpt-4")
+    assert not isinstance(instance, type("PatchedChatOpenAI", (), {}))
+    # Should be the plain ChatOpenAI from langchain_openai
+    from langchain_openai import ChatOpenAI
+
+    assert isinstance(instance, ChatOpenAI)
