@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
+
+import pytest
+from fastapi import FastAPI
 
 
 def test_format_sse_basic():
@@ -340,3 +345,148 @@ def test_build_run_config_no_request_config():
     config = build_run_config("thread-abc", None, None)
     assert config["configurable"] == {"thread_id": "thread-abc"}
     assert "context" not in config
+
+
+class CountingBridge:
+    """Small wrapper around MemoryStreamBridge that counts publish_end calls."""
+
+    def __init__(self):
+        from deerflow.runtime import MemoryStreamBridge
+
+        self._bridge = MemoryStreamBridge(queue_maxsize=32)
+        self.end_calls: list[str] = []
+
+    async def publish(self, run_id: str, event: str, data):
+        await self._bridge.publish(run_id, event, data)
+
+    async def publish_end(self, run_id: str):
+        self.end_calls.append(run_id)
+        await self._bridge.publish_end(run_id)
+
+    def subscribe(self, run_id: str, *, last_event_id: str | None = None, heartbeat_interval: float = 15.0):
+        return self._bridge.subscribe(run_id, last_event_id=last_event_id, heartbeat_interval=heartbeat_interval)
+
+    async def cleanup(self, run_id: str, *, delay: float = 0):
+        await self._bridge.cleanup(run_id, delay=delay)
+
+
+def _make_gateway_request():
+    from deerflow.runtime import RunManager
+
+    app = FastAPI()
+    app.state.stream_bridge = CountingBridge()
+    app.state.run_manager = RunManager()
+    app.state.checkpointer = SimpleNamespace()
+    app.state.store = None
+    return SimpleNamespace(app=app)
+
+
+@pytest.mark.anyio
+async def test_start_run_enqueue_waits_for_previous_run(monkeypatch: pytest.MonkeyPatch):
+    """Second enqueue run should not call run_agent until the earlier run finishes."""
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunStatus
+
+    request = _make_gateway_request()
+    run_mgr = request.app.state.run_manager
+    started: list[str] = []
+    first_started = asyncio.Event()
+    allow_first_to_finish = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def fake_run_agent(bridge, run_manager, record, **kwargs):
+        started.append(record.run_id)
+        await run_manager.set_status(record.run_id, RunStatus.running)
+        if len(started) == 1:
+            first_started.set()
+            await allow_first_to_finish.wait()
+        else:
+            second_started.set()
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        await bridge.publish_end(record.run_id)
+
+    monkeypatch.setattr("app.gateway.services.run_agent", fake_run_agent)
+    monkeypatch.setattr("app.gateway.services.resolve_agent_factory", lambda assistant_id: object())
+
+    first = await start_run(RunCreateRequest(input={"messages": [{"role": "user", "content": "first"}]}), "thread-1", request)
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+
+    second = await start_run(
+        RunCreateRequest(
+            input={"messages": [{"role": "user", "content": "second"}]},
+            multitask_strategy="enqueue",
+        ),
+        "thread-1",
+        request,
+    )
+
+    await asyncio.sleep(0.05)
+    assert second.status.value == "pending"
+    assert second_started.is_set() is False
+    assert started == [first.run_id]
+
+    allow_first_to_finish.set()
+    await asyncio.wait_for(first.task, timeout=1)
+    await asyncio.wait_for(second.task, timeout=1)
+
+    assert second_started.is_set() is True
+    assert started == [first.run_id, second.run_id]
+    assert run_mgr.get(second.run_id).status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_start_run_enqueue_cancelled_before_start_does_not_run_agent(monkeypatch: pytest.MonkeyPatch):
+    """Queued runs cancelled before start should emit END and never call run_agent."""
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import END_SENTINEL, RunStatus
+
+    request = _make_gateway_request()
+    bridge = request.app.state.stream_bridge
+    run_mgr = request.app.state.run_manager
+    first_started = asyncio.Event()
+    allow_first_to_finish = asyncio.Event()
+    started: list[str] = []
+
+    async def fake_run_agent(bridge_obj, run_manager, record, **kwargs):
+        started.append(record.run_id)
+        await run_manager.set_status(record.run_id, RunStatus.running)
+        if len(started) == 1:
+            first_started.set()
+            await allow_first_to_finish.wait()
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        await bridge_obj.publish_end(record.run_id)
+
+    monkeypatch.setattr("app.gateway.services.run_agent", fake_run_agent)
+    monkeypatch.setattr("app.gateway.services.resolve_agent_factory", lambda assistant_id: object())
+
+    first = await start_run(RunCreateRequest(input={"messages": [{"role": "user", "content": "first"}]}), "thread-1", request)
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+
+    queued = await start_run(
+        RunCreateRequest(
+            input={"messages": [{"role": "user", "content": "queued"}]},
+            multitask_strategy="enqueue",
+        ),
+        "thread-1",
+        request,
+    )
+
+    await asyncio.sleep(0.05)
+    assert await run_mgr.cancel(queued.run_id) is True
+    await asyncio.wait_for(queued.task, timeout=1)
+
+    events = []
+    async for entry in bridge.subscribe(queued.run_id, heartbeat_interval=0.01):
+        events.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    assert started == [first.run_id]
+    assert queued.status == RunStatus.interrupted
+    assert bridge.end_calls.count(queued.run_id) == 1
+    assert events == [END_SENTINEL]
+
+    allow_first_to_finish.set()
+    await asyncio.wait_for(first.task, timeout=1)
