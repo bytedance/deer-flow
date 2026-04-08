@@ -5,14 +5,17 @@ import logging
 import math
 import re
 import uuid
-from datetime import datetime
 from typing import Any
 
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
-from deerflow.agents.memory.storage import create_empty_memory, get_memory_storage
+from deerflow.agents.memory.storage import (
+    create_empty_memory,
+    get_memory_storage,
+    utc_now_iso_z,
+)
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
 
@@ -86,7 +89,7 @@ def create_memory_fact(
 
     normalized_category = category.strip() or "context"
     validated_confidence = _validate_confidence(confidence)
-    now = datetime.utcnow().isoformat() + "Z"
+    now = utc_now_iso_z()
     memory_data = get_memory_data(agent_name)
     updated_memory = dict(memory_data)
     facts = list(memory_data.get("facts", []))
@@ -376,7 +379,7 @@ class MemoryUpdater:
             Updated memory data.
         """
         config = get_memory_config()
-        now = datetime.utcnow().isoformat() + "Z"
+        now = utc_now_iso_z()
 
         # Update user sections
         user_updates = update_data.get("user", {})

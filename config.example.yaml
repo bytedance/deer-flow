@@ -304,6 +304,23 @@ tools:
   #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
   #   search_time_range: 10
 
+  # Web search tool (uses Exa, requires EXA_API_KEY)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.exa.tools:web_search_tool
+  #   max_results: 5
+  #   search_type: auto  # Options: auto, neural, keyword
+  #   contents_max_characters: 1000
+  #   # api_key: $EXA_API_KEY
+
+  # Web fetch tool (uses Exa)
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry below before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.exa.tools:web_fetch_tool
+  #   # api_key: $EXA_API_KEY
+
   # Web fetch tool (uses Jina AI reader)
   - name: web_fetch
     group: web
@@ -618,6 +635,14 @@ memory:
     enabled: false # Whether to write retrieval decision traces for memory injection
     storage_path: "" # Default: retrieval_traces.jsonl alongside the active memory file
     max_file_bytes: 5242880 # Rotate trace file after 5MB
+
+# ============================================================================
+# Skill Self-Evolution Configuration
+# ============================================================================
+# Allow the agent to autonomously create and improve skills in skills/custom/.
+skill_evolution:
+  enabled: false                # Set to true to allow agent-managed writes under skills/custom
+  moderation_model_name: null  # Model for LLM-based security scanning (null = use default model)
 
 # ============================================================================
 # Checkpointer Configuration
