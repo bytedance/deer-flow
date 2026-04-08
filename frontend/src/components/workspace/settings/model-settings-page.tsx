@@ -28,10 +28,37 @@ type SecretStatuses = Record<string, boolean>;
 
 type DesktopProviderSetting = {
   id: string;
+  providerType: string;
   label: string;
   apiKeyEnv: string;
   baseUrl: string;
+  defaultModel: string;
 };
+
+type ProviderPreset = {
+  label: string;
+  apiKeyEnv: string;
+  baseUrl: string;
+  defaultModel: string;
+};
+
+const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
+  openai: { label: "OpenAI", apiKeyEnv: "OPENAI_API_KEY", baseUrl: "", defaultModel: "gpt-4o" },
+  anthropic: { label: "Anthropic", apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "", defaultModel: "claude-sonnet-4-20250514" },
+  google: { label: "Google Gemini", apiKeyEnv: "GEMINI_API_KEY", baseUrl: "", defaultModel: "gemini-2.5-pro" },
+  deepseek: { label: "DeepSeek", apiKeyEnv: "DEEPSEEK_API_KEY", baseUrl: "https://api.deepseek.com/v1", defaultModel: "deepseek-chat" },
+  volcengine: { label: "Volcengine (Doubao)", apiKeyEnv: "VOLCENGINE_API_KEY", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", defaultModel: "doubao-seed-1-8-251228" },
+  moonshot: { label: "Moonshot (Kimi)", apiKeyEnv: "MOONSHOT_API_KEY", baseUrl: "https://api.moonshot.cn/v1", defaultModel: "kimi-k2.5" },
+  minimax: { label: "MiniMax", apiKeyEnv: "MINIMAX_API_KEY", baseUrl: "https://api.minimax.io/v1", defaultModel: "MiniMax-M2.5" },
+  openrouter: { label: "OpenRouter", apiKeyEnv: "OPENROUTER_API_KEY", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "" },
+  novita: { label: "Novita AI", apiKeyEnv: "NOVITA_API_KEY", baseUrl: "https://api.novita.ai/openai", defaultModel: "" },
+  "openai-compatible": { label: "OpenAI-Compatible", apiKeyEnv: "", baseUrl: "", defaultModel: "" },
+};
+
+const PROVIDER_TYPE_OPTIONS = Object.entries(PROVIDER_PRESETS).map(([key, preset]) => ({
+  value: key,
+  label: preset.label,
+}));
 
 type DesktopSettings = {
   defaultModel: string | null;
@@ -52,12 +79,6 @@ declare global {
   }
 }
 
-const EMPTY_PROVIDER: DesktopProviderSetting = {
-  id: "",
-  label: "",
-  apiKeyEnv: "",
-  baseUrl: "",
-};
 
 export function ModelSettingsPage() {
   const { t } = useI18n();
@@ -97,8 +118,12 @@ export function ModelSettingsPage() {
     const nextProviders = [
       ...providers,
       {
-        ...EMPTY_PROVIDER,
         id: `provider-${Date.now()}`,
+        providerType: "",
+        label: "",
+        apiKeyEnv: "",
+        baseUrl: "",
+        defaultModel: "",
       },
     ];
     await persistProviders(nextProviders);
