@@ -1,4 +1,4 @@
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 
 from langchain.agents import AgentState
 
@@ -16,6 +16,19 @@ class ThreadDataState(TypedDict):
 class ViewedImageData(TypedDict):
     base64: str
     mime_type: str
+
+
+class UploadedImageDescriptionImage(TypedDict):
+    filename: str
+    path: NotRequired[str | None]
+    description: str
+
+
+class UploadedImageDescriptionDocument(TypedDict):
+    status: Literal["parsed", "failed"]
+    document: str
+    markdown_path: NotRequired[str | None]
+    images: list[UploadedImageDescriptionImage]
 
 
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
@@ -52,4 +65,5 @@ class ThreadState(AgentState):
     artifacts: Annotated[list[str], merge_artifacts]
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
+    uploaded_image_descriptions: NotRequired[dict[str, UploadedImageDescriptionDocument] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
