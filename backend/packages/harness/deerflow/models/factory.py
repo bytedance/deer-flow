@@ -7,7 +7,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency guard
     ChatOpenAI = None
 
-from deerflow.config import get_app_config, get_tracing_config, is_tracing_enabled
+from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
 from deerflow.tracing import build_tracing_callbacks
 
