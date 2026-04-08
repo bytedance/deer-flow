@@ -112,10 +112,21 @@ class CronSchedulerService:
                 continue
 
     async def _launch_job(self, job: CronJobRecord) -> Any:
+        metadata = dict(job.metadata or {})
+        scheduler_metadata = dict(metadata.get("scheduler", {}))
+        scheduler_metadata.update(
+            {
+                "job_id": job.job_id,
+                "cron": job.cron,
+                "timezone": job.timezone,
+            }
+        )
+        metadata["scheduler"] = scheduler_metadata
+
         payload = CronJobPayload(
             assistant_id=job.assistant_id,
             input=job.input,
-            metadata=job.metadata,
+            metadata=metadata,
             config=job.config,
             context=job.context,
             multitask_strategy=job.multitask_strategy,
