@@ -156,12 +156,39 @@ async def test_scheduler_dispatch_continues_after_job_failure(caplog: pytest.Log
     assert [record.run_id for record in records] == ["run-thread-ok"]
     assert failed is not None
     assert failed.last_run_id is None
-    assert failed.last_fire_at is None
-    assert failed.next_fire_at == _ts(2026, 4, 8, 10, 30)
+    assert failed.last_fire_at == _ts(2026, 4, 8, 10, 30)
+    assert failed.next_fire_at == _ts(2026, 4, 8, 11, 0)
     assert succeeded is not None
     assert succeeded.last_run_id == "run-thread-ok"
     assert succeeded.next_fire_at == _ts(2026, 4, 8, 11, 0)
     assert any("failed to dispatch job job-fail" in record.message for record in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_compute_sleep_seconds_avoids_zero_spin_for_overdue_jobs():
+    from deerflow.runtime.scheduler import CronJobCreate, CronSchedulerService, create_cron_job
+
+    store = InMemoryStore()
+
+    async def fake_run_launcher(thread_id, payload):
+        return SimpleNamespace(run_id="run-sleep")
+
+    await create_cron_job(
+        store,
+        CronJobCreate(
+            thread_id="thread-1",
+            cron="*/30 * * * *",
+            timezone="UTC",
+        ),
+        job_id="job-1",
+        now=_ts(2026, 4, 8, 10, 0),
+    )
+
+    service = CronSchedulerService(store, fake_run_launcher, poll_interval=30.0)
+
+    sleep_seconds = await service.compute_sleep_seconds(now=_ts(2026, 4, 8, 10, 45))
+
+    assert sleep_seconds == 1.0
 
 
 @pytest.mark.anyio

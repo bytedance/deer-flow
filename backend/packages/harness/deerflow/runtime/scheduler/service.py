@@ -73,14 +73,21 @@ class CronSchedulerService:
         results = []
 
         for job in jobs:
+            scheduled_fire_at = job.next_fire_at if job.next_fire_at is not None else (now if now is not None else time.time())
+
             try:
                 record = await self._launch_job(job)
             except Exception:
                 logger.exception("Cron scheduler failed to dispatch job %s", job.job_id)
+                await mark_cron_job_fired(
+                    self._store,
+                    job.job_id,
+                    fired_at=scheduled_fire_at,
+                    run_id=None,
+                )
                 continue
 
             run_id = getattr(record, "run_id", None)
-            scheduled_fire_at = job.next_fire_at if job.next_fire_at is not None else (now if now is not None else time.time())
             await mark_cron_job_fired(
                 self._store,
                 job.job_id,
@@ -98,7 +105,15 @@ class CronSchedulerService:
         next_fire_candidates = [job.next_fire_at for job in jobs if job.next_fire_at is not None]
         if not next_fire_candidates:
             return self._poll_interval
-        return max(0.0, min(self._poll_interval, min(next_fire_candidates) - current_time))
+
+        soonest_fire_at = min(next_fire_candidates)
+        if soonest_fire_at <= current_time:
+            # Avoid a zero-timeout spin when an overdue job keeps failing to dispatch.
+            # A short bounded retry interval still lets the loop drain large due sets
+            # without pinning the event loop at 100% CPU.
+            return min(self._poll_interval, 1.0)
+
+        return min(self._poll_interval, soonest_fire_at - current_time)
 
     async def run_forever(self) -> None:
         """Run the scheduler loop until stopped."""
