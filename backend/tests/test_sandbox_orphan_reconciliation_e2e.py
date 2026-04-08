@@ -1,14 +1,14 @@
-"""End-to-end test: sandbox orphan container reconciliation.
+"""Docker-backed sandbox container lifecycle and cleanup tests.
 
-This test requires Docker to be running. It verifies the core issue from
-GitHub issue #1972: when a process dies and restarts, orphaned sandbox
-containers are properly cleaned up.
+This test module requires Docker to be running. It exercises the container
+backend behavior behind sandbox lifecycle management and verifies that test
+containers are created, observed, and explicitly cleaned up correctly.
 
-Test scenario:
-1. Start a sandbox container (simulating a previous process lifecycle)
-2. Create a NEW AioSandboxProvider instance (simulating process restart)
-3. Verify the orphaned container is either destroyed (if old) or adopted into warm pool (if young)
-4. Verify the container is eventually cleaned up
+The coverage here is limited to direct backend/container operations used by
+the reconciliation flow. It does not simulate a process restart by creating
+a new ``AioSandboxProvider`` instance or assert provider startup orphan
+reconciliation end-to-end — that logic is covered by unit tests in
+``test_sandbox_orphan_reconciliation.py``.
 
 Run with: PYTHONPATH=. uv run pytest tests/test_sandbox_orphan_reconciliation_e2e.py -v -s
 Requires: Docker running locally

@@ -259,8 +259,8 @@ def _make_provider_for_reconciliation():
     return provider
 
 
-def test_reconcile_destroys_old_containers():
-    """Containers older than idle_timeout should be destroyed."""
+def test_reconcile_adopts_old_containers_into_warm_pool():
+    """All containers are adopted into warm pool regardless of age — idle checker handles cleanup."""
     provider = _make_provider_for_reconciliation()
     now = time.time()
 
@@ -274,12 +274,13 @@ def test_reconcile_destroys_old_containers():
 
     provider._reconcile_orphans()
 
-    provider._backend.destroy.assert_called_once_with(old_info)
-    assert "old12345" not in provider._warm_pool
+    # Should NOT destroy directly — let idle checker handle it
+    provider._backend.destroy.assert_not_called()
+    assert "old12345" in provider._warm_pool
 
 
 def test_reconcile_adopts_young_containers():
-    """Containers younger than idle_timeout should be adopted into warm pool."""
+    """Young containers are adopted into warm pool for potential reuse."""
     provider = _make_provider_for_reconciliation()
     now = time.time()
 
@@ -299,8 +300,8 @@ def test_reconcile_adopts_young_containers():
     assert adopted_info.sandbox_id == "young123"
 
 
-def test_reconcile_mixed_containers():
-    """Mix of old and young containers: old destroyed, young adopted."""
+def test_reconcile_mixed_containers_all_adopted():
+    """All containers (old and young) are adopted into warm pool."""
     provider = _make_provider_for_reconciliation()
     now = time.time()
 
@@ -320,8 +321,8 @@ def test_reconcile_mixed_containers():
 
     provider._reconcile_orphans()
 
-    provider._backend.destroy.assert_called_once_with(old_info)
-    assert "old_one" not in provider._warm_pool
+    provider._backend.destroy.assert_not_called()
+    assert "old_one" in provider._warm_pool
     assert "young_one" in provider._warm_pool
 
 
@@ -367,24 +368,25 @@ def test_reconcile_no_running_containers():
     assert provider._warm_pool == {}
 
 
-def test_reconcile_handles_destroy_failure():
-    """If destroy fails for one container, others should still be processed."""
+def test_reconcile_multiple_containers_all_adopted():
+    """Multiple containers should all be adopted into warm pool."""
     provider = _make_provider_for_reconciliation()
     now = time.time()
 
-    info1 = SandboxInfo(sandbox_id="fail_one", sandbox_url="http://localhost:8081", created_at=now - 1200)
-    info2 = SandboxInfo(sandbox_id="fail_two", sandbox_url="http://localhost:8082", created_at=now - 1200)
+    info1 = SandboxInfo(sandbox_id="cont_one", sandbox_url="http://localhost:8081", created_at=now - 1200)
+    info2 = SandboxInfo(sandbox_id="cont_two", sandbox_url="http://localhost:8082", created_at=now - 1200)
 
     provider._backend.list_running.return_value = [info1, info2]
-    provider._backend.destroy.side_effect = [RuntimeError("docker stop failed"), None]
 
     provider._reconcile_orphans()
 
-    assert provider._backend.destroy.call_count == 2
+    provider._backend.destroy.assert_not_called()
+    assert "cont_one" in provider._warm_pool
+    assert "cont_two" in provider._warm_pool
 
 
-def test_reconcile_zero_created_at_treated_as_orphan():
-    """Containers with created_at=0 (unknown age) should be treated as infinitely old → destroyed."""
+def test_reconcile_zero_created_at_adopted():
+    """Containers with created_at=0 (unknown age) should still be adopted into warm pool."""
     provider = _make_provider_for_reconciliation()
 
     info = SandboxInfo(sandbox_id="unknown1", sandbox_url="http://localhost:8081", created_at=0.0)
@@ -392,7 +394,8 @@ def test_reconcile_zero_created_at_treated_as_orphan():
 
     provider._reconcile_orphans()
 
-    provider._backend.destroy.assert_called_once_with(info)
+    provider._backend.destroy.assert_not_called()
+    assert "unknown1" in provider._warm_pool
 
 
 def test_reconcile_idle_timeout_zero_adopts_all():
@@ -422,13 +425,15 @@ def test_sighup_handler_registered():
 
     provider = _make_provider_for_reconciliation()
 
-    # Save original handler
-    original_handler = signal.getsignal(signal.SIGHUP)
+    # Save original handlers for ALL signals we'll modify
+    original_sighup = signal.getsignal(signal.SIGHUP)
+    original_sigterm = signal.getsignal(signal.SIGTERM)
+    original_sigint = signal.getsignal(signal.SIGINT)
     try:
         aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
-        provider._original_sighup = signal.getsignal(signal.SIGHUP)
-        provider._original_sigterm = signal.getsignal(signal.SIGTERM)
-        provider._original_sigint = signal.getsignal(signal.SIGINT)
+        provider._original_sighup = original_sighup
+        provider._original_sigterm = original_sigterm
+        provider._original_sigint = original_sigint
         provider.shutdown = MagicMock()
 
         aio_mod.AioSandboxProvider._register_signal_handlers(provider)
@@ -437,5 +442,7 @@ def test_sighup_handler_registered():
         handler = signal.getsignal(signal.SIGHUP)
         assert handler != signal.SIG_DFL, "SIGHUP handler should be registered"
     finally:
-        # Restore original handler
-        signal.signal(signal.SIGHUP, original_handler)
+        # Restore ALL original handlers to avoid leaking state across tests
+        signal.signal(signal.SIGHUP, original_sighup)
+        signal.signal(signal.SIGTERM, original_sigterm)
+        signal.signal(signal.SIGINT, original_sigint)

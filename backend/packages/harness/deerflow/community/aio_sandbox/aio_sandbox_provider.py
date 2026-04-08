@@ -183,10 +183,16 @@ class AioSandboxProvider(SandboxProvider):
     def _reconcile_orphans(self) -> None:
         """Reconcile orphaned containers left by previous process lifecycles.
 
-        On startup, enumerate all running containers matching our prefix.
-        Containers older than idle_timeout are destroyed immediately (they are
-        definitely orphaned). Younger containers are adopted into the warm pool
-        so the idle checker can reclaim them if nobody re-acquires them.
+        On startup, enumerate all running containers matching our prefix
+        and adopt them all into the warm pool.  The idle checker will reclaim
+        containers that nobody re-acquires within ``idle_timeout``.
+
+        All containers are adopted unconditionally because we cannot
+        distinguish "orphaned" from "actively used by another process"
+        based on age alone — ``idle_timeout`` represents inactivity, not
+        uptime.  Adopting into the warm pool and letting the idle checker
+        decide avoids destroying containers that a concurrent process may
+        still be using.
 
         This closes the fundamental gap where in-memory state loss (process
         restart, crash, SIGKILL) leaves Docker containers running forever.
@@ -200,10 +206,8 @@ class AioSandboxProvider(SandboxProvider):
         if not running:
             return
 
-        idle_timeout = self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT)
         current_time = time.time()
         adopted = 0
-        destroyed = 0
 
         for info in running:
             # Skip containers already tracked (shouldn't happen at startup, but be safe)
@@ -211,24 +215,13 @@ class AioSandboxProvider(SandboxProvider):
                 if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
                     continue
 
+            with self._lock:
+                self._warm_pool[info.sandbox_id] = (info, current_time)
+            adopted += 1
             age = current_time - info.created_at if info.created_at > 0 else float("inf")
+            logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
-            if idle_timeout > 0 and age > idle_timeout:
-                # Container is older than idle_timeout — definitely orphaned, destroy it
-                try:
-                    self._backend.destroy(info)
-                    destroyed += 1
-                    logger.info(f"Destroyed orphaned container {info.sandbox_id} (age: {age:.0f}s > idle_timeout: {idle_timeout}s)")
-                except Exception as e:
-                    logger.error(f"Failed to destroy orphaned container {info.sandbox_id}: {e}")
-            else:
-                # Container is young enough — adopt into warm pool for potential reuse
-                with self._lock:
-                    self._warm_pool[info.sandbox_id] = (info, current_time)
-                adopted += 1
-                logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
-
-        logger.info(f"Startup reconciliation complete: {destroyed} destroyed, {adopted} adopted, {len(running)} total found")
+        logger.info(f"Startup reconciliation complete: {adopted} adopted into warm pool, {len(running)} total found")
 
     # ── Deterministic ID ─────────────────────────────────────────────────
 

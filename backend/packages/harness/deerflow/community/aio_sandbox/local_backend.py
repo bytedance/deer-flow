@@ -254,9 +254,18 @@ class LocalContainerBackend(SandboxBackend):
                 text=True,
                 timeout=10,
             )
-            if result.returncode != 0 or not result.stdout.strip():
+            if result.returncode != 0:
+                stderr = (result.stderr or "").strip()
+                logger.warning(
+                    "Failed to list running containers with %s ps (returncode=%s, stderr=%s)",
+                    self._runtime,
+                    result.returncode,
+                    stderr or "<empty>",
+                )
                 return []
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            if not result.stdout.strip():
+                return []
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             logger.warning(f"Failed to list running containers: {e}")
             return []
 
