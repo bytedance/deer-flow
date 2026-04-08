@@ -216,8 +216,20 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
+| **Cron** (`/api/cron/jobs`) | `POST /` - create job; `GET /` - list jobs; `GET /{job_id}` - fetch one job; `PATCH /{job_id}` - update; `DELETE /{job_id}` - delete; `POST /{job_id}/trigger` - manual trigger |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
+
+**Built-in Cron Scheduler** (`app/gateway/cron_scheduler.py`, `packages/harness/deerflow/runtime/scheduler/`):
+- Backend-only MVP for recurring runs in Gateway mode
+- Scheduler loop loads persisted cron jobs from the Store and dispatches them through `start_run_with_deps()` instead of executing agents directly
+- Gateway startup wiring lives in `app.gateway.app.lifespan`
+- Background loop is opt-in and should run on exactly one process:
+  - `DEERFLOW_CRON_SCHEDULER_ENABLED=1`
+  - `DEERFLOW_CRON_SCHEDULER_LEADER=1`
+  - optional `DEERFLOW_CRON_SCHEDULER_POLL_INTERVAL=<seconds>`
+- If leader mode is disabled, the API surface still works for create/list/update/delete/manual trigger, but no automatic wall-clock dispatch loop is started
+- Cron scheduler overlap behavior intentionally reuses run `multitask_strategy`; the scheduler itself stays a thin job -> run launcher
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
