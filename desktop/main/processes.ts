@@ -72,12 +72,23 @@ export function createRuntimeProcessController(options: {
     return entry;
   }
 
+  function serializeModelEntryYaml(entry: Record<string, unknown>): string {
+    const kvLines = Object.entries(entry).map(([key, value]) => {
+      if (typeof value === "string") {
+        return `    ${key}: ${value.startsWith("$") ? value : JSON.stringify(value)}`;
+      }
+      return `    ${key}: ${value}`;
+    });
+    const [first, ...rest] = kvLines;
+    return `  - ${first.trimStart()}\n${rest.join("\n")}`;
+  }
+
   async function generateRuntimeConfig(
     repoConfigPath: string,
     runtimeConfigPath: string,
     providers: DesktopProviderSetting[],
   ) {
-    let configContent = await fs.readFile(repoConfigPath, "utf8");
+    const configContent = await fs.readFile(repoConfigPath, "utf8");
 
     const modelEntries = providers
       .filter((p) => p.defaultModel)
@@ -86,26 +97,11 @@ export function createRuntimeProcessController(options: {
     const modelsYaml =
       modelEntries.length === 0
         ? "models: []"
-        : "models:\n" +
-          modelEntries
-            .map((entry) => {
-              const lines = Object.entries(entry)
-                .map(([key, value]) => {
-                  if (typeof value === "string")
-                    return `    ${key}: ${value.startsWith("$") ? value : JSON.stringify(value)}`;
-                  return `    ${key}: ${value}`;
-                })
-                .join("\n");
-              return `  - ${lines.trimStart().replace(/^    /, "")}`;
-            })
-            .join("\n");
+        : "models:\n" + modelEntries.map(serializeModelEntryYaml).join("\n");
 
-    configContent = configContent.replace(
-      /^models:\s*\[\].*?(?=\n\S|\n#\s*=)/ms,
-      modelsYaml + "\n",
-    );
+    const result = configContent.replace(/^models:.*$/m, modelsYaml);
 
-    await fs.writeFile(runtimeConfigPath, configContent, "utf8");
+    await fs.writeFile(runtimeConfigPath, result, "utf8");
   }
 
   async function start() {
