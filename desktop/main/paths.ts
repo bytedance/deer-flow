@@ -10,6 +10,7 @@ export type DesktopPaths = {
   repoConfigPath: string;
   repoExtensionsConfigPath: string;
   repoSkillsPath: string;
+  runtimeConfigPath: string;
 };
 
 export function getDesktopPaths(userData: string, repoRoot: string): DesktopPaths {
@@ -27,5 +28,6 @@ export function getDesktopPaths(userData: string, repoRoot: string): DesktopPath
     repoConfigPath: path.join(repoRoot, "config.yaml"),
     repoExtensionsConfigPath: path.join(repoRoot, "extensions_config.json"),
     repoSkillsPath: path.join(repoRoot, "skills"),
+    runtimeConfigPath: path.join(runtimeDir, "config.yaml"),
   };
 }
