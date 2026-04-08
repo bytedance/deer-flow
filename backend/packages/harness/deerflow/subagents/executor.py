@@ -76,6 +76,9 @@ _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent
 # Larger pool to avoid blocking when scheduler submits execution tasks
 _execution_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-exec-")
 
+# Dedicated pool for sync execute() calls made from an already-running event loop.
+_isolated_loop_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-isolated-")
+
 
 def _filter_tools(
     all_tools: list[BaseTool],
@@ -381,23 +384,36 @@ class SubagentExecutor:
         isolation from any parent event loop, preventing conflicts with asyncio
         primitives that may be bound to the parent loop (e.g., httpx clients).
         """
+        try:
+            previous_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            previous_loop = None
+
         # Create and set a new event loop for this thread
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
+            asyncio.set_event_loop(loop)
             return loop.run_until_complete(self._aexecute(task, result_holder))
         finally:
-            # Clean up the loop
             try:
-                # Cancel any pending tasks
                 pending = asyncio.all_tasks(loop)
                 if pending:
                     for task_obj in pending:
                         task_obj.cancel()
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                loop.close()
+
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.run_until_complete(loop.shutdown_default_executor())
             except Exception:
-                pass
+                logger.debug(
+                    f"[trace={self.trace_id}] Failed while cleaning up isolated event loop for subagent {self.config.name}",
+                    exc_info=True,
+                )
+            finally:
+                try:
+                    loop.close()
+                finally:
+                    asyncio.set_event_loop(previous_loop)
 
     def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task synchronously (wrapper around async execution).
@@ -418,23 +434,15 @@ class SubagentExecutor:
             SubagentResult with the execution result.
         """
         try:
-            # Check if we're already in a running event loop
             try:
                 loop = asyncio.get_running_loop()
-                if loop.is_running():
-                    # We're being called from within a running event loop.
-                    # We cannot use asyncio.run() here because it would create a new
-                    # loop and conflict with any asyncio primitives (like httpx clients
-                    # or locks) that were created in and bound to the parent loop.
-                    # Instead, run the subagent in a separate thread to ensure it has
-                    # its own isolated event loop.
-                    logger.debug(f"[trace={self.trace_id}] Subagent {self.config.name} detected running event loop, using isolated thread")
-                    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="subagent-isolated-") as executor:
-                        future = executor.submit(self._execute_in_isolated_loop, task, result_holder)
-                        return future.result()
             except RuntimeError:
-                # No event loop running in this thread, safe to use asyncio.run
-                pass
+                loop = None
+
+            if loop is not None and loop.is_running():
+                logger.debug(f"[trace={self.trace_id}] Subagent {self.config.name} detected running event loop, using isolated thread")
+                future = _isolated_loop_pool.submit(self._execute_in_isolated_loop, task, result_holder)
+                return future.result()
 
             # Standard path: no running event loop, use asyncio.run
             return asyncio.run(self._aexecute(task, result_holder))
