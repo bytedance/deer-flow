@@ -57,3 +57,7 @@ config.yaml.bak
 .playwright-mcp
 .gstack/
 .worktrees
+
+
+dist
+node_modules

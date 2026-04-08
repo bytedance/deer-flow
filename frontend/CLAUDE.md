@@ -45,7 +45,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `api/` — LangGraph client singleton
   - `artifacts/` — Artifact loading and caching
   - `i18n/` — Internationalization (en-US, zh-CN)
-  - `settings/` — User preferences in localStorage
+  - `settings/` — User preferences in localStorage, with desktop-facing settings sections mounted in the workspace dialog
   - `memory/` — Persistent user memory system
   - `skills/` — Skills installation and management
   - `messages/` — Message processing and transformation

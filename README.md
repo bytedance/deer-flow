@@ -697,6 +697,15 @@ client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": 
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 
+## Desktop App Work-in-Progress
+
+This repository now includes an early `desktop/` scaffold for a desktop-shell version of DeerFlow. The current work adds:
+- a desktop control-plane module layout under `desktop/`
+- backend desktop-mode prompt guidance behind `DEER_DESKTOP=1`
+- a frontend Settings entry for **Models & API Keys**
+
+This is an in-repo implementation scaffold, not a finished packaged desktop application yet.
+
 ## Documentation
 
 - [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow

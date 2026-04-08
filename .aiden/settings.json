@@ -1,0 +1,29 @@
+{
+  "extraKnownMarketplaces": {
+    "c-tmates-plugins": {
+      "source": {
+        "source": "git",
+        "url": "git@code.byted.org:ife/webcast-plugin.git"
+      }
+    }
+  },
+  "enabledPlugins": {},
+  "ideExtension": {
+    "figmaAuth": {
+      "mode": "oauth",
+      "accessToken": ""
+    },
+    "figmaImageUpload": {
+      "mode": "default",
+      "cdn": {
+        "dir": "",
+        "region": "CN",
+        "email": ""
+      },
+      "local": {
+        "outputDir": "./assets/images"
+      }
+    }
+  },
+  "templateRepository": "/Users/bytedance/.trae-cn/extensions/byted-extensions.aiden-1.0.10-universal/dist/templates/tmates-template"
+}

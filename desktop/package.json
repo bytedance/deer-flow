@@ -1,0 +1,17 @@
+{
+  "name": "deer-flow-desktop",
+  "private": true,
+  "type": "module",
+  "main": "dist/main/app.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "npm run build && electron ."
+  },
+  "dependencies": {
+    "electron": "^37.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "@types/node": "^20.14.10"
+  }
+}

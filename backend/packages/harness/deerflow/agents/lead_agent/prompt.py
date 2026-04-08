@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import threading
 from datetime import datetime
 from functools import lru_cache
@@ -671,6 +672,19 @@ def _build_custom_mounts_section() -> str:
     return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
+def _build_desktop_mode_section() -> str:
+    if os.getenv("DEER_DESKTOP") != "1":
+        return ""
+
+    return (
+        "\n**Desktop Environment:**\n"
+        "- You are running in a single-user desktop environment\n"
+        "- local file operations are expected when the user asks for them\n"
+        "- surface final outputs in user-visible desktop locations when possible\n"
+        "- Avoid Docker/container assumptions in user-facing explanations"
+    )
+
+
 def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
@@ -706,7 +720,8 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section()
     custom_mounts_section = _build_custom_mounts_section()
-    acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
+    desktop_mode_section = _build_desktop_mode_section()
+    acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section, desktop_mode_section) if section)
 
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
