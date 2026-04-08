@@ -38,6 +38,12 @@ def _run(coro):
         loop.close()
 
 
+def _write_docx(path: Path, members: dict[str, bytes]) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+
+
 # ---------------------------------------------------------------------------
 # _pymupdf_output_too_sparse
 # ---------------------------------------------------------------------------
@@ -266,12 +272,39 @@ class TestConvertFileToMarkdown:
         mock_thread.assert_called_once()
         assert md_path == pdf.with_suffix(".md")
         assert md_path.read_text() == "# Large PDF"
+    def test_returns_none_on_conversion_error(self, tmp_path):
+        """If conversion raises, return None without propagating the exception."""
+        pdf = tmp_path / "broken.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
 
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch(
+                "deerflow.utils.file_conversion._do_convert",
+                side_effect=RuntimeError("conversion failed"),
+            ),
+        ):
+            result = _run(convert_file_to_markdown(pdf))
 
-def _write_docx(path: Path, members: dict[str, bytes]) -> None:
-    with zipfile.ZipFile(path, "w") as archive:
-        for name, content in members.items():
-            archive.writestr(name, content)
+        assert result is None
+
+    def test_writes_utf8_markdown_file(self, tmp_path):
+        """Generated .md file is written with UTF-8 encoding."""
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        chinese_content = "# 中文报告\n\n这是测试内容。"
+
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch(
+                "deerflow.utils.file_conversion._do_convert",
+                return_value=chinese_content,
+            ),
+        ):
+            md_path = _run(convert_file_to_markdown(pdf))
+
+        assert md_path is not None
+        assert md_path.read_text(encoding="utf-8") == chinese_content
 
 
 def test_extract_docx_images_returns_stably_named_supported_images(tmp_path):
@@ -311,40 +344,6 @@ def test_extract_docx_images_returns_empty_for_invalid_docx(tmp_path):
     extracted = _run(extract_docx_images(docx_path))
 
     assert extracted == []
-
-    def test_returns_none_on_conversion_error(self, tmp_path):
-        """If conversion raises, return None without propagating the exception."""
-        pdf = tmp_path / "broken.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
-
-        with (
-            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch(
-                "deerflow.utils.file_conversion._do_convert",
-                side_effect=RuntimeError("conversion failed"),
-            ),
-        ):
-            result = _run(convert_file_to_markdown(pdf))
-
-        assert result is None
-
-    def test_writes_utf8_markdown_file(self, tmp_path):
-        """Generated .md file is written with UTF-8 encoding."""
-        pdf = tmp_path / "report.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
-        chinese_content = "# 中文报告\n\n这是测试内容。"
-
-        with (
-            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch(
-                "deerflow.utils.file_conversion._do_convert",
-                return_value=chinese_content,
-            ),
-        ):
-            md_path = _run(convert_file_to_markdown(pdf))
-
-        assert md_path is not None
-        assert md_path.read_text(encoding="utf-8") == chinese_content
 
 
 # ---------------------------------------------------------------------------

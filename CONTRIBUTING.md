@@ -77,6 +77,18 @@ export UV_INDEX_URL=https://pypi.org/simple
 export NPM_REGISTRY=https://registry.npmjs.org
 ```
 
+#### Recommended host resources
+
+Use these as practical starting points for development and review environments:
+
+| Scenario | Starting point | Recommended | Notes |
+|---------|-----------|------------|-------|
+| `make dev` on one machine | 4 vCPU, 8 GB RAM | 8 vCPU, 16 GB RAM | Best when DeerFlow uses hosted model APIs. |
+| `make docker-start` review environment | 4 vCPU, 8 GB RAM | 8 vCPU, 16 GB RAM | Docker image builds and sandbox containers need extra headroom. |
+| Shared Linux test server | 8 vCPU, 16 GB RAM | 16 vCPU, 32 GB RAM | Prefer this for heavier multi-agent runs or multiple reviewers. |
+
+`2 vCPU / 4 GB` environments often fail to start reliably or become unresponsive under normal DeerFlow workloads.
+
 #### Linux: Docker daemon permission denied
 
 If `make docker-init`, `make docker-start`, or `make docker-stop` fails on Linux with an error like below, your current user likely does not have permission to access the Docker daemon socket:
@@ -310,7 +322,7 @@ Every pull request runs the backend regression workflow at [.github/workflows/ba
 
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture
-- [MCP Setup Guide](MCP_SETUP.md) - Model Context Protocol configuration
+- [MCP Setup Guide](backend/docs/MCP_SERVER.md) - Model Context Protocol configuration
 
 ## Need Help?
 

@@ -41,7 +41,19 @@ _FAILED_DESCRIPTION_TEXT = (
 
 
 def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
-    """Return the document outline and fallback preview for *file_path*."""
+    """Return the document outline and fallback preview for *file_path*.
+
+    Looks for a sibling ``<stem>.md`` file produced by the upload conversion
+    pipeline.
+
+    Returns:
+        (outline, preview) where:
+        - outline: list of ``{title, line}`` dicts (plus optional sentinel).
+          Empty when no headings are found or no .md exists.
+        - preview: first few non-empty lines of the .md, used as a content
+          anchor when outline is empty so the agent has some context.
+          Empty when outline is non-empty (no fallback needed).
+    """
     md_path = file_path.with_suffix(".md")
     if not md_path.is_file():
         return [], []
@@ -51,6 +63,7 @@ def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
         logger.debug("Extracted %d outline entries from %s", len(outline), file_path.name)
         return outline, []
 
+    # outline is empty — read the first few non-empty lines as a content preview
     preview: list[str] = []
     try:
         with md_path.open(encoding="utf-8") as f:
@@ -128,7 +141,17 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         lines.append("")
 
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
-        """Create a formatted message listing uploaded files."""
+        """Create a formatted message listing uploaded files.
+
+        Args:
+            new_files: Files uploaded in the current message.
+            historical_files: Files uploaded in previous messages.
+                Each file dict may contain an optional ``outline`` key — a list of
+                ``{title, line}`` dicts extracted from the converted Markdown file.
+
+        Returns:
+            Formatted string inside <uploaded_files> tags.
+        """
         lines = ["<uploaded_files>"]
 
         lines.append("The following files were uploaded in this message:")
@@ -574,7 +597,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
                 thread_id = get_config().get("configurable", {}).get("thread_id")
             except RuntimeError:
-                pass
+                pass  # get_config() raises outside a runnable context (e.g. unit tests)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []

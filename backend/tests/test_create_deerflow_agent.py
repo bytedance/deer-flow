@@ -1,11 +1,14 @@
 """Tests for create_deerflow_agent SDK entry point."""
 
+from typing import get_type_hints
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import Next, Prev, RuntimeFeatures
+from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.thread_state import ThreadState
 
 
 def _make_mock_model():
@@ -125,6 +128,13 @@ def test_vision_injects_view_image_tool(mock_create_agent):
     call_kwargs = mock_create_agent.call_args[1]
     tool_names = [t.name for t in call_kwargs["tools"]]
     assert "view_image" in tool_names
+
+
+def test_view_image_middleware_preserves_viewed_images_reducer():
+    middleware_hints = get_type_hints(ViewImageMiddleware.state_schema, include_extras=True)
+    thread_hints = get_type_hints(ThreadState, include_extras=True)
+
+    assert middleware_hints["viewed_images"] == thread_hints["viewed_images"]
 
 
 # ---------------------------------------------------------------------------

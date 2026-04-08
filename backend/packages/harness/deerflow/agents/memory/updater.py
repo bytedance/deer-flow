@@ -5,14 +5,17 @@ import logging
 import math
 import re
 import uuid
-from datetime import datetime
 from typing import Any
 
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
-from deerflow.agents.memory.storage import create_empty_memory, get_memory_storage
+from deerflow.agents.memory.storage import (
+    create_empty_memory,
+    get_memory_storage,
+    utc_now_iso_z,
+)
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
 
@@ -86,7 +89,7 @@ def create_memory_fact(
 
     normalized_category = category.strip() or "context"
     validated_confidence = _validate_confidence(confidence)
-    now = datetime.utcnow().isoformat() + "Z"
+    now = utc_now_iso_z()
     memory_data = get_memory_data(agent_name)
     updated_memory = dict(memory_data)
     facts = list(memory_data.get("facts", []))
@@ -246,7 +249,7 @@ def _fact_content_key(content: Any) -> str | None:
     stripped = content.strip()
     if not stripped:
         return None
-    return stripped
+    return stripped.casefold()
 
 
 class MemoryUpdater:
@@ -266,13 +269,22 @@ class MemoryUpdater:
         model_name = self._model_name or config.model_name
         return create_chat_model(name=model_name, thinking_enabled=False)
 
-    def update_memory(self, messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
+    def update_memory(
+        self,
+        messages: list[Any],
+        thread_id: str | None = None,
+        agent_name: str | None = None,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+    ) -> bool:
         """Update memory based on conversation messages.
 
         Args:
             messages: List of conversation messages.
             thread_id: Optional thread ID for tracking source.
             agent_name: If provided, updates per-agent memory. If None, updates global memory.
+            correction_detected: Whether recent turns include an explicit correction signal.
+            reinforcement_detected: Whether recent turns include a positive reinforcement signal.
 
         Returns:
             True if update was successful, False otherwise.
@@ -295,9 +307,27 @@ class MemoryUpdater:
                 return False
 
             # Build prompt
+            correction_hint = ""
+            if correction_detected:
+                correction_hint = (
+                    "IMPORTANT: Explicit correction signals were detected in this conversation. "
+                    "Pay special attention to what the agent got wrong, what the user corrected, "
+                    "and record the correct approach as a fact with category "
+                    '"correction" and confidence >= 0.95 when appropriate.'
+                )
+            if reinforcement_detected:
+                reinforcement_hint = (
+                    "IMPORTANT: Positive reinforcement signals were detected in this conversation. "
+                    "The user explicitly confirmed the agent's approach was correct or helpful. "
+                    "Record the confirmed approach, style, or preference as a fact with category "
+                    '"preference" or "behavior" and confidence >= 0.9 when appropriate.'
+                )
+                correction_hint = (correction_hint + "\n" + reinforcement_hint).strip() if correction_hint else reinforcement_hint
+
             prompt = MEMORY_UPDATE_PROMPT.format(
                 current_memory=json.dumps(current_memory, indent=2),
                 conversation=conversation_text,
+                correction_hint=correction_hint,
             )
 
             # Call LLM
@@ -349,7 +379,7 @@ class MemoryUpdater:
             Updated memory data.
         """
         config = get_memory_config()
-        now = datetime.utcnow().isoformat() + "Z"
+        now = utc_now_iso_z()
 
         # Update user sections
         user_updates = update_data.get("user", {})
@@ -383,6 +413,8 @@ class MemoryUpdater:
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
                 raw_content = fact.get("content", "")
+                if not isinstance(raw_content, str):
+                    continue
                 normalized_content = raw_content.strip()
                 fact_key = _fact_content_key(normalized_content)
                 if fact_key is not None and fact_key in existing_fact_keys:
@@ -396,6 +428,11 @@ class MemoryUpdater:
                     "createdAt": now,
                     "source": thread_id or "unknown",
                 }
+                source_error = fact.get("sourceError")
+                if isinstance(source_error, str):
+                    normalized_source_error = source_error.strip()
+                    if normalized_source_error:
+                        fact_entry["sourceError"] = normalized_source_error
                 current_memory["facts"].append(fact_entry)
                 if fact_key is not None:
                     existing_fact_keys.add(fact_key)
@@ -412,16 +449,24 @@ class MemoryUpdater:
         return current_memory
 
 
-def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
+def update_memory_from_conversation(
+    messages: list[Any],
+    thread_id: str | None = None,
+    agent_name: str | None = None,
+    correction_detected: bool = False,
+    reinforcement_detected: bool = False,
+) -> bool:
     """Convenience function to update memory from a conversation.
 
     Args:
         messages: List of conversation messages.
         thread_id: Optional thread ID.
         agent_name: If provided, updates per-agent memory. If None, updates global memory.
+        correction_detected: Whether recent turns include an explicit correction signal.
+        reinforcement_detected: Whether recent turns include a positive reinforcement signal.
 
     Returns:
         True if successful, False otherwise.
     """
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name)
+    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected)

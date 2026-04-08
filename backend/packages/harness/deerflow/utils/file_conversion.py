@@ -71,7 +71,6 @@ def _claim_unique_path(path: Path) -> Path:
             return candidate
         counter += 1
 
-
 def _pymupdf_output_too_sparse(text: str, file_path: Path) -> bool:
     """Return True if pymupdf4llm output is suspiciously short (image-based PDF).
 

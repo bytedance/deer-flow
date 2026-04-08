@@ -38,6 +38,7 @@ class RunCreateRequest(BaseModel):
     command: dict[str, Any] | None = Field(default=None, description="LangGraph Command")
     metadata: dict[str, Any] | None = Field(default=None, description="Run metadata")
     config: dict[str, Any] | None = Field(default=None, description="RunnableConfig overrides")
+    context: dict[str, Any] | None = Field(default=None, description="DeerFlow context overrides (model_name, thinking_enabled, etc.)")
     webhook: str | None = Field(default=None, description="Completion callback URL")
     checkpoint_id: str | None = Field(default=None, description="Resume from checkpoint")
     checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")
@@ -117,8 +118,9 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
             # LangGraph Platform includes run metadata in this header.
-            # The SDK's _get_run_metadata_from_response() parses it.
-            "Content-Location": (f"/api/threads/{thread_id}/runs/{record.run_id}/stream?thread_id={thread_id}&run_id={record.run_id}"),
+            # The SDK uses a greedy regex to extract the run id from this path,
+            # so it must point at the canonical run resource without extra suffixes.
+            "Content-Location": f"/api/threads/{thread_id}/runs/{record.run_id}",
         },
     )
 

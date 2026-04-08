@@ -7,11 +7,13 @@ import logging
 import mimetypes
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+import httpx
 from langgraph_sdk.errors import ConflictError
 
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
 
@@ -35,7 +37,48 @@ CHANNEL_CAPABILITIES = {
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
     "telegram": {"supports_streaming": False},
+    "wecom": {"supports_streaming": True},
 }
+
+InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
+
+
+INBOUND_FILE_READERS: dict[str, InboundFileReader] = {}
+
+
+def register_inbound_file_reader(channel_name: str, reader: InboundFileReader) -> None:
+    INBOUND_FILE_READERS[channel_name] = reader
+
+
+async def _read_http_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
+    url = file_info.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+
+    resp = await client.get(url)
+    resp.raise_for_status()
+    return resp.content
+
+
+async def _read_wecom_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
+    data = await _read_http_inbound_file(file_info, client)
+    if data is None:
+        return None
+
+    aeskey = file_info.get("aeskey") if isinstance(file_info.get("aeskey"), str) else None
+    if not aeskey:
+        return data
+
+    try:
+        from aibot.crypto_utils import decrypt_file
+    except Exception:
+        logger.exception("[Manager] failed to import WeCom decrypt_file")
+        return None
+
+    return decrypt_file(data, aeskey)
+
+
+register_inbound_file_reader("wecom", _read_wecom_inbound_file)
 
 
 class InvalidChannelSessionConfigError(ValueError):
@@ -341,6 +384,105 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
+async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dict[str, Any]]:
+    if not msg.files:
+        return []
+
+    from deerflow.uploads.manager import claim_unique_filename, ensure_uploads_dir, normalize_filename
+
+    uploads_dir = ensure_uploads_dir(thread_id)
+    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+
+    created: list[dict[str, Any]] = []
+    file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        for idx, f in enumerate(msg.files):
+            if not isinstance(f, dict):
+                continue
+
+            ftype = f.get("type") if isinstance(f.get("type"), str) else "file"
+            filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
+
+            try:
+                data = await file_reader(f, client)
+            except Exception:
+                logger.exception(
+                    "[Manager] failed to read inbound file: channel=%s, file=%s",
+                    msg.channel_name,
+                    f.get("url") or filename or idx,
+                )
+                continue
+
+            if data is None:
+                logger.warning(
+                    "[Manager] inbound file reader returned no data: channel=%s, file=%s",
+                    msg.channel_name,
+                    f.get("url") or filename or idx,
+                )
+                continue
+
+            if not filename:
+                ext = ".bin"
+                if ftype == "image":
+                    ext = ".png"
+                filename = f"{msg.thread_ts or 'msg'}_{idx}{ext}"
+
+            try:
+                safe_name = claim_unique_filename(normalize_filename(filename), seen_names)
+            except ValueError:
+                logger.warning(
+                    "[Manager] skipping inbound file with unsafe filename: channel=%s, file=%r",
+                    msg.channel_name,
+                    filename,
+                )
+                continue
+
+            dest = uploads_dir / safe_name
+            try:
+                dest.write_bytes(data)
+            except Exception:
+                logger.exception("[Manager] failed to write inbound file: %s", dest)
+                continue
+
+            created.append(
+                {
+                    "filename": safe_name,
+                    "size": len(data),
+                    "path": f"/mnt/user-data/uploads/{safe_name}",
+                    "is_image": ftype == "image",
+                }
+            )
+
+    return created
+
+
+def _format_uploaded_files_block(files: list[dict[str, Any]]) -> str:
+    lines = [
+        "<uploaded_files>",
+        "The following files were uploaded in this message:",
+        "",
+    ]
+    if not files:
+        lines.append("(empty)")
+    else:
+        for f in files:
+            filename = f.get("filename", "")
+            size = int(f.get("size") or 0)
+            size_kb = size / 1024 if size else 0
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+            path = f.get("path", "")
+            is_image = bool(f.get("is_image"))
+            file_kind = "image" if is_image else "file"
+            lines.append(f"- {filename} ({size_str})")
+            lines.append(f"  Type: {file_kind}")
+            lines.append(f"  Path: {path}")
+            lines.append("")
+    lines.append("Use `read_file` for text-based files and documents.")
+    lines.append("Use `view_image` for image files (jpg, jpeg, png, webp) so the model can inspect the image content.")
+    lines.append("</uploaded_files>")
+    return "\n".join(lines)
+
+
 class ChannelManager:
     """Core dispatcher that bridges IM channels to the DeerFlow agent.
 
@@ -533,8 +675,25 @@ class ChannelManager:
             thread_id = await self._create_thread(client, msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+
+        # If the inbound message contains file attachments, let the channel
+        # materialize (download) them and update msg.text to include sandbox file paths.
+        # This enables downstream models to access user-uploaded files by path.
+        # Channels that do not support file download will simply return the original message.
+        if msg.files:
+            from .service import get_channel_service
+
+            service = get_channel_service()
+            channel = service.get_channel(msg.channel_name) if service else None
+            logger.info("[Manager] preparing receive file context for %d attachments", len(msg.files))
+            msg = await channel.receive_file(msg, thread_id) if channel else msg
         if extra_context:
             run_context.update(extra_context)
+
+        uploaded = await _ingest_inbound_files(thread_id, msg)
+        if uploaded:
+            msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
+
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
                 client,
@@ -735,7 +894,8 @@ class ChannelManager:
                 "/help — Show this help"
             )
         else:
-            reply = f"Unknown command: /{command}. Type /help for available commands."
+            available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
+            reply = f"Unknown command: /{command}. Available commands: {available}"
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,

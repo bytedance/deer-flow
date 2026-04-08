@@ -1,11 +1,167 @@
+import asyncio
 import logging
+import threading
 from datetime import datetime
+from functools import lru_cache
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
+from deerflow.skills.types import Skill
 from deerflow.subagents import get_available_subagent_names
 
 logger = logging.getLogger(__name__)
+
+_ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
+_enabled_skills_lock = threading.Lock()
+_enabled_skills_cache: list[Skill] | None = None
+_enabled_skills_refresh_active = False
+_enabled_skills_refresh_version = 0
+_enabled_skills_refresh_event = threading.Event()
+
+
+def _load_enabled_skills_sync() -> list[Skill]:
+    return list(load_skills(enabled_only=True))
+
+
+def _start_enabled_skills_refresh_thread() -> None:
+    threading.Thread(
+        target=_refresh_enabled_skills_cache_worker,
+        name="deerflow-enabled-skills-loader",
+        daemon=True,
+    ).start()
+
+
+def _refresh_enabled_skills_cache_worker() -> None:
+    global _enabled_skills_cache, _enabled_skills_refresh_active
+
+    while True:
+        with _enabled_skills_lock:
+            target_version = _enabled_skills_refresh_version
+
+        try:
+            skills = _load_enabled_skills_sync()
+        except Exception:
+            logger.exception("Failed to load enabled skills for prompt injection")
+            skills = []
+
+        with _enabled_skills_lock:
+            if _enabled_skills_refresh_version == target_version:
+                _enabled_skills_cache = skills
+                _enabled_skills_refresh_active = False
+                _enabled_skills_refresh_event.set()
+                return
+
+            # A newer invalidation happened while loading. Keep the worker alive
+            # and loop again so the cache always converges on the latest version.
+            _enabled_skills_cache = None
+
+
+def _ensure_enabled_skills_cache() -> threading.Event:
+    global _enabled_skills_refresh_active
+
+    with _enabled_skills_lock:
+        if _enabled_skills_cache is not None:
+            _enabled_skills_refresh_event.set()
+            return _enabled_skills_refresh_event
+        if _enabled_skills_refresh_active:
+            return _enabled_skills_refresh_event
+        _enabled_skills_refresh_active = True
+        _enabled_skills_refresh_event.clear()
+
+    _start_enabled_skills_refresh_thread()
+    return _enabled_skills_refresh_event
+
+
+def _invalidate_enabled_skills_cache() -> threading.Event:
+    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_refresh_version
+
+    _get_cached_skills_prompt_section.cache_clear()
+    with _enabled_skills_lock:
+        _enabled_skills_cache = None
+        _enabled_skills_refresh_version += 1
+        _enabled_skills_refresh_event.clear()
+        if _enabled_skills_refresh_active:
+            return _enabled_skills_refresh_event
+        _enabled_skills_refresh_active = True
+
+    _start_enabled_skills_refresh_thread()
+    return _enabled_skills_refresh_event
+
+
+def prime_enabled_skills_cache() -> None:
+    _ensure_enabled_skills_cache()
+
+
+def warm_enabled_skills_cache(timeout_seconds: float = _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS) -> bool:
+    if _ensure_enabled_skills_cache().wait(timeout=timeout_seconds):
+        return True
+
+    logger.warning("Timed out waiting %.1fs for enabled skills cache warm-up", timeout_seconds)
+    return False
+
+
+def _get_enabled_skills():
+    with _enabled_skills_lock:
+        cached = _enabled_skills_cache
+
+    if cached is not None:
+        return list(cached)
+
+    _ensure_enabled_skills_cache()
+    return []
+
+
+def _skill_mutability_label(category: str) -> str:
+    return "[custom, editable]" if category == "custom" else "[built-in]"
+
+
+def clear_skills_system_prompt_cache() -> None:
+    _invalidate_enabled_skills_cache()
+
+
+async def refresh_skills_system_prompt_cache_async() -> None:
+    await asyncio.to_thread(_invalidate_enabled_skills_cache().wait)
+
+
+def _reset_skills_system_prompt_cache_state() -> None:
+    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_refresh_version
+
+    _get_cached_skills_prompt_section.cache_clear()
+    with _enabled_skills_lock:
+        _enabled_skills_cache = None
+        _enabled_skills_refresh_active = False
+        _enabled_skills_refresh_version = 0
+        _enabled_skills_refresh_event.clear()
+
+
+def _refresh_enabled_skills_cache() -> None:
+    """Backward-compatible test helper for direct synchronous reload."""
+    try:
+        skills = _load_enabled_skills_sync()
+    except Exception:
+        logger.exception("Failed to load enabled skills for prompt injection")
+        skills = []
+
+    with _enabled_skills_lock:
+        _enabled_skills_cache = skills
+        _enabled_skills_refresh_active = False
+        _enabled_skills_refresh_event.set()
+
+
+def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:
+    if not skill_evolution_enabled:
+        return ""
+    return """
+## Skill Self-Evolution
+After completing a task, consider creating or updating a skill when:
+- The task required 5+ tool calls to resolve
+- You overcame non-obvious errors or pitfalls
+- The user corrected your approach and the corrected version worked
+- You discovered a non-trivial, recurring workflow
+If you used a skill and encountered issues not covered by it, patch it immediately.
+Prefer patch over edit. Before creating a new skill, confirm with the user first.
+Skip simple one-off tasks.
+"""
 
 
 def _build_subagent_section(max_concurrent: int) -> str:
@@ -380,33 +536,21 @@ def _get_memory_context(agent_name: str | None = None) -> str:
         return ""
 
 
-def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
-    """Generate the skills prompt section with available skills list.
-
-    Returns the <skill_system>...</skill_system> block listing all enabled skills,
-    suitable for injection into any agent's system prompt.
-    """
-    skills = load_skills(enabled_only=True)
-
-    try:
-        from deerflow.config import get_app_config
-
-        config = get_app_config()
-        container_base_path = config.skills.container_path
-    except Exception:
-        container_base_path = "/mnt/skills"
-
-    if not skills:
-        return ""
-
-    if available_skills is not None:
-        skills = [skill for skill in skills if skill.name in available_skills]
-
-    skill_items = "\n".join(
-        f"    <skill>\n        <name>{skill.name}</name>\n        <description>{skill.description}</description>\n        <location>{skill.get_container_file_path(container_base_path)}</location>\n    </skill>" for skill in skills
-    )
-    skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
-
+@lru_cache(maxsize=32)
+def _get_cached_skills_prompt_section(
+    skill_signature: tuple[tuple[str, str, str, str], ...],
+    available_skills_key: tuple[str, ...] | None,
+    container_base_path: str,
+    skill_evolution_section: str,
+) -> str:
+    filtered = [(name, description, category, location) for name, description, category, location in skill_signature if available_skills_key is None or name in available_skills_key]
+    skills_list = ""
+    if filtered:
+        skill_items = "\n".join(
+            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>\n    </skill>"
+            for name, description, category, location in filtered
+        )
+        skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
     return f"""<skill_system>
 You have access to skills that provide optimized workflows for specific tasks. Each skill contains best practices, frameworks, and references to additional resources.
 
@@ -418,10 +562,38 @@ You have access to skills that provide optimized workflows for specific tasks. E
 5. Follow the skill's instructions precisely
 
 **Skills are located at:** {container_base_path}
-
+{skill_evolution_section}
 {skills_list}
 
 </skill_system>"""
+
+
+def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
+    """Generate the skills prompt section with available skills list."""
+    skills = _get_enabled_skills()
+
+    try:
+        from deerflow.config import get_app_config
+
+        config = get_app_config()
+        container_base_path = config.skills.container_path
+        skill_evolution_enabled = config.skill_evolution.enabled
+    except Exception:
+        container_base_path = "/mnt/skills"
+        skill_evolution_enabled = False
+
+    if not skills and not skill_evolution_enabled:
+        return ""
+
+    if available_skills is not None and not any(skill.name in available_skills for skill in skills):
+        return ""
+
+    skill_signature = tuple((skill.name, skill.description, skill.category, skill.get_container_file_path(container_base_path)) for skill in skills)
+    available_key = tuple(sorted(available_skills)) if available_skills is not None else None
+    if not skill_signature and available_key is not None:
+        return ""
+    skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
+    return _get_cached_skills_prompt_section(skill_signature, available_key, container_base_path, skill_evolution_section)
 
 
 def get_agent_soul(agent_name: str | None) -> str:
@@ -446,7 +618,7 @@ def get_deferred_tools_prompt_section() -> str:
 
         if not get_app_config().tool_search.enabled:
             return ""
-    except FileNotFoundError:
+    except Exception:
         return ""
 
     registry = get_deferred_registry()
