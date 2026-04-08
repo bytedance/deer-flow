@@ -19,11 +19,15 @@ from deerflow.agents.thread_state import UploadedImageDescriptionDocument
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import Paths, get_paths
 from deerflow.uploads.manager import enrich_file_listing, list_files_in_dir
+from deerflow.utils.file_conversion import extract_outline
 
 logger = logging.getLogger(__name__)
 
+
+_OUTLINE_PREVIEW_LINES = 5
 _VIEW_IMAGE_GUIDANCE = (
-    "  This .docx includes extracted images. Before answering questions that depend on screenshots, diagrams, flowcharts, or other visual details, use `view_image` on those image paths instead of relying on markdown alone."
+    "  This .docx includes extracted images. Before answering questions that depend on screenshots, diagrams, "
+    "flowcharts, or other visual details, use `view_image` on those image paths instead of relying on markdown alone."
 )
 _DESCRIPTION_TAG = "document_image_descriptions"
 _DESCRIPTION_BLOCK_RE = re.compile(
@@ -36,6 +40,31 @@ _FAILED_DESCRIPTION_TEXT = (
 )
 
 
+def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
+    """Return the document outline and fallback preview for *file_path*."""
+    md_path = file_path.with_suffix(".md")
+    if not md_path.is_file():
+        return [], []
+
+    outline = extract_outline(md_path)
+    if outline:
+        logger.debug("Extracted %d outline entries from %s", len(outline), file_path.name)
+        return outline, []
+
+    preview: list[str] = []
+    try:
+        with md_path.open(encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped:
+                    preview.append(stripped)
+                if len(preview) >= _OUTLINE_PREVIEW_LINES:
+                    break
+    except Exception:
+        logger.debug("Failed to read preview lines from %s", md_path, exc_info=True)
+    return [], preview
+
+
 class UploadsMiddlewareState(AgentState):
     """State schema for uploads middleware."""
 
@@ -44,105 +73,92 @@ class UploadsMiddlewareState(AgentState):
 
 
 class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
-    """Middleware to inject uploaded files information into the agent context.
-
-    Reads file metadata from the current message's additional_kwargs.files
-    (set by the frontend after upload) and prepends an <uploaded_files> block
-    to the last human message so the model knows which files are available.
-    """
+    """Middleware to inject uploaded files information into the agent context."""
 
     state_schema = UploadsMiddlewareState
 
     def __init__(self, base_dir: str | None = None):
-        """Initialize the middleware.
-
-        Args:
-            base_dir: Base directory for thread data. Defaults to Paths resolution.
-        """
         super().__init__()
         self._paths = Paths(base_dir) if base_dir else get_paths()
 
-    def _append_file_details(self, lines: list[str], file: dict) -> None:
-        """Append per-file details based on image description state."""
-        image_status = file.get("image_description_status")
+    def _format_file_entry(self, file: dict, lines: list[str]) -> None:
+        """Append a single file entry (name, size, path, optional outline) to lines."""
+        size_kb = int(file["size"]) / 1024
+        size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+        lines.append(f"- {file['filename']} ({size_str})")
+        lines.append(f"  Path: {file['path']}")
 
+        if file.get("markdown_file") and file.get("markdown_path"):
+            lines.append(f"  Converted Markdown: {file['markdown_file']}")
+            lines.append(f"    Path: {file['markdown_path']}")
+
+        image_status = file.get("image_description_status")
         if image_status == "parsed" and file.get("image_descriptions"):
             lines.append("  Persisted image descriptions:")
             for index, image in enumerate(file["image_descriptions"], start=1):
                 lines.append(f"    {index}. {image['description']}")
-            return
+        else:
+            if image_status == "failed":
+                lines.append(f"  {_FAILED_DESCRIPTION_TEXT}")
 
-        if image_status == "failed":
-            lines.append(f"  {_FAILED_DESCRIPTION_TEXT}")
+            extracted_images = file.get("extracted_images") or []
+            if extracted_images:
+                lines.append("  Extracted images for vision analysis:")
+                for image in extracted_images:
+                    lines.append(f"    Image: {image['filename']}")
+                    lines.append(f"      Path: {image['path']}")
+                lines.append(_VIEW_IMAGE_GUIDANCE)
 
-        extracted_images = file.get("extracted_images", [])
-        for image in extracted_images:
-            lines.append("  Extracted images for vision analysis:")
-            lines.append(f"  Image: {image['filename']}")
-            lines.append(f"    Path: {image['path']}")
-
-        if extracted_images:
-            lines.append(_VIEW_IMAGE_GUIDANCE)
+        outline = file.get("outline") or []
+        if outline:
+            truncated = outline[-1].get("truncated", False)
+            visible = [entry for entry in outline if not entry.get("truncated")]
+            lines.append("  Document outline (use `read_file` with line ranges to read sections):")
+            for entry in visible:
+                lines.append(f"    L{entry['line']}: {entry['title']}")
+            if truncated:
+                lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further)")
+        else:
+            preview = file.get("outline_preview") or []
+            if preview:
+                lines.append("  No structural headings detected. Document begins with:")
+                for text in preview:
+                    lines.append(f"    > {text}")
+            lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
+        lines.append("")
 
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
-        """Create a formatted message listing uploaded files.
-
-        Args:
-            new_files: Files uploaded in the current message.
-            historical_files: Files uploaded in previous messages.
-
-        Returns:
-            Formatted string inside <uploaded_files> tags.
-        """
+        """Create a formatted message listing uploaded files."""
         lines = ["<uploaded_files>"]
 
         lines.append("The following files were uploaded in this message:")
         lines.append("")
         if new_files:
             for file in new_files:
-                size_kb = int(file["size"]) / 1024
-                size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-                lines.append(f"- {file['filename']} ({size_str})")
-                lines.append(f"  Path: {file['path']}")
-                if file.get("markdown_file") and file.get("markdown_path"):
-                    lines.append(f"  Converted Markdown: {file['markdown_file']}")
-                    lines.append(f"    Path: {file['markdown_path']}")
-                self._append_file_details(lines, file)
-                lines.append("")
+                self._format_file_entry(file, lines)
         else:
             lines.append("(empty)")
+            lines.append("")
 
         if historical_files:
             lines.append("The following files were uploaded in previous messages and are still available:")
             lines.append("")
             for file in historical_files:
-                size_kb = int(file["size"]) / 1024
-                size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-                lines.append(f"- {file['filename']} ({size_str})")
-                lines.append(f"  Path: {file['path']}")
-                self._append_file_details(lines, file)
-                lines.append("")
+                self._format_file_entry(file, lines)
 
-        lines.append("You can read these files using the `read_file` tool with the paths shown above.")
+        lines.append("To work with these files:")
+        lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
+        lines.append("- Use `grep` to search for keywords when you are not sure which section to look at")
+        lines.append("  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).")
+        lines.append("- Use `glob` to find files by name pattern")
+        lines.append("  (e.g. `glob(pattern='**/*.md', path='/mnt/user-data/uploads/')`).")
+        lines.append("- Only fall back to web search if the file content is clearly insufficient to answer the question.")
         lines.append("</uploaded_files>")
 
         return "\n".join(lines)
 
     def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
-        """Extract file info from message additional_kwargs.files.
-
-        The frontend sends uploaded file metadata in additional_kwargs.files
-        after a successful upload. Each entry has: filename, size (bytes),
-        path (virtual path), status.
-
-        Args:
-            message: The human message to inspect.
-            uploads_dir: Physical uploads directory used to verify file existence.
-                         When provided, entries whose files no longer exist are skipped.
-
-        Returns:
-            List of file dicts with virtual paths, or None if the field is absent or empty.
-        """
+        """Extract file info from message additional_kwargs.files."""
         kwargs_files = (message.additional_kwargs or {}).get("files")
         if not isinstance(kwargs_files, list) or not kwargs_files:
             return None
@@ -156,6 +172,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 continue
             if uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue
+
             file_info = {
                 "filename": filename,
                 "size": int(f.get("size") or 0),
@@ -198,8 +215,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """Collect filenames that should be excluded from historical listings."""
         related_filenames: set[str] = set()
         for file in new_files:
-            filename = file["filename"]
-            related_filenames.add(filename)
+            related_filenames.add(file["filename"])
             markdown_filename = file.get("markdown_file")
             if markdown_filename:
                 related_filenames.add(markdown_filename)
@@ -216,12 +232,23 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         for file in result["files"]:
             if file["filename"] in excluded_filenames:
                 continue
+
             historical_file = {
                 "filename": file["filename"],
                 "size": int(file["size"]),
                 "path": file.get("virtual_path", f"/mnt/user-data/uploads/{file['filename']}"),
                 "extension": file.get("extension", Path(file["filename"]).suffix),
             }
+
+            md_path = uploads_dir / Path(file["filename"]).with_suffix(".md").name
+            if md_path.is_file():
+                historical_file["markdown_file"] = md_path.name
+                historical_file["markdown_path"] = f"/mnt/user-data/uploads/{md_path.name}"
+
+            outline, preview = _extract_outline_for_file(uploads_dir / file["filename"])
+            historical_file["outline"] = outline
+            historical_file["outline_preview"] = preview
+
             extracted_images = []
             for image in file.get("extracted_images", []):
                 if image["filename"] in excluded_filenames:
@@ -238,6 +265,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 )
             if extracted_images:
                 historical_file["extracted_images"] = extracted_images
+
             historical_files.append(historical_file)
         return historical_files
 
@@ -381,20 +409,16 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """Flatten structured model content into plain text for payload parsing."""
         if isinstance(content, str):
             return content
-
         if isinstance(content, list):
             parts = [self._normalize_content(item) for item in content]
             return "\n".join(part for part in parts if part)
-
         if isinstance(content, dict):
             text_value = content.get("text")
             if isinstance(text_value, str):
                 return text_value
-
             nested_content = content.get("content")
             if nested_content is not None:
                 return self._normalize_content(nested_content)
-
         return ""
 
     def _strip_description_payload(self, content: object) -> object:
@@ -411,7 +435,6 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             return stripped_blocks
         if isinstance(content, dict):
             updated = dict(content)
-
             text = updated.get("text")
             if isinstance(text, str):
                 cleaned_text = _DESCRIPTION_BLOCK_RE.sub("", text).strip()
@@ -426,7 +449,6 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     updated.pop("content", None)
                 else:
                     updated["content"] = cleaned_nested
-
             return updated
         return content
 
@@ -535,60 +557,57 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
     @override
     def before_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
-        """Inject uploaded files information before agent execution.
-
-        New files come from the current message's additional_kwargs.files.
-        Historical files are scanned from the thread's uploads directory,
-        excluding the new ones.
-
-        Prepends <uploaded_files> context to the last human message content.
-        The original additional_kwargs (including files metadata) is preserved
-        on the updated message so the frontend can read it from the stream.
-
-        Args:
-            state: Current agent state.
-            runtime: Runtime context containing thread_id.
-
-        Returns:
-            State updates including uploaded files list.
-        """
+        """Inject uploaded files information before agent execution."""
         messages = list(state.get("messages", []))
         if not messages:
             return None
 
         last_message_index = len(messages) - 1
         last_message = messages[last_message_index]
-
         if not isinstance(last_message, HumanMessage):
             return None
 
-        # Resolve uploads directory for existence checks
         thread_id = (runtime.context or {}).get("thread_id")
+        if thread_id is None:
+            try:
+                from langgraph.config import get_config
+
+                thread_id = get_config().get("configurable", {}).get("thread_id")
+            except RuntimeError:
+                pass
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
-        # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
         uploaded_image_descriptions, descriptions_changed = self._clear_reuploaded_doc_descriptions(
             state.get("uploaded_image_descriptions"),
             new_files,
         )
+
+        if uploads_dir:
+            for file in new_files:
+                phys_path = uploads_dir / file["filename"]
+                outline, preview = _extract_outline_for_file(phys_path)
+                file["outline"] = outline
+                file["outline_preview"] = preview
+
         self._attach_image_descriptions(new_files, uploaded_image_descriptions)
 
-        # Collect historical files from the uploads directory (all except the new ones)
         historical_files: list[dict] = []
         if uploads_dir and uploads_dir.exists() and thread_id:
-            historical_files = self._load_historical_files(uploads_dir, thread_id, self._collect_related_new_filenames(new_files))
+            historical_files = self._load_historical_files(
+                uploads_dir,
+                thread_id,
+                self._collect_related_new_filenames(new_files),
+            )
         self._attach_image_descriptions(historical_files, uploaded_image_descriptions)
 
         if not new_files and not historical_files:
             return None
 
-        logger.debug(f"New files: {[f['filename'] for f in new_files]}, historical: {[f['filename'] for f in historical_files]}")
+        logger.debug("New files: %s, historical: %s", [f["filename"] for f in new_files], [f["filename"] for f in historical_files])
 
-        # Create files message and prepend to the last human message content
         files_message = self._create_files_message(new_files, historical_files)
 
-        # Extract original content - handle both string and list formats
         original_content = ""
         if isinstance(last_message.content, str):
             original_content = last_message.content
@@ -599,9 +618,6 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     text_parts.append(block.get("text", ""))
             original_content = "\n".join(text_parts)
 
-        # Create new message with combined content.
-        # Preserve additional_kwargs (including files metadata) so the frontend
-        # can read structured file info from the streamed message.
         updated_message = HumanMessage(
             content=f"{files_message}\n\n{original_content}",
             id=last_message.id,
