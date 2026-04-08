@@ -1478,13 +1478,28 @@ docker logs deer-flow-gateway 2>&1 | grep -E "ChannelManager|channel" | head -10
 
 **预期：** 无 auth 相关错误。渠道通过 `langgraph-sdk` 直连 LangGraph Server（`http://langgraph:2024`），不走 auth 层。
 
-#### TC-DOCKER-05: admin 密码在容器日志中可见
+#### TC-DOCKER-05: admin 密码写入 0600 凭证文件（不再走日志）
 
 ```bash
-docker logs deer-flow-gateway 2>&1 | grep "Password:"
+# 凭证文件写在挂载到宿主机的 DEER_FLOW_HOME 下
+ls -la ${DEER_FLOW_HOME:-backend/.deer-flow}/admin_initial_credentials.txt
+# 预期文件权限: -rw------- (0600)
+
+cat ${DEER_FLOW_HOME:-backend/.deer-flow}/admin_initial_credentials.txt
+# 预期内容: email + password 行
+
+# 容器日志只输出文件路径，不输出密码本身
+docker logs deer-flow-gateway 2>&1 | grep -E "Credentials written to|Admin account"
+# 预期看到: "Credentials written to: /...../admin_initial_credentials.txt (mode 0600)"
+
+# 反向验证: 日志里 NEVER 出现明文密码
+docker logs deer-flow-gateway 2>&1 | grep -iE "Password: .{15,}" && echo "FAIL: leaked" || echo "OK: not leaked"
 ```
 
-**预期：** 首次启动时输出 admin 密码，运维可通过 `docker logs` 获取。
+**预期：**
+- 凭证文件存在于 `DEER_FLOW_HOME` 下，权限 `0600`
+- 容器日志输出**路径**（不是密码本身），符合 CodeQL `py/clear-text-logging-sensitive-data` 规则
+- `grep "Password:"` 在日志中**应当无匹配**（旧行为已废弃，simplify pass 移除了日志泄露路径）
 
 #### TC-DOCKER-06: Gateway 模式 Docker 部署
 
