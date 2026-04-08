@@ -53,6 +53,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Quick Start](#quick-start)
     - [Configuration](#configuration)
     - [Running the Application](#running-the-application)
+      - [Deployment Sizing](#deployment-sizing)
       - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
       - [Option 2: Local Development](#option-2-local-development)
     - [Advanced](#advanced)
@@ -224,6 +225,20 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
    ```
 
 ### Running the Application
+
+#### Deployment Sizing
+
+Use the table below as a practical starting point when choosing how to run DeerFlow:
+
+| Deployment target | Starting point | Recommended | Notes |
+|---------|-----------|------------|-------|
+| Local evaluation / `make dev` | 4 vCPU, 8 GB RAM, 20 GB free SSD | 8 vCPU, 16 GB RAM | Good for one developer or one light session with hosted model APIs. `2 vCPU / 4 GB` is usually not enough. |
+| Docker development / `make docker-start` | 4 vCPU, 8 GB RAM, 25 GB free SSD | 8 vCPU, 16 GB RAM | Image builds, bind mounts, and sandbox containers need more headroom than pure local dev. |
+| Long-running server / `make up` | 8 vCPU, 16 GB RAM, 40 GB free SSD | 16 vCPU, 32 GB RAM | Preferred for shared use, multi-agent runs, report generation, or heavier sandbox workloads. |
+
+- These numbers cover DeerFlow itself. If you also host a local LLM, size that service separately.
+- Linux plus Docker is the recommended deployment target for a persistent server. macOS and Windows are best treated as development or evaluation environments.
+- If CPU or memory usage stays pinned, reduce concurrent runs first, then move to the next sizing tier.
 
 #### Option 1: Docker (Recommended)
 
