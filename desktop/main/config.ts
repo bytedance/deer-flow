@@ -117,10 +117,13 @@ export async function readDesktopSettings(paths: DesktopPaths): Promise<DesktopS
   try {
     const raw = await fs.readFile(paths.preferencesPath, "utf8");
     const parsed = JSON.parse(raw) as Partial<DesktopSettings>;
+    const providers = (parsed.providers ?? DEFAULT_DESKTOP_SETTINGS.providers).filter(
+      (p) => p.providerType,
+    );
     return {
       ...DEFAULT_DESKTOP_SETTINGS,
       ...parsed,
-      providers: parsed.providers ?? DEFAULT_DESKTOP_SETTINGS.providers,
+      providers,
     };
   } catch {
     return DEFAULT_DESKTOP_SETTINGS;
