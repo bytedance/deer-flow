@@ -241,6 +241,7 @@ async def _launch_run_task(
     run_mgr: RunManager,
     record: RunRecord,
     *,
+    launch_state: dict[str, bool],
     after_seconds: float | None,
     checkpointer: Any,
     store: Any,
@@ -258,6 +259,7 @@ async def _launch_run_task(
     delayed task is cancelled before execution starts, we still close the SSE
     stream so subscribers do not hang waiting for an ``end`` event.
     """
+    launch_state["entered"] = True
     started = False
 
     try:
@@ -280,7 +282,8 @@ async def _launch_run_task(
             interrupt_after=interrupt_after,
         )
     except asyncio.CancelledError:
-        if not started:
+        if not started and not launch_state["stream_closed"]:
+            launch_state["stream_closed"] = True
             await bridge.publish_end(record.run_id)
             asyncio.create_task(bridge.cleanup(record.run_id, delay=60))
         raise
@@ -356,11 +359,14 @@ async def start_run(
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
+    launch_state = {"entered": False, "stream_closed": False}
+
     task = asyncio.create_task(
         _launch_run_task(
             bridge,
             run_mgr,
             record,
+            launch_state=launch_state,
             after_seconds=body.after_seconds,
             checkpointer=checkpointer,
             store=store,
@@ -378,7 +384,8 @@ async def start_run(
     # ``_launch_run_task`` (for example an immediate cancel on a delayed run),
     # no coroutine-level cleanup runs. Close the SSE stream here as a backstop.
     def _close_cancelled_stream(done_task: asyncio.Task) -> None:
-        if done_task.cancelled():
+        if done_task.cancelled() and not launch_state["entered"] and not launch_state["stream_closed"]:
+            launch_state["stream_closed"] = True
             asyncio.create_task(bridge.publish_end(record.run_id))
             asyncio.create_task(bridge.cleanup(record.run_id, delay=60))
 

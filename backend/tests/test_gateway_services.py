@@ -344,31 +344,34 @@ async def test_start_run_honors_after_seconds(monkeypatch: pytest.MonkeyPatch):
 
     request, _bridge, _run_mgr = _make_gateway_request()
     started = asyncio.Event()
-    call_times: list[float] = []
+    delay_entered = asyncio.Event()
+    release_delay = asyncio.Event()
 
     async def fake_run_agent(*args, **kwargs):
-        call_times.append(asyncio.get_running_loop().time())
         started.set()
+
+    async def fake_sleep(seconds: float):
+        assert seconds == 0.05
+        delay_entered.set()
+        await release_delay.wait()
 
     monkeypatch.setattr(services, "resolve_agent_factory", lambda _assistant_id: object())
     monkeypatch.setattr(services, "run_agent", fake_run_agent)
+    monkeypatch.setattr(services.asyncio, "sleep", fake_sleep)
 
     body = RunCreateRequest(
         input={"messages": [{"role": "user", "content": "hi"}]},
         after_seconds=0.05,
     )
 
-    started_at = asyncio.get_running_loop().time()
     record = await services.start_run(body, "thread-1", request)
 
-    await asyncio.sleep(0)
+    await asyncio.wait_for(delay_entered.wait(), timeout=0.3)
     assert record.status == RunStatus.pending
     assert started.is_set() is False
 
+    release_delay.set()
     await asyncio.wait_for(started.wait(), timeout=0.3)
-    assert call_times
-    assert call_times[0] - started_at >= 0.04
-
     await record.task
 
 
