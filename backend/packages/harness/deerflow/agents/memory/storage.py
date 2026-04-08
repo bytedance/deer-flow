@@ -29,9 +29,10 @@ def get_memory_file_path(agent_name: str | None = None) -> Path:
         p = Path(config.storage_path)
         return p if p.is_absolute() else get_paths().base_dir / p
     return get_paths().memory_file
-  
+
+
 def utc_now_iso_z() -> str:
-    """Current UTC time as ISO-8601 with ``Z`` suffix (matches prior naive-UTC output)."""
+    """Current UTC time as ISO-8601 with ``Z`` suffix."""
     return datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
 
 
@@ -68,7 +69,11 @@ class MemoryStorage(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    def save(
+        self,
+        memory_data: dict[str, Any],
+        agent_name: str | None = None,
+    ) -> bool:
         """Save memory data for the given agent."""
         pass
 
@@ -86,7 +91,10 @@ class FileMemoryStorage(MemoryStorage):
         """Get the path to the memory file."""
         return get_memory_file_path(agent_name)
 
-    def _load_memory_from_file(self, agent_name: str | None = None) -> dict[str, Any]:
+    def _load_memory_from_file(
+        self,
+        agent_name: str | None = None,
+    ) -> dict[str, Any]:
         """Load memory data from file."""
         file_path = self._get_memory_file_path(agent_name)
 
@@ -132,7 +140,11 @@ class FileMemoryStorage(MemoryStorage):
         self._memory_cache[agent_name] = (memory_data, mtime)
         return memory_data
 
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    def save(
+        self,
+        memory_data: dict[str, Any],
+        agent_name: str | None = None,
+    ) -> bool:
         """Save memory data to file and update cache."""
         file_path = self._get_memory_file_path(agent_name)
 
