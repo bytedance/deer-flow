@@ -103,7 +103,9 @@ function MessageImage({
     return <img className={imgClassName} src={src} alt={alt} {...props} />;
   }
 
-  const url = isArtifactVirtualPath(src) ? resolveArtifactURL(src, threadId) : src;
+  const url = isArtifactVirtualPath(src)
+    ? resolveArtifactURL(src, threadId)
+    : src;
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">

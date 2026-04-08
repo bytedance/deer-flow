@@ -15,6 +15,7 @@ import { streamdownPlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
+
 import { ThreadContext } from "./context";
 
 function isExternalUrl(href: string | undefined): boolean {
