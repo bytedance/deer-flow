@@ -361,6 +361,16 @@ export interface Translations {
       providerListDescription: string;
       deleteProviderConfirmTitle: string;
       deleteProviderConfirmDescription: string;
+      providerType: string;
+      providerTypePlaceholder: string;
+      providerName: string;
+      modelName: string;
+      modelNamePlaceholder: string;
+      addProviderDialogTitle: string;
+      addProviderDialogDescription: string;
+      openaiCompatible: string;
+      emptyProviders: string;
+      emptyProvidersDescription: string;
     };
     tools: {
       title: string;

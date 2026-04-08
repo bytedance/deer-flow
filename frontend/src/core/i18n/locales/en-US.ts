@@ -439,6 +439,16 @@ export const enUS: Translations = {
       deleteProviderConfirmTitle: "Delete this provider?",
       deleteProviderConfirmDescription:
         "This removes the provider from desktop settings and clears its saved API key.",
+      providerType: "Provider Type",
+      providerTypePlaceholder: "Select a provider",
+      providerName: "Provider Name",
+      modelName: "Model Name",
+      modelNamePlaceholder: "e.g. gpt-4o, claude-3-5-sonnet",
+      addProviderDialogTitle: "Add Model Provider",
+      addProviderDialogDescription: "Configure provider credentials.",
+      openaiCompatible: "OpenAI-Compatible",
+      emptyProviders: "No providers configured",
+      emptyProvidersDescription: "Add a provider to get started with AI models.",
     },
     tools: {
       title: "Tools",

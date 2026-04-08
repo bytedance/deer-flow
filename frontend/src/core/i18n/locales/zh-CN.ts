@@ -1,4 +1,4 @@
-﻿import {
+import {
   CompassIcon,
   GraduationCapIcon,
   ImageIcon,
@@ -420,6 +420,16 @@ export const zhCN: Translations = {
       providerListDescription: "每个 Provider 都可以配置自己的 API Key 环境变量和可选 Base URL。",
       deleteProviderConfirmTitle: "要删除这个 Provider 吗？",
       deleteProviderConfirmDescription: "这会从桌面端设置中移除该 Provider，并清除已保存的 API Key。",
+      providerType: "Provider 类型",
+      providerTypePlaceholder: "选择 Provider",
+      providerName: "Provider 名称",
+      modelName: "模型名称",
+      modelNamePlaceholder: "例如 gpt-4o, claude-3-5-sonnet",
+      addProviderDialogTitle: "添加模型 Provider",
+      addProviderDialogDescription: "配置 Provider 凭据。",
+      openaiCompatible: "OpenAI 兼容",
+      emptyProviders: "尚未配置 Provider",
+      emptyProvidersDescription: "添加一个 Provider 以开始使用 AI 模型。",
     },
     tools: {
       title: "工具",
