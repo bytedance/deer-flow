@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def utc_now_iso_z() -> str:
     """Current UTC time as ISO-8601 with ``Z`` suffix (matches prior naive-UTC output)."""
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
 
 
 def create_empty_memory() -> dict[str, Any]:
