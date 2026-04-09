@@ -20,6 +20,7 @@ from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
 from deerflow.uploads.manager import PathTraversalError
+from deerflow.utils.file_conversion import LegacyDocConversionError
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -929,6 +930,28 @@ class TestUploads:
             assert created_executors[0].shutdown_calls == [True]
             assert result["files"][0]["markdown_file"] == "first.md"
             assert result["files"][1]["markdown_file"] == "second.md"
+
+    def test_upload_files_rejects_legacy_doc_without_supported_converter(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            legacy_doc = tmp_path / "legacy.doc"
+            legacy_doc.write_bytes(b"fake doc")
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch(
+                    "deerflow.utils.file_conversion.ensure_legacy_doc_conversion_supported",
+                    side_effect=LegacyDocConversionError(
+                        "Legacy .doc uploads require LibreOffice (`soffice`) or macOS `textutil` to convert them to .docx before Markdown extraction."
+                    ),
+                ),
+            ):
+                with pytest.raises(ValueError, match="Legacy \\.doc uploads require LibreOffice"):
+                    client.upload_files("thread-doc", [legacy_doc])
 
     def test_list_uploads(self, client):
         with tempfile.TemporaryDirectory() as tmp:
