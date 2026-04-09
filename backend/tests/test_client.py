@@ -571,7 +571,7 @@ class TestGetModel:
 
 
 # ---------------------------------------------------------------------------
-# Thread Queries (list_threads / get_thread)
+# Thread Queries (list_threads / get_thread / get_thread_history)
 # ---------------------------------------------------------------------------
 
 
@@ -596,7 +596,7 @@ class TestThreadQueries:
             channel_values["messages"] = messages
 
         cp.checkpoint = {"ts": ts, "channel_values": channel_values}
-        cp.metadata = {"source": "test"}
+        cp.metadata = {"source": "test", "created_at": ts}
 
         if parent_id:
             cp.parent_config = {"configurable": {"thread_id": thread_id, "checkpoint_id": parent_id}}
@@ -709,6 +709,55 @@ class TestThreadQueries:
         assert result["thread_id"] == "t99"
         assert result["checkpoints"] == []
         mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}})
+
+    def test_get_thread_history(self, client):
+        mock_checkpointer = MagicMock()
+        client._checkpointer = mock_checkpointer
+
+        msg1 = HumanMessage(content="Hello", id="m1")
+        msg2 = AIMessage(content="Hi there", id="m2")
+        task = MagicMock()
+        task.name = "resume_node"
+        cp1 = self._make_mock_checkpoint_tuple("t1", "c1", "2023-01-01T10:00:00Z", messages=[msg1])
+        cp1.tasks = []
+        cp2 = self._make_mock_checkpoint_tuple("t1", "c2", "2023-01-01T10:01:00Z", parent_id="c1", messages=[msg1, msg2])
+        cp2.tasks = [task]
+        mock_checkpointer.list.return_value = [cp2, cp1]
+
+        result = client.get_thread_history("t1", limit=2, before="cursor-1")
+
+        mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t1", "checkpoint_id": "cursor-1"}}, limit=2)
+        assert len(result) == 2
+        assert result[0]["checkpoint_id"] == "c2"
+        assert result[0]["parent_checkpoint_id"] == "c1"
+        assert result[0]["created_at"] == "2023-01-01T10:01:00Z"
+        assert result[0]["next"] == ["resume_node"]
+        assert result[0]["values"]["messages"][1]["content"] == "Hi there"
+        assert result[1]["checkpoint_id"] == "c1"
+        assert result[1]["next"] == []
+
+    def test_get_thread_history_empty(self, client):
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.list.return_value = []
+        client._checkpointer = mock_checkpointer
+
+        result = client.get_thread_history("t-empty")
+
+        assert result == []
+        mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t-empty"}}, limit=10)
+
+    def test_get_thread_history_fallback_checkpointer(self, client):
+        mock_checkpointer = MagicMock()
+        cp = self._make_mock_checkpoint_tuple("t99", "c99", "2023-01-01T10:00:00Z")
+        cp.tasks = []
+        mock_checkpointer.list.return_value = [cp]
+
+        with patch("deerflow.agents.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
+            result = client.get_thread_history("t99", limit=1)
+
+        assert len(result) == 1
+        assert result[0]["checkpoint_id"] == "c99"
+        mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}}, limit=1)
 
 
 # ---------------------------------------------------------------------------
