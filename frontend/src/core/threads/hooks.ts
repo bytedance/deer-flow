@@ -452,6 +452,7 @@ export function useThreadStream({
             status: "uploaded" as const,
           }),
         );
+        const agentName = extraContext?.agent_name ?? context.agent_name;
 
         await thread.submit(
           {
@@ -477,6 +478,7 @@ export function useThreadStream({
             threadId: threadId,
             streamSubgraphs: true,
             streamResumable: true,
+            metadata: agentName ? { agent_name: agentName } : undefined,
             config: {
               recursion_limit: 1000,
             },
@@ -528,7 +530,7 @@ export function useThreads(
     limit: 50,
     sortBy: "updated_at",
     sortOrder: "desc",
-    select: ["thread_id", "updated_at", "values", "context"],
+    select: ["thread_id", "updated_at", "values", "metadata"],
   },
 ) {
   const apiClient = getAPIClient();
