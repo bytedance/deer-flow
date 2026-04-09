@@ -606,6 +606,31 @@ class TestThreadQueries:
         cp.pending_writes = pending_writes or []
         return cp
 
+    def _make_mock_state_checkpoint_tuple(
+        self,
+        thread_id: str,
+        checkpoint_id: str,
+        *,
+        created_at: str,
+        parent_id: str | None = None,
+        channel_values: dict | None = None,
+        tasks: list | None = None,
+    ):
+        cp = MagicMock()
+        cp.config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_id": checkpoint_id,
+            }
+        }
+        cp.checkpoint = {
+            "channel_values": channel_values or {},
+        }
+        cp.metadata = {"created_at": created_at, "source": "test"}
+        cp.parent_config = {"configurable": {"thread_id": thread_id, "checkpoint_id": parent_id}} if parent_id else None
+        cp.tasks = tasks or []
+        return cp
+
     def test_list_threads_empty(self, client):
         mock_checkpointer = MagicMock()
         mock_checkpointer.list.return_value = []
@@ -709,6 +734,62 @@ class TestThreadQueries:
         assert result["thread_id"] == "t99"
         assert result["checkpoints"] == []
         mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}})
+
+    def test_get_thread_state(self, client):
+        mock_checkpointer = MagicMock()
+        client._checkpointer = mock_checkpointer
+
+        msg1 = HumanMessage(content="Hello", id="m1")
+        msg2 = AIMessage(content="Hi there", id="m2")
+        task = MagicMock()
+        task.id = "task-1"
+        task.name = "resume_node"
+        cp = self._make_mock_state_checkpoint_tuple(
+            "t1",
+            "c2",
+            created_at="2023-01-01T10:01:00Z",
+            parent_id="c1",
+            channel_values={"title": "Thread 1", "messages": [msg1, msg2]},
+            tasks=[task],
+        )
+        mock_checkpointer.get_tuple.return_value = cp
+
+        result = client.get_thread_state("t1")
+
+        mock_checkpointer.get_tuple.assert_called_once_with({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}})
+        assert result["checkpoint"] == {"id": "c2", "ts": "2023-01-01T10:01:00Z"}
+        assert result["checkpoint_id"] == "c2"
+        assert result["parent_checkpoint_id"] == "c1"
+        assert result["created_at"] == "2023-01-01T10:01:00Z"
+        assert result["metadata"]["source"] == "test"
+        assert result["next"] == ["resume_node"]
+        assert result["tasks"] == [{"id": "task-1", "name": "resume_node"}]
+        assert result["values"]["title"] == "Thread 1"
+        assert result["values"]["messages"][0]["content"] == "Hello"
+        assert result["values"]["messages"][1]["content"] == "Hi there"
+
+    def test_get_thread_state_not_found(self, client):
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.get_tuple.return_value = None
+        client._checkpointer = mock_checkpointer
+
+        with pytest.raises(ValueError, match="Thread missing not found"):
+            client.get_thread_state("missing")
+
+    def test_get_thread_state_fallback_checkpointer(self, client):
+        mock_checkpointer = MagicMock()
+        cp = self._make_mock_state_checkpoint_tuple(
+            "t99",
+            "c99",
+            created_at="2023-01-01T00:00:00Z",
+        )
+        mock_checkpointer.get_tuple.return_value = cp
+
+        with patch("deerflow.agents.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
+            result = client.get_thread_state("t99")
+
+        assert result["checkpoint_id"] == "c99"
+        mock_checkpointer.get_tuple.assert_called_once_with({"configurable": {"thread_id": "t99", "checkpoint_ns": ""}})
 
 
 # ---------------------------------------------------------------------------
