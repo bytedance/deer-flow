@@ -802,7 +802,12 @@ class DeerFlowClient:
             FileNotFoundError: If any file does not exist.
             ValueError: If any supplied path exists but is not a regular file.
         """
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+        from deerflow.utils.file_conversion import (
+            CONVERTIBLE_EXTENSIONS,
+            LegacyDocConversionError,
+            convert_file_to_markdown,
+            ensure_legacy_doc_conversion_supported,
+        )
 
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
@@ -818,6 +823,11 @@ class DeerFlowClient:
             resolved_files.append((p, dest_name))
             if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
+            if p.suffix.lower() == ".doc":
+                try:
+                    ensure_legacy_doc_conversion_supported()
+                except LegacyDocConversionError as exc:
+                    raise ValueError(str(exc)) from exc
 
         uploads_dir = ensure_uploads_dir(thread_id)
         uploaded_files: list[dict] = []
@@ -859,6 +869,8 @@ class DeerFlowClient:
                             md_path = conversion_pool.submit(_convert_in_thread, dest).result()
                         else:
                             md_path = asyncio.run(convert_file_to_markdown(dest))
+                    except LegacyDocConversionError as exc:
+                        raise ValueError(str(exc)) from exc
                     except Exception:
                         logger.warning(
                             "Failed to convert %s to markdown",
