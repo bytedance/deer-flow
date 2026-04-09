@@ -49,21 +49,49 @@ cleanup_apple_container() {
 
         if [ "$CONTAINER_LIST" != "[]" ] && [ -n "$CONTAINER_LIST" ]; then
             # Extract container IDs that match our prefix
-            CONTAINER_IDS=$(echo "$CONTAINER_LIST" | python3 -c "
+            if ! CONTAINER_IDS=$(echo "$CONTAINER_LIST" | PREFIX="$PREFIX" python3 -c "
 import json
+import os
 import sys
+
+prefix = os.environ['PREFIX']
+
 try:
     containers = json.load(sys.stdin)
-    if isinstance(containers, list):
-        for c in containers:
-            if isinstance(c, dict):
-                # Apple Container uses 'id' field which contains the container name
-                cid = c.get('configuration').get('id', '')
-                if '${PREFIX}' in cid:
-                    print(cid)
-except:
-    pass
-" 2>/dev/null || echo "")
+except json.JSONDecodeError as exc:
+    print(f'Failed to parse Apple Container list JSON: {exc}', file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(containers, list):
+    print(
+        f'Unexpected Apple Container list payload type: {type(containers).__name__}',
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+for container_entry in containers:
+    if not isinstance(container_entry, dict):
+        print(
+            f'Skipping Apple Container entry with unexpected type: {type(container_entry).__name__}',
+            file=sys.stderr,
+        )
+        continue
+
+    configuration = container_entry.get('configuration')
+    if configuration is None:
+        continue
+
+    if not isinstance(configuration, dict):
+        print('Skipping Apple Container entry with invalid configuration payload', file=sys.stderr)
+        continue
+
+    cid = configuration.get('id', '')
+    if isinstance(cid, str) and prefix in cid:
+        print(cid)
+"); then
+                echo -e "${RED}Failed to inspect Apple Container containers${NC}" >&2
+                return 1
+            fi
 
             if [ -n "$CONTAINER_IDS" ]; then
                 echo ""
