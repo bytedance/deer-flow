@@ -69,10 +69,15 @@ services:
     environment:
       - LANGGRAPH_UPSTREAM=${LANGGRAPH_UPSTREAM:-langgraph:2024}
       - LANGGRAPH_REWRITE=${LANGGRAPH_REWRITE:-/}
-    command: >
-      sh -c "envsubst '$$LANGGRAPH_UPSTREAM $$LANGGRAPH_REWRITE'
-      < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
-      && nginx -g 'daemon off;'"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        envsubst '$$LANGGRAPH_UPSTREAM $$LANGGRAPH_REWRITE' \
+          < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
+        exec nginx -g 'daemon off;'
     depends_on:
       - frontend
       - gateway
