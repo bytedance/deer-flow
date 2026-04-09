@@ -1,5 +1,6 @@
 """Middleware to inject uploaded files information into agent context."""
 
+import asyncio
 import base64
 import json
 import logging
@@ -618,6 +619,86 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         historical_files: list[dict] = []
         if uploads_dir and uploads_dir.exists() and thread_id:
             historical_files = self._load_historical_files(
+                uploads_dir,
+                thread_id,
+                self._collect_related_new_filenames(new_files),
+            )
+        self._attach_image_descriptions(historical_files, uploaded_image_descriptions)
+
+        if not new_files and not historical_files:
+            return None
+
+        logger.debug("New files: %s, historical: %s", [f["filename"] for f in new_files], [f["filename"] for f in historical_files])
+
+        files_message = self._create_files_message(new_files, historical_files)
+
+        original_content = ""
+        if isinstance(last_message.content, str):
+            original_content = last_message.content
+        elif isinstance(last_message.content, list):
+            text_parts = []
+            for block in last_message.content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+            original_content = "\n".join(text_parts)
+
+        updated_message = HumanMessage(
+            content=f"{files_message}\n\n{original_content}",
+            id=last_message.id,
+            additional_kwargs=last_message.additional_kwargs,
+        )
+
+        messages[last_message_index] = updated_message
+
+        result = {
+            "uploaded_files": new_files,
+            "messages": messages,
+        }
+        if descriptions_changed:
+            result["uploaded_image_descriptions"] = uploaded_image_descriptions
+        return result
+
+    @override
+    async def abefore_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
+        """Async before-agent hook that offloads historical upload scanning."""
+        messages = list(state.get("messages", []))
+        if not messages:
+            return None
+
+        last_message_index = len(messages) - 1
+        last_message = messages[last_message_index]
+        if not isinstance(last_message, HumanMessage):
+            return None
+
+        thread_id = (runtime.context or {}).get("thread_id")
+        if thread_id is None:
+            try:
+                from langgraph.config import get_config
+
+                thread_id = get_config().get("configurable", {}).get("thread_id")
+            except RuntimeError:
+                pass  # get_config() raises outside a runnable context (e.g. unit tests)
+        uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
+
+        new_files = self._files_from_kwargs(last_message, uploads_dir) or []
+        uploaded_image_descriptions, descriptions_changed = self._clear_reuploaded_doc_descriptions(
+            state.get("uploaded_image_descriptions"),
+            new_files,
+        )
+
+        if uploads_dir:
+            for file in new_files:
+                phys_path = uploads_dir / file["filename"]
+                outline, preview = _extract_outline_for_file(phys_path)
+                file["outline"] = outline
+                file["outline_preview"] = preview
+
+        self._attach_image_descriptions(new_files, uploaded_image_descriptions)
+
+        historical_files: list[dict] = []
+        if uploads_dir and uploads_dir.exists() and thread_id:
+            historical_files = await asyncio.to_thread(
+                self._load_historical_files,
                 uploads_dir,
                 thread_id,
                 self._collect_related_new_filenames(new_files),

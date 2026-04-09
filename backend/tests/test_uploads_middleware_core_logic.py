@@ -7,6 +7,8 @@ Covers:
   additional_kwargs, historical files from uploads dir, edge-cases)
 """
 
+import asyncio
+
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -391,6 +393,46 @@ class TestBeforeAgent:
         content = result["messages"][-1].content
         assert "uploaded in this message" in content
         assert "new.txt" in content
+        assert "previous messages" in content
+        assert "old.txt" in content
+
+    def test_abefore_agent_offloads_historical_file_loading(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "old.txt").write_bytes(b"old")
+        (uploads_dir / "new.txt").write_bytes(b"new")
+
+        msg = _human("go", files=[{"filename": "new.txt", "size": 3, "path": "/mnt/user-data/uploads/new.txt"}])
+        state = self._state(msg)
+        expected_historical_files = [
+            {
+                "filename": "old.txt",
+                "size": 3,
+                "path": "/mnt/user-data/uploads/old.txt",
+                "extension": ".txt",
+            }
+        ]
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch.object(mw, "_load_historical_files", return_value=expected_historical_files) as load_historical_files,
+            patch(
+                "deerflow.agents.middlewares.uploads_middleware.asyncio.to_thread",
+                new=AsyncMock(side_effect=fake_to_thread),
+            ) as to_thread,
+        ):
+            result = asyncio.run(mw.abefore_agent(state, _runtime()))
+
+        assert result is not None
+        to_thread.assert_awaited_once()
+        load_historical_files.assert_called_once_with(
+            uploads_dir,
+            THREAD_ID,
+            {"new.txt"},
+        )
+        content = result["messages"][-1].content
         assert "previous messages" in content
         assert "old.txt" in content
 
