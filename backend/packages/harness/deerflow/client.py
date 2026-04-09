@@ -16,6 +16,7 @@ Usage:
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import mimetypes
@@ -24,6 +25,7 @@ import tempfile
 import uuid
 from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
@@ -315,6 +317,20 @@ class DeerFlowClient:
             return "\n".join(pieces) if pieces else ""
         return str(content)
 
+    @staticmethod
+    def _resolve_maybe_async(result: Any) -> Any:
+        """Resolve a sync value or awaitable from sync client methods."""
+        if not isawaitable(result):
+            return result
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(result)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(asyncio.run, result).result()
+
     # ------------------------------------------------------------------
     # Public API — threads
     # ------------------------------------------------------------------
@@ -416,6 +432,40 @@ class DeerFlowClient:
         checkpoints.sort(key=lambda x: x["ts"] if x["ts"] else "")
 
         return {"thread_id": thread_id, "checkpoints": checkpoints}
+
+    def delete_thread(self, thread_id: str) -> dict:
+        """Delete a thread's local data and checkpoint history.
+
+        Args:
+            thread_id: Thread ID.
+
+        Returns:
+            Dict with success and message, aligned with Gateway
+            ``ThreadDeleteResponse``.
+
+        Raises:
+            ValueError: If ``thread_id`` is invalid.
+            OSError: If local thread data cannot be removed.
+        """
+        get_paths().delete_thread_dir(thread_id)
+
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.agents.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+
+        delete_method = getattr(checkpointer, "delete_thread", None) or getattr(checkpointer, "adelete_thread", None)
+        if delete_method is not None:
+            try:
+                self._resolve_maybe_async(delete_method(thread_id))
+            except Exception:
+                logger.debug("Could not delete checkpoints for thread %s (not critical)", thread_id, exc_info=True)
+
+        return {
+            "success": True,
+            "message": f"Deleted local thread data for {thread_id}",
+        }
 
     # ------------------------------------------------------------------
     # Public API — conversation

@@ -16,6 +16,7 @@ from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
 from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
+from app.gateway.routers.threads import ThreadDeleteResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
@@ -709,6 +710,90 @@ class TestThreadQueries:
         assert result["thread_id"] == "t99"
         assert result["checkpoints"] == []
         mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}})
+
+    def test_delete_thread_removes_local_dir_and_sync_checkpointer(self, client, tmp_path):
+        paths = Paths(tmp_path)
+        thread_id = "thread-cleanup"
+        thread_dir = paths.thread_dir(thread_id)
+        paths.sandbox_work_dir(thread_id).mkdir(parents=True, exist_ok=True)
+        (paths.sandbox_work_dir(thread_id) / "notes.txt").write_text("hello", encoding="utf-8")
+
+        mock_checkpointer = MagicMock()
+        client._checkpointer = mock_checkpointer
+
+        with patch("deerflow.client.get_paths", return_value=paths):
+            result = client.delete_thread(thread_id)
+
+        assert result == {
+            "success": True,
+            "message": "Deleted local thread data for thread-cleanup",
+        }
+        assert not thread_dir.exists()
+        mock_checkpointer.delete_thread.assert_called_once_with(thread_id)
+
+    def test_delete_thread_supports_async_checkpointer(self, client, tmp_path):
+        class AsyncOnlyCheckpointer:
+            def __init__(self):
+                self.adelete_thread = MagicMock()
+                self.adelete_thread.side_effect = self._delete
+
+            async def _delete(self, thread_id: str):
+                self.thread_id = thread_id
+
+        paths = Paths(tmp_path)
+        thread_id = "thread-async"
+        paths.sandbox_work_dir(thread_id).mkdir(parents=True, exist_ok=True)
+        async_checkpointer = AsyncOnlyCheckpointer()
+        client._checkpointer = async_checkpointer
+
+        with patch("deerflow.client.get_paths", return_value=paths):
+            result = client.delete_thread(thread_id)
+
+        assert result["success"] is True
+        assert getattr(async_checkpointer, "thread_id", None) == thread_id
+        async_checkpointer.adelete_thread.assert_called_once_with(thread_id)
+
+    def test_delete_thread_ignores_checkpointer_cleanup_failures(self, client, tmp_path):
+        paths = Paths(tmp_path)
+        thread_id = "thread-noncritical"
+        paths.sandbox_work_dir(thread_id).mkdir(parents=True, exist_ok=True)
+
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.delete_thread.side_effect = RuntimeError("boom")
+        client._checkpointer = mock_checkpointer
+
+        with patch("deerflow.client.get_paths", return_value=paths):
+            result = client.delete_thread(thread_id)
+
+        assert result["success"] is True
+        assert not paths.thread_dir(thread_id).exists()
+
+    def test_delete_thread_rejects_invalid_thread_id(self, client, tmp_path):
+        paths = Paths(tmp_path)
+        mock_checkpointer = MagicMock()
+        client._checkpointer = mock_checkpointer
+
+        with patch("deerflow.client.get_paths", return_value=paths):
+            with pytest.raises(ValueError, match="Invalid thread_id"):
+                client.delete_thread("../escape")
+
+        mock_checkpointer.delete_thread.assert_not_called()
+
+    def test_delete_thread_fallback_checkpointer_provider(self, client, tmp_path):
+        paths = Paths(tmp_path)
+        thread_id = "thread-provider"
+        paths.sandbox_work_dir(thread_id).mkdir(parents=True, exist_ok=True)
+        client._checkpointer = None
+        mock_checkpointer = MagicMock()
+
+        with (
+            patch("deerflow.client.get_paths", return_value=paths),
+            patch("deerflow.agents.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer),
+        ):
+            result = client.delete_thread(thread_id)
+
+        assert result["success"] is True
+        mock_checkpointer.delete_thread.assert_called_once_with(thread_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1969,6 +2054,19 @@ class TestGatewayConformance:
         parsed = UploadResponse(**result)
         assert parsed.success is True
         assert len(parsed.files) == 1
+
+    def test_delete_thread(self, client, tmp_path):
+        paths = Paths(tmp_path)
+        thread_id = "t-delete"
+        paths.sandbox_work_dir(thread_id).mkdir(parents=True, exist_ok=True)
+        client._checkpointer = MagicMock()
+
+        with patch("deerflow.client.get_paths", return_value=paths):
+            result = client.delete_thread(thread_id)
+
+        parsed = ThreadDeleteResponse(**result)
+        assert parsed.success is True
+        assert parsed.message == "Deleted local thread data for t-delete"
 
     def test_get_memory_config(self, client):
         mem_cfg = MagicMock()
