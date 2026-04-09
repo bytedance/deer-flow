@@ -68,6 +68,8 @@ The script prints a JSON array to stdout. Each paper has: `id`, `title`, `author
 
 **If the script fails** (network error, non-200 from arXiv), tell the user which error and stop. Do not try to fabricate paper metadata.
 
+**Do not save the search results to a file** — the JSON stays in your context for Phase 3. The only file saved during the entire workflow is the final report in Phase 5.
+
 ### Phase 3: Extract metadata in parallel
 
 Once you have the full paper list from Phase 2, extract structured metadata from each paper in parallel using subagents. Running extraction in parallel keeps each paper's abstract in its own isolated context, so papers do not pollute each other's metadata during extraction, and the whole phase takes roughly the time of one paper instead of N.
