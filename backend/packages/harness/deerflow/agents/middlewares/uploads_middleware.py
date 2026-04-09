@@ -87,11 +87,21 @@ class UploadsMiddlewareState(AgentState):
 
 
 class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
-    """Middleware to inject uploaded files information into the agent context."""
+    """Middleware to inject uploaded files information into the agent context.
+
+    Reads file metadata from the current message's additional_kwargs.files
+    (set by the frontend after upload) and prepends an <uploaded_files> block
+    to the last human message so the model knows which files are available.
+    """
 
     state_schema = UploadsMiddlewareState
 
     def __init__(self, base_dir: str | None = None):
+        """Initialize the middleware.
+
+        Args:
+            base_dir: Base directory for thread data. Defaults to Paths resolution.
+        """
         super().__init__()
         self._paths = Paths(base_dir) if base_dir else get_paths()
 
@@ -182,7 +192,20 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         return "\n".join(lines)
 
     def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
-        """Extract file info from message additional_kwargs.files."""
+        """Extract file info from message additional_kwargs.files.
+
+        The frontend sends uploaded file metadata in additional_kwargs.files
+        after a successful upload. Each entry has: filename, size (bytes),
+        path (virtual path), status, plus optional markdown/image metadata.
+
+        Args:
+            message: The human message to inspect.
+            uploads_dir: Physical uploads directory used to verify file existence.
+                         When provided, entries whose files no longer exist are skipped.
+
+        Returns:
+            List of file dicts with virtual paths, or None if the field is absent or empty.
+        """
         kwargs_files = (message.additional_kwargs or {}).get("files")
         if not isinstance(kwargs_files, list) or not kwargs_files:
             return None
@@ -581,7 +604,23 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
     @override
     def before_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
-        """Inject uploaded files information before agent execution."""
+        """Inject uploaded files information before agent execution.
+
+        New files come from the current message's additional_kwargs.files.
+        Historical files are scanned from the thread's uploads directory,
+        excluding the new upload group and related sidecars.
+
+        Prepends <uploaded_files> context to the last human message content.
+        The original additional_kwargs (including files metadata) is preserved
+        on the updated message so the frontend can read it from the stream.
+
+        Args:
+            state: Current agent state.
+            runtime: Runtime context containing thread_id.
+
+        Returns:
+            State updates including uploaded files list.
+        """
         messages = list(state.get("messages", []))
         if not messages:
             return None
@@ -591,6 +630,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return None
 
+        # Resolve uploads directory for existence checks
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             try:
@@ -601,12 +641,14 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 pass  # get_config() raises outside a runnable context (e.g. unit tests)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
+        # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
         uploaded_image_descriptions, descriptions_changed = self._clear_reuploaded_doc_descriptions(
             state.get("uploaded_image_descriptions"),
             new_files,
         )
 
+        # Attach outlines to new files as well
         if uploads_dir:
             for file in new_files:
                 phys_path = uploads_dir / file["filename"]
@@ -616,6 +658,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         self._attach_image_descriptions(new_files, uploaded_image_descriptions)
 
+        # Collect historical files from the uploads directory (all except the
+        # current upload group and its related sidecars/markdown companions).
         historical_files: list[dict] = []
         if uploads_dir and uploads_dir.exists() and thread_id:
             historical_files = self._load_historical_files(
@@ -630,8 +674,10 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         logger.debug("New files: %s, historical: %s", [f["filename"] for f in new_files], [f["filename"] for f in historical_files])
 
+        # Create files message and prepend to the last human message content
         files_message = self._create_files_message(new_files, historical_files)
 
+        # Extract original content - handle both string and list formats
         original_content = ""
         if isinstance(last_message.content, str):
             original_content = last_message.content
@@ -642,6 +688,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     text_parts.append(block.get("text", ""))
             original_content = "\n".join(text_parts)
 
+        # Create new message with combined content.
+        # Preserve additional_kwargs (including files metadata) so the frontend
+        # can read structured file info from the streamed message.
         updated_message = HumanMessage(
             content=f"{files_message}\n\n{original_content}",
             id=last_message.id,
@@ -670,6 +719,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return None
 
+        # Resolve uploads directory for existence checks.
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             try:
@@ -680,12 +730,14 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 pass  # get_config() raises outside a runnable context (e.g. unit tests)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
+        # Get newly uploaded files from the current message's additional_kwargs.files.
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
         uploaded_image_descriptions, descriptions_changed = self._clear_reuploaded_doc_descriptions(
             state.get("uploaded_image_descriptions"),
             new_files,
         )
 
+        # Attach outlines to new files as well
         if uploads_dir:
             for file in new_files:
                 phys_path = uploads_dir / file["filename"]
@@ -695,6 +747,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         self._attach_image_descriptions(new_files, uploaded_image_descriptions)
 
+        # Collect historical files from the uploads directory in a worker thread
+        # so async agent execution does not block on filesystem scans.
         historical_files: list[dict] = []
         if uploads_dir and uploads_dir.exists() and thread_id:
             historical_files = await asyncio.to_thread(
@@ -710,8 +764,10 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         logger.debug("New files: %s, historical: %s", [f["filename"] for f in new_files], [f["filename"] for f in historical_files])
 
+        # Create files message and prepend it to the last human message content.
         files_message = self._create_files_message(new_files, historical_files)
 
+        # Extract original content - handle both string and list formats.
         original_content = ""
         if isinstance(last_message.content, str):
             original_content = last_message.content
@@ -722,6 +778,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     text_parts.append(block.get("text", ""))
             original_content = "\n".join(text_parts)
 
+        # Create new message with combined content.
+        # Preserve additional_kwargs (including files metadata) so the frontend
+        # can read structured file info from the streamed message.
         updated_message = HumanMessage(
             content=f"{files_message}\n\n{original_content}",
             id=last_message.id,
