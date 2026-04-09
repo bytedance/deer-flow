@@ -97,7 +97,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config = get_title_config()
         fallback_chars = min(config.max_chars, 50)
         if len(user_msg) > fallback_chars:
-            return user_msg[:fallback_chars].rstrip() + "..."
+            return user_msg[: fallback_chars - 3].rstrip() + "..."
         return user_msg if user_msg else "New Conversation"
 
     def _generate_title_result(self, state: TitleMiddlewareState) -> dict | None:
