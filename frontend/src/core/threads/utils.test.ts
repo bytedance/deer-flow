@@ -15,6 +15,16 @@ void test("uses standard chat route when thread has no agent context", () => {
   );
 });
 
+void test("uses agent chat route when thread metadata has agent_name", () => {
+  assert.equal(
+    pathOfThread({
+      thread_id: "thread-123",
+      metadata: { agent_name: "researcher" },
+    }),
+    "/workspace/agents/researcher/chats/thread-123",
+  );
+});
+
 void test("uses agent chat route when thread context has agent_name", () => {
   assert.equal(
     pathOfThread({

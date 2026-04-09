@@ -1,4 +1,4 @@
-import type { Message, Thread } from "@langchain/langgraph-sdk";
+import type { Message, Metadata, Thread } from "@langchain/langgraph-sdk";
 
 import type { Todo } from "../todos";
 
@@ -19,6 +19,11 @@ export interface AgentThreadContext extends Record<string, unknown> {
   agent_name?: string;
 }
 
-export interface AgentThread extends Thread<AgentThreadState> {
+export interface AgentThreadMetadata extends NonNullable<Metadata> {
+  agent_name?: string;
+}
+
+export interface AgentThread extends Omit<Thread<AgentThreadState>, "metadata"> {
+  metadata: AgentThreadMetadata | null | undefined;
   context?: AgentThreadContext;
 }

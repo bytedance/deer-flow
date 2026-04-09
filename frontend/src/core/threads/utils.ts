@@ -1,13 +1,18 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
-import type { AgentThread, AgentThreadContext } from "./types";
+import type {
+  AgentThread,
+  AgentThreadContext,
+  AgentThreadMetadata,
+} from "./types";
 
 type ThreadRouteTarget =
   | string
-  | Pick<AgentThread, "thread_id" | "context">
+  | Pick<AgentThread, "thread_id" | "context" | "metadata">
   | {
       thread_id: string;
       context?: Pick<AgentThreadContext, "agent_name"> | null;
+      metadata?: Pick<AgentThreadMetadata, "agent_name"> | null;
     };
 
 export function pathOfThread(
@@ -18,7 +23,7 @@ export function pathOfThread(
   const agentName =
     typeof thread === "string"
       ? context?.agent_name
-      : thread.context?.agent_name;
+      : thread.metadata?.agent_name ?? thread.context?.agent_name;
 
   return agentName
     ? `/workspace/agents/${encodeURIComponent(agentName)}/chats/${threadId}`
