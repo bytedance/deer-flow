@@ -200,6 +200,89 @@ class TestLoopDetection:
             result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
             assert result is None
 
+    def test_cross_file_read_file_loops_trigger_warning(self):
+        mw = LoopDetectionMiddleware(
+            warn_threshold=50,
+            hard_limit=100,
+            tool_type_warn_threshold=3,
+            tool_type_hard_limit=6,
+        )
+        runtime = _make_runtime()
+
+        for i in range(2):
+            result = mw._apply(
+                _make_state(
+                    tool_calls=[
+                        {
+                            "name": "read_file",
+                            "id": f"call_read_{i}",
+                            "args": {"path": f"/tmp/file_{i}.py", "start_line": 1, "end_line": 50},
+                        }
+                    ]
+                ),
+                runtime,
+            )
+            assert result is None
+
+        result = mw._apply(
+            _make_state(
+                tool_calls=[
+                    {
+                        "name": "read_file",
+                        "id": "call_read_2",
+                        "args": {"path": "/tmp/file_2.py", "start_line": 1, "end_line": 50},
+                    }
+                ]
+            ),
+            runtime,
+        )
+        assert result is not None
+        assert "LOOP DETECTED" in result["messages"][0].content
+
+    def test_cross_file_read_file_loops_trigger_hard_stop(self):
+        mw = LoopDetectionMiddleware(
+            warn_threshold=50,
+            hard_limit=100,
+            tool_type_warn_threshold=3,
+            tool_type_hard_limit=4,
+        )
+        runtime = _make_runtime()
+
+        for i in range(3):
+            result = mw._apply(
+                _make_state(
+                    tool_calls=[
+                        {
+                            "name": "read_file",
+                            "id": f"call_read_{i}",
+                            "args": {"path": f"/tmp/file_{i}.py", "start_line": 1, "end_line": 50},
+                        }
+                    ],
+                    content="still reading files",
+                ),
+                runtime,
+            )
+            assert result is None or "LOOP DETECTED" in result["messages"][0].content
+
+        result = mw._apply(
+            _make_state(
+                tool_calls=[
+                    {
+                        "name": "read_file",
+                        "id": "call_read_4",
+                        "args": {"path": "/tmp/file_4.py", "start_line": 1, "end_line": 50},
+                    }
+                ],
+                content="still reading files",
+            ),
+            runtime,
+        )
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls == []
+        assert _HARD_STOP_MSG in msg.content
+
     def test_window_sliding(self):
         mw = LoopDetectionMiddleware(warn_threshold=3, window_size=5)
         runtime = _make_runtime()

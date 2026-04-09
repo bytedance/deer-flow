@@ -7,9 +7,11 @@ Detection strategy:
   1. After each model response, hash the tool calls (name + args).
   2. Track recent hashes in a sliding window.
   3. If the same hash appears >= warn_threshold times, inject a
-     "you are repeating yourself — wrap up" system message (once per hash).
+     "you are repeating yourself, wrap up" message (once per hash).
   4. If it appears >= hard_limit times, strip all tool_calls from the
      response so the agent is forced to produce a final text answer.
+  5. Separately detect long streaks where each response keeps calling only
+     the same tool type (for example, read_file across different paths).
 """
 
 import hashlib
@@ -26,11 +28,14 @@ from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
 
-# Defaults — can be overridden via constructor
+# Defaults can be overridden via constructor
 _DEFAULT_WARN_THRESHOLD = 3  # inject warning after 3 identical calls
 _DEFAULT_HARD_LIMIT = 5  # force-stop after 5 identical calls
 _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
+_DEFAULT_TOOL_TYPE_WARN_THRESHOLD = 8  # warn on long single-tool streaks
+_DEFAULT_TOOL_TYPE_HARD_LIMIT = 12  # stop long single-tool streaks
+_TOOL_TYPE_STREAK_GUARD = {"read_file"}
 
 
 def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
@@ -108,16 +113,13 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     This is intended to be order-independent: the same multiset of tool calls
     should always produce the same hash, regardless of their input order.
     """
-    # Normalize each tool call to a stable (name, key) structure.
     normalized: list[str] = []
     for tc in tool_calls:
         name = tc.get("name", "")
         args, fallback_key = _normalize_tool_call_args(tc.get("args", {}))
         key = _stable_tool_key(name, args, fallback_key)
-
         normalized.append(f"{name}:{key}")
 
-    # Sort so permutations of the same multiset of calls yield the same ordering.
     normalized.sort()
     blob = json.dumps(normalized, sort_keys=True, default=str)
     return hashlib.md5(blob.encode()).hexdigest()[:12]
@@ -140,6 +142,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             Default: 20.
         max_tracked_threads: Maximum number of threads to track before
             evicting the least recently used. Default: 100.
+        tool_type_warn_threshold: Number of consecutive responses that only
+            call the same tool type before injecting a warning. Default: 8.
+        tool_type_hard_limit: Number of consecutive responses that only call
+            the same tool type before forcing a final answer. Default: 12.
     """
 
     def __init__(
@@ -148,16 +154,21 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         hard_limit: int = _DEFAULT_HARD_LIMIT,
         window_size: int = _DEFAULT_WINDOW_SIZE,
         max_tracked_threads: int = _DEFAULT_MAX_TRACKED_THREADS,
+        tool_type_warn_threshold: int = _DEFAULT_TOOL_TYPE_WARN_THRESHOLD,
+        tool_type_hard_limit: int = _DEFAULT_TOOL_TYPE_HARD_LIMIT,
     ):
         super().__init__()
         self.warn_threshold = warn_threshold
         self.hard_limit = hard_limit
         self.window_size = window_size
         self.max_tracked_threads = max_tracked_threads
+        self.tool_type_warn_threshold = tool_type_warn_threshold
+        self.tool_type_hard_limit = tool_type_hard_limit
         self._lock = threading.Lock()
-        # Per-thread tracking using OrderedDict for LRU eviction
         self._history: OrderedDict[str, list[str]] = OrderedDict()
+        self._tool_history: OrderedDict[str, list[tuple[str, ...]]] = OrderedDict()
         self._warned: dict[str, set[str]] = defaultdict(set)
+        self._tool_type_warned: dict[str, set[tuple[str, ...]]] = defaultdict(set)
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""
@@ -173,8 +184,15 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         """
         while len(self._history) > self.max_tracked_threads:
             evicted_id, _ = self._history.popitem(last=False)
+            self._tool_history.pop(evicted_id, None)
             self._warned.pop(evicted_id, None)
+            self._tool_type_warned.pop(evicted_id, None)
             logger.debug("Evicted loop tracking for thread %s (LRU)", evicted_id)
+
+    @staticmethod
+    def _tool_signature(tool_calls: list[dict]) -> tuple[str, ...]:
+        """Summarize a tool batch by tool names only, ignoring arguments."""
+        return tuple(sorted(str(tc.get("name", "")) for tc in tool_calls if tc.get("name")))
 
     def _track_and_check(self, state: AgentState, runtime: Runtime) -> tuple[str | None, bool]:
         """Track tool calls and check for loops.
@@ -196,13 +214,15 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
         thread_id = self._get_thread_id(runtime)
         call_hash = _hash_tool_calls(tool_calls)
+        tool_signature = self._tool_signature(tool_calls)
 
         with self._lock:
-            # Touch / create entry (move to end for LRU)
             if thread_id in self._history:
                 self._history.move_to_end(thread_id)
+                self._tool_history.move_to_end(thread_id)
             else:
                 self._history[thread_id] = []
+                self._tool_history[thread_id] = []
                 self._evict_if_needed()
 
             history = self._history[thread_id]
@@ -210,12 +230,17 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             if len(history) > self.window_size:
                 history[:] = history[-self.window_size :]
 
+            tool_history = self._tool_history[thread_id]
+            tool_history.append(tool_signature)
+            if len(tool_history) > self.window_size:
+                tool_history[:] = tool_history[-self.window_size :]
+
             count = history.count(call_hash)
             tool_names = [tc.get("name", "?") for tc in tool_calls]
 
             if count >= self.hard_limit:
                 logger.error(
-                    "Loop hard limit reached — forcing stop",
+                    "Loop hard limit reached: forcing stop",
                     extra={
                         "thread_id": thread_id,
                         "call_hash": call_hash,
@@ -230,7 +255,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 if call_hash not in warned:
                     warned.add(call_hash)
                     logger.warning(
-                        "Repetitive tool calls detected — injecting warning",
+                        "Repetitive tool calls detected: injecting warning",
                         extra={
                             "thread_id": thread_id,
                             "call_hash": call_hash,
@@ -239,8 +264,41 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         },
                     )
                     return _WARNING_MSG, False
-                # Warning already injected for this hash — suppress
                 return None, False
+
+            # Catch cross-file loops where the agent keeps calling the same
+            # tool type in consecutive model responses.
+            if tool_signature and len(set(tool_signature)) == 1 and tool_signature[0] in _TOOL_TYPE_STREAK_GUARD:
+                streak = 0
+                for signature in reversed(tool_history):
+                    if signature != tool_signature:
+                        break
+                    streak += 1
+
+                if streak >= self.tool_type_hard_limit:
+                    logger.error(
+                        "Tool-type loop hard limit reached: forcing stop",
+                        extra={
+                            "thread_id": thread_id,
+                            "tool_signature": tool_signature,
+                            "streak": streak,
+                        },
+                    )
+                    return _HARD_STOP_MSG, True
+
+                if streak >= self.tool_type_warn_threshold:
+                    warned_signatures = self._tool_type_warned[thread_id]
+                    if tool_signature not in warned_signatures:
+                        warned_signatures.add(tool_signature)
+                        logger.warning(
+                            "Tool-type loop detected: injecting warning",
+                            extra={
+                                "thread_id": thread_id,
+                                "tool_signature": tool_signature,
+                                "streak": streak,
+                            },
+                        )
+                        return _WARNING_MSG, False
 
         return None, False
 
@@ -258,14 +316,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return [*content, {"type": "text", "text": f"\n\n{text}"}]
         if isinstance(content, str):
             return content + f"\n\n{text}"
-        # Fallback: coerce unexpected types to str to avoid TypeError
         return str(content) + f"\n\n{text}"
 
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
         warning, hard_stop = self._track_and_check(state, runtime)
 
         if hard_stop:
-            # Strip tool_calls from the last AIMessage to force text output
             messages = state.get("messages", [])
             last_msg = messages[-1]
             stripped_msg = last_msg.model_copy(
@@ -277,12 +333,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return {"messages": [stripped_msg]}
 
         if warning:
-            # Inject as HumanMessage instead of SystemMessage to avoid
-            # Anthropic's "multiple non-consecutive system messages" error.
-            # Anthropic models require system messages only at the start of
-            # the conversation; injecting one mid-conversation crashes
-            # langchain_anthropic's _format_messages(). HumanMessage works
-            # with all providers. See #1299.
+            # Use HumanMessage instead of SystemMessage to avoid Anthropic's
+            # "multiple non-consecutive system messages" error.
             return {"messages": [HumanMessage(content=warning)]}
 
         return None
@@ -300,7 +352,11 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             if thread_id:
                 self._history.pop(thread_id, None)
+                self._tool_history.pop(thread_id, None)
                 self._warned.pop(thread_id, None)
+                self._tool_type_warned.pop(thread_id, None)
             else:
                 self._history.clear()
+                self._tool_history.clear()
                 self._warned.clear()
+                self._tool_type_warned.clear()
