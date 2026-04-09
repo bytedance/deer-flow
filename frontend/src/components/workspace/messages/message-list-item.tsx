@@ -197,6 +197,7 @@ function MessageContent_({
         remarkPlugins={humanMessagePlugins.remarkPlugins}
         rehypePlugins={humanMessagePlugins.rehypePlugins}
         components={components}
+        parseIncompleteMarkdown={false}
       >
         {contentToDisplay}
       </AIElementMessageResponse>
