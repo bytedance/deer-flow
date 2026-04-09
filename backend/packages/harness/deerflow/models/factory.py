@@ -56,6 +56,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "supports_thinking",
             "supports_reasoning_effort",
             "when_thinking_enabled",
+            "when_thinking_disabled",
             "thinking",
             "supports_vision",
         },
@@ -72,21 +73,24 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
         if effective_wte:
             model_settings_from_config.update(effective_wte)
-    if not thinking_enabled and has_thinking_settings:
-        if effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
+    if not thinking_enabled:
+        if model_config.when_thinking_disabled is not None:
+            # User-provided disable settings take full precedence
+            model_settings_from_config.update(model_config.when_thinking_disabled)
+        elif has_thinking_settings and effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
             # OpenAI-compatible gateway: thinking is nested under extra_body
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
                 model_settings_from_config.get("extra_body"),
                 {"thinking": {"type": "disabled"}},
             )
             model_settings_from_config["reasoning_effort"] = "minimal"
-        elif disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {}):
+        elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
                 model_settings_from_config.get("extra_body"),
                 {"chat_template_kwargs": disable_chat_template_kwargs},
             )
-        elif effective_wte.get("thinking", {}).get("type"):
+        elif has_thinking_settings and effective_wte.get("thinking", {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
             model_settings_from_config["thinking"] = {"type": "disabled"}
     if not model_config.supports_reasoning_effort:
@@ -109,7 +113,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"
 
-    model_instance = model_class(**kwargs, **model_settings_from_config)
+    model_instance = model_class(**{**model_settings_from_config, **kwargs})
 
     callbacks = build_tracing_callbacks()
     if callbacks:
