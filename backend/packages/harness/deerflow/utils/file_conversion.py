@@ -55,6 +55,36 @@ _DOCX_IMAGE_EXTENSIONS = {
     ".tif",
     ".tiff",
 }
+_DOCX_IMAGE_KINDS = {suffix.lstrip(".").replace("jpg", "jpeg") for suffix in _DOCX_IMAGE_EXTENSIONS}
+
+_DOCX_DATA_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((data:image/[^)]+)\)")
+
+
+def _natural_sort_key(value: str) -> list[int | str]:
+    """Split digit runs so names sort naturally (image2 before image10)."""
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", value)]
+
+
+def _docx_data_image_kind(data_uri: str) -> str | None:
+    """Return a normalized image kind from a markdown data URI."""
+    match = re.match(r"data:image/([^;,)+]+)", data_uri, re.IGNORECASE)
+    if not match:
+        return None
+
+    kind = match.group(1).lower()
+    if kind == "jpg":
+        return "jpeg"
+    if kind.startswith("x-"):
+        kind = kind[2:]
+    return kind
+
+
+def _path_image_kind(path: Path) -> str:
+    """Return a normalized image kind for an extracted sidecar path."""
+    kind = path.suffix.lower().lstrip(".")
+    if kind == "jpg":
+        return "jpeg"
+    return kind
 
 
 def _claim_unique_path(path: Path) -> Path:
@@ -343,9 +373,12 @@ async def extract_docx_images(file_path: Path) -> list[Path]:
     try:
         with zipfile.ZipFile(file_path) as archive:
             media_entries = sorted(
-                name
-                for name in archive.namelist()
-                if name.startswith("word/media/") and Path(name).suffix.lower() in _DOCX_IMAGE_EXTENSIONS
+                (
+                    name
+                    for name in archive.namelist()
+                    if name.startswith("word/media/") and Path(name).suffix.lower() in _DOCX_IMAGE_EXTENSIONS
+                ),
+                key=_natural_sort_key,
             )
 
             extracted_paths: list[Path] = []
@@ -361,3 +394,63 @@ async def extract_docx_images(file_path: Path) -> list[Path]:
     except Exception as e:
         logger.error("Failed to extract images from %s: %s", file_path.name, e)
         return []
+
+
+def rewrite_docx_markdown_image_links(md_path: Path, extracted_image_paths: list[Path]) -> bool:
+    """Rewrite inline data-image markdown links to extracted DOCX sidecar paths.
+
+    Rewrites matching inline ``data:image`` links to extracted DOCX sidecar
+    paths in document order. Links that cannot be matched confidently are left
+    unchanged to avoid image misalignment.
+    """
+    try:
+        content = md_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.error("Failed to read markdown for DOCX image rewrite %s: %s", md_path.name, e)
+        return False
+
+    matches = list(_DOCX_DATA_IMAGE_RE.finditer(content))
+    if not matches:
+        return False
+
+    path_index = 0
+    replacements = 0
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal path_index, replacements
+        alt_text = match.group(1)
+        data_uri = match.group(2)
+        data_kind = _docx_data_image_kind(data_uri)
+
+        while path_index < len(extracted_image_paths):
+            image_path = extracted_image_paths[path_index]
+            image_kind = _path_image_kind(image_path)
+            if data_kind is not None and image_kind == data_kind:
+                path_index += 1
+                replacements += 1
+                return f"![{alt_text}](./{image_path.name})"
+            if data_kind in _DOCX_IMAGE_KINDS:
+                break
+            # Unsupported embedded formats such as WMF are left inline without
+            # consuming the next extracted sidecar.
+            break
+
+        return match.group(0)
+
+    rewritten = _DOCX_DATA_IMAGE_RE.sub(_replace, content)
+    if rewritten == content:
+        return False
+
+    try:
+        md_path.write_text(rewritten, encoding="utf-8")
+    except Exception as e:
+        logger.error("Failed to write rewritten markdown for %s: %s", md_path.name, e)
+        return False
+
+    logger.info(
+        "Rewrote %d of %d DOCX markdown image links in %s",
+        replacements,
+        len(matches),
+        md_path.name,
+    )
+    return True

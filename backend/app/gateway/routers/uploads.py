@@ -27,6 +27,7 @@ from deerflow.utils.file_conversion import (
     CONVERTIBLE_EXTENSIONS,
     convert_file_to_markdown,
     extract_docx_images,
+    rewrite_docx_markdown_image_links,
 )
 
 logger = logging.getLogger(__name__)
@@ -160,12 +161,18 @@ async def upload_files(
                     extracted_images = []
                     extracted_image_paths = await extract_docx_images(file_path)
                     write_docx_sidecar_manifest(file_path, extracted_image_paths)
+                    markdown_rewritten = False
+                    if md_path and extracted_image_paths:
+                        markdown_rewritten = rewrite_docx_markdown_image_links(md_path, extracted_image_paths)
                     manifest_path = docx_sidecar_manifest_path(file_path)
                     manifest_virtual_path = upload_virtual_path(manifest_path.name)
                     manifest_bytes = manifest_path.read_bytes() if manifest_path.is_file() else b""
                     if sandbox_id != "local" and manifest_bytes:
                         _make_file_sandbox_writable(manifest_path)
                         sandbox.update_file(manifest_virtual_path, manifest_bytes)
+                    if sandbox_id != "local" and md_path and markdown_rewritten:
+                        _make_file_sandbox_writable(md_path)
+                        sandbox.update_file(md_virtual_path, md_path.read_bytes())
                     for image_path in extracted_image_paths:
                         image_virtual_path = upload_virtual_path(image_path.name)
                         image_bytes = image_path.read_bytes()

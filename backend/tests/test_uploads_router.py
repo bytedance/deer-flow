@@ -174,6 +174,81 @@ def test_upload_files_returns_extracted_images_for_docx_and_syncs_them_to_sandbo
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report__image2.jpeg", b"jpeg")
 
 
+def test_upload_files_rewrites_docx_markdown_and_resyncs_sandbox_when_rewrite_succeeds(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.acquire.return_value = "aio-1"
+    sandbox = MagicMock()
+    provider.get.return_value = sandbox
+
+    async def fake_convert(file_path: Path) -> Path:
+        md_path = file_path.with_suffix(".md")
+        md_path.write_text("converted", encoding="utf-8")
+        return md_path
+
+    async def fake_extract(file_path: Path) -> list[Path]:
+        image = file_path.with_name("report__image1.png")
+        image.write_bytes(b"png")
+        return [image]
+
+    def fake_rewrite(md_path: Path, extracted_image_paths: list[Path]) -> bool:
+        md_path.write_text("rewritten", encoding="utf-8")
+        return True
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+        patch.object(uploads, "extract_docx_images", AsyncMock(side_effect=fake_extract)),
+        patch.object(uploads, "rewrite_docx_markdown_image_links", side_effect=fake_rewrite) as rewrite,
+    ):
+        file = UploadFile(filename="report.docx", file=BytesIO(b"docx-bytes"))
+        result = asyncio.run(uploads.upload_files("thread-aio", files=[file]))
+
+    assert result.success is True
+    rewrite.assert_called_once()
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "rewritten"
+    sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"rewritten")
+
+
+def test_upload_files_keeps_original_markdown_when_docx_rewrite_fails_open(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.acquire.return_value = "local"
+    sandbox = MagicMock()
+    provider.get.return_value = sandbox
+
+    async def fake_convert(file_path: Path) -> Path:
+        md_path = file_path.with_suffix(".md")
+        md_path.write_text("converted", encoding="utf-8")
+        return md_path
+
+    async def fake_extract(file_path: Path) -> list[Path]:
+        image = file_path.with_name("report__image1.png")
+        image.write_bytes(b"png")
+        return [image]
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+        patch.object(uploads, "extract_docx_images", AsyncMock(side_effect=fake_extract)),
+        patch.object(uploads, "rewrite_docx_markdown_image_links", return_value=False) as rewrite,
+    ):
+        file = UploadFile(filename="report.docx", file=BytesIO(b"docx-bytes"))
+        result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+
+    assert result.success is True
+    rewrite.assert_called_once()
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
+
+
 def test_upload_files_replaces_existing_docx_sidecars(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

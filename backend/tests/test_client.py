@@ -962,6 +962,36 @@ class TestUploads:
             assert result["files"][0]["markdown_file"] == "report.md"
             assert [img["filename"] for img in result["files"][0]["extracted_images"]] == ["report__image1.png"]
 
+    def test_upload_files_rewrites_docx_markdown_when_sidecar_images_exist(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            src_file = tmp_path / "report.docx"
+            src_file.write_bytes(b"docx")
+
+            async def fake_convert(path: Path) -> Path:
+                md_path = path.with_suffix(".md")
+                md_path.write_text("![chart](data:image/png;base64,AAA)\n", encoding="utf-8")
+                return md_path
+
+            async def fake_extract(path: Path) -> list[Path]:
+                image = path.with_name("report__image1.png")
+                image.write_bytes(b"png")
+                return [image]
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+                patch("deerflow.utils.file_conversion.extract_docx_images", side_effect=fake_extract),
+            ):
+                result = client.upload_files("thread-1", [src_file])
+
+            assert result["success"] is True
+            assert (uploads_dir / "report.md").read_text(encoding="utf-8") == "![chart](./report__image1.png)\n"
+
     def test_upload_files_replaces_existing_docx_sidecars(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

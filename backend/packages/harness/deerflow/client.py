@@ -804,7 +804,12 @@ class DeerFlowClient:
             FileNotFoundError: If any file does not exist.
             ValueError: If any supplied path exists but is not a regular file.
         """
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown, extract_docx_images
+        from deerflow.utils.file_conversion import (
+            CONVERTIBLE_EXTENSIONS,
+            convert_file_to_markdown,
+            extract_docx_images,
+            rewrite_docx_markdown_image_links,
+        )
 
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
@@ -894,6 +899,8 @@ class DeerFlowClient:
                             extracted_image_paths = []
 
                         write_docx_sidecar_manifest(dest, extracted_image_paths)
+                        if md_path is not None and extracted_image_paths:
+                            rewrite_docx_markdown_image_links(md_path, extracted_image_paths)
                         if extracted_image_paths:
                             info["extracted_images"] = [
                                 {

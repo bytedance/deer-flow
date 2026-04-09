@@ -18,6 +18,7 @@ from deerflow.utils.file_conversion import (
     convert_file_to_markdown,
     extract_docx_images,
     extract_outline,
+    rewrite_docx_markdown_image_links,
 )
 
 
@@ -328,6 +329,27 @@ def test_extract_docx_images_returns_stably_named_supported_images(tmp_path):
     assert extracted[1].read_bytes() == b"jpeg"
 
 
+def test_extract_docx_images_uses_natural_sort_for_double_digit_media_names(tmp_path):
+    docx_path = tmp_path / "report.docx"
+    _write_docx(
+        docx_path,
+        {
+            "word/media/image10.png": b"ten",
+            "word/media/image2.png": b"two",
+            "word/media/image1.png": b"one",
+        },
+    )
+
+    extracted = _run(extract_docx_images(docx_path))
+
+    assert [path.name for path in extracted] == [
+        "report__image1.png",
+        "report__image2.png",
+        "report__image3.png",
+    ]
+    assert [path.read_bytes() for path in extracted] == [b"one", b"two", b"ten"]
+
+
 def test_extract_docx_images_returns_empty_for_non_docx_files(tmp_path):
     text_path = tmp_path / "notes.txt"
     text_path.write_text("hello", encoding="utf-8")
@@ -344,6 +366,63 @@ def test_extract_docx_images_returns_empty_for_invalid_docx(tmp_path):
     extracted = _run(extract_docx_images(docx_path))
 
     assert extracted == []
+
+
+def test_rewrite_docx_markdown_image_links_rewrites_matching_data_images(tmp_path):
+    md_path = tmp_path / "report.md"
+    md_path.write_text(
+        "before\n"
+        "![chart](data:image/png;base64,AAA)\n"
+        "middle\n"
+        "![photo](data:image/jpeg;base64,BBB)\n"
+        "after\n",
+        encoding="utf-8",
+    )
+    extracted_image_paths = [tmp_path / "report__image1.png", tmp_path / "report__image2.jpeg"]
+
+    rewritten = rewrite_docx_markdown_image_links(md_path, extracted_image_paths)
+
+    assert rewritten is True
+    assert md_path.read_text(encoding="utf-8") == (
+        "before\n"
+        "![chart](./report__image1.png)\n"
+        "middle\n"
+        "![photo](./report__image2.jpeg)\n"
+        "after\n"
+    )
+
+
+def test_rewrite_docx_markdown_image_links_rewrites_supported_prefix_when_counts_mismatch(tmp_path):
+    md_path = tmp_path / "report.md"
+    md_path.write_text(
+        "![wmf](data:image/x-wmf;base64,AAA)\n"
+        "![chart](data:image/png;base64,BBB)\n"
+        "![photo](data:image/jpeg;base64,CCC)\n"
+        "tail\n",
+        encoding="utf-8",
+    )
+    extracted_image_paths = [tmp_path / "report__image1.png", tmp_path / "report__image2.jpeg"]
+
+    rewritten = rewrite_docx_markdown_image_links(md_path, extracted_image_paths)
+
+    assert rewritten is True
+    assert md_path.read_text(encoding="utf-8") == (
+        "![wmf](data:image/x-wmf;base64,AAA)\n"
+        "![chart](./report__image1.png)\n"
+        "![photo](./report__image2.jpeg)\n"
+        "tail\n"
+    )
+
+
+def test_rewrite_docx_markdown_image_links_keeps_content_when_no_data_images_found(tmp_path):
+    md_path = tmp_path / "report.md"
+    original = "![chart](./report__image1.png)\nplain text\n"
+    md_path.write_text(original, encoding="utf-8")
+
+    rewritten = rewrite_docx_markdown_image_links(md_path, [tmp_path / "report__image1.png"])
+
+    assert rewritten is False
+    assert md_path.read_text(encoding="utf-8") == original
 
 
 # ---------------------------------------------------------------------------
