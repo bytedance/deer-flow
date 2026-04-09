@@ -1,9 +1,11 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   Conversation,
   ConversationContent,
 } from "@/components/ai-elements/conversation";
+import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -13,6 +15,8 @@ import {
   hasContent,
   hasPresentFiles,
   hasReasoning,
+  isConversationSummaryMessage,
+  isHiddenFromUIMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
@@ -32,6 +36,69 @@ import { SubtaskCard } from "./subtask-card";
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 160;
 export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
 
+type ThreadHistoryEntry = {
+  checkpoint_id: string;
+  values?: {
+    messages?: AgentThreadState["messages"];
+  };
+};
+
+const HISTORY_PAGE_SIZE = 25;
+const HISTORY_PAGE_LIMIT = 4;
+
+function messageIdentity(message: AgentThreadState["messages"][number]) {
+  if (message.id) {
+    return message.id;
+  }
+  const content =
+    typeof message.content === "string"
+      ? message.content
+      : JSON.stringify(message.content);
+  return `${message.type}:${message.name ?? ""}:${content}`;
+}
+
+function buildDisplayMessages(
+  latestMessages: AgentThreadState["messages"],
+  historyEntries: ThreadHistoryEntry[],
+) {
+  const latestVisibleIds = new Set(
+    latestMessages
+      .filter(
+        (message) =>
+          !isHiddenFromUIMessage(message) && !isConversationSummaryMessage(message),
+      )
+      .map(messageIdentity),
+  );
+
+  const mergedMessages: AgentThreadState["messages"] = [];
+  const seenMessages = new Set<string>();
+  const oldestFirstEntries = [...historyEntries].reverse();
+
+  for (const entry of oldestFirstEntries) {
+    for (const message of entry.values?.messages ?? []) {
+      const identity = messageIdentity(message);
+      if (seenMessages.has(identity)) {
+        continue;
+      }
+      seenMessages.add(identity);
+      mergedMessages.push(message);
+    }
+  }
+
+  const restoredMessages = mergedMessages.filter(
+    (message) => !isConversationSummaryMessage(message),
+  );
+  const hasRecoveredHistory = restoredMessages.some(
+    (message) => !latestVisibleIds.has(messageIdentity(message)),
+  );
+
+  if (!hasRecoveredHistory) {
+    return latestMessages;
+  }
+
+  return restoredMessages;
+}
+
 export function MessageList({
   className,
   threadId,
@@ -46,7 +113,92 @@ export function MessageList({
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  const messages = thread.messages;
+  const [historyEntries, setHistoryEntries] = useState<ThreadHistoryEntry[]>([]);
+  const [historyLoadedForThread, setHistoryLoadedForThread] = useState<
+    string | null
+  >(null);
+  const messages = useMemo(() => {
+    if (historyLoadedForThread !== threadId || historyEntries.length === 0) {
+      return thread.messages;
+    }
+    return buildDisplayMessages(thread.messages, historyEntries);
+  }, [historyEntries, historyLoadedForThread, thread.messages, threadId]);
+  const hasSummaryMessage = useMemo(
+    () => thread.messages.some(isConversationSummaryMessage),
+    [thread.messages],
+  );
+
+  useEffect(() => {
+    setHistoryEntries([]);
+    setHistoryLoadedForThread(null);
+  }, [threadId]);
+
+  useEffect(() => {
+    if (!threadId || !hasSummaryMessage || thread.isThreadLoading) {
+      return;
+    }
+    if (historyLoadedForThread === threadId) {
+      return;
+    }
+
+    const controller = new AbortController();
+
+    const loadThreadHistory = async () => {
+      const entries: ThreadHistoryEntry[] = [];
+      let before: string | null = null;
+
+      for (let page = 0; page < HISTORY_PAGE_LIMIT; page += 1) {
+        const response = await fetch(
+          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/history`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              limit: HISTORY_PAGE_SIZE,
+              before,
+            }),
+            signal: controller.signal,
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(`Failed to load thread history: ${response.status}`);
+        }
+
+        const pageEntries = (await response.json()) as ThreadHistoryEntry[];
+        const rootEntries = pageEntries.filter(
+          (entry) => (entry.values?.messages?.length ?? 0) > 0,
+        );
+        entries.push(...rootEntries);
+
+        if (pageEntries.length < HISTORY_PAGE_SIZE) {
+          break;
+        }
+
+        before = pageEntries.at(-1)?.checkpoint_id ?? null;
+        if (!before) {
+          break;
+        }
+      }
+
+      setHistoryEntries(entries);
+      setHistoryLoadedForThread(threadId);
+    };
+
+    void loadThreadHistory().catch((error: unknown) => {
+      if (controller.signal.aborted) {
+        return;
+      }
+      console.error("Failed to restore summarized thread history", error);
+      setHistoryEntries([]);
+      setHistoryLoadedForThread(threadId);
+    });
+
+    return () => controller.abort();
+  }, [hasSummaryMessage, historyLoadedForThread, thread.isThreadLoading, threadId]);
+
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }

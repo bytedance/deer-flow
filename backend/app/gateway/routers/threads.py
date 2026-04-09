@@ -642,7 +642,9 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
     """Get checkpoint history for a thread."""
     checkpointer = get_checkpointer(request)
 
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    config: dict[str, Any] = {
+        "configurable": {"thread_id": thread_id, "checkpoint_ns": ""}
+    }
     if body.before:
         config["configurable"]["checkpoint_id"] = body.before
 

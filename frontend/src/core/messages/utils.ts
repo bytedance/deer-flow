@@ -331,6 +331,16 @@ export function isHiddenFromUIMessage(message: Message) {
   return message.additional_kwargs?.hide_from_ui === true;
 }
 
+const CONVERSATION_SUMMARY_PREFIX = "Here is a summary of the conversation to date:";
+
+export function isConversationSummaryMessage(message: Message) {
+  if (message.type !== "human") {
+    return false;
+  }
+  const content = extractTextFromMessage(message);
+  return content.startsWith(CONVERSATION_SUMMARY_PREFIX);
+}
+
 /**
  * Represents a file stored in message additional_kwargs.files.
  * Used for optimistic UI (uploading state) and structured file metadata.
