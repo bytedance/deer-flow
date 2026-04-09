@@ -20,7 +20,12 @@ from deerflow.uploads.manager import (
     upload_artifact_url,
     upload_virtual_path,
 )
-from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+from deerflow.utils.file_conversion import (
+    CONVERTIBLE_EXTENSIONS,
+    LegacyDocConversionError,
+    convert_file_to_markdown,
+    ensure_legacy_doc_conversion_supported,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +71,14 @@ async def upload_files(
         uploads_dir = ensure_uploads_dir(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    for file in files:
+        if file.filename and file.filename.lower().endswith(".doc"):
+            try:
+                ensure_legacy_doc_conversion_supported()
+            except LegacyDocConversionError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
     sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
     uploaded_files = []
 
@@ -106,7 +119,10 @@ async def upload_files(
 
             file_ext = file_path.suffix.lower()
             if file_ext in CONVERTIBLE_EXTENSIONS:
-                md_path = await convert_file_to_markdown(file_path)
+                try:
+                    md_path = await convert_file_to_markdown(file_path)
+                except LegacyDocConversionError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
                 if md_path:
                     md_virtual_path = upload_virtual_path(md_path.name)
 
