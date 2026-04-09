@@ -690,3 +690,44 @@ def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
 
     assert captured.get("use_responses_api") is True
     assert captured.get("output_version") == "responses/v1"
+
+
+# ---------------------------------------------------------------------------
+# Duplicate keyword argument collision (issue #1977)
+# ---------------------------------------------------------------------------
+
+
+def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disabled(monkeypatch):
+    """When reasoning_effort is set in config.yaml (extra field) AND the thinking-disabled
+    path also injects reasoning_effort=minimal into kwargs, the factory must not raise
+    TypeError: got multiple values for keyword argument 'reasoning_effort'."""
+    wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 5000}}}
+    # ModelConfig.extra="allow" means extra fields from config.yaml land in model_dump()
+    model = ModelConfig(
+        name="doubao-model",
+        display_name="Doubao 1.8",
+        description=None,
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="doubao-seed-1-8-250315",
+        reasoning_effort="high",  # user-set extra field in config.yaml
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        when_thinking_enabled=wte,
+        supports_vision=False,
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+
+    # Must not raise TypeError
+    factory_module.create_chat_model(name="doubao-model", thinking_enabled=False)
+
+    # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
+    assert captured.get("reasoning_effort") == "minimal"
