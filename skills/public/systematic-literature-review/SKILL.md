@@ -56,6 +56,8 @@ python /mnt/skills/public/systematic-literature-review/scripts/arxiv_search.py \
   [--end-date YYYY-MM-DD]
 ```
 
+**IMPORTANT — extract 2-3 core keywords before searching.** Do not pass the user's full topic description as the query. Before calling the script, mentally reduce the topic to its 2-3 most essential terms. Drop qualifiers like "in computer vision", "for NLP", "variants", "recent" — those belong in `--category` or `--start-date`, not in the query string.
+
 **Query phrasing — keep it short.** The script wraps multi-word queries in double quotes for phrase matching on arXiv. This means:
 
 - `"diffusion models"` → searches for the exact phrase → good, returns relevant papers.
@@ -88,7 +90,13 @@ The script prints a JSON array to stdout. Each paper has: `id`, `title`, `author
 
 ### Phase 3: Extract metadata in parallel
 
-**You must delegate extraction to subagents — do not extract metadata yourself.** Use the `task` tool to spawn subagents for this phase. Do not write Python scripts, do not use bash to process papers, and do not extract metadata inline in your own context. The reason: extracting 10-50 papers in your own context consumes too many tokens and degrades synthesis quality in Phase 4. Each subagent runs in an isolated context with only its batch of papers, producing cleaner extractions.
+**You MUST delegate extraction to subagents via the `task` tool — do not extract metadata yourself.** This is non-negotiable. Specifically, do NOT do any of the following:
+
+- ❌ Write `python -c "papers = [...]"` or any Python/bash script to process papers
+- ❌ Extract metadata inline in your own context by reading abstracts one by one
+- ❌ Use any tool other than `task` for this phase
+
+Instead, you MUST call the `task` tool to spawn subagents. The reason: extracting 10-50 papers in your own context consumes too many tokens and degrades synthesis quality in Phase 4. Each subagent runs in an isolated context with only its batch of papers, producing cleaner extractions.
 
 Split papers into batches of ~5, then for each batch, call the `task` tool with `subagent_type: "general-purpose"`. Each subagent receives the paper abstracts as text and returns structured JSON.
 
