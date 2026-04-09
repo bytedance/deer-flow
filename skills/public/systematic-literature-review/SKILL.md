@@ -51,10 +51,23 @@ python /mnt/skills/public/systematic-literature-review/scripts/arxiv_search.py \
   "<topic>" \
   --max-results <N> \
   [--category <cat>] \
-  [--sort-by submittedDate] \
+  [--sort-by relevance] \
   [--start-date YYYY-MM-DD] \
   [--end-date YYYY-MM-DD]
 ```
+
+**Query phrasing — keep it short.** The script wraps multi-word queries in double quotes for phrase matching on arXiv. This means:
+
+- `"diffusion models"` → searches for the exact phrase → good, returns relevant papers.
+- `"diffusion models in computer vision"` → searches for that exact 5-word phrase → **too specific, likely returns 0 results** because few papers contain that exact string.
+
+Use **2-3 core keywords** as the query, and use `--category` to narrow the field instead of stuffing field names into the query. Examples:
+
+| User says | Good query | Bad query |
+|---|---|---|
+| "diffusion models in computer vision" | `"diffusion models" --category cs.CV` | `"diffusion models in computer vision"` |
+| "transformer attention variants" | `"transformer attention"` | `"transformer attention variants in NLP"` |
+| "graph neural networks for molecules" | `"graph neural networks" --category cs.LG` | `"graph neural networks for molecular property prediction"` |
 
 The script prints a JSON array to stdout. Each paper has: `id`, `title`, `authors`, `abstract`, `published`, `updated`, `categories`, `pdf_url`, `abs_url`.
 
@@ -75,7 +88,9 @@ The script prints a JSON array to stdout. Each paper has: `id`, `title`, `author
 
 ### Phase 3: Extract metadata in parallel
 
-Once you have the full paper list from Phase 2, extract structured metadata from each paper in parallel using subagents. Running extraction in parallel keeps each paper's abstract in its own isolated context, so papers do not pollute each other's metadata during extraction, and the whole phase takes roughly the time of one paper instead of N.
+**You must delegate extraction to subagents — do not extract metadata yourself.** Use the `task` tool to spawn subagents for this phase. Do not write Python scripts, do not use bash to process papers, and do not extract metadata inline in your own context. The reason: extracting 10-50 papers in your own context consumes too many tokens and degrades synthesis quality in Phase 4. Each subagent runs in an isolated context with only its batch of papers, producing cleaner extractions.
+
+Split papers into batches of ~5, then for each batch, call the `task` tool with `subagent_type: "general-purpose"`. Each subagent receives the paper abstracts as text and returns structured JSON.
 
 **Concurrency limit: at most 3 subagents per turn.** The DeerFlow runtime enforces `MAX_CONCURRENT_SUBAGENTS = 3` and will silently drop any extra dispatches in the same turn — the LLM will not be told this happened, so strictly follow the round strategy below.
 
