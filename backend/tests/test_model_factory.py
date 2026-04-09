@@ -486,6 +486,30 @@ def test_openai_compatible_provider_respects_explicit_stream_usage(monkeypatch):
     assert FakeChatOpenAI.captured_kwargs.get("stream_usage") is False
 
 
+def test_openai_compatible_provider_respects_caller_stream_usage_kwarg(monkeypatch):
+    """A caller-provided stream_usage kwarg should override config defaults without duplicate kwargs."""
+    model = ModelConfig(
+        name="openai-compatible-caller-explicit",
+        display_name="OpenAI Compatible Caller Explicit",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-4.1-mini",
+        base_url="https://api.example.com/v1",
+        api_key="test-key",
+        stream_usage=True,
+        supports_vision=False,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg, model_class=FakeChatOpenAI)
+    monkeypatch.setattr(factory_module, "ChatOpenAI", FakeChatOpenAI)
+
+    FakeChatOpenAI.captured_kwargs = {}
+    factory_module.create_chat_model(name="openai-compatible-caller-explicit", stream_usage=False)
+
+    assert FakeChatOpenAI.captured_kwargs.get("stream_usage") is False
+
+
 def test_openai_compatible_provider_passes_base_url(monkeypatch):
     """OpenAI-compatible providers like MiniMax should pass base_url through to the model."""
     model = ModelConfig(

@@ -24,17 +24,17 @@ class FakeStreamingChatOpenAI(ChatOpenAI):
     """OpenAI-compatible test double that makes usage reporting observable."""
 
     captured_inits: ClassVar[list[dict[str, Any]]] = []
+    stream_called: ClassVar[bool] = False
 
     def __init__(self, **kwargs):
         self.__class__.captured_inits.append(dict(kwargs))
         super().__init__(**kwargs)
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
-        usage = {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
-        message = AIMessage(content="fake final answer", usage_metadata=usage)
-        return ChatResult(generations=[ChatGeneration(message=message)], llm_output={"usage": usage})
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="fake final answer"))], llm_output={})
 
     def _stream(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        self.__class__.stream_called = True
         usage = {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18} if getattr(self, "stream_usage", False) else None
         yield ChatGenerationChunk(message=AIMessageChunk(content="fake final answer", usage_metadata=usage))
 
@@ -82,22 +82,37 @@ def _install_fake_model(monkeypatch) -> None:
     monkeypatch.setattr(factory_module, "ChatOpenAI", FakeStreamingChatOpenAI)
 
 
+class _FakeAgent:
+    def __init__(self, model):
+        self.model = model
+
+    def stream(self, state, config=None, context=None, stream_mode="values"):
+        usage = None
+        content_parts: list[str] = []
+
+        for chunk in self.model.stream(state["messages"]):
+            chunk_content = chunk.content if isinstance(chunk.content, str) else ""
+            if chunk_content:
+                content_parts.append(chunk_content)
+            if getattr(chunk, "usage_metadata", None):
+                usage = chunk.usage_metadata
+
+        yield {
+            "messages": [
+                *state["messages"],
+                AIMessage(content="".join(content_parts), usage_metadata=usage),
+            ]
+        }
+
+
 def test_stream_usage_reaches_real_client_stream(monkeypatch):
     """A real DeerFlow stream should surface usage metadata for OpenAI-compatible models."""
     _install_fake_model(monkeypatch)
 
-    from deerflow.client import _build_middlewares
-    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-
-    original_build_middlewares = _build_middlewares
-
-    def _sync_safe_build_middlewares(*args, **kwargs):
-        middlewares = original_build_middlewares(*args, **kwargs)
-        return [middleware for middleware in middlewares if not isinstance(middleware, TitleMiddleware)]
-
-    monkeypatch.setattr("deerflow.client._build_middlewares", _sync_safe_build_middlewares)
+    monkeypatch.setattr("deerflow.client.create_agent", lambda **kwargs: _FakeAgent(kwargs["model"]))
 
     FakeStreamingChatOpenAI.captured_inits.clear()
+    FakeStreamingChatOpenAI.stream_called = False
     client = DeerFlowClient(checkpointer=None, thinking_enabled=False)
     events = list(client.stream("Reply with exactly: hello", thread_id="issue-1602-verify"))
 
@@ -105,6 +120,7 @@ def test_stream_usage_reaches_real_client_stream(monkeypatch):
     end_event = next((event for event in events if event.type == "end"), None)
 
     assert any(kwargs.get("stream_usage") is True for kwargs in FakeStreamingChatOpenAI.captured_inits)
+    assert FakeStreamingChatOpenAI.stream_called is True
     assert any("usage_metadata" in event.data for event in ai_events)
     assert end_event is not None
     assert end_event.data.get("usage", {}).get("total_tokens", 0) > 0

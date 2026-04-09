@@ -67,16 +67,6 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:
         del kwargs["reasoning_effort"]
 
-    # OpenAI-compatible streaming models only emit usage metadata when stream_usage is enabled.
-    # Keep user-specified values intact, but default to True for ChatOpenAI-based providers.
-    if (
-        ChatOpenAI is not None
-        and issubclass(model_class, ChatOpenAI)
-        and "stream_usage" not in model_settings_from_config
-        and "stream_usage" not in kwargs
-    ):
-        model_settings_from_config["stream_usage"] = True
-
     # For Codex Responses API models: map thinking mode to reasoning_effort
     from deerflow.models.openai_codex_provider import CodexChatModel
 
@@ -93,7 +83,14 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"
 
-    model_instance = model_class(**kwargs, **model_settings_from_config)
+    effective_settings = {**model_settings_from_config, **kwargs}
+
+    # OpenAI-compatible streaming models only emit usage metadata when stream_usage is enabled.
+    # Respect explicit values from config or caller kwargs; only fill the default when both omit it.
+    if ChatOpenAI is not None and issubclass(model_class, ChatOpenAI) and "stream_usage" not in effective_settings:
+        effective_settings["stream_usage"] = True
+
+    model_instance = model_class(**effective_settings)
 
     callbacks = build_tracing_callbacks()
     if callbacks:
