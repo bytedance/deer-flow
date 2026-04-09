@@ -552,8 +552,10 @@ class TestToolFrequencyDetection:
     def test_hash_detection_takes_priority(self):
         """Hash-based hard stop fires before frequency check for identical calls."""
         mw = LoopDetectionMiddleware(
-            warn_threshold=2, hard_limit=3,
-            tool_freq_warn=100, tool_freq_hard_limit=200,
+            warn_threshold=2,
+            hard_limit=3,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
         )
         runtime = _make_runtime()
         call = [self._read_call("/same_file.py")]
