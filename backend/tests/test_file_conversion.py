@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from types import ModuleType
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from deerflow.utils.file_conversion import (
     _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
+    LegacyDocConversionError,
     MAX_OUTLINE_ENTRIES,
     _do_convert,
     _pymupdf_output_too_sparse,
     convert_file_to_markdown,
+    ensure_legacy_doc_conversion_supported,
     extract_outline,
 )
 
@@ -457,3 +462,36 @@ class TestExtractOutline:
         assert len(outline) == 1
         # Title must be clean — no ** ** artefacts
         assert outline[0]["title"] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"
+
+
+def test_ensure_legacy_doc_conversion_supported_requires_converter():
+    with patch("deerflow.utils.file_conversion._find_legacy_doc_converter", return_value=None):
+        with pytest.raises(LegacyDocConversionError, match="Legacy \\.doc uploads require"):
+            ensure_legacy_doc_conversion_supported()
+
+
+def test_convert_file_to_markdown_uses_soffice_for_legacy_doc(tmp_path):
+    source = tmp_path / "legacy.doc"
+    source.write_bytes(b"fake-doc")
+
+    class FakeMarkItDown:
+        def convert(self, path: str):
+            assert path.endswith(".docx")
+            return SimpleNamespace(text_content="converted legacy doc")
+
+    fake_module = SimpleNamespace(MarkItDown=FakeMarkItDown)
+
+    def fake_run(cmd, check, capture_output, text):
+        outdir = Path(cmd[cmd.index("--outdir") + 1])
+        (outdir / "legacy.docx").write_bytes(b"docx-bytes")
+        return SimpleNamespace(stdout="", stderr="")
+
+    with (
+        patch("deerflow.utils.file_conversion._find_legacy_doc_converter", return_value=("soffice", "soffice")),
+        patch("deerflow.utils.file_conversion.subprocess.run", side_effect=fake_run),
+        patch.dict("sys.modules", {"markitdown": fake_module}),
+    ):
+        md_path = asyncio.run(convert_file_to_markdown(source))
+
+    assert md_path == source.with_suffix(".md")
+    assert md_path.read_text(encoding="utf-8") == "converted legacy doc"
