@@ -138,8 +138,10 @@ services:
       - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
       - ../logs:/app/logs
-      # Mount uv cache for faster dependency installation
-      - ~/.cache/uv:/root/.cache/uv
+      # Use a Docker-managed uv cache volume instead of a host bind mount.
+      # On macOS/Docker Desktop, uv may fail to create symlinks inside shared
+      # host directories, which causes startup-time `uv sync` to crash.
+      - gateway-uv-cache:/root/.cache/uv
       # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
       - /var/run/docker.sock:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
@@ -195,8 +197,10 @@ services:
       - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
       - ../logs:/app/logs
-      # Mount uv cache for faster dependency installation
-      - ~/.cache/uv:/root/.cache/uv
+      # Use a Docker-managed uv cache volume instead of a host bind mount.
+      # On macOS/Docker Desktop, uv may fail to create symlinks inside shared
+      # host directories, which causes startup-time `uv sync` to crash.
+      - langgraph-uv-cache:/root/.cache/uv
       # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
       - /var/run/docker.sock:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
@@ -233,6 +237,8 @@ volumes:
   # image build are not shadowed by the host backend/ directory mount.
   gateway-venv:
   langgraph-venv:
+  gateway-uv-cache:
+  langgraph-uv-cache:
 
 networks:
   deer-flow-dev:
