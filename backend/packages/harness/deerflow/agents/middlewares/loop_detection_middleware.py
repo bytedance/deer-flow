@@ -127,7 +127,10 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
 
 _WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
 
-_TOOL_FREQ_WARNING_MSG = "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
+_TOOL_FREQ_WARNING_MSG = (
+    "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. "
+    "Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
+)
 
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
 
