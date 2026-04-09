@@ -316,13 +316,14 @@ def test_when_thinking_disabled_not_used_when_thinking_enabled(monkeypatch):
     assert captured.get("extra_body") == {"thinking": {"type": "enabled"}}
 
 
-def test_when_thinking_disabled_without_when_thinking_enabled_does_nothing(monkeypatch):
-    """when_thinking_disabled alone (no when_thinking_enabled) should not affect the model."""
+def test_when_thinking_disabled_without_when_thinking_enabled_still_applies(monkeypatch):
+    """when_thinking_disabled alone (no when_thinking_enabled) should still apply its settings."""
     cfg = _make_app_config(
         [
             _make_model(
                 "wtd-only",
                 supports_thinking=True,
+                supports_reasoning_effort=True,
                 when_thinking_disabled={"reasoning_effort": "low"},
             )
         ]
@@ -340,9 +341,8 @@ def test_when_thinking_disabled_without_when_thinking_enabled_does_nothing(monke
 
     factory_module.create_chat_model(name="wtd-only", thinking_enabled=False)
 
-    # No when_thinking_enabled means has_thinking_settings is False,
-    # so the entire disable block is skipped
-    assert captured.get("reasoning_effort") is None
+    # when_thinking_disabled is now gated independently of has_thinking_settings
+    assert captured.get("reasoning_effort") == "low"
 
 
 def test_when_thinking_disabled_excluded_from_model_dump(monkeypatch):
