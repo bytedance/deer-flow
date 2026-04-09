@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.authz import require_permission
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_store
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ async def delete_run_feedback(
 
 
 @router.post("/{thread_id}/runs/{run_id}/feedback", response_model=FeedbackResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
 async def create_feedback(
     thread_id: str,
     run_id: str,
@@ -141,6 +143,7 @@ async def create_feedback(
 
 
 @router.get("/{thread_id}/runs/{run_id}/feedback", response_model=list[FeedbackResponse])
+@require_permission("threads", "read", owner_check=True)
 async def list_feedback(
     thread_id: str,
     run_id: str,
@@ -152,6 +155,7 @@ async def list_feedback(
 
 
 @router.get("/{thread_id}/runs/{run_id}/feedback/stats", response_model=FeedbackStatsResponse)
+@require_permission("threads", "read", owner_check=True)
 async def feedback_stats(
     thread_id: str,
     run_id: str,
@@ -163,6 +167,7 @@ async def feedback_stats(
 
 
 @router.delete("/{thread_id}/runs/{run_id}/feedback/{feedback_id}")
+@require_permission("threads", "delete", owner_check=True, require_existing=True)
 async def delete_feedback(
     thread_id: str,
     run_id: str,
