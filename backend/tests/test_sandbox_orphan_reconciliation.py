@@ -3,16 +3,17 @@
 Covers:
 - SandboxBackend.list_running() default behavior
 - LocalContainerBackend.list_running() with mocked docker commands
-- LocalContainerBackend._get_container_created_at() timestamp parsing
+- _parse_docker_timestamp() / _extract_host_port() helpers
 - AioSandboxProvider._reconcile_orphans() decision logic
 - SIGHUP signal handler registration
 """
 
 import importlib
+import json
 import signal
 import threading
 import time
-from datetime import UTC
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,7 +27,6 @@ def test_backend_list_running_default_returns_empty():
     """Base SandboxBackend.list_running() returns empty list (backward compat for RemoteSandboxBackend)."""
     from deerflow.community.aio_sandbox.backend import SandboxBackend
 
-    # Create a concrete subclass with the abstract methods stubbed
     class StubBackend(SandboxBackend):
         def create(self, thread_id, sandbox_id, extra_mounts=None):
             pass
@@ -44,7 +44,7 @@ def test_backend_list_running_default_returns_empty():
     assert backend.list_running() == []
 
 
-# ── LocalContainerBackend.list_running() ─────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 
 def _make_local_backend():
@@ -60,36 +60,63 @@ def _make_local_backend():
     )
 
 
-def test_list_running_returns_containers(monkeypatch):
-    """list_running should enumerate containers via docker ps and build SandboxInfo."""
-    backend = _make_local_backend()
-    monkeypatch.setattr(backend, "_runtime", "docker")
-
-    docker_ps_output = "deer-flow-sandbox-abc12345\ndeer-flow-sandbox-def67890\n"
-    port_map = {
-        "deer-flow-sandbox-abc12345": 8081,
-        "deer-flow-sandbox-def67890": 8082,
-    }
-    created_map = {
-        "deer-flow-sandbox-abc12345": 1000.0,
-        "deer-flow-sandbox-def67890": 2000.0,
+def _make_inspect_entry(name: str, created: str, host_port: str | None = None) -> dict:
+    """Build a minimal docker inspect JSON entry matching the real schema."""
+    ports: dict = {}
+    if host_port is not None:
+        ports["8080/tcp"] = [{"HostIp": "0.0.0.0", "HostPort": host_port}]
+    return {
+        "Name": f"/{name}",  # docker inspect prefixes names with "/"
+        "Created": created,
+        "NetworkSettings": {"Ports": ports},
     }
 
+
+def _mock_ps_and_inspect(monkeypatch, ps_output: str, inspect_payload: list | None):
+    """Patch subprocess.run to serve fixed ps + inspect responses."""
     import subprocess
 
     def mock_run(cmd, **kwargs):
         result = MagicMock()
-        if cmd[:2] == ["docker", "ps"]:
+        if len(cmd) >= 2 and cmd[1] == "ps":
             result.returncode = 0
-            result.stdout = docker_ps_output
-        else:
-            result.returncode = 1
-            result.stdout = ""
+            result.stdout = ps_output
+            result.stderr = ""
+            return result
+        if len(cmd) >= 2 and cmd[1] == "inspect":
+            if inspect_payload is None:
+                result.returncode = 1
+                result.stdout = ""
+                result.stderr = "inspect failed"
+                return result
+            result.returncode = 0
+            result.stdout = json.dumps(inspect_payload)
+            result.stderr = ""
+            return result
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = "unexpected command"
         return result
 
     monkeypatch.setattr(subprocess, "run", mock_run)
-    monkeypatch.setattr(backend, "_get_container_port", lambda name: port_map.get(name))
-    monkeypatch.setattr(backend, "_get_container_created_at", lambda name: created_map.get(name, 0.0))
+
+
+# ── LocalContainerBackend.list_running() ─────────────────────────────────────
+
+
+def test_list_running_returns_containers(monkeypatch):
+    """list_running should enumerate containers via docker ps and batch-inspect them."""
+    backend = _make_local_backend()
+    monkeypatch.setattr(backend, "_runtime", "docker")
+
+    _mock_ps_and_inspect(
+        monkeypatch,
+        ps_output="deer-flow-sandbox-abc12345\ndeer-flow-sandbox-def67890\n",
+        inspect_payload=[
+            _make_inspect_entry("deer-flow-sandbox-abc12345", "2026-04-08T01:22:50.000000000Z", "8081"),
+            _make_inspect_entry("deer-flow-sandbox-def67890", "2026-04-08T02:22:50.000000000Z", "8082"),
+        ],
+    )
 
     infos = backend.list_running()
 
@@ -105,16 +132,7 @@ def test_list_running_empty_when_no_containers(monkeypatch):
     """list_running should return empty list when docker ps returns nothing."""
     backend = _make_local_backend()
     monkeypatch.setattr(backend, "_runtime", "docker")
-
-    import subprocess
-
-    def mock_run(cmd, **kwargs):
-        result = MagicMock()
-        result.returncode = 0
-        result.stdout = ""
-        return result
-
-    monkeypatch.setattr(subprocess, "run", mock_run)
+    _mock_ps_and_inspect(monkeypatch, ps_output="", inspect_payload=[])
 
     assert backend.list_running() == []
 
@@ -124,21 +142,13 @@ def test_list_running_skips_non_matching_names(monkeypatch):
     backend = _make_local_backend()
     monkeypatch.setattr(backend, "_runtime", "docker")
 
-    import subprocess
-
-    def mock_run(cmd, **kwargs):
-        result = MagicMock()
-        if cmd[:2] == ["docker", "ps"]:
-            result.returncode = 0
-            result.stdout = "deer-flow-sandbox-abc12345\nsome-other-container\n"
-        else:
-            result.returncode = 1
-            result.stdout = ""
-        return result
-
-    monkeypatch.setattr(subprocess, "run", mock_run)
-    monkeypatch.setattr(backend, "_get_container_port", lambda name: 8081)
-    monkeypatch.setattr(backend, "_get_container_created_at", lambda name: 1000.0)
+    _mock_ps_and_inspect(
+        monkeypatch,
+        ps_output="deer-flow-sandbox-abc12345\nsome-other-container\n",
+        inspect_payload=[
+            _make_inspect_entry("deer-flow-sandbox-abc12345", "2026-04-08T01:22:50Z", "8081"),
+        ],
+    )
 
     infos = backend.list_running()
     assert len(infos) == 1
@@ -146,29 +156,22 @@ def test_list_running_skips_non_matching_names(monkeypatch):
 
 
 def test_list_running_includes_containers_without_port(monkeypatch):
-    """list_running should include containers even without port mappings (for orphan cleanup)."""
+    """Containers without a port mapping should still be listed (with empty URL)."""
     backend = _make_local_backend()
     monkeypatch.setattr(backend, "_runtime", "docker")
 
-    import subprocess
-
-    def mock_run(cmd, **kwargs):
-        result = MagicMock()
-        if cmd[:2] == ["docker", "ps"]:
-            result.returncode = 0
-            result.stdout = "deer-flow-sandbox-abc12345\n"
-        else:
-            result.returncode = 1
-            result.stdout = ""
-        return result
-
-    monkeypatch.setattr(subprocess, "run", mock_run)
-    monkeypatch.setattr(backend, "_get_container_port", lambda name: None)
+    _mock_ps_and_inspect(
+        monkeypatch,
+        ps_output="deer-flow-sandbox-abc12345\n",
+        inspect_payload=[
+            _make_inspect_entry("deer-flow-sandbox-abc12345", "2026-04-08T01:22:50Z", host_port=None),
+        ],
+    )
 
     infos = backend.list_running()
     assert len(infos) == 1
     assert infos[0].sandbox_id == "abc12345"
-    assert infos[0].sandbox_url == ""  # No port → empty URL
+    assert infos[0].sandbox_url == ""
 
 
 def test_list_running_handles_docker_failure(monkeypatch):
@@ -182,6 +185,7 @@ def test_list_running_handles_docker_failure(monkeypatch):
         result = MagicMock()
         result.returncode = 1
         result.stdout = ""
+        result.stderr = "daemon not running"
         return result
 
     monkeypatch.setattr(subprocess, "run", mock_run)
@@ -189,11 +193,22 @@ def test_list_running_handles_docker_failure(monkeypatch):
     assert backend.list_running() == []
 
 
-# ── _get_container_created_at() ──────────────────────────────────────────────
+def test_list_running_handles_inspect_failure(monkeypatch):
+    """list_running should return empty list when batch inspect fails."""
+    backend = _make_local_backend()
+    monkeypatch.setattr(backend, "_runtime", "docker")
+
+    _mock_ps_and_inspect(
+        monkeypatch,
+        ps_output="deer-flow-sandbox-abc12345\n",
+        inspect_payload=None,  # Signals inspect failure
+    )
+
+    assert backend.list_running() == []
 
 
-def test_get_container_created_at_parses_docker_timestamp(monkeypatch):
-    """Should correctly parse Docker's ISO 8601 timestamp with nanoseconds."""
+def test_list_running_handles_malformed_inspect_json(monkeypatch):
+    """list_running should return empty list when docker inspect emits invalid JSON."""
     backend = _make_local_backend()
     monkeypatch.setattr(backend, "_runtime", "docker")
 
@@ -201,44 +216,129 @@ def test_get_container_created_at_parses_docker_timestamp(monkeypatch):
 
     def mock_run(cmd, **kwargs):
         result = MagicMock()
-        result.returncode = 0
-        result.stdout = "2026-04-08T01:22:50.123456789Z\n"
+        if len(cmd) >= 2 and cmd[1] == "ps":
+            result.returncode = 0
+            result.stdout = "deer-flow-sandbox-abc12345\n"
+            result.stderr = ""
+        else:
+            result.returncode = 0
+            result.stdout = "this is not json"
+            result.stderr = ""
         return result
 
     monkeypatch.setattr(subprocess, "run", mock_run)
 
-    ts = backend._get_container_created_at("test-container")
-    assert ts > 0
-    # Verify it's approximately correct (2026-04-08T01:22:50Z)
-    from datetime import datetime
-
-    expected = datetime(2026, 4, 8, 1, 22, 50, tzinfo=UTC).timestamp()
-    assert abs(ts - expected) < 1.0
+    assert backend.list_running() == []
 
 
-def test_get_container_created_at_returns_zero_on_failure(monkeypatch):
-    """Should return 0.0 when docker inspect fails."""
+def test_list_running_uses_single_batch_inspect_call(monkeypatch):
+    """list_running should issue exactly ONE docker inspect call regardless of container count."""
     backend = _make_local_backend()
     monkeypatch.setattr(backend, "_runtime", "docker")
+
+    inspect_call_count = {"count": 0}
 
     import subprocess
 
     def mock_run(cmd, **kwargs):
         result = MagicMock()
+        if len(cmd) >= 2 and cmd[1] == "ps":
+            result.returncode = 0
+            result.stdout = "deer-flow-sandbox-a\ndeer-flow-sandbox-b\ndeer-flow-sandbox-c\n"
+            result.stderr = ""
+            return result
+        if len(cmd) >= 2 and cmd[1] == "inspect":
+            inspect_call_count["count"] += 1
+            # Expect all three names passed in a single call
+            assert cmd[2:] == ["deer-flow-sandbox-a", "deer-flow-sandbox-b", "deer-flow-sandbox-c"]
+            result.returncode = 0
+            result.stdout = json.dumps(
+                [
+                    _make_inspect_entry("deer-flow-sandbox-a", "2026-04-08T01:22:50Z", "8081"),
+                    _make_inspect_entry("deer-flow-sandbox-b", "2026-04-08T01:22:50Z", "8082"),
+                    _make_inspect_entry("deer-flow-sandbox-c", "2026-04-08T01:22:50Z", "8083"),
+                ]
+            )
+            result.stderr = ""
+            return result
         result.returncode = 1
         result.stdout = ""
         return result
 
     monkeypatch.setattr(subprocess, "run", mock_run)
 
-    assert backend._get_container_created_at("bad-container") == 0.0
+    infos = backend.list_running()
+    assert len(infos) == 3
+    assert inspect_call_count["count"] == 1  # ← The core performance assertion
+
+
+# ── _parse_docker_timestamp() ────────────────────────────────────────────────
+
+
+def test_parse_docker_timestamp_with_nanoseconds():
+    """Should correctly parse Docker's ISO 8601 timestamp with nanoseconds."""
+    from deerflow.community.aio_sandbox.local_backend import _parse_docker_timestamp
+
+    ts = _parse_docker_timestamp("2026-04-08T01:22:50.123456789Z")
+    assert ts > 0
+    expected = datetime(2026, 4, 8, 1, 22, 50, tzinfo=UTC).timestamp()
+    assert abs(ts - expected) < 1.0
+
+
+def test_parse_docker_timestamp_without_fractional_seconds():
+    """Should parse plain ISO 8601 timestamps without fractional seconds."""
+    from deerflow.community.aio_sandbox.local_backend import _parse_docker_timestamp
+
+    ts = _parse_docker_timestamp("2026-04-08T01:22:50Z")
+    expected = datetime(2026, 4, 8, 1, 22, 50, tzinfo=UTC).timestamp()
+    assert abs(ts - expected) < 1.0
+
+
+def test_parse_docker_timestamp_empty_returns_zero():
+    from deerflow.community.aio_sandbox.local_backend import _parse_docker_timestamp
+
+    assert _parse_docker_timestamp("") == 0.0
+    assert _parse_docker_timestamp("not a timestamp") == 0.0
+
+
+# ── _extract_host_port() ─────────────────────────────────────────────────────
+
+
+def test_extract_host_port_returns_mapped_port():
+    from deerflow.community.aio_sandbox.local_backend import _extract_host_port
+
+    entry = {"NetworkSettings": {"Ports": {"8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8081"}]}}}
+    assert _extract_host_port(entry, 8080) == 8081
+
+
+def test_extract_host_port_returns_none_when_unmapped():
+    from deerflow.community.aio_sandbox.local_backend import _extract_host_port
+
+    entry = {"NetworkSettings": {"Ports": {}}}
+    assert _extract_host_port(entry, 8080) is None
+
+
+def test_extract_host_port_handles_missing_fields():
+    from deerflow.community.aio_sandbox.local_backend import _extract_host_port
+
+    assert _extract_host_port({}, 8080) is None
+    assert _extract_host_port({"NetworkSettings": None}, 8080) is None
 
 
 # ── AioSandboxProvider._reconcile_orphans() ──────────────────────────────────
 
 
 def _make_provider_for_reconciliation():
-    """Build a minimal AioSandboxProvider without triggering __init__ side effects."""
+    """Build a minimal AioSandboxProvider without triggering __init__ side effects.
+
+    WARNING: This helper intentionally bypasses ``__init__`` via ``__new__`` so
+    tests don't depend on Docker or touch the real idle-checker thread.  The
+    downside is that this helper is tightly coupled to the set of attributes
+    set up in ``AioSandboxProvider.__init__``.  If ``__init__`` gains a new
+    attribute that ``_reconcile_orphans`` (or other methods under test) reads,
+    this helper must be updated in lockstep — otherwise tests will fail with a
+    confusing ``AttributeError`` instead of a meaningful assertion failure.
+    """
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
     provider._lock = threading.Lock()
@@ -344,6 +444,8 @@ def test_reconcile_skips_already_tracked_containers():
     provider._reconcile_orphans()
 
     provider._backend.destroy.assert_not_called()
+    # The pre-populated sandbox should NOT be moved into warm pool
+    assert "existing1" not in provider._warm_pool
 
 
 def test_reconcile_handles_backend_failure():
@@ -399,7 +501,7 @@ def test_reconcile_zero_created_at_adopted():
 
 
 def test_reconcile_idle_timeout_zero_adopts_all():
-    """When idle_timeout=0 (disabled), all containers are adopted into warm pool, none destroyed."""
+    """When idle_timeout=0 (disabled), all containers are still adopted into warm pool."""
     provider = _make_provider_for_reconciliation()
     provider._config["idle_timeout"] = 0
     now = time.time()

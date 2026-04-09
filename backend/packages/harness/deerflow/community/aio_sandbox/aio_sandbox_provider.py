@@ -210,15 +210,15 @@ class AioSandboxProvider(SandboxProvider):
         adopted = 0
 
         for info in running:
-            # Skip containers already tracked (shouldn't happen at startup, but be safe)
+            age = current_time - info.created_at if info.created_at > 0 else float("inf")
+            # Single lock acquisition per container: atomic check-and-insert.
+            # Avoids a TOCTOU window between the "already tracked?" check and
+            # the warm-pool insert.
             with self._lock:
                 if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
                     continue
-
-            with self._lock:
                 self._warm_pool[info.sandbox_id] = (info, current_time)
             adopted += 1
-            age = current_time - info.created_at if info.created_at > 0 else float("inf")
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
         logger.info(f"Startup reconciliation complete: {adopted} adopted into warm pool, {len(running)} total found")
