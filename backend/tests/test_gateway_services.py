@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
 
 def test_format_sse_basic():
     from app.gateway.services import format_sse
@@ -71,7 +73,44 @@ def test_normalize_input_with_messages():
 
     result = normalize_input({"messages": [{"role": "user", "content": "hi"}]})
     assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], HumanMessage)
     assert result["messages"][0].content == "hi"
+
+
+def test_normalize_input_preserves_non_user_message_types():
+    from app.gateway.services import normalize_input
+
+    result = normalize_input(
+        {
+            "messages": [
+                {"role": "system", "content": "You are helpful.", "id": "sys-1"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "id": "ai-1",
+                    "tool_calls": [{"name": "web_search", "id": "tc-1", "args": {"query": "deerflow"}}],
+                },
+                {
+                    "role": "tool",
+                    "content": "search results",
+                    "name": "web_search",
+                    "tool_call_id": "tc-1",
+                    "id": "tool-1",
+                },
+            ]
+        }
+    )
+
+    assert isinstance(result["messages"][0], SystemMessage)
+    assert result["messages"][0].id == "sys-1"
+    assert isinstance(result["messages"][1], AIMessage)
+    assert result["messages"][1].id == "ai-1"
+    assert result["messages"][1].tool_calls == [
+        {"name": "web_search", "id": "tc-1", "args": {"query": "deerflow"}, "type": "tool_call"}
+    ]
+    assert isinstance(result["messages"][2], ToolMessage)
+    assert result["messages"][2].tool_call_id == "tc-1"
+    assert result["messages"][2].name == "web_search"
 
 
 def test_normalize_input_passthrough():
