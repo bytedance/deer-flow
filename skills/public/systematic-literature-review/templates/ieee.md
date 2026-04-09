@@ -38,7 +38,7 @@ Formatting rules:
 ### Special cases
 
 - **More than 6 authors**: IEEE allows listing the first author followed by `et al.`: `A. Vaswani et al., "Attention is all you need," arXiv:1706.03762, 2017.` Use this for papers with many authors to keep reference entries readable.
-- **If the paper has also been published at a venue**: prefer the venue citation format over arXiv. For PR 1, we only have arXiv metadata, so always use the arXiv form.
+- **If the paper has also been published at a venue**: prefer the venue citation format over arXiv. In this workflow we only have arXiv metadata, so always use the arXiv form.
 
 ## Report Structure
 

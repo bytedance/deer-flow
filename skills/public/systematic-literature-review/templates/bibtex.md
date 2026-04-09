@@ -8,7 +8,7 @@ Use this template when the user mentions BibTeX, LaTeX, wants machine-readable r
 
 - `@article` requires a `journal` field. arXiv is not a journal — it is a preprint server. Using `@article` with `journal = {arXiv}` is technically wrong and some bibliography styles will complain or render it inconsistently.
 - `@misc` is the correct entry type for preprints, technical reports, and other non-journal publications. It accepts `howpublished` and `eprint` fields, which is exactly what arXiv citations need.
-- Only switch to `@article` (or `@inproceedings`) when the paper has been **formally published** in a peer-reviewed venue and you have the venue metadata. For PR 1, we only have arXiv metadata, so always emit `@misc`.
+- Only switch to `@article` (or `@inproceedings`) when the paper has been **formally published** in a peer-reviewed venue and you have the venue metadata. In this workflow we only have arXiv metadata, so always emit `@misc`.
 
 ## Citation Format Rules
 
@@ -145,7 +145,7 @@ Save the entries below to a `.bib` file and reference them from your LaTeX docum
 
 Before saving the report, verify:
 
-- [ ] Every entry is `@misc`, not `@article`, since all papers come from arXiv.
+- [ ] Every entry is `@misc`, not `@article` (this workflow only has arXiv metadata).
 - [ ] Cite keys are unique within the report.
 - [ ] Cite keys follow the `<firstauthorlast><year><firstword>` pattern, all lowercase.
 - [ ] `author` field uses ` and ` (the literal word) between authors, not commas.

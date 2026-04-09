@@ -4,11 +4,11 @@
 Queries the public arXiv API (http://export.arxiv.org/api/query) and
 returns structured paper metadata as JSON. No API key required.
 
-Design notes (see docs/enhancement/enhancement04-slr-skill.md for context):
+Design notes:
 
-- stdlib only. Tries `requests` first, falls back to `urllib` with a
-  requests-compatible shim (same pattern as
-  ../github-deep-research/scripts/github_api.py).
+- No additional dependencies required. Uses `requests` when available,
+  falls back to `urllib` with a requests-compatible shim (same pattern as
+  ../../github-deep-research/scripts/github_api.py).
 - Query parameters are URL-encoded via `urllib.parse.urlencode` with
   `quote_via=quote_plus`. Hand-rolled `k=v` joining would break on
   multi-word topics like "transformer attention".
@@ -125,9 +125,15 @@ def _build_search_query(
 def _normalise_arxiv_id(raw_id: str) -> str:
     """Convert a full arXiv URL to a bare id.
 
-    Example: "http://arxiv.org/abs/1706.03762v5" -> "1706.03762"
+    Handles both modern and legacy arXiv ID formats:
+    - Modern: "http://arxiv.org/abs/1706.03762v5" -> "1706.03762"
+    - Legacy: "http://arxiv.org/abs/hep-th/9901001v1" -> "hep-th/9901001"
     """
-    tail = raw_id.rsplit("/", 1)[-1]
+    # Extract everything after /abs/ to preserve legacy archive prefix
+    if "/abs/" in raw_id:
+        tail = raw_id.split("/abs/", 1)[1]
+    else:
+        tail = raw_id.rsplit("/", 1)[-1]
     # Strip version suffix: "1706.03762v5" -> "1706.03762"
     if "v" in tail:
         base, _, suffix = tail.rpartition("v")
