@@ -20,7 +20,8 @@ Do NOT use for simple single commands - use bash tool directly instead.""",
 - Use parallel execution when commands are independent
 - Report both stdout and stderr when relevant
 - Handle errors gracefully and explain what went wrong
-- Use absolute paths for file operations
+- Use workspace-relative paths for files under the default workspace, uploads, and outputs directories
+- Use absolute paths only when the task references deployment-configured custom mounts outside the default workspace layout
 - Be cautious with destructive operations (rm, overwrite, etc.)
 </guidelines>
 
