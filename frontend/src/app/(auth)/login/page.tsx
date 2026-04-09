@@ -64,6 +64,20 @@ export default function LoginPage() {
     }
   }, [isAuthenticated, redirectPath, router]);
 
+  // Redirect to setup if the system has no users yet
+  useEffect(() => {
+    void fetch("/api/v1/auth/setup-status")
+      .then((r) => r.json())
+      .then((data: { needs_setup?: boolean }) => {
+        if (data.needs_setup) {
+          router.push("/setup");
+        }
+      })
+      .catch(() => {
+        // Ignore errors; user stays on login page
+      });
+  }, [router]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -97,7 +111,7 @@ export default function LoginPage() {
 
       // Both login and register set a cookie — redirect to workspace
       router.push(redirectPath);
-    } catch (_err) {
+    } catch {
       setError("Network error. Please try again.");
     } finally {
       setLoading(false);

@@ -378,9 +378,47 @@ async def get_me(request: Request):
 
 @router.get("/setup-status")
 async def setup_status():
-    """Check if admin account exists. Always False after first boot."""
+    """Check if admin account exists. Returns needs_setup=True when no users exist."""
     user_count = await get_local_provider().count_users()
     return {"needs_setup": user_count == 0}
+
+
+class InitializeAdminRequest(BaseModel):
+    """Request model for first-boot admin account creation."""
+
+    email: EmailStr
+    password: str = Field(..., min_length=8)
+
+    _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
+
+
+@router.post("/initialize", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def initialize_admin(request: Request, response: Response, body: InitializeAdminRequest):
+    """Create the first admin account on initial system setup.
+
+    Only callable when no users exist. Returns 409 Conflict if the
+    system has already been initialized. Auto-logs in by setting the
+    session cookie.
+    """
+    user_count = await get_local_provider().count_users()
+    if user_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="System already initialized").model_dump(),
+        )
+
+    try:
+        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="System already initialized").model_dump(),
+        )
+
+    token = create_access_token(str(user.id), token_version=user.token_version)
+    _set_session_cookie(response, token, request)
+
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role)
 
 
 # ── OAuth Endpoints (Future/Placeholder) ─────────────────────────────────

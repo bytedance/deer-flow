@@ -16,6 +16,7 @@ export type User = z.infer<typeof userSchema>;
 export type AuthResult =
   | { tag: "authenticated"; user: User }
   | { tag: "needs_setup"; user: User }
+  | { tag: "system_setup_required" }
   | { tag: "unauthenticated" }
   | { tag: "gateway_unavailable" }
   | { tag: "config_error"; message: string };

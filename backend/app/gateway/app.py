@@ -2,7 +2,6 @@ import logging
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import UTC
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,73 +40,45 @@ logger = logging.getLogger(__name__)
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
-    """Auto-create the admin user on first boot if no users exist.
+    """Migrate orphan LangGraph threads to the admin user on startup.
 
-    After admin creation, migrate orphan threads from the LangGraph
-    store (metadata.owner_id unset) to the admin account. This is the
-    "no-auth → with-auth" upgrade path: users who ran DeerFlow without
-    authentication have existing LangGraph thread data that needs an
-    owner assigned.
+    The admin account is now created interactively via the
+    ``POST /api/v1/auth/initialize`` endpoint on first boot rather than
+    being auto-generated here. This function only performs the one-time
+    "no-auth → with-auth" orphan thread migration for existing
+    installations that already have an admin account.
 
     No SQL persistence migration is needed: the four owner_id columns
     (threads_meta, runs, run_events, feedback) only come into existence
     alongside the auth module via create_all, so freshly created tables
-    never contain NULL-owner rows. "Existing persistence DB + new auth"
-    is not a supported upgrade path — fresh install or wipe-and-retry.
-
-    Multi-worker safe: relies on SQLite UNIQUE constraint to resolve
-    races during admin creation. Only the worker that successfully
-    creates/updates the admin prints the password; losers silently skip.
+    never contain NULL-owner rows.
     """
-    import secrets
+    from sqlalchemy import select
 
-    from app.gateway.auth.credential_file import write_initial_credentials
     from app.gateway.deps import get_local_provider
-
-    def _announce_credentials(email: str, password: str, *, label: str, headline: str) -> None:
-        """Write the password to a 0600 file and log the path (never the secret)."""
-        cred_path = write_initial_credentials(email, password, label=label)
-        logger.info("=" * 60)
-        logger.info("  %s", headline)
-        logger.info("  Credentials written to: %s (mode 0600)", cred_path)
-        logger.info("  Change it after login: Settings -> Account")
-        logger.info("=" * 60)
+    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.user.model import UserRow
 
     provider = get_local_provider()
     user_count = await provider.count_users()
 
-    admin = None
-
     if user_count == 0:
-        password = secrets.token_urlsafe(16)
-        try:
-            admin = await provider.create_user(email="admin@deerflow.dev", password=password, system_role="admin", needs_setup=True)
-        except ValueError:
-            return  # Another worker already created the admin.
-        _announce_credentials(admin.email, password, label="initial", headline="Admin account created on first boot")
-    else:
-        # Admin exists but setup never completed — reset password so operator
-        # can always find it in the console without needing the CLI.
-        # Multi-worker guard: if admin was created less than 30s ago, another
-        # worker just created it and will print the password — skip reset.
-        admin = await provider.get_user_by_email("admin@deerflow.dev")
-        if admin and admin.needs_setup:
-            import time
+        logger.info("No users found — waiting for admin initialization via /api/v1/auth/initialize")
+        return
 
-            age = time.time() - admin.created_at.replace(tzinfo=UTC).timestamp()
-            if age >= 30:
-                from app.gateway.auth.password import hash_password_async
+    # Find an admin user to assign orphaned threads to.
+    sf = get_session_factory()
+    if sf is None:
+        return
 
-                password = secrets.token_urlsafe(16)
-                admin.password_hash = await hash_password_async(password)
-                admin.token_version += 1
-                await provider.update_user(admin)
-                _announce_credentials(admin.email, password, label="reset", headline="Admin account setup incomplete — password reset")
+    async with sf() as session:
+        stmt = select(UserRow).where(UserRow.system_role == "admin").limit(1)
+        row = (await session.execute(stmt)).scalar_one_or_none()
 
-    if admin is None:
-        return  # Nothing to bind orphans to.
+    if row is None:
+        return  # No admin user found; nothing to bind orphans to.
 
-    admin_id = str(admin.id)
+    admin_id = str(row.id)
 
     # LangGraph store orphan migration — non-fatal.
     # This covers the "no-auth → with-auth" upgrade path for users
