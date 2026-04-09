@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 5
+config_version: 6
 
 # ============================================================================
 # Logging
@@ -50,6 +50,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: OpenAI model
   # - name: gpt-4
@@ -88,6 +92,9 @@ models:
   #   when_thinking_enabled:
   #     thinking:
   #       type: enabled
+  #   when_thinking_disabled:
+  #     thinking:
+  #       type: disabled
 
   # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
@@ -120,6 +127,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
@@ -136,6 +147,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
@@ -153,6 +168,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: Novita AI (OpenAI-compatible)
   # Novita provides an OpenAI-compatible API with competitive pricing
@@ -173,6 +192,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: MiniMax (OpenAI-compatible) - International Edition
   # MiniMax provides high-performance models with 204K context window
@@ -303,6 +326,23 @@ tools:
   #   use: deerflow.community.infoquest.tools:web_search_tool
   #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
   #   search_time_range: 10
+
+  # Web search tool (uses Exa, requires EXA_API_KEY)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.exa.tools:web_search_tool
+  #   max_results: 5
+  #   search_type: auto  # Options: auto, neural, keyword
+  #   contents_max_characters: 1000
+  #   # api_key: $EXA_API_KEY
+
+  # Web fetch tool (uses Exa)
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry below before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.exa.tools:web_fetch_tool
+  #   # api_key: $EXA_API_KEY
 
   # Web fetch tool (uses Jina AI reader)
   - name: web_fetch
