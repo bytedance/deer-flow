@@ -60,11 +60,14 @@ The script prints a JSON array to stdout. Each paper has: `id`, `title`, `author
 
 **Sort strategy**:
 
-- Default `relevance` for open-ended topic queries — arXiv's BM25-style scoring surfaces canonical papers first.
-- Use `submittedDate` when the user explicitly asks for "recent" papers or gives a time window.
+- **Always use `relevance` sorting** — arXiv's BM25-style scoring ensures results are actually about the user's topic. `submittedDate` sorting returns the most recently submitted papers in the category regardless of topic relevance, which produces mostly off-topic results.
+- When the user asks for "recent" papers or gives a time window, use `--sort-by relevance` **combined with `--start-date`** to constrain the time range while keeping results on-topic. For example, "recent diffusion model papers" → `--sort-by relevance --start-date 2024-01-01`, not `--sort-by submittedDate`.
+- `submittedDate` sorting is only appropriate when the user explicitly asks for chronological order (e.g. "show me papers in the order they were published"). This is rare.
 - `lastUpdatedDate` is rarely useful; ignore it unless the user asks.
 
-**If the script returns fewer papers than requested**, that is the real size of the arXiv result set for the query. Do not retry with a different endpoint or try to pad the list — report the actual count to the user and proceed.
+**Run the search exactly once.** Do not retry with modified queries if the results seem imperfect — arXiv's relevance ranking is what it is. Retrying with different query phrasings wastes tool calls and risks hitting the recursion limit. If the results are genuinely empty (0 papers), tell the user and suggest they broaden their topic or remove the category filter.
+
+**If the script returns fewer papers than requested**, that is the real size of the arXiv result set for the query. Do not pad the list — report the actual count to the user and proceed.
 
 **If the script fails** (network error, non-200 from arXiv), tell the user which error and stop. Do not try to fabricate paper metadata.
 
@@ -175,7 +178,7 @@ User: "Do a systematic literature review of recent transformer attention variant
 
 Your flow:
 1. Phase 1: confirm topic (transformer attention variants), scope (20 papers, default time window), format (APA). Ask **one** clarification only if something is missing (e.g. "Any particular time window, or should I default to the last 3 years?").
-2. Phase 2: `arxiv_search.py "transformer attention" --max-results 20 --sort-by submittedDate --start-date 2023-01-01`.
+2. Phase 2: `arxiv_search.py "transformer attention" --max-results 20 --sort-by relevance --start-date 2023-01-01`.
 3. Phase 3: 20 papers → round 1 = 3 subagents × 5 papers = 15 covered, round 2 = 1 subagent × 5 papers = 5 covered. Aggregate.
 4. Phase 4: read `templates/apa.md`, write the report using its structure, fill in themes + per-paper annotations from Phase 3 metadata.
 5. Phase 5: save to `slr-transformer-attention-20260409.md`, call `present_files`.
