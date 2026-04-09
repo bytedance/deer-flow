@@ -104,7 +104,14 @@ def _build_search_query(
     topic (matches title + abstract + authors) and optionally AND it
     with a category filter and a submission date range.
     """
-    parts = [f"all:{query}"]
+    # Wrap multi-word queries in double quotes so arXiv's Lucene parser
+    # treats them as a phrase.  Without quotes, `all:diffusion model` is
+    # parsed as `all:diffusion OR model`, pulling in unrelated papers
+    # that merely mention the word "model".
+    if " " in query:
+        parts = [f'all:"{query}"']
+    else:
+        parts = [f"all:{query}"]
     if category:
         parts.append(f"cat:{category}")
     if start_date or end_date:
