@@ -416,6 +416,23 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not visual_documents:
             return None
 
+        return self._build_uploaded_visual_context_message(visual_documents)
+
+    async def _acreate_uploaded_visual_context_message(
+        self,
+        state: UploadsMiddlewareState,
+        runtime: Runtime,
+    ) -> HumanMessage | None:
+        """Build the multimodal visual-context message off the event loop."""
+        visual_documents = self._get_visual_context_documents(state, runtime)
+        if not visual_documents:
+            return None
+
+        return await asyncio.to_thread(self._build_uploaded_visual_context_message, visual_documents)
+
+    def _build_uploaded_visual_context_message(self, visual_documents: list[dict]) -> HumanMessage:
+        """Create the multimodal message payload for already-validated images."""
+
         content_blocks: list[dict] = []
         text_sections = [
             "<document_visual_context>",
@@ -438,7 +455,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
             for image in file["validated_images"]:
                 image_base64 = base64.b64encode(image["actual_path"].read_bytes()).decode("utf-8")
-                file_lines.append(f"Image path: {image.get('path', f'/mnt/user-data/uploads/{image['filename']}')}")
+                default_image_path = f"/mnt/user-data/uploads/{image['filename']}"
+                file_lines.append(f"Image path: {image.get('path', default_image_path)}")
                 content_blocks.append(
                     {
                         "type": "image_url",
@@ -818,7 +836,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
     ) -> ModelCallResult:
         """Async version of wrap_model_call."""
         if self._runtime_supports_vision(request.runtime):
-            visual_message = self._create_uploaded_visual_context_message(request.state, request.runtime)
+            visual_message = await self._acreate_uploaded_visual_context_message(request.state, request.runtime)
             if visual_message is not None:
                 request = request.override(messages=[*request.messages, visual_message])
         return await handler(request)
@@ -844,7 +862,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             merged = dict(state.get("uploaded_image_descriptions") or {})
             merged.update(self._build_parsed_uploaded_image_descriptions(parsed, state.get("uploaded_files")))
             updates["uploaded_image_descriptions"] = merged
-        elif self._runtime_supports_vision(runtime) and self._create_uploaded_visual_context_message(state, runtime) is not None:
+        elif self._runtime_supports_vision(runtime) and self._get_visual_context_documents(state, runtime):
             failed = self._build_failed_uploaded_image_descriptions(state)
             if failed:
                 merged = dict(state.get("uploaded_image_descriptions") or {})

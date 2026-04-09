@@ -895,6 +895,48 @@ class TestAwrapModelCall:
         request.override.assert_called_once()
         handler.assert_called_once_with(request.override.return_value)
 
+    @pytest.mark.anyio
+    async def test_async_wrap_model_call_offloads_visual_message_build(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.docx").write_bytes(b"docx")
+        (uploads_dir / "report__image1.png").write_bytes(b"png")
+
+        state = {
+            "messages": [_human("review the document")],
+            "uploaded_files": [
+                {
+                    "filename": "report.docx",
+                    "size": 5,
+                    "path": "/mnt/user-data/uploads/report.docx",
+                    "extracted_images": [{"filename": "report__image1.png", "size": 3, "path": "/mnt/user-data/uploads/report__image1.png"}],
+                }
+            ],
+        }
+        request = MagicMock()
+        request.state = state
+        request.runtime = _runtime()
+        request.messages = list(state["messages"])
+        request.override.return_value = MagicMock()
+        handler = AsyncMock(return_value="response")
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with (
+            patch.object(mw, "_runtime_supports_vision", return_value=True),
+            patch(
+                "deerflow.agents.middlewares.uploads_middleware.asyncio.to_thread",
+                new=AsyncMock(side_effect=fake_to_thread),
+            ) as to_thread,
+        ):
+            result = await mw.awrap_model_call(request, handler)
+
+        assert result == "response"
+        to_thread.assert_awaited_once()
+        request.override.assert_called_once()
+        handler.assert_called_once_with(request.override.return_value)
+
 
 # ---------------------------------------------------------------------------
 # after_model
@@ -979,6 +1021,9 @@ class TestAfterModel:
 
     def test_missing_payload_after_visual_attempt_persists_failed_placeholder(self, tmp_path):
         mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.docx").write_bytes(b"docx")
+        (uploads_dir / "report__image1.png").write_bytes(b"png")
         ai = AIMessage(content="Final answer without payload.")
         state = self._state(
             _human("review"),
@@ -997,14 +1042,71 @@ class TestAfterModel:
             ],
         )
 
-        with patch.object(mw, "_runtime_supports_vision", return_value=True), patch.object(
-            mw,
-            "_create_uploaded_visual_context_message",
-            return_value=HumanMessage(content="visual"),
-        ):
+        with patch.object(mw, "_runtime_supports_vision", return_value=True):
             result = mw.after_model(state, _runtime())
 
         assert result is not None
         assert result["uploaded_image_descriptions"]["report.docx"]["status"] == "failed"
         assert result["uploaded_image_descriptions"]["report.docx"]["images"][0]["path"] == "/mnt/user-data/uploads/report__image1.png"
         assert "messages" not in result
+
+    def test_missing_payload_persists_failed_placeholder_without_rebuilding_visual_message(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.docx").write_bytes(b"docx")
+        (uploads_dir / "report__image1.png").write_bytes(b"png")
+        ai = AIMessage(content="Final answer without payload.")
+        state = self._state(
+            _human("review"),
+            ai,
+            uploaded_files=[
+                {
+                    "filename": "report.docx",
+                    "markdown_path": "/mnt/user-data/uploads/report.md",
+                    "extracted_images": [
+                        {
+                            "filename": "report__image1.png",
+                            "path": "/mnt/user-data/uploads/report__image1.png",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        with (
+            patch.object(mw, "_runtime_supports_vision", return_value=True),
+            patch.object(
+                mw,
+                "_create_uploaded_visual_context_message",
+                side_effect=AssertionError("after_model should not rebuild visual context"),
+            ),
+        ):
+            result = mw.after_model(state, _runtime())
+
+        assert result is not None
+        assert result["uploaded_image_descriptions"]["report.docx"]["status"] == "failed"
+
+    def test_missing_payload_without_visual_attempt_does_not_persist_failed_placeholder(self, tmp_path):
+        mw = _middleware(tmp_path)
+        ai = AIMessage(content="Final answer without payload.")
+        state = self._state(
+            _human("review"),
+            ai,
+            uploaded_files=[
+                {
+                    "filename": "report.docx",
+                    "markdown_path": "/mnt/user-data/uploads/report.md",
+                    "extracted_images": [
+                        {
+                            "filename": "report__image1.png",
+                            "path": "/mnt/user-data/uploads/report__image1.png",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        with patch.object(mw, "_runtime_supports_vision", return_value=True):
+            result = mw.after_model(state, _runtime(thread_id=None))
+
+        assert result is None

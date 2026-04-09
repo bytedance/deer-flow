@@ -370,6 +370,11 @@ async def extract_docx_images(file_path: Path) -> list[Path]:
     if file_path.suffix.lower() != ".docx":
         return []
 
+    return await asyncio.to_thread(_extract_docx_images_sync, file_path)
+
+
+def _extract_docx_images_sync(file_path: Path) -> list[Path]:
+    """Blocking DOCX image extraction implementation used by async callers."""
     try:
         with zipfile.ZipFile(file_path) as archive:
             media_entries = sorted(

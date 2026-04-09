@@ -7,7 +7,7 @@ import sys
 import zipfile
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from deerflow.utils.file_conversion import (
     _ASYNC_THRESHOLD_BYTES,
@@ -348,6 +348,28 @@ def test_extract_docx_images_uses_natural_sort_for_double_digit_media_names(tmp_
         "report__image3.png",
     ]
     assert [path.read_bytes() for path in extracted] == [b"one", b"two", b"ten"]
+
+
+def test_extract_docx_images_offloads_archive_work_to_thread(tmp_path):
+    docx_path = tmp_path / "report.docx"
+    _write_docx(
+        docx_path,
+        {
+            "word/media/image1.png": b"png",
+        },
+    )
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    with patch(
+        "deerflow.utils.file_conversion.asyncio.to_thread",
+        new=AsyncMock(side_effect=fake_to_thread),
+    ) as to_thread:
+        extracted = _run(extract_docx_images(docx_path))
+
+    to_thread.assert_awaited_once()
+    assert [path.name for path in extracted] == ["report__image1.png"]
 
 
 def test_extract_docx_images_returns_empty_for_non_docx_files(tmp_path):
