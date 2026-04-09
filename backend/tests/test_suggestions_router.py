@@ -46,7 +46,9 @@ def test_generate_suggestions_parses_and_limits(monkeypatch):
     fake_model.ainvoke = AsyncMock(return_value=MagicMock(content='```json\n["Q1", "Q2", "Q3", "Q4"]\n```'))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
-    result = asyncio.run(suggestions.generate_suggestions("t1", req))
+    # Bypass the require_permission decorator (which needs request +
+    # thread_meta_repo) — these tests cover the parsing logic.
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None))
 
     assert result.suggestions == ["Q1", "Q2", "Q3"]
     fake_model.ainvoke.assert_awaited_once()
@@ -66,7 +68,9 @@ def test_generate_suggestions_parses_list_block_content(monkeypatch):
     fake_model.ainvoke = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": '```json\n["Q1", "Q2"]\n```'}]))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
-    result = asyncio.run(suggestions.generate_suggestions("t1", req))
+    # Bypass the require_permission decorator (which needs request +
+    # thread_meta_repo) — these tests cover the parsing logic.
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None))
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
@@ -86,7 +90,9 @@ def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
     fake_model.ainvoke = AsyncMock(return_value=MagicMock(content=[{"type": "output_text", "text": '```json\n["Q1", "Q2"]\n```'}]))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
-    result = asyncio.run(suggestions.generate_suggestions("t1", req))
+    # Bypass the require_permission decorator (which needs request +
+    # thread_meta_repo) — these tests cover the parsing logic.
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None))
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
@@ -103,6 +109,8 @@ def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):
     fake_model.ainvoke = AsyncMock(side_effect=RuntimeError("boom"))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
-    result = asyncio.run(suggestions.generate_suggestions("t1", req))
+    # Bypass the require_permission decorator (which needs request +
+    # thread_meta_repo) — these tests cover the parsing logic.
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None))
 
     assert result.suggestions == []

@@ -86,8 +86,27 @@ async def init_engine(
     if backend == "sqlite":
         import os
 
+        from sqlalchemy import event
+
         os.makedirs(sqlite_dir or ".", exist_ok=True)
         _engine = create_async_engine(url, echo=echo, json_serializer=_json_serializer)
+
+        # Enable WAL on every new connection. SQLite PRAGMA settings are
+        # per-connection, so we wire the listener instead of running PRAGMA
+        # once at startup. WAL gives concurrent reads + writers without
+        # blocking and is the standard recommendation for any production
+        # SQLite deployment (TC-UPG-06 in AUTH_TEST_PLAN.md). The companion
+        # ``synchronous=NORMAL`` is the safe-and-fast pairing — fsync only
+        # at WAL checkpoint boundaries instead of every commit.
+        @event.listens_for(_engine.sync_engine, "connect")
+        def _enable_sqlite_wal(dbapi_conn, _record):  # noqa: ARG001 — SQLAlchemy contract
+            cursor = dbapi_conn.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL;")
+                cursor.execute("PRAGMA synchronous=NORMAL;")
+                cursor.execute("PRAGMA foreign_keys=ON;")
+            finally:
+                cursor.close()
     elif backend == "postgres":
         _engine = create_async_engine(
             url,

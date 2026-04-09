@@ -224,6 +224,7 @@ export const zhCN: Translations = {
     reportIssue: "报告问题",
     contactUs: "联系我们",
     about: "关于 DeerFlow",
+    logout: "退出登录",
   },
 
   // Conversation
@@ -309,6 +310,7 @@ export const zhCN: Translations = {
     title: "设置",
     description: "根据你的偏好调整 DeerFlow 的界面和行为。",
     sections: {
+      account: "账号",
       appearance: "外观",
       memory: "记忆",
       tools: "工具",

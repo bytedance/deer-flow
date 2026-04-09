@@ -18,8 +18,9 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
@@ -27,6 +28,22 @@ from deerflow.runtime import serialize_channel_values
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
+
+
+# Metadata keys that the server controls; clients are not allowed to set
+# them. Pydantic ``@field_validator("metadata")`` strips them on every
+# inbound model below so a malicious client cannot reflect a forged
+# owner identity through the API surface. Defense-in-depth — the
+# row-level invariant is still ``threads_meta.owner_id`` populated from
+# the auth contextvar; this list closes the metadata-blob echo gap.
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
+
+
+def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return ``metadata`` with server-controlled keys removed."""
+    if not metadata:
+        return metadata or {}
+    return {k: v for k, v in metadata.items() if k not in _SERVER_RESERVED_METADATA_KEYS}
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +77,8 @@ class ThreadCreateRequest(BaseModel):
     assistant_id: str | None = Field(default=None, description="Associate thread with an assistant")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Initial metadata")
 
+    _strip_reserved = field_validator("metadata")(classmethod(lambda cls, v: _strip_reserved_metadata(v)))
+
 
 class ThreadSearchRequest(BaseModel):
     """Request body for searching threads."""
@@ -87,6 +106,8 @@ class ThreadPatchRequest(BaseModel):
     """Request body for patching thread metadata."""
 
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata to merge")
+
+    _strip_reserved = field_validator("metadata")(classmethod(lambda cls, v: _strip_reserved_metadata(v)))
 
 
 class ThreadStateUpdateRequest(BaseModel):
@@ -165,6 +186,7 @@ def _derive_thread_status(checkpoint_tuple) -> str:
 
 
 @router.delete("/{thread_id}", response_model=ThreadDeleteResponse)
+@require_permission("threads", "delete", owner_check=True, require_existing=True)
 async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread.
 
@@ -211,6 +233,8 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     thread_meta_repo = get_thread_meta_repo(request)
     thread_id = body.thread_id or str(uuid.uuid4())
     now = time.time()
+    # ``body.metadata`` is already stripped of server-reserved keys by
+    # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
 
     # Idempotency: return existing record when already present
     existing_record = await thread_meta_repo.get(thread_id)
@@ -293,6 +317,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
 
 
 @router.patch("/{thread_id}", response_model=ThreadResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
 async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Request) -> ThreadResponse:
     """Merge metadata into a thread record."""
     from app.gateway.deps import get_thread_meta_repo
@@ -302,6 +327,7 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
     if record is None:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    # ``body.metadata`` already stripped by ``ThreadPatchRequest._strip_reserved``.
     try:
         await thread_meta_repo.update_metadata(thread_id, body.metadata)
     except Exception:
@@ -320,6 +346,7 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
 
 
 @router.get("/{thread_id}", response_model=ThreadResponse)
+@require_permission("threads", "read", owner_check=True)
 async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     """Get thread info.
 
@@ -376,6 +403,7 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
 
 
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
+@require_permission("threads", "read", owner_check=True)
 async def get_thread_state(thread_id: str, request: Request) -> ThreadStateResponse:
     """Get the latest state snapshot for a thread.
 
@@ -425,6 +453,7 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
 
 
 @router.post("/{thread_id}/state", response_model=ThreadStateResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
 async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, request: Request) -> ThreadStateResponse:
     """Update thread state (e.g. for human-in-the-loop resume or title rename).
 
@@ -514,6 +543,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
 
 
 @router.post("/{thread_id}/history", response_model=list[HistoryEntry])
+@require_permission("threads", "read", owner_check=True)
 async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request: Request) -> list[HistoryEntry]:
     """Get checkpoint history for a thread.
 

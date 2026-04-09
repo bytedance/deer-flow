@@ -16,6 +16,10 @@ class RunEventRow(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Owner of the conversation this event belongs to. Nullable for data
+    # created before auth was introduced; populated by auth middleware on
+    # new writes and by the boot-time orphan migration on existing rows.
+    owner_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     category: Mapped[str] = mapped_column(String(16), nullable=False)
     # "message" | "trace" | "lifecycle"

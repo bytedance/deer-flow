@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,18 @@ class DbRunEventStore(RunEventStore):
                 metadata = {**(metadata or {}), "content_truncated": True, "original_byte_length": len(encoded)}
         return content, metadata or {}
 
+    @staticmethod
+    def _owner_from_context() -> str | None:
+        """Soft read of owner_id from contextvar for write paths.
+
+        Returns ``None`` (no filter / no stamp) if contextvar is unset,
+        which is the expected case for background worker writes. HTTP
+        request writes will have the contextvar set by auth middleware
+        and get their user_id stamped automatically.
+        """
+        user = get_current_user()
+        return user.id if user is not None else None
+
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):  # noqa: D401
         """Write a single event — low-frequency path only.
 
@@ -68,6 +81,7 @@ class DbRunEventStore(RunEventStore):
             metadata = {**(metadata or {}), "content_is_dict": True}
         else:
             db_content = content
+        owner_id = self._owner_from_context()
         async with self._sf() as session:
             async with session.begin():
                 # Use FOR UPDATE to serialize seq assignment within a thread.
@@ -78,6 +92,7 @@ class DbRunEventStore(RunEventStore):
                 row = RunEventRow(
                     thread_id=thread_id,
                     run_id=run_id,
+                    owner_id=owner_id,
                     event_type=event_type,
                     category=category,
                     content=db_content,
@@ -91,6 +106,7 @@ class DbRunEventStore(RunEventStore):
     async def put_batch(self, events):
         if not events:
             return []
+        owner_id = self._owner_from_context()
         async with self._sf() as session:
             async with session.begin():
                 # Get max seq for the thread (assume all events in batch belong to same thread).
@@ -114,6 +130,7 @@ class DbRunEventStore(RunEventStore):
                     row = RunEventRow(
                         thread_id=e["thread_id"],
                         run_id=e["run_id"],
+                        owner_id=e.get("owner_id", owner_id),
                         event_type=e["event_type"],
                         category=category,
                         content=db_content,
@@ -125,8 +142,19 @@ class DbRunEventStore(RunEventStore):
                     rows.append(row)
             return [self._row_to_dict(r) for r in rows]
 
-    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages(
+        self,
+        thread_id,
+        *,
+        limit=50,
+        before_seq=None,
+        after_seq=None,
+        owner_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.list_messages")
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
+        if resolved_owner_id is not None:
+            stmt = stmt.where(RunEventRow.owner_id == resolved_owner_id)
         if before_seq is not None:
             stmt = stmt.where(RunEventRow.seq < before_seq)
         if after_seq is not None:
@@ -146,8 +174,19 @@ class DbRunEventStore(RunEventStore):
                 rows = list(result.scalars())
                 return [self._row_to_dict(r) for r in reversed(rows)]
 
-    async def list_events(self, thread_id, run_id, *, event_types=None, limit=500):
+    async def list_events(
+        self,
+        thread_id,
+        run_id,
+        *,
+        event_types=None,
+        limit=500,
+        owner_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.list_events")
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
+        if resolved_owner_id is not None:
+            stmt = stmt.where(RunEventRow.owner_id == resolved_owner_id)
         if event_types:
             stmt = stmt.where(RunEventRow.event_type.in_(event_types))
         stmt = stmt.order_by(RunEventRow.seq.asc()).limit(limit)
@@ -155,31 +194,68 @@ class DbRunEventStore(RunEventStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def list_messages_by_run(self, thread_id, run_id):
-        stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id, RunEventRow.category == "message").order_by(RunEventRow.seq.asc())
+    async def list_messages_by_run(
+        self,
+        thread_id,
+        run_id,
+        *,
+        owner_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.list_messages_by_run")
+        stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id, RunEventRow.category == "message")
+        if resolved_owner_id is not None:
+            stmt = stmt.where(RunEventRow.owner_id == resolved_owner_id)
+        stmt = stmt.order_by(RunEventRow.seq.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def count_messages(self, thread_id):
+    async def count_messages(
+        self,
+        thread_id,
+        *,
+        owner_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.count_messages")
         stmt = select(func.count()).select_from(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
+        if resolved_owner_id is not None:
+            stmt = stmt.where(RunEventRow.owner_id == resolved_owner_id)
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
-    async def delete_by_thread(self, thread_id):
+    async def delete_by_thread(
+        self,
+        thread_id,
+        *,
+        owner_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.delete_by_thread")
         async with self._sf() as session:
-            count_stmt = select(func.count()).select_from(RunEventRow).where(RunEventRow.thread_id == thread_id)
+            count_conditions = [RunEventRow.thread_id == thread_id]
+            if resolved_owner_id is not None:
+                count_conditions.append(RunEventRow.owner_id == resolved_owner_id)
+            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
             count = await session.scalar(count_stmt) or 0
             if count > 0:
-                await session.execute(delete(RunEventRow).where(RunEventRow.thread_id == thread_id))
+                await session.execute(delete(RunEventRow).where(*count_conditions))
                 await session.commit()
             return count
 
-    async def delete_by_run(self, thread_id, run_id):
+    async def delete_by_run(
+        self,
+        thread_id,
+        run_id,
+        *,
+        owner_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="DbRunEventStore.delete_by_run")
         async with self._sf() as session:
-            count_stmt = select(func.count()).select_from(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
+            count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
+            if resolved_owner_id is not None:
+                count_conditions.append(RunEventRow.owner_id == resolved_owner_id)
+            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
             count = await session.scalar(count_stmt) or 0
             if count > 0:
-                await session.execute(delete(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id))
+                await session.execute(delete(RunEventRow).where(*count_conditions))
                 await session.commit()
             return count

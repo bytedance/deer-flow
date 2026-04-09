@@ -236,6 +236,7 @@ export const enUS: Translations = {
     reportIssue: "Report a issue",
     contactUs: "Contact us",
     about: "About DeerFlow",
+    logout: "Log out",
   },
 
   // Conversation
@@ -324,6 +325,7 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     sections: {
+      account: "Account",
       appearance: "Appearance",
       memory: "Memory",
       tools: "Tools",

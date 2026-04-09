@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_owner_id
 
 
 class RunRepository(RunStore):
@@ -68,7 +69,7 @@ class RunRepository(RunStore):
         *,
         thread_id,
         assistant_id=None,
-        owner_id=None,
+        owner_id: str | None | _AutoSentinel = AUTO,
         status="pending",
         multitask_strategy="reject",
         metadata=None,
@@ -77,12 +78,13 @@ class RunRepository(RunStore):
         created_at=None,
         follow_up_to_run_id=None,
     ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="RunRepository.put")
         now = datetime.now(UTC)
         row = RunRow(
             run_id=run_id,
             thread_id=thread_id,
             assistant_id=assistant_id,
-            owner_id=owner_id,
+            owner_id=resolved_owner_id,
             status=status,
             multitask_strategy=multitask_strategy,
             metadata_json=self._safe_json(metadata) or {},
@@ -96,15 +98,32 @@ class RunRepository(RunStore):
             session.add(row)
             await session.commit()
 
-    async def get(self, run_id):
+    async def get(
+        self,
+        run_id,
+        *,
+        owner_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="RunRepository.get")
         async with self._sf() as session:
             row = await session.get(RunRow, run_id)
-            return self._row_to_dict(row) if row else None
+            if row is None:
+                return None
+            if resolved_owner_id is not None and row.owner_id != resolved_owner_id:
+                return None
+            return self._row_to_dict(row)
 
-    async def list_by_thread(self, thread_id, *, owner_id=None, limit=100):
+    async def list_by_thread(
+        self,
+        thread_id,
+        *,
+        owner_id: str | None | _AutoSentinel = AUTO,
+        limit=100,
+    ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="RunRepository.list_by_thread")
         stmt = select(RunRow).where(RunRow.thread_id == thread_id)
-        if owner_id is not None:
-            stmt = stmt.where(RunRow.owner_id == owner_id)
+        if resolved_owner_id is not None:
+            stmt = stmt.where(RunRow.owner_id == resolved_owner_id)
         stmt = stmt.order_by(RunRow.created_at.desc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)
@@ -118,12 +137,21 @@ class RunRepository(RunStore):
             await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
             await session.commit()
 
-    async def delete(self, run_id):
+    async def delete(
+        self,
+        run_id,
+        *,
+        owner_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_owner_id = resolve_owner_id(owner_id, method_name="RunRepository.delete")
         async with self._sf() as session:
             row = await session.get(RunRow, run_id)
-            if row is not None:
-                await session.delete(row)
-                await session.commit()
+            if row is None:
+                return
+            if resolved_owner_id is not None and row.owner_id != resolved_owner_id:
+                return
+            await session.delete(row)
+            await session.commit()
 
     async def list_pending(self, *, before=None):
         if before is None:
