@@ -253,6 +253,11 @@ def _convert_legacy_doc_to_docx(file_path: Path, output_dir: Path) -> Path:
 
 
 def _find_legacy_doc_converter() -> tuple[str, str] | None:
+    if platform.system() == "Windows":
+        soffice_exe = shutil.which("soffice.exe")
+        if soffice_exe:
+            return ("soffice", soffice_exe)
+
     soffice = shutil.which("soffice")
     if soffice:
         return ("soffice", soffice)

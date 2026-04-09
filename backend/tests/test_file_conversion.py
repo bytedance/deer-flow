@@ -13,6 +13,7 @@ import pytest
 from deerflow.utils.file_conversion import (
     _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
+    _find_legacy_doc_converter,
     LegacyDocConversionError,
     MAX_OUTLINE_ENTRIES,
     _do_convert,
@@ -495,3 +496,19 @@ def test_convert_file_to_markdown_uses_soffice_for_legacy_doc(tmp_path):
 
     assert md_path == source.with_suffix(".md")
     assert md_path.read_text(encoding="utf-8") == "converted legacy doc"
+
+
+def test_find_legacy_doc_converter_prefers_soffice_exe_on_windows():
+    with (
+        patch("deerflow.utils.file_conversion.platform.system", return_value="Windows"),
+        patch(
+            "deerflow.utils.file_conversion.shutil.which",
+            side_effect=lambda name: {
+                "soffice.exe": r"C:\Program Files\LibreOffice\program\soffice.exe",
+                "soffice": r"C:\Program Files\LibreOffice\program\soffice.COM",
+            }.get(name),
+        ),
+    ):
+        converter = _find_legacy_doc_converter()
+
+    assert converter == ("soffice", r"C:\Program Files\LibreOffice\program\soffice.exe")
