@@ -571,7 +571,7 @@ class TestGetModel:
 
 
 # ---------------------------------------------------------------------------
-# Thread Queries (list_threads / get_thread)
+# Thread Queries (list_threads / get_thread / patch_thread)
 # ---------------------------------------------------------------------------
 
 
@@ -709,6 +709,63 @@ class TestThreadQueries:
         assert result["thread_id"] == "t99"
         assert result["checkpoints"] == []
         mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}})
+
+    def test_patch_thread(self, client):
+        store = MagicMock()
+        item = MagicMock()
+        item.value = {
+            "thread_id": "t1",
+            "status": "idle",
+            "created_at": 1710000000.0,
+            "updated_at": 1710000001.0,
+            "metadata": {"source": "old", "keep": "yes"},
+            "values": {"title": "Existing"},
+        }
+        store.get.return_value = item
+
+        with (
+            patch("deerflow.client.get_store", return_value=store),
+            patch("deerflow.client.time.time", return_value=1710001234.5),
+        ):
+            result = client.patch_thread("t1", {"source": "new", "added": "ok"})
+
+        store.get.assert_called_once_with(("threads",), "t1")
+        store.put.assert_called_once_with(
+            ("threads",),
+            "t1",
+            {
+                "thread_id": "t1",
+                "status": "idle",
+                "created_at": 1710000000.0,
+                "updated_at": 1710001234.5,
+                "metadata": {"source": "new", "keep": "yes", "added": "ok"},
+                "values": {"title": "Existing"},
+            },
+        )
+        assert result == {
+            "thread_id": "t1",
+            "status": "idle",
+            "created_at": "1710000000.0",
+            "updated_at": "1710001234.5",
+            "metadata": {"source": "new", "keep": "yes", "added": "ok"},
+            "values": {},
+            "interrupts": {},
+        }
+
+    def test_patch_thread_not_found(self, client):
+        store = MagicMock()
+        store.get.return_value = None
+
+        with patch("deerflow.client.get_store", return_value=store):
+            with pytest.raises(FileNotFoundError, match="Thread t-missing not found"):
+                client.patch_thread("t-missing", {"status": "new"})
+
+        store.get.assert_called_once_with(("threads",), "t-missing")
+
+    def test_patch_thread_store_unavailable(self, client):
+        with patch("deerflow.client.get_store", return_value=None):
+            with pytest.raises(RuntimeError, match="Store not available"):
+                client.patch_thread("t1", {"status": "new"})
 
 
 # ---------------------------------------------------------------------------

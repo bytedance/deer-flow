@@ -21,6 +21,7 @@ import logging
 import mimetypes
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime.store.provider import get_store
 from deerflow.skills.installer import install_skill_from_archive
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -53,6 +55,7 @@ from deerflow.uploads.manager import (
 )
 
 logger = logging.getLogger(__name__)
+THREADS_NS: tuple[str, ...] = ("threads",)
 
 
 @dataclass
@@ -416,6 +419,41 @@ class DeerFlowClient:
         checkpoints.sort(key=lambda x: x["ts"] if x["ts"] else "")
 
         return {"thread_id": thread_id, "checkpoints": checkpoints}
+
+    def patch_thread(self, thread_id: str, metadata: dict[str, Any]) -> dict:
+        """Merge metadata into an existing thread record.
+
+        Args:
+            thread_id: Thread ID.
+            metadata: Metadata keys to merge into the thread record.
+
+        Returns:
+            Dict matching the Gateway ``ThreadResponse`` shape.
+        """
+        store = get_store()
+        if store is None:
+            raise RuntimeError("Store not available")
+
+        item = store.get(THREADS_NS, thread_id)
+        record = item.value if item is not None else None
+        if record is None:
+            raise FileNotFoundError(f"Thread {thread_id} not found")
+
+        now = time.time()
+        updated = dict(record)
+        updated.setdefault("metadata", {}).update(metadata)
+        updated["updated_at"] = now
+        store.put(THREADS_NS, thread_id, updated)
+
+        return {
+            "thread_id": thread_id,
+            "status": updated.get("status", "idle"),
+            "created_at": str(updated.get("created_at", "")),
+            "updated_at": str(now),
+            "metadata": updated.get("metadata", {}),
+            "values": {},
+            "interrupts": {},
+        }
 
     # ------------------------------------------------------------------
     # Public API — conversation
