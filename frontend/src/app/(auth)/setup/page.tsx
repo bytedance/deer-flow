@@ -28,6 +28,8 @@ export default function SetupPage() {
   const [currentPassword, setCurrentPassword] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
+
     if (isAuthenticated && user?.needs_setup) {
       setMode("change_password");
     } else if (!isAuthenticated) {
@@ -35,6 +37,7 @@ export default function SetupPage() {
       void fetch("/api/v1/auth/setup-status")
         .then((r) => r.json())
         .then((data: { needs_setup?: boolean }) => {
+          if (cancelled) return;
           if (data.needs_setup) {
             setMode("init_admin");
           } else {
@@ -43,12 +46,16 @@ export default function SetupPage() {
           }
         })
         .catch(() => {
-          router.push("/login");
+          if (!cancelled) router.push("/login");
         });
     } else {
       // Authenticated but needs_setup is false — already set up
       router.push("/workspace");
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [isAuthenticated, user, router]);
 
   // ── Init-admin handler ─────────────────────────────────────────────

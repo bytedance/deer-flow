@@ -66,16 +66,22 @@ export default function LoginPage() {
 
   // Redirect to setup if the system has no users yet
   useEffect(() => {
+    let cancelled = false;
+
     void fetch("/api/v1/auth/setup-status")
       .then((r) => r.json())
       .then((data: { needs_setup?: boolean }) => {
-        if (data.needs_setup) {
+        if (!cancelled && data.needs_setup) {
           router.push("/setup");
         }
       })
       .catch(() => {
         // Ignore errors; user stays on login page
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
