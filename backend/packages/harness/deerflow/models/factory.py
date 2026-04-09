@@ -109,7 +109,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"
 
-    model_instance = model_class(**kwargs, **model_settings_from_config)
+    model_instance = model_class(**{**model_settings_from_config, **kwargs})
 
     callbacks = build_tracing_callbacks()
     if callbacks:
