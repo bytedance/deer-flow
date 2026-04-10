@@ -98,13 +98,12 @@ def test_initialize_rejects_wrong_token(client):
 
 
 def test_initialize_rejects_empty_token(client):
-    """Empty init_token → 403."""
+    """Empty init_token → 403 (fails constant-time comparison against stored token)."""
     resp = client.post(
         "/api/v1/auth/initialize",
         json={**_init_payload(), "init_token": ""},
     )
-    # Empty string fails compare_digest (or Pydantic min_length if added)
-    assert resp.status_code in (403, 422)
+    assert resp.status_code == 403
 
 
 def test_initialize_token_consumed_after_success(client):

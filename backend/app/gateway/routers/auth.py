@@ -2,6 +2,7 @@
 
 import logging
 import os
+import secrets
 import time
 from ipaddress import ip_address, ip_network
 
@@ -404,16 +405,14 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     On success the token is consumed (one-time use), the admin account is
     created with ``needs_setup=False``, and the session cookie is set.
     """
-    import secrets as _secrets
-
     # Validate the one-time initialization token.  The token is generated
     # at startup and stored in app.state.init_token; it is consumed here on
     # the first successful call so it cannot be replayed.
     stored_token: str | None = getattr(request.app.state, "init_token", None)
-    if stored_token is None or not _secrets.compare_digest(stored_token, body.init_token):
+    if stored_token is None or not secrets.compare_digest(stored_token, body.init_token):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=AuthErrorResponse(code=AuthErrorCode.NOT_AUTHENTICATED, message="Invalid or expired initialization token").model_dump(),
+            detail=AuthErrorResponse(code=AuthErrorCode.INVALID_INIT_TOKEN, message="Invalid or expired initialization token").model_dump(),
         )
 
     # Guard against a concurrent request that might have already created an
