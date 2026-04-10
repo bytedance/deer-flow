@@ -280,6 +280,8 @@ class TestLoopDetection:
         mw._apply(_make_state(tool_calls=call), runtime_new)
 
         assert "thread-0" not in mw._history
+        assert "thread-0" not in mw._tool_freq
+        assert "thread-0" not in mw._tool_freq_warned
         assert "thread-new" in mw._history
         assert len(mw._history) == 3
 
@@ -508,6 +510,32 @@ class TestToolFrequencyDetection:
 
         # After reset, count restarts — should not trigger
         result = mw._apply(_make_state(tool_calls=[self._read_call("/file_new.py")]), runtime)
+        assert result is None
+
+    def test_freq_reset_per_thread_clears_only_target(self):
+        """reset(thread_id=...) should clear frequency state for that thread only."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime_a = _make_runtime("thread-A")
+        runtime_b = _make_runtime("thread-B")
+
+        # 2 calls on each thread
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/a_{i}.py")]), runtime_a)
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/b_{i}.py")]), runtime_b)
+
+        # Reset only thread-A
+        mw.reset(thread_id="thread-A")
+
+        assert "thread-A" not in mw._tool_freq
+        assert "thread-A" not in mw._tool_freq_warned
+
+        # thread-B state should still be intact — 3rd call triggers warn
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/b_2.py")]), runtime_b)
+        assert result is not None
+        assert "LOOP DETECTED" in result["messages"][0].content
+
+        # thread-A restarted from 0 — should not trigger
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/a_new.py")]), runtime_a)
         assert result is None
 
     def test_freq_per_thread_isolation(self):
