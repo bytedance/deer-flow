@@ -13,7 +13,7 @@
         "The search was executed only once without retries",
         "Metadata extraction was delegated via the task tool to subagents, not done inline or via python -c",
         "The APA template file (templates/apa.md) was read",
-        "The final report was saved to /mnt/user-data/outputs/ with a filename matching slr-*-.md",
+        "The final report was saved to /mnt/user-data/outputs/ with a filename matching slr-<topic-slug>-<YYYYMMDD>.md",
         "The present_files tool was called to make the report visible to the user",
         "The report contains an Executive Summary section",
         "The report identifies at least 3 themes with cross-paper analysis",
