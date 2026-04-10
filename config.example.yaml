@@ -794,6 +794,36 @@ checkpointer:
 #     bot_token: $TELEGRAM_BOT_TOKEN
 #     allowed_users: []               # empty = allow all
 #
+#   wechat:
+#     enabled: false
+#     bot_token: $WECHAT_BOT_TOKEN
+#     ilink_bot_id: $WECHAT_ILINK_BOT_ID
+#     # Optional: allow first-time QR bootstrap when bot_token is absent
+#     qrcode_login_enabled: true
+#     # Optional: sent as iLink-App-Id header when provided
+#     ilink_app_id: ""
+#     # Optional: sent as SKRouteTag header when provided
+#     route_tag: ""
+#     allowed_users: []               # empty = allow all
+#     # Optional: long-polling timeout in seconds
+#     polling_timeout: 35
+#     # Optional: QR poll interval in seconds when qrcode_login_enabled is true
+#     qrcode_poll_interval: 2
+#     # Optional: QR bootstrap timeout in seconds
+#     qrcode_poll_timeout: 180
+#     # Optional: persist getupdates cursor under the gateway container volume
+#     state_dir: ./.deer-flow/wechat/state
+#     # Optional: max inbound image size in bytes before skipping download
+#     max_inbound_image_bytes: 20971520
+#     # Optional: max outbound image size in bytes before skipping upload
+#     max_outbound_image_bytes: 20971520
+#     # Optional: max inbound file size in bytes before skipping download
+#     max_inbound_file_bytes: 52428800
+#     # Optional: max outbound file size in bytes before skipping upload
+#     max_outbound_file_bytes: 52428800
+#     # Optional: allowed file extensions for regular file receive/send
+#     allowed_file_extensions: [".txt", ".md", ".pdf", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".log", ".zip", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf"]
+#
 #     # Optional: channel-level session overrides
 #     session:
 #       assistant_id: mobile-agent  # custom agent names are supported here too

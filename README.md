@@ -368,6 +368,7 @@ DeerFlow supports receiving tasks from messaging apps. Channels auto-start when 
 | Telegram | Bot API (long-polling) | Easy |
 | Slack | Socket Mode | Moderate |
 | Feishu / Lark | WebSocket | Moderate |
+| WeChat | Tencent iLink (long-polling) | Moderate |
 | WeCom | WebSocket | Moderate |
 
 **Configuration in `config.yaml`:**
@@ -412,6 +413,19 @@ channels:
     bot_token: $TELEGRAM_BOT_TOKEN
     allowed_users: []               # empty = allow all
 
+  wechat:
+    enabled: false
+    bot_token: $WECHAT_BOT_TOKEN
+    ilink_bot_id: $WECHAT_ILINK_BOT_ID
+    qrcode_login_enabled: true      # optional: allow first-time QR bootstrap when bot_token is absent
+    allowed_users: []               # empty = allow all
+    polling_timeout: 35
+    state_dir: ./.deer-flow/wechat/state
+    max_inbound_image_bytes: 20971520
+    max_outbound_image_bytes: 20971520
+    max_inbound_file_bytes: 52428800
+    max_outbound_file_bytes: 52428800
+
     # Optional: per-channel / per-user session settings
     session:
       assistant_id: mobile-agent  # custom agent names are also supported here
@@ -445,6 +459,10 @@ SLACK_APP_TOKEN=xapp-...
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
 
+# WeChat iLink
+WECHAT_BOT_TOKEN=your_ilink_bot_token
+WECHAT_ILINK_BOT_ID=your_ilink_bot_id
+
 # WeCom
 WECOM_BOT_ID=your_bot_id
 WECOM_BOT_SECRET=your_bot_secret
@@ -469,6 +487,14 @@ WECOM_BOT_SECRET=your_bot_secret
 2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
 3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
+
+**WeChat Setup**
+
+1. Enable the `wechat` channel in `config.yaml`.
+2. Either set `WECHAT_BOT_TOKEN` in `.env`, or set `qrcode_login_enabled: true` for first-time QR bootstrap.
+3. When `bot_token` is absent and QR bootstrap is enabled, watch backend logs for the QR content returned by iLink and complete the binding flow.
+4. After the QR flow succeeds, DeerFlow persists the acquired token under `state_dir` for later restarts.
+5. For Docker Compose deployments, keep `state_dir` on a persistent volume so the `get_updates_buf` cursor and saved auth state survive restarts.
 
 **WeCom Setup**
 
