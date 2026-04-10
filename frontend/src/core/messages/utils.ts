@@ -352,6 +352,36 @@ export function stripUploadedFilesTag(content: string): string {
     .trim();
 }
 
+function parseUploadedFileSize(sizeText: string): number {
+  const normalized = sizeText.trim().toLowerCase();
+  const sizeRegex = /^(\d+(?:\.\d+)?)\s*(bytes?|kb|mb|gb)?$/;
+  const match = sizeRegex.exec(normalized);
+  if (!match) {
+    return 0;
+  }
+
+  const value = Number.parseFloat(match[1] ?? "0");
+  const unit = match[2] ?? "bytes";
+
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  switch (unit) {
+    case "byte":
+    case "bytes":
+      return Math.round(value);
+    case "kb":
+      return Math.round(value * 1024);
+    case "mb":
+      return Math.round(value * 1024 * 1024);
+    case "gb":
+      return Math.round(value * 1024 * 1024 * 1024);
+    default:
+      return 0;
+  }
+}
+
 export function parseUploadedFiles(content: string): FileInMessage[] {
   // Match <uploaded_files>...</uploaded_files> tag
   const uploadedFilesRegex = /<uploaded_files>([\s\S]*?)<\/uploaded_files>/;
@@ -375,15 +405,16 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
   }
 
   // Parse file list
-  // Format: - filename (size)\n  Path: /path/to/file
-  const fileRegex = /- ([^\n(]+)\s*\(([^)]+)\)\s*\n\s*Path:\s*([^\n]+)/g;
+  // Format: - filename (size)\n  [Type: image|file]\n  Path: /path/to/file
+  const fileRegex =
+    /- (.+?)\s+\(([^)]+)\)\s*\n(?:\s*Type:\s*[^\n]+\n)?\s*Path:\s*([^\n]+)/g;
   const files: FileInMessage[] = [];
   let fileMatch;
 
   while ((fileMatch = fileRegex.exec(uploadedFilesContent ?? "")) !== null) {
     files.push({
       filename: fileMatch[1].trim(),
-      size: parseInt(fileMatch[2].trim(), 10) ?? 0,
+      size: parseUploadedFileSize(fileMatch[2] ?? ""),
       path: fileMatch[3].trim(),
     });
   }
