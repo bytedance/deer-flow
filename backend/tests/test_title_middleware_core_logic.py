@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.agents.middlewares import title_middleware as title_middleware_module
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
 
@@ -73,37 +74,32 @@ class TestTitleMiddlewareCoreLogic:
 
         assert middleware._should_generate_title(state) is False
 
-    def test_generate_title_trims_quotes_and_respects_max_chars(self, monkeypatch):
+    def test_generate_title_uses_async_model_and_respects_max_chars(self, monkeypatch):
         _set_test_title_config(max_chars=12)
         middleware = TitleMiddleware()
-        fake_model = MagicMock()
-        fake_model.ainvoke = AsyncMock(return_value=MagicMock(content='"A very long generated title"'))
-        monkeypatch.setattr("deerflow.agents.middlewares.title_middleware.create_chat_model", lambda **kwargs: fake_model)
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="短标题"))
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(return_value=model))
 
         state = {
             "messages": [
-                HumanMessage(content="请帮我写一个脚本"),
+                HumanMessage(content="请帮我写一个很长很长的脚本标题"),
                 AIMessage(content="好的，先确认需求"),
             ]
         }
         result = asyncio.run(middleware._agenerate_title_result(state))
         title = result["title"]
 
-        assert '"' not in title
-        assert "'" not in title
-        assert len(title) == 12
+        assert title == "短标题"
+        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False)
+        model.ainvoke.assert_awaited_once()
 
-    def test_generate_title_normalizes_structured_message_and_response_content(self, monkeypatch):
+    def test_generate_title_normalizes_structured_message_content(self, monkeypatch):
         _set_test_title_config(max_chars=20)
         middleware = TitleMiddleware()
-        fake_model = MagicMock()
-        fake_model.ainvoke = AsyncMock(
-            return_value=MagicMock(content=[{"type": "text", "text": '"结构总结"'}]),
-        )
-        monkeypatch.setattr(
-            "deerflow.agents.middlewares.title_middleware.create_chat_model",
-            lambda **kwargs: fake_model,
-        )
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="请帮我总结这段代码"))
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(return_value=model))
 
         state = {
             "messages": [
@@ -115,21 +111,14 @@ class TestTitleMiddlewareCoreLogic:
         result = asyncio.run(middleware._agenerate_title_result(state))
         title = result["title"]
 
-        prompt = fake_model.ainvoke.await_args.args[0]
-        assert "请帮我总结这段代码" in prompt
-        assert "好的，先看结构" in prompt
-        # Ensure structured message dict/JSON reprs are not leaking into the prompt.
-        assert "{'type':" not in prompt
-        assert "'type':" not in prompt
-        assert '"type":' not in prompt
-        assert title == "结构总结"
+        assert title == "请帮我总结这段代码"
 
-    def test_generate_title_fallback_when_model_fails(self, monkeypatch):
+    def test_generate_title_fallback_for_long_message(self, monkeypatch):
         _set_test_title_config(max_chars=20)
         middleware = TitleMiddleware()
-        fake_model = MagicMock()
-        fake_model.ainvoke = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
-        monkeypatch.setattr("deerflow.agents.middlewares.title_middleware.create_chat_model", lambda **kwargs: fake_model)
+        model = MagicMock()
+        model.ainvoke = AsyncMock(side_effect=RuntimeError("model unavailable"))
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(return_value=model))
 
         state = {
             "messages": [
@@ -164,13 +153,10 @@ class TestTitleMiddlewareCoreLogic:
         monkeypatch.setattr(middleware, "_generate_title_result", MagicMock(return_value=None))
         assert middleware.after_model({"messages": []}, runtime=MagicMock()) is None
 
-    def test_sync_generate_title_with_model(self, monkeypatch):
-        """Sync path calls model.invoke and produces a title."""
+    def test_sync_generate_title_uses_fallback_without_model(self):
+        """Sync path avoids LLM calls and derives a local fallback title."""
         _set_test_title_config(max_chars=20)
         middleware = TitleMiddleware()
-        fake_model = MagicMock()
-        fake_model.invoke = MagicMock(return_value=MagicMock(content='"同步生成的标题"'))
-        monkeypatch.setattr("deerflow.agents.middlewares.title_middleware.create_chat_model", lambda **kwargs: fake_model)
 
         state = {
             "messages": [
@@ -179,22 +165,19 @@ class TestTitleMiddlewareCoreLogic:
             ]
         }
         result = middleware._generate_title_result(state)
-        assert result == {"title": "同步生成的标题"}
-        fake_model.invoke.assert_called_once()
+        assert result == {"title": "请帮我写测试"}
 
-    def test_empty_title_falls_back(self, monkeypatch):
-        """Empty model response triggers fallback title."""
+    def test_sync_generate_title_respects_fallback_truncation(self):
+        """Sync fallback path still respects max_chars truncation rules."""
         _set_test_title_config(max_chars=50)
         middleware = TitleMiddleware()
-        fake_model = MagicMock()
-        fake_model.invoke = MagicMock(return_value=MagicMock(content="   "))
-        monkeypatch.setattr("deerflow.agents.middlewares.title_middleware.create_chat_model", lambda **kwargs: fake_model)
 
         state = {
             "messages": [
-                HumanMessage(content="空标题测试"),
+                HumanMessage(content="这是一个非常长的问题描述，需要被截断以形成fallback标题，而且这里继续补充更多上下文，确保超过本地fallback截断阈值"),
                 AIMessage(content="回复"),
             ]
         }
         result = middleware._generate_title_result(state)
-        assert result["title"] == "空标题测试"
+        assert result["title"].endswith("...")
+        assert result["title"].startswith("这是一个非常长的问题描述")

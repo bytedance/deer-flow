@@ -5,6 +5,7 @@ import concurrent.futures
 import json
 import tempfile
 import zipfile
+from enum import Enum
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -59,18 +60,20 @@ class TestClientInit:
         assert client._subagent_enabled is False
         assert client._plan_mode is False
         assert client._agent_name is None
+        assert client._available_skills is None
         assert client._checkpointer is None
         assert client._agent is None
 
     def test_custom_params(self, mock_app_config):
         mock_middleware = MagicMock()
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
-            c = DeerFlowClient(model_name="gpt-4", thinking_enabled=False, subagent_enabled=True, plan_mode=True, agent_name="test-agent", middlewares=[mock_middleware])
+            c = DeerFlowClient(model_name="gpt-4", thinking_enabled=False, subagent_enabled=True, plan_mode=True, agent_name="test-agent", available_skills={"skill1", "skill2"}, middlewares=[mock_middleware])
         assert c._model_name == "gpt-4"
         assert c._thinking_enabled is False
         assert c._subagent_enabled is True
         assert c._plan_mode is True
         assert c._agent_name == "test-agent"
+        assert c._available_skills == {"skill1", "skill2"}
         assert c._middlewares == [mock_middleware]
 
     def test_invalid_agent_name(self, mock_app_config):
@@ -203,6 +206,33 @@ class TestStream:
         msg_events = _ai_events(events)
         assert msg_events[0].data["content"] == "Hello!"
 
+    def test_custom_events_are_forwarded(self, client):
+        """stream() forwards custom stream events alongside normal values output."""
+        ai = AIMessage(content="Hello!", id="ai-1")
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("custom", {"type": "task_started", "task_id": "task-1"}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), ai]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-custom"))
+
+        agent.stream.assert_called_once()
+        call_kwargs = agent.stream.call_args.kwargs
+        assert call_kwargs["stream_mode"] == ["values", "custom"]
+
+        assert events[0].type == "custom"
+        assert events[0].data == {"type": "task_started", "task_id": "task-1"}
+        assert any(event.type == "messages-tuple" and event.data["content"] == "Hello!" for event in events)
+        assert any(event.type == "values" for event in events)
+        assert events[-1].type == "end"
+
     def test_context_propagation(self, client):
         """stream() passes agent_name to the context."""
         agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
@@ -219,6 +249,33 @@ class TestStream:
         call_kwargs = agent.stream.call_args.kwargs
         assert call_kwargs["context"]["thread_id"] == "t1"
         assert call_kwargs["context"]["agent_name"] == "test-agent-1"
+
+    def test_custom_mode_is_normalized_to_string(self, client):
+        """stream() forwards custom events even when the mode is not a plain string."""
+
+        class StreamMode(Enum):
+            CUSTOM = "custom"
+
+            def __str__(self):
+                return self.value
+
+        agent = _make_agent_mock(
+            [
+                (StreamMode.CUSTOM, {"type": "task_started", "task_id": "task-1"}),
+                {"messages": [AIMessage(content="Hello!", id="ai-1")]},
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-custom-enum"))
+
+        assert events[0].type == "custom"
+        assert events[0].data == {"type": "task_started", "task_id": "task-1"}
+        assert any(event.type == "messages-tuple" and event.data["content"] == "Hello!" for event in events)
+        assert events[-1].type == "end"
 
     def test_tool_call_and_result(self, client):
         """stream() emits messages-tuple events for tool calls and results."""
@@ -394,8 +451,10 @@ class TestEnsureAgent:
             patch("deerflow.client._build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._agent_name = "custom-agent"
+            client._available_skills = {"test_skill"}
             client._ensure_agent(config)
 
         assert client._agent is mock_agent
@@ -404,6 +463,7 @@ class TestEnsureAgent:
         assert mock_build_middlewares.call_args.kwargs.get("agent_name") == "custom-agent"
         mock_apply_prompt.assert_called_once()
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
+        assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
 
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
@@ -441,6 +501,7 @@ class TestEnsureAgent:
             patch("deerflow.client._build_middlewares", side_effect=fake_build_middlewares),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config)
 
@@ -469,7 +530,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False)
+        client._agent_config_key = (None, True, False, False, None, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
@@ -507,6 +568,147 @@ class TestGetModel:
     def test_not_found(self, client):
         client._app_config.get_model_config.return_value = None
         assert client.get_model("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# Thread Queries (list_threads / get_thread)
+# ---------------------------------------------------------------------------
+
+
+class TestThreadQueries:
+    def _make_mock_checkpoint_tuple(
+        self,
+        thread_id: str,
+        checkpoint_id: str,
+        ts: str,
+        title: str | None = None,
+        parent_id: str | None = None,
+        messages: list = None,
+        pending_writes: list = None,
+    ):
+        cp = MagicMock()
+        cp.config = {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
+
+        channel_values = {}
+        if title is not None:
+            channel_values["title"] = title
+        if messages is not None:
+            channel_values["messages"] = messages
+
+        cp.checkpoint = {"ts": ts, "channel_values": channel_values}
+        cp.metadata = {"source": "test"}
+
+        if parent_id:
+            cp.parent_config = {"configurable": {"thread_id": thread_id, "checkpoint_id": parent_id}}
+        else:
+            cp.parent_config = {}
+
+        cp.pending_writes = pending_writes or []
+        return cp
+
+    def test_list_threads_empty(self, client):
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.list.return_value = []
+        client._checkpointer = mock_checkpointer
+
+        result = client.list_threads()
+        assert result == {"thread_list": []}
+        mock_checkpointer.list.assert_called_once_with(config=None, limit=10)
+
+    def test_list_threads_basic(self, client):
+        mock_checkpointer = MagicMock()
+        client._checkpointer = mock_checkpointer
+
+        cp1 = self._make_mock_checkpoint_tuple("t1", "c1", "2023-01-01T10:00:00Z", title="Thread 1")
+        cp2 = self._make_mock_checkpoint_tuple("t1", "c2", "2023-01-01T10:05:00Z", title="Thread 1 Updated")
+        cp3 = self._make_mock_checkpoint_tuple("t2", "c3", "2023-01-02T10:00:00Z", title="Thread 2")
+        cp_empty = self._make_mock_checkpoint_tuple("", "c4", "2023-01-03T10:00:00Z", title="Thread Empty")
+
+        # Mock list returns out of order to test the timestamp sorting/comparison
+        # Also includes a checkpoint with an empty thread_id which should be skipped
+        mock_checkpointer.list.return_value = [cp2, cp1, cp_empty, cp3]
+
+        result = client.list_threads(limit=5)
+        mock_checkpointer.list.assert_called_once_with(config=None, limit=5)
+
+        threads = result["thread_list"]
+        assert len(threads) == 2
+
+        # t2 should be first because its created_at (2023-01-02) is newer than t1 (2023-01-01)
+        assert threads[0]["thread_id"] == "t2"
+        assert threads[0]["created_at"] == "2023-01-02T10:00:00Z"
+        assert threads[0]["title"] == "Thread 2"
+
+        assert threads[1]["thread_id"] == "t1"
+        assert threads[1]["created_at"] == "2023-01-01T10:00:00Z"
+        assert threads[1]["updated_at"] == "2023-01-01T10:05:00Z"
+        assert threads[1]["latest_checkpoint_id"] == "c2"
+        assert threads[1]["title"] == "Thread 1 Updated"
+
+    def test_list_threads_fallback_checkpointer(self, client):
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.list.return_value = []
+
+        with patch("deerflow.agents.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
+            # No internal checkpointer, should fetch from provider
+            result = client.list_threads()
+
+        assert result == {"thread_list": []}
+        mock_checkpointer.list.assert_called_once()
+
+    def test_get_thread(self, client):
+        mock_checkpointer = MagicMock()
+        client._checkpointer = mock_checkpointer
+
+        msg1 = HumanMessage(content="Hello", id="m1")
+        msg2 = AIMessage(content="Hi there", id="m2")
+
+        cp1 = self._make_mock_checkpoint_tuple("t1", "c1", "2023-01-01T10:00:00Z", messages=[msg1])
+        cp2 = self._make_mock_checkpoint_tuple("t1", "c2", "2023-01-01T10:01:00Z", parent_id="c1", messages=[msg1, msg2], pending_writes=[("task_1", "messages", {"text": "pending"})])
+        cp3_no_ts = self._make_mock_checkpoint_tuple("t1", "c3", None)
+
+        # checkpointer.list yields in reverse time or random order, test sorting
+        mock_checkpointer.list.return_value = [cp2, cp1, cp3_no_ts]
+
+        result = client.get_thread("t1")
+
+        mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t1"}})
+
+        assert result["thread_id"] == "t1"
+        checkpoints = result["checkpoints"]
+        assert len(checkpoints) == 3
+
+        # None timestamp remains None but is sorted first via a fallback key
+        assert checkpoints[0]["checkpoint_id"] == "c3"
+        assert checkpoints[0]["ts"] is None
+
+        # Should be sorted by timestamp globally
+        assert checkpoints[1]["checkpoint_id"] == "c1"
+        assert checkpoints[1]["ts"] == "2023-01-01T10:00:00Z"
+        assert len(checkpoints[1]["values"]["messages"]) == 1
+
+        assert checkpoints[2]["checkpoint_id"] == "c2"
+        assert checkpoints[2]["parent_checkpoint_id"] == "c1"
+        assert checkpoints[2]["ts"] == "2023-01-01T10:01:00Z"
+        assert len(checkpoints[2]["values"]["messages"]) == 2
+        # Verify message serialization
+        assert checkpoints[2]["values"]["messages"][1]["content"] == "Hi there"
+
+        # Verify pending writes
+        assert len(checkpoints[2]["pending_writes"]) == 1
+        assert checkpoints[2]["pending_writes"][0]["task_id"] == "task_1"
+        assert checkpoints[2]["pending_writes"][0]["channel"] == "messages"
+
+    def test_get_thread_fallback_checkpointer(self, client):
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.list.return_value = []
+
+        with patch("deerflow.agents.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
+            result = client.get_thread("t99")
+
+        assert result["thread_id"] == "t99"
+        assert result["checkpoints"] == []
+        mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}})
 
 
 # ---------------------------------------------------------------------------
@@ -1276,6 +1478,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config_a)
             first_agent = client._agent
@@ -1303,6 +1506,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config)
             client._ensure_agent(config)
@@ -1327,6 +1531,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config)
             client.reset_agent()

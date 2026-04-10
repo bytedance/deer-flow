@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from app.gateway.routers import suggestions
 
@@ -43,7 +43,7 @@ def test_generate_suggestions_parses_and_limits(monkeypatch):
         model_name=None,
     )
     fake_model = MagicMock()
-    fake_model.invoke.return_value = MagicMock(content='```json\n["Q1", "Q2", "Q3", "Q4"]\n```')
+    fake_model.ainvoke = AsyncMock(return_value=MagicMock(content='```json\n["Q1", "Q2", "Q3", "Q4"]\n```'))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     result = asyncio.run(suggestions.generate_suggestions("t1", req))
@@ -61,7 +61,7 @@ def test_generate_suggestions_parses_list_block_content(monkeypatch):
         model_name=None,
     )
     fake_model = MagicMock()
-    fake_model.invoke.return_value = MagicMock(content=[{"type": "text", "text": '```json\n["Q1", "Q2"]\n```'}])
+    fake_model.ainvoke = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": '```json\n["Q1", "Q2"]\n```'}]))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     result = asyncio.run(suggestions.generate_suggestions("t1", req))
@@ -79,7 +79,7 @@ def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
         model_name=None,
     )
     fake_model = MagicMock()
-    fake_model.invoke.return_value = MagicMock(content=[{"type": "output_text", "text": '```json\n["Q1", "Q2"]\n```'}])
+    fake_model.ainvoke = AsyncMock(return_value=MagicMock(content=[{"type": "output_text", "text": '```json\n["Q1", "Q2"]\n```'}]))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     result = asyncio.run(suggestions.generate_suggestions("t1", req))
@@ -94,7 +94,7 @@ def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):
         model_name=None,
     )
     fake_model = MagicMock()
-    fake_model.invoke.side_effect = RuntimeError("boom")
+    fake_model.ainvoke = AsyncMock(side_effect=RuntimeError("boom"))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     result = asyncio.run(suggestions.generate_suggestions("t1", req))

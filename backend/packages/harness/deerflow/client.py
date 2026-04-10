@@ -117,6 +117,7 @@ class DeerFlowClient:
         subagent_enabled: bool = False,
         plan_mode: bool = False,
         agent_name: str | None = None,
+        available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
     ):
         """Initialize the client.
@@ -133,6 +134,7 @@ class DeerFlowClient:
             subagent_enabled: Enable subagent delegation.
             plan_mode: Enable TodoList middleware for plan mode.
             agent_name: Name of the agent to use.
+            available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
         """
         if config_path is not None:
@@ -148,6 +150,7 @@ class DeerFlowClient:
         self._subagent_enabled = subagent_enabled
         self._plan_mode = plan_mode
         self._agent_name = agent_name
+        self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
 
         # Lazy agent — created on first call, recreated when config changes.
@@ -208,6 +211,8 @@ class DeerFlowClient:
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
+            self._agent_name,
+            frozenset(self._available_skills) if self._available_skills is not None else None,
         )
 
         if self._agent is not None and self._agent_config_key == key:
@@ -226,6 +231,7 @@ class DeerFlowClient:
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
+                available_skills=self._available_skills,
             ),
             "state_schema": ThreadState,
         }
@@ -310,6 +316,108 @@ class DeerFlowClient:
         return str(content)
 
     # ------------------------------------------------------------------
+    # Public API — threads
+    # ------------------------------------------------------------------
+
+    def list_threads(self, limit: int = 10) -> dict:
+        """List the recent N threads.
+
+        Args:
+            limit: Maximum number of threads to return. Default is 10.
+
+        Returns:
+            Dict with "thread_list" key containing list of thread info dicts,
+            sorted by thread creation time descending.
+        """
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.agents.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+
+        thread_info_map = {}
+
+        for cp in checkpointer.list(config=None, limit=limit):
+            cfg = cp.config.get("configurable", {})
+            thread_id = cfg.get("thread_id")
+            if not thread_id:
+                continue
+
+            ts = cp.checkpoint.get("ts")
+            checkpoint_id = cfg.get("checkpoint_id")
+
+            if thread_id not in thread_info_map:
+                channel_values = cp.checkpoint.get("channel_values", {})
+                thread_info_map[thread_id] = {
+                    "thread_id": thread_id,
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "latest_checkpoint_id": checkpoint_id,
+                    "title": channel_values.get("title"),
+                }
+            else:
+                # Explicitly compare timestamps to ensure accuracy when iterating over unordered namespaces.
+                # Treat None as "missing" and only compare when existing values are non-None.
+                if ts is not None:
+                    current_created = thread_info_map[thread_id]["created_at"]
+                    if current_created is None or ts < current_created:
+                        thread_info_map[thread_id]["created_at"] = ts
+
+                    current_updated = thread_info_map[thread_id]["updated_at"]
+                    if current_updated is None or ts > current_updated:
+                        thread_info_map[thread_id]["updated_at"] = ts
+                        thread_info_map[thread_id]["latest_checkpoint_id"] = checkpoint_id
+                        channel_values = cp.checkpoint.get("channel_values", {})
+                        thread_info_map[thread_id]["title"] = channel_values.get("title")
+
+        threads = list(thread_info_map.values())
+        threads.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+
+        return {"thread_list": threads[:limit]}
+
+    def get_thread(self, thread_id: str) -> dict:
+        """Get the complete thread record, including all node execution records.
+
+        Args:
+            thread_id: Thread ID.
+
+        Returns:
+            Dict containing the thread's full checkpoint history.
+        """
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.agents.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+
+        config = {"configurable": {"thread_id": thread_id}}
+        checkpoints = []
+
+        for cp in checkpointer.list(config):
+            channel_values = dict(cp.checkpoint.get("channel_values", {}))
+            if "messages" in channel_values:
+                channel_values["messages"] = [self._serialize_message(m) if hasattr(m, "content") else m for m in channel_values["messages"]]
+
+            cfg = cp.config.get("configurable", {})
+            parent_cfg = cp.parent_config.get("configurable", {}) if cp.parent_config else {}
+
+            checkpoints.append(
+                {
+                    "checkpoint_id": cfg.get("checkpoint_id"),
+                    "parent_checkpoint_id": parent_cfg.get("checkpoint_id"),
+                    "ts": cp.checkpoint.get("ts"),
+                    "metadata": cp.metadata,
+                    "values": channel_values,
+                    "pending_writes": [{"task_id": w[0], "channel": w[1], "value": w[2]} for w in getattr(cp, "pending_writes", [])],
+                }
+            )
+
+        # Sort globally by timestamp to prevent partial ordering issues caused by different namespaces (e.g., subgraphs)
+        checkpoints.sort(key=lambda x: x["ts"] if x["ts"] else "")
+
+        return {"thread_id": thread_id, "checkpoints": checkpoints}
+
+    # ------------------------------------------------------------------
     # Public API — conversation
     # ------------------------------------------------------------------
 
@@ -339,6 +447,7 @@ class DeerFlowClient:
         Yields:
             StreamEvent with one of:
             - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...]}
+            - type="custom"          data={...}
             - type="messages-tuple"  data={"type": "ai", "content": str, "id": str}
             - type="messages-tuple"  data={"type": "ai", "content": str, "id": str, "usage_metadata": {...}}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
@@ -359,7 +468,22 @@ class DeerFlowClient:
         seen_ids: set[str] = set()
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-        for chunk in self._agent.stream(state, config=config, context=context, stream_mode="values"):
+        for item in self._agent.stream(
+            state,
+            config=config,
+            context=context,
+            stream_mode=["values", "custom"],
+        ):
+            if isinstance(item, tuple) and len(item) == 2:
+                mode, chunk = item
+                mode = str(mode)
+            else:
+                mode, chunk = "values", item
+
+            if mode == "custom":
+                yield StreamEvent(type="custom", data=chunk)
+                continue
+
             messages = chunk.get("messages", [])
 
             for msg in messages:
