@@ -29,6 +29,10 @@ export interface ListFilesResponse {
   count: number;
 }
 
+export interface UploadFilesOptions {
+  onProgress?: (progress: number) => void;
+}
+
 async function readErrorDetail(
   response: Response,
   fallback: string,
@@ -43,6 +47,7 @@ async function readErrorDetail(
 export async function uploadFiles(
   threadId: string,
   files: File[],
+  options?: UploadFilesOptions,
 ): Promise<UploadResponse> {
   const formData = new FormData();
 
@@ -50,19 +55,52 @@ export async function uploadFiles(
     formData.append("files", file);
   });
 
-  const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads`,
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
+  return new Promise<UploadResponse>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "POST",
+      `${getBackendBaseURL()}/api/threads/${threadId}/uploads`,
+    );
 
-  if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Upload failed"));
-  }
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        return;
+      }
+      const progress = Math.min(
+        100,
+        Math.max(0, Math.round((event.loaded / event.total) * 100)),
+      );
+      options?.onProgress?.(progress);
+    };
 
-  return response.json();
+    xhr.onerror = () => {
+      reject(new Error("Upload failed"));
+    };
+
+    xhr.onload = () => {
+      const responseText = xhr.responseText || "";
+      let payload: UploadResponse | { detail?: string } | undefined;
+      try {
+        payload = responseText
+          ? (JSON.parse(responseText) as UploadResponse | { detail?: string })
+          : undefined;
+      } catch {
+        payload = undefined;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const detail =
+          payload && "detail" in payload ? payload.detail : undefined;
+        reject(new Error(detail ?? "Upload failed"));
+        return;
+      }
+
+      options?.onProgress?.(100);
+      resolve(payload as UploadResponse);
+    };
+
+    xhr.send(formData);
+  });
 }
 
 /**
