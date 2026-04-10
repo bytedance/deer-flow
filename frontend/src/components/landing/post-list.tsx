@@ -81,10 +81,10 @@ export function PostMeta({
 
 export function PostTags({
   tags,
-  classname,
+  className,
 }: {
   tags?: unknown;
-  classname?: string;
+  className?: string;
 }) {
   if (!Array.isArray(tags)) {
     return null;
@@ -99,7 +99,7 @@ export function PostTags({
   }
 
   return (
-    <div className={cn("flex flex-wrap items-center gap-3", classname)}>
+    <div className={cn("flex flex-wrap items-center gap-3", className)}>
       <span className="text-secondary-foreground text-sm">Tags:</span>
       {validTags.map((tag) => (
         <Link
@@ -135,9 +135,10 @@ export function PostList({ description, posts, title }: PostListProps) {
             >
               <div className="space-y-3">
                 <PostMeta
+                  currentLang={post.lang}
                   date={post.metadata.date}
                   languages={post.languages}
-                  pathname={post.slug.join("/")}
+                  pathname={getBlogRoute(post.slug)}
                 />
                 <Link
                   href={getBlogRoute(post.slug)}

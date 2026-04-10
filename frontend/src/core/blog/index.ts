@@ -60,7 +60,7 @@ function isMdxFile(item: PageMapItem): item is BlogMdxFile {
 function normalizeBlogRoute(route: string): string {
   // Posts are sourced from locale-specific content trees but exposed
   // under the single public /blog route.
-  return route.replace(/^\/(en|zh)\/blog/, "/blog");
+  return route.replace(/^\/(en|zh)\/(?:posts|blog)(?=\/|$)/, "/blog");
 }
 
 export function getBlogRoute(slug: string[]): string {

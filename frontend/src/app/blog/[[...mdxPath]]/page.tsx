@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { importPage } from "nextra/pages";
 import { cache } from "react";
 
-import { PostList, PostMeta, PostTags } from "@/components/landing/post-list";
+import { PostList, PostMeta } from "@/components/landing/post-list";
 import {
   BLOG_LANGS,
   type BlogLang,
@@ -121,7 +121,12 @@ export default async function Page(props) {
   }
 
   if (mdxPath[0] === "tags" && mdxPath[1]) {
-    const tag = decodeURIComponent(mdxPath[1]);
+    let tag: string;
+    try {
+      tag = decodeURIComponent(mdxPath[1]);
+    } catch {
+      notFound();
+    }
     const title = formatTagName(tag);
     const { posts } = await getBlogIndexData(preferredLang, { tag });
 
