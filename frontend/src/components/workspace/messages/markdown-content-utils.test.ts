@@ -25,10 +25,7 @@ void test("detects streamdown code block containers", () => {
 });
 
 void test("ignores inline-only children", () => {
-  const children = [
-    element("span", { children: "inline" }),
-    "plain text",
-  ];
+  const children = [element("span", { children: "inline" }), "plain text"];
 
   assert.equal(hasBlockLevelChildren(children), false);
 });

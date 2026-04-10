@@ -48,7 +48,9 @@ export function isBlockLevelChild(node: ReactNode): boolean {
   }
 
   const props = element.props;
-  return !!props && typeof props === "object" && "data-code-block-container" in props;
+  return (
+    !!props && typeof props === "object" && "data-code-block-container" in props
+  );
 }
 
 export function hasBlockLevelChildren(children: ReactNode): boolean {
@@ -60,5 +62,7 @@ export function hasBlockLevelChildren(children: ReactNode): boolean {
 
 export function filterPresentChildren(children: ReactNode): ReactNode[] {
   const normalizedChildren = Array.isArray(children) ? children : [children];
-  return normalizedChildren.filter((child) => child !== null && child !== undefined && child !== "");
+  return normalizedChildren.filter(
+    (child) => child !== null && child !== undefined && child !== "",
+  );
 }
