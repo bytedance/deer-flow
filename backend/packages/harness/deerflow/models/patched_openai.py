@@ -1,15 +1,19 @@
-"""Patched ChatOpenAI that preserves thought_signature for Gemini thinking models.
+"""Patched ChatOpenAI that preserves non-standard thinking fields.
 
 When using Gemini with thinking enabled via an OpenAI-compatible gateway (e.g.
 Vertex AI, Google AI Studio, or any proxy), the API requires that the
 ``thought_signature`` field on tool-call objects is echoed back verbatim in
 every subsequent request.
 
-The OpenAI-compatible gateway stores the raw tool-call dicts (including
-``thought_signature``) in ``additional_kwargs["tool_calls"]``, but standard
-``langchain_openai.ChatOpenAI`` only serialises the standard fields (``id``,
-``type``, ``function``) into the outgoing payload, silently dropping the
-signature.  That causes an HTTP 400 ``INVALID_ARGUMENT`` error:
+OpenAI-compatible gateways often return assistant-only metadata that must be
+echoed back on later turns:
+
+- Gemini-style ``thought_signature`` on tool calls
+- DeepSeek/Kimi-style ``reasoning_content`` on assistant messages
+
+Standard ``langchain_openai.ChatOpenAI`` serializes only the standard fields,
+silently dropping those gateway-specific thinking fields. That causes request
+validation failures in multi-turn tool-call flows.
 
     Unable to submit request because function call `<tool>` in the N. content
     block is missing a `thought_signature`.
@@ -29,13 +33,13 @@ from langchain_openai import ChatOpenAI
 
 
 class PatchedChatOpenAI(ChatOpenAI):
-    """ChatOpenAI with ``thought_signature`` preservation for Gemini thinking via OpenAI gateway.
+    """ChatOpenAI with gateway-specific thinking field preservation.
 
-    When using Gemini with thinking enabled via an OpenAI-compatible gateway,
-    the API expects ``thought_signature`` to be present on tool-call objects in
-    multi-turn conversations.  This patched version restores those signatures
-    from ``AIMessage.additional_kwargs["tool_calls"]`` into the serialised
-    request payload before it is sent to the API.
+    When using thinking-enabled models via an OpenAI-compatible gateway, the
+    API may expect prior assistant metadata to be echoed back verbatim in
+    subsequent requests. This patched version restores those fields from the
+    original ``AIMessage`` objects into the serialized request payload before
+    it is sent to the API.
 
     Usage in ``config.yaml``::
 
@@ -80,15 +84,28 @@ class PatchedChatOpenAI(ChatOpenAI):
         if len(payload_messages) == len(original_messages):
             for payload_msg, orig_msg in zip(payload_messages, original_messages):
                 if payload_msg.get("role") == "assistant" and isinstance(orig_msg, AIMessage):
-                    _restore_tool_call_signatures(payload_msg, orig_msg)
+                    _restore_assistant_gateway_fields(payload_msg, orig_msg)
         else:
             # Fallback: match assistant-role entries positionally against AIMessages.
             ai_messages = [m for m in original_messages if isinstance(m, AIMessage)]
             assistant_payloads = [(i, m) for i, m in enumerate(payload_messages) if m.get("role") == "assistant"]
             for (_, payload_msg), ai_msg in zip(assistant_payloads, ai_messages):
-                _restore_tool_call_signatures(payload_msg, ai_msg)
+                _restore_assistant_gateway_fields(payload_msg, ai_msg)
 
         return payload
+
+
+def _restore_assistant_gateway_fields(payload_msg: dict, orig_msg: AIMessage) -> None:
+    """Re-inject non-standard assistant fields required by OpenAI-compatible gateways."""
+    _restore_reasoning_content(payload_msg, orig_msg)
+    _restore_tool_call_signatures(payload_msg, orig_msg)
+
+
+def _restore_reasoning_content(payload_msg: dict, orig_msg: AIMessage) -> None:
+    """Re-inject ``reasoning_content`` onto outgoing assistant messages."""
+    reasoning_content = orig_msg.additional_kwargs.get("reasoning_content")
+    if reasoning_content is not None:
+        payload_msg["reasoning_content"] = reasoning_content
 
 
 def _restore_tool_call_signatures(payload_msg: dict, orig_msg: AIMessage) -> None:
