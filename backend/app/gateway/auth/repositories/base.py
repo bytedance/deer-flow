@@ -84,6 +84,11 @@ class UserRepository(ABC):
         ...
 
     @abstractmethod
+    async def count_admin_users(self) -> int:
+        """Return number of users with system_role == 'admin'."""
+        ...
+
+    @abstractmethod
     async def get_user_by_oauth(self, provider: str, oauth_id: str) -> User | None:
         """Get user by OAuth provider and ID.
 

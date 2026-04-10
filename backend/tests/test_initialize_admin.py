@@ -1,8 +1,8 @@
 """Tests for the POST /api/v1/auth/initialize endpoint.
 
 Covers: first-boot admin creation, rejection when system already
-initialized, password strength validation, and public accessibility
-(no auth cookie required).
+initialized, invalid/missing init_token, password strength validation,
+and public accessibility (no auth cookie required).
 """
 
 import asyncio
@@ -16,6 +16,7 @@ os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-initialize-admin-min-3
 from app.gateway.auth.config import AuthConfig, set_auth_config
 
 _TEST_SECRET = "test-secret-key-initialize-admin-min-32"
+_INIT_TOKEN = "test-init-token-for-initialization-tests"
 
 
 @pytest.fixture(autouse=True)
@@ -44,21 +45,31 @@ def client(_setup_auth):
 
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
     app = create_app()
+    # Pre-set the init token on app.state (normally done by the lifespan on
+    # first boot; tests don't run the lifespan because it requires config.yaml).
+    app.state.init_token = _INIT_TOKEN
     # Do NOT use TestClient as a context manager — that would trigger the
     # full lifespan which requires config.yaml. The auth endpoints work
     # without the lifespan (persistence engine is set up by _setup_auth).
     yield TestClient(app)
 
 
+def _init_payload(**extra):
+    """Build a valid /initialize payload with the test init_token."""
+    return {
+        "email": "admin@example.com",
+        "password": "Str0ng!Pass99",
+        "init_token": _INIT_TOKEN,
+        **extra,
+    }
+
+
 # ── Happy path ────────────────────────────────────────────────────────────
 
 
 def test_initialize_creates_admin_and_sets_cookie(client):
-    """POST /initialize when no users exist → 201, session cookie set."""
-    resp = client.post(
-        "/api/v1/auth/initialize",
-        json={"email": "admin@example.com", "password": "Str0ng!Pass99"},
-    )
+    """POST /initialize when no admin exists → 201, session cookie set."""
+    resp = client.post("/api/v1/auth/initialize", json=_init_payload())
     assert resp.status_code == 201
     data = resp.json()
     assert data["email"] == "admin@example.com"
@@ -68,29 +79,71 @@ def test_initialize_creates_admin_and_sets_cookie(client):
 
 def test_initialize_needs_setup_false(client):
     """Newly created admin via /initialize has needs_setup=False."""
-    client.post(
-        "/api/v1/auth/initialize",
-        json={"email": "admin@example.com", "password": "Str0ng!Pass99"},
-    )
+    client.post("/api/v1/auth/initialize", json=_init_payload())
     me = client.get("/api/v1/auth/me")
     assert me.status_code == 200
     assert me.json()["needs_setup"] is False
 
 
+# ── Token validation ──────────────────────────────────────────────────────
+
+
+def test_initialize_rejects_wrong_token(client):
+    """Wrong init_token → 403."""
+    resp = client.post(
+        "/api/v1/auth/initialize",
+        json={**_init_payload(), "init_token": "wrong-token"},
+    )
+    assert resp.status_code == 403
+
+
+def test_initialize_rejects_empty_token(client):
+    """Empty init_token → 403."""
+    resp = client.post(
+        "/api/v1/auth/initialize",
+        json={**_init_payload(), "init_token": ""},
+    )
+    # Empty string fails compare_digest (or Pydantic min_length if added)
+    assert resp.status_code in (403, 422)
+
+
+def test_initialize_token_consumed_after_success(client):
+    """After a successful /initialize the token is consumed and cannot be reused."""
+    client.post("/api/v1/auth/initialize", json=_init_payload())
+    # The token is now None; the same token value must be rejected
+    resp2 = client.post(
+        "/api/v1/auth/initialize",
+        json={**_init_payload(), "email": "other@example.com"},
+    )
+    # Token is consumed → 403 (invalid token), not 409
+    assert resp2.status_code == 403
+
+
 # ── Rejection when already initialized ───────────────────────────────────
 
 
-def test_initialize_rejected_when_users_exist(client):
-    """Second call to /initialize after system is set up → 409."""
-    client.post(
-        "/api/v1/auth/initialize",
-        json={"email": "admin@example.com", "password": "Str0ng!Pass99"},
-    )
+def test_initialize_rejected_when_admin_exists(client):
+    """Second call to /initialize after admin exists → 409 system_already_initialized."""
+    client.post("/api/v1/auth/initialize", json=_init_payload())
+    # Re-set token so second attempt can reach the admin-exists check
+    client.app.state.init_token = _INIT_TOKEN
     resp2 = client.post(
         "/api/v1/auth/initialize",
-        json={"email": "other@example.com", "password": "Str0ng!Pass99"},
+        json={**_init_payload(), "email": "other@example.com"},
     )
     assert resp2.status_code == 409
+    body = resp2.json()
+    assert body["detail"]["code"] == "system_already_initialized"
+
+
+def test_initialize_register_does_not_block_initialization(client):
+    """/register creating a user before /initialize doesn't block admin creation."""
+    # Register a regular user first
+    client.post("/api/v1/auth/register", json={"email": "regular@example.com", "password": "Tr0ub4dor3a"})
+    # /initialize should still succeed (checks admin_count, not total user_count)
+    resp = client.post("/api/v1/auth/initialize", json=_init_payload())
+    assert resp.status_code == 201
+    assert resp.json()["system_role"] == "admin"
 
 
 # ── Endpoint is public (no cookie required) ───────────────────────────────
@@ -100,7 +153,7 @@ def test_initialize_accessible_without_cookie(client):
     """No access_token cookie needed for /initialize."""
     resp = client.post(
         "/api/v1/auth/initialize",
-        json={"email": "admin@example.com", "password": "Str0ng!Pass99"},
+        json=_init_payload(),
         cookies={},
     )
     assert resp.status_code == 201
@@ -113,7 +166,7 @@ def test_initialize_rejects_short_password(client):
     """Password shorter than 8 chars → 422."""
     resp = client.post(
         "/api/v1/auth/initialize",
-        json={"email": "admin@example.com", "password": "short"},
+        json={**_init_payload(), "password": "short"},
     )
     assert resp.status_code == 422
 
@@ -122,7 +175,7 @@ def test_initialize_rejects_common_password(client):
     """Common password → 422."""
     resp = client.post(
         "/api/v1/auth/initialize",
-        json={"email": "admin@example.com", "password": "password123"},
+        json={**_init_payload(), "password": "password123"},
     )
     assert resp.status_code == 422
 
@@ -139,10 +192,15 @@ def test_setup_status_before_initialization(client):
 
 def test_setup_status_after_initialization(client):
     """setup-status returns needs_setup=False after /initialize succeeds."""
-    client.post(
-        "/api/v1/auth/initialize",
-        json={"email": "admin@example.com", "password": "Str0ng!Pass99"},
-    )
+    client.post("/api/v1/auth/initialize", json=_init_payload())
     resp = client.get("/api/v1/auth/setup-status")
     assert resp.status_code == 200
     assert resp.json()["needs_setup"] is False
+
+
+def test_setup_status_false_when_only_regular_user_exists(client):
+    """setup-status returns needs_setup=True even when regular users exist (no admin)."""
+    client.post("/api/v1/auth/register", json={"email": "regular@example.com", "password": "Tr0ub4dor3a"})
+    resp = client.get("/api/v1/auth/setup-status")
+    assert resp.status_code == 200
+    assert resp.json()["needs_setup"] is True

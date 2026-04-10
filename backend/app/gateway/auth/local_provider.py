@@ -78,6 +78,10 @@ class LocalAuthProvider(AuthProvider):
         """Return total number of registered users."""
         return await self._repo.count_users()
 
+    async def count_admin_users(self) -> int:
+        """Return number of admin users."""
+        return await self._repo.count_admin_users()
+
     async def update_user(self, user: User) -> User:
         """Update an existing user."""
         return await self._repo.update_user(user)

@@ -22,10 +22,14 @@ export async function getServerSideUser(): Promise<AuthResult> {
 
   if (!sessionCookie) {
     // No session — check whether the system has been initialised yet.
+    const setupController = new AbortController();
+    const setupTimeout = setTimeout(() => setupController.abort(), SSR_AUTH_TIMEOUT_MS);
     try {
       const setupRes = await fetch(`${internalGatewayUrl}/api/v1/auth/setup-status`, {
         cache: "no-store",
+        signal: setupController.signal,
       });
+      clearTimeout(setupTimeout);
       if (setupRes.ok) {
         const setupData = (await setupRes.json()) as { needs_setup?: boolean };
         if (setupData.needs_setup) {
@@ -33,7 +37,8 @@ export async function getServerSideUser(): Promise<AuthResult> {
         }
       }
     } catch {
-      // If setup-status is unreachable, fall through to unauthenticated.
+      clearTimeout(setupTimeout);
+      // If setup-status is unreachable/times out, fall through to unauthenticated.
     }
     return { tag: "unauthenticated" };
   }

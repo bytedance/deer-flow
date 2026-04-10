@@ -24,6 +24,9 @@ export default function SetupPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // --- Init-admin mode only ---
+  const [initToken, setInitToken] = useState("");
+
   // --- Change-password mode only ---
   const [currentPassword, setCurrentPassword] = useState("");
 
@@ -74,7 +77,7 @@ export default function SetupPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ email, password: newPassword }),
+        body: JSON.stringify({ email, password: newPassword, init_token: initToken }),
       });
 
       if (!res.ok) {
@@ -165,6 +168,19 @@ export default function SetupPage() {
               onChange={(e) => setEmail(e.target.value)}
               required
             />
+            <div className="space-y-1">
+              <Input
+                type="text"
+                placeholder="Initialization token (from server logs)"
+                value={initToken}
+                onChange={(e) => setInitToken(e.target.value)}
+                required
+                autoComplete="off"
+              />
+              <p className="text-muted-foreground text-xs">
+                Copy the <code>INIT TOKEN</code> printed in the server startup logs.
+              </p>
+            </div>
             <Input
               type="password"
               placeholder="Password (min. 8 characters)"

@@ -39,6 +39,7 @@ const AUTH_ERROR_CODES = [
   "email_already_exists",
   "provider_not_found",
   "not_authenticated",
+  "system_already_initialized",
 ] as const;
 
 export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];

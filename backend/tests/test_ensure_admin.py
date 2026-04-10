@@ -33,9 +33,10 @@ def _make_app_stub(store=None):
     return app
 
 
-def _make_provider(user_count=0):
+def _make_provider(admin_count=0):
     p = AsyncMock()
-    p.count_users = AsyncMock(return_value=user_count)
+    p.count_users = AsyncMock(return_value=admin_count)
+    p.count_admin_users = AsyncMock(return_value=admin_count)
     p.create_user = AsyncMock()
     p.update_user = AsyncMock(side_effect=lambda u: u)
     return p
@@ -62,13 +63,14 @@ def _make_session_factory(admin_row=None):
     return sf
 
 
-# ── First boot: no users → early return ─────────────────────────────────
+# ── First boot: no admin → generate init_token, return early ─────────────
 
 
 def test_first_boot_does_not_create_admin():
-    """count_users==0 → return early, do NOT create admin automatically."""
-    provider = _make_provider(user_count=0)
+    """admin_count==0 → generate init_token, do NOT create admin automatically."""
+    provider = _make_provider(admin_count=0)
     app = _make_app_stub()
+    app.state.init_token = None  # lifespan sets this
 
     with patch("app.gateway.deps.get_local_provider", return_value=provider):
         from app.gateway.app import _ensure_admin_user
@@ -76,14 +78,18 @@ def test_first_boot_does_not_create_admin():
         asyncio.run(_ensure_admin_user(app))
 
     provider.create_user.assert_not_called()
+    # init_token must have been set on app.state
+    assert app.state.init_token is not None
+    assert len(app.state.init_token) > 10
 
 
 def test_first_boot_skips_migration():
-    """No users → return early before any migration attempt."""
-    provider = _make_provider(user_count=0)
+    """No admin → return early before any migration attempt."""
+    provider = _make_provider(admin_count=0)
     store = AsyncMock()
     store.asearch = AsyncMock(return_value=[])
     app = _make_app_stub(store=store)
+    app.state.init_token = None
 
     with patch("app.gateway.deps.get_local_provider", return_value=provider):
         from app.gateway.app import _ensure_admin_user
@@ -93,17 +99,17 @@ def test_first_boot_skips_migration():
     store.asearch.assert_not_called()
 
 
-# ── Users exist: migration runs when admin row found ────────────────────
+# ── Admin exists: migration runs when admin row found ────────────────────
 
 
-def test_users_exist_admin_found_triggers_migration():
-    """Users exist and admin row found → _migrate_orphaned_threads called."""
+def test_admin_exists_triggers_migration():
+    """Admin exists and admin row found → _migrate_orphaned_threads called."""
     from uuid import uuid4
 
     admin_row = MagicMock()
     admin_row.id = uuid4()
 
-    provider = _make_provider(user_count=1)
+    provider = _make_provider(admin_count=1)
     sf = _make_session_factory(admin_row=admin_row)
     store = AsyncMock()
     store.asearch = AsyncMock(return_value=[])
@@ -118,9 +124,9 @@ def test_users_exist_admin_found_triggers_migration():
     store.asearch.assert_called_once()
 
 
-def test_users_exist_no_admin_row_skips_migration():
-    """Users exist but no admin row → skip migration gracefully."""
-    provider = _make_provider(user_count=2)
+def test_admin_exists_no_admin_row_skips_migration():
+    """Admin count > 0 but DB row missing (edge case) → skip migration gracefully."""
+    provider = _make_provider(admin_count=2)
     sf = _make_session_factory(admin_row=None)
     store = AsyncMock()
     app = _make_app_stub(store=store)
@@ -134,14 +140,14 @@ def test_users_exist_no_admin_row_skips_migration():
     store.asearch.assert_not_called()
 
 
-def test_users_exist_no_store_skips_migration():
-    """Users exist, admin found, but no store → no crash, no migration."""
+def test_admin_exists_no_store_skips_migration():
+    """Admin exists, row found, but no store → no crash, no migration."""
     from uuid import uuid4
 
     admin_row = MagicMock()
     admin_row.id = uuid4()
 
-    provider = _make_provider(user_count=1)
+    provider = _make_provider(admin_count=1)
     sf = _make_session_factory(admin_row=admin_row)
     app = _make_app_stub(store=None)
 
@@ -154,9 +160,9 @@ def test_users_exist_no_store_skips_migration():
     # No assertion needed — just verify no crash
 
 
-def test_users_exist_session_factory_none_skips_migration():
+def test_admin_exists_session_factory_none_skips_migration():
     """get_session_factory() returns None → return early, no crash."""
-    provider = _make_provider(user_count=1)
+    provider = _make_provider(admin_count=1)
     store = AsyncMock()
     app = _make_app_stub(store=store)
 
@@ -176,7 +182,7 @@ def test_migration_failure_is_non_fatal():
     admin_row = MagicMock()
     admin_row.id = uuid4()
 
-    provider = _make_provider(user_count=1)
+    provider = _make_provider(admin_count=1)
     sf = _make_session_factory(admin_row=admin_row)
     store = AsyncMock()
     store.asearch = AsyncMock(side_effect=RuntimeError("store crashed"))

@@ -40,19 +40,25 @@ logger = logging.getLogger(__name__)
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
-    """Migrate orphan LangGraph threads to the admin user on startup.
+    """Startup hook: generate init token on first boot; migrate orphan threads otherwise.
 
-    The admin account is now created interactively via the
-    ``POST /api/v1/auth/initialize`` endpoint on first boot rather than
-    being auto-generated here. This function only performs the one-time
-    "no-auth → with-auth" orphan thread migration for existing
-    installations that already have an admin account.
+    First boot (no admin exists):
+      - Generates a one-time ``init_token`` stored in ``app.state.init_token``
+      - Logs the token to stdout so the operator can copy-paste it into the
+        ``/setup`` form to create the first admin account interactively.
+      - Does NOT create any user accounts automatically.
+
+    Subsequent boots (admin already exists):
+      - Runs the one-time "no-auth → with-auth" orphan thread migration for
+        existing LangGraph thread metadata that has no owner_id.
 
     No SQL persistence migration is needed: the four owner_id columns
     (threads_meta, runs, run_events, feedback) only come into existence
     alongside the auth module via create_all, so freshly created tables
     never contain NULL-owner rows.
     """
+    import secrets
+
     from sqlalchemy import select
 
     from app.gateway.deps import get_local_provider
@@ -60,13 +66,22 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     from deerflow.persistence.user.model import UserRow
 
     provider = get_local_provider()
-    user_count = await provider.count_users()
+    admin_count = await provider.count_admin_users()
 
-    if user_count == 0:
-        logger.info("No users found — waiting for admin initialization via /api/v1/auth/initialize")
+    if admin_count == 0:
+        init_token = secrets.token_urlsafe(32)
+        app.state.init_token = init_token
+        logger.info("=" * 60)
+        logger.info("  First boot detected — no admin account exists.")
+        logger.info("  Use the one-time token below to create the admin account.")
+        logger.info("  Copy it into the /setup form when prompted.")
+        logger.info("  INIT TOKEN: %s", init_token)
+        logger.info("  Visit /setup to complete admin account creation.")
+        logger.info("=" * 60)
         return
 
-    # Find an admin user to assign orphaned threads to.
+    # Admin already exists — run orphan thread migration for any
+    # LangGraph thread metadata that pre-dates the auth module.
     sf = get_session_factory()
     if sf is None:
         return
@@ -76,13 +91,11 @@ async def _ensure_admin_user(app: FastAPI) -> None:
         row = (await session.execute(stmt)).scalar_one_or_none()
 
     if row is None:
-        return  # No admin user found; nothing to bind orphans to.
+        return  # Should not happen (admin_count > 0 above), but be safe.
 
     admin_id = str(row.id)
 
     # LangGraph store orphan migration — non-fatal.
-    # This covers the "no-auth → with-auth" upgrade path for users
-    # whose existing LangGraph thread metadata has no owner_id set.
     store = getattr(app.state, "store", None)
     if store is not None:
         try:
@@ -344,6 +357,11 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
             Service health status information.
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
+
+    # Ensure init_token always exists on app.state (None until lifespan sets it
+    # if no admin is found).  This prevents AttributeError in tests that don't
+    # run the full lifespan.
+    app.state.init_token = None
 
     return app
 
