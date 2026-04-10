@@ -22,6 +22,9 @@ const meta: MetaRecord = {
   workspace: {
     type: "page",
   },
+  blog: {
+    type: "page",
+  },
 };
 
 export default meta;
