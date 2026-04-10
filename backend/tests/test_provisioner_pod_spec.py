@@ -39,4 +39,3 @@ def test_build_pod_adds_secret_env_from_when_configured():
     assert len(container.env_from) == 1
     assert container.env_from[0].secret_ref is not None
     assert container.env_from[0].secret_ref.name == "sandbox-env"
-
