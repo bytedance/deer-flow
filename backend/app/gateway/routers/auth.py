@@ -2,7 +2,6 @@
 
 import logging
 import os
-import secrets
 import time
 from ipaddress import ip_address, ip_network
 
@@ -389,7 +388,6 @@ class InitializeAdminRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
-    init_token: str = Field(..., description="One-time initialization token printed to server logs on first boot")
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -399,28 +397,11 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     """Create the first admin account on initial system setup.
 
     Only callable when no admin exists. Returns 409 Conflict if an admin
-    already exists. Requires the one-time ``init_token`` that is logged to
-    stdout at startup whenever the system has no admin account.
-
-    On success the token is consumed (one-time use), the admin account is
-    created with ``needs_setup=False``, and the session cookie is set.
+    already exists. On success the admin account is created with
+    ``needs_setup=False``, and the session cookie is set.
     """
-    # Validate the one-time initialization token.  The token is generated
-    # at startup and stored in app.state.init_token; it is consumed here on
-    # the first successful call so it cannot be replayed.
-    stored_token: str | None = getattr(request.app.state, "init_token", None)
-    if stored_token is None or not secrets.compare_digest(stored_token, body.init_token):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=AuthErrorResponse(code=AuthErrorCode.INVALID_INIT_TOKEN, message="Invalid or expired initialization token").model_dump(),
-        )
-
-    # Guard against a concurrent request that might have already created an
-    # admin between the token check and the DB insert below.
     admin_count = await get_local_provider().count_admin_users()
     if admin_count > 0:
-        # Consume the token so it can't be used again even though init failed.
-        request.app.state.init_token = None
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
@@ -430,14 +411,10 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
     except ValueError:
         # DB unique-constraint race: another concurrent request beat us.
-        request.app.state.init_token = None
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
         )
-
-    # Consume the token — initialization is complete, prevent replays.
-    request.app.state.init_token = None
 
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request)

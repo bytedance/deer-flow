@@ -1,9 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { getCsrfHeaders } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -14,7 +16,7 @@ type SetupMode = "loading" | "init_admin" | "change_password";
 export default function SetupPage() {
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
-
+  const { theme, resolvedTheme } = useTheme();
   const [mode, setMode] = useState<SetupMode>("loading");
 
   // --- Shared state ---
@@ -23,9 +25,6 @@ export default function SetupPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-
-  // --- Init-admin mode only ---
-  const [initToken, setInitToken] = useState("");
 
   // --- Change-password mode only ---
   const [currentPassword, setCurrentPassword] = useState("");
@@ -62,7 +61,7 @@ export default function SetupPage() {
   }, [isAuthenticated, user, router]);
 
   // ── Init-admin handler ─────────────────────────────────────────────
-  const handleInitAdmin = async (e: React.FormEvent) => {
+  const handleInitAdmin = async (e: React.SubmitEvent) => {
     e.preventDefault();
     setError("");
 
@@ -77,7 +76,10 @@ export default function SetupPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ email, password: newPassword, init_token: initToken }),
+        body: JSON.stringify({
+          email,
+          password: newPassword,
+        }),
       });
 
       if (!res.ok) {
@@ -96,7 +98,7 @@ export default function SetupPage() {
   };
 
   // ── Change-password handler ────────────────────────────────────────
-  const handleChangePassword = async (e: React.FormEvent) => {
+  const handleChangePassword = async (e: React.SubmitEvent) => {
     e.preventDefault();
     setError("");
 
@@ -140,6 +142,8 @@ export default function SetupPage() {
     }
   };
 
+  const actualTheme = theme === "system" ? resolvedTheme : theme;
+
   if (mode === "loading") {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -151,8 +155,16 @@ export default function SetupPage() {
   // ── Admin initialization form ──────────────────────────────────────
   if (mode === "init_admin") {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="w-full max-w-sm space-y-6 p-6">
+      <div className="bg-background flex min-h-screen items-center justify-center">
+        <FlickeringGrid
+          className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+          squareSize={4}
+          gridGap={4}
+          color={actualTheme === "dark" ? "white" : "black"}
+          maxOpacity={0.3}
+          flickerChance={0.25}
+        />
+        <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
           <div className="text-center">
             <h1 className="font-serif text-3xl">DeerFlow</h1>
             <p className="text-muted-foreground mt-2">Create admin account</p>
@@ -160,44 +172,49 @@ export default function SetupPage() {
               Set up the administrator account to get started.
             </p>
           </div>
-          <form onSubmit={handleInitAdmin} className="space-y-4">
-            <Input
-              type="email"
-              placeholder="Admin email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-            <div className="space-y-1">
+          <form onSubmit={handleInitAdmin} className="space-y-2">
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="email" className="text-sm font-medium">
+                Email
+              </label>
               <Input
-                type="text"
-                placeholder="Initialization token (from server logs)"
-                value={initToken}
-                onChange={(e) => setInitToken(e.target.value)}
+                id="email"
+                type="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 required
-                autoComplete="off"
               />
-              <p className="text-muted-foreground text-xs">
-                Copy the <code>INIT TOKEN</code> printed in the server startup logs.
-              </p>
             </div>
-            <Input
-              type="password"
-              placeholder="Password (min. 8 characters)"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              required
-              minLength={8}
-            />
-            <Input
-              type="password"
-              placeholder="Confirm password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              required
-              minLength={8}
-            />
-            {error && <p className="text-sm text-red-500">{error}</p>}
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="password" className="text-sm font-medium">
+                Password
+              </label>
+              <Input
+                id="password"
+                type="password"
+                placeholder="Password (min. 8 characters)"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+            </div>
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="confirmPassword" className="text-sm font-medium">
+                Confirm Password
+              </label>
+              <Input
+                id="confirmPassword"
+                type="password"
+                placeholder="Confirm password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+            </div>
+            {error && <p className="ms-1 text-sm text-red-500">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Creating account…" : "Create Admin Account"}
             </Button>
@@ -209,8 +226,16 @@ export default function SetupPage() {
 
   // ── Change-password form (needs_setup after login) ─────────────────
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <div className="w-full max-w-sm space-y-6 p-6">
+    <div className="bg-background flex min-h-screen items-center justify-center">
+      <FlickeringGrid
+        className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+        squareSize={4}
+        gridGap={4}
+        color={actualTheme === "dark" ? "white" : "black"}
+        maxOpacity={0.3}
+        flickerChance={0.25}
+      />
+      <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
         <div className="text-center">
           <h1 className="font-serif text-3xl">DeerFlow</h1>
           <p className="text-muted-foreground mt-2">
