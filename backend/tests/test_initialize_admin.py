@@ -110,7 +110,7 @@ def test_initialize_rejects_empty_token(client):
 def test_initialize_token_consumed_after_success(client):
     """After a successful /initialize the token is consumed and cannot be reused."""
     client.post("/api/v1/auth/initialize", json=_init_payload())
-    # The token is now None; the same token value must be rejected (403)
+    # The token is now None; any subsequent call with the old token must be rejected (403)
     resp2 = client.post(
         "/api/v1/auth/initialize",
         json={**_init_payload(), "email": "other@example.com"},
@@ -122,7 +122,12 @@ def test_initialize_token_consumed_after_success(client):
 
 
 def test_initialize_rejected_when_admin_exists(client):
-    """Second call to /initialize after admin exists → 409 system_already_initialized."""
+    """Second call to /initialize after admin exists → 409 system_already_initialized.
+
+    The first call consumes the token.  Re-setting it on app.state simulates
+    what would happen if the operator somehow restarted or manually refreshed
+    the token (e.g., in testing).
+    """
     client.post("/api/v1/auth/initialize", json=_init_payload())
     # Re-set the token so the second attempt can pass token validation
     # and reach the admin-exists check.
@@ -134,6 +139,24 @@ def test_initialize_rejected_when_admin_exists(client):
     assert resp2.status_code == 409
     body = resp2.json()
     assert body["detail"]["code"] == "system_already_initialized"
+
+
+def test_initialize_token_not_consumed_on_admin_exists(client):
+    """Token is NOT consumed when the admin-exists guard rejects the request.
+
+    This prevents a DoS where an attacker calls with the correct token when
+    admin already exists and permanently burns the init token.
+    """
+    client.post("/api/v1/auth/initialize", json=_init_payload())
+    # Token consumed by success above; re-simulate the scenario:
+    # admin exists, token is still valid (re-set), call should 409 and NOT consume token.
+    client.app.state.init_token = _INIT_TOKEN
+    client.post(
+        "/api/v1/auth/initialize",
+        json={**_init_payload(), "email": "other@example.com"},
+    )
+    # Token must still be set (not consumed) after the 409 rejection.
+    assert client.app.state.init_token == _INIT_TOKEN
 
 
 def test_initialize_register_does_not_block_initialization(client):
