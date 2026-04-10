@@ -31,7 +31,12 @@ import { ArtifactsProvider } from "@/components/workspace/artifacts";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
-import { checkAgentName, getAgent } from "@/core/agents/api";
+import {
+  AgentNameCheckError,
+  checkAgentName,
+  createAgent,
+  getAgent,
+} from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
@@ -65,6 +70,20 @@ async function getAgentWithRetry(agentName: string) {
   return null;
 }
 
+function getCreateAgentErrorMessage(
+  error: unknown,
+  networkErrorMessage: string,
+  fallbackMessage: string,
+) {
+  if (error instanceof TypeError && error.message === "Failed to fetch") {
+    return networkErrorMessage;
+  }
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return fallbackMessage;
+}
+
 export default function NewAgentPage() {
   const { t } = useI18n();
   const router = useRouter();
@@ -73,6 +92,7 @@ export default function NewAgentPage() {
   const [nameInput, setNameInput] = useState("");
   const [nameError, setNameError] = useState("");
   const [isCheckingName, setIsCheckingName] = useState(false);
+  const [isCreatingAgent, setIsCreatingAgent] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agent, setAgent] = useState<Agent | null>(null);
   const [showSaveHint, setShowSaveHint] = useState(false);
@@ -134,7 +154,10 @@ export default function NewAgentPage() {
         return;
       }
     } catch (err) {
-      if (err instanceof TypeError && err.message === "Failed to fetch") {
+      if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "backend_unreachable"
+      ) {
         setNameError(t.agents.nameStepNetworkError);
       } else {
         setNameError(t.agents.nameStepCheckError);
@@ -142,6 +165,26 @@ export default function NewAgentPage() {
       return;
     } finally {
       setIsCheckingName(false);
+    }
+
+    setIsCreatingAgent(true);
+    try {
+      await createAgent({
+        name: trimmed,
+        description: "",
+        soul: "",
+      });
+    } catch (err) {
+      setNameError(
+        getCreateAgentErrorMessage(
+          err,
+          t.agents.nameStepNetworkError,
+          t.agents.nameStepCheckError,
+        ),
+      );
+      return;
+    } finally {
+      setIsCreatingAgent(false);
     }
 
     setAgentName(trimmed);
@@ -292,7 +335,9 @@ export default function NewAgentPage() {
               <Button
                 className="w-full"
                 onClick={() => void handleConfirmName()}
-                disabled={!nameInput.trim() || isCheckingName}
+                disabled={
+                  !nameInput.trim() || isCheckingName || isCreatingAgent
+                }
               >
                 {t.agents.nameStepContinue}
               </Button>

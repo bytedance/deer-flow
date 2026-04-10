@@ -21,7 +21,7 @@ def _make_skill(name: str) -> Skill:
 
 def test_get_skills_prompt_section_returns_empty_when_no_skills_match(monkeypatch):
     skills = [_make_skill("skill1"), _make_skill("skill2")]
-    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: skills)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
 
     result = get_skills_prompt_section(available_skills={"non_existent_skill"})
     assert result == ""
@@ -29,7 +29,7 @@ def test_get_skills_prompt_section_returns_empty_when_no_skills_match(monkeypatc
 
 def test_get_skills_prompt_section_returns_empty_when_available_skills_empty(monkeypatch):
     skills = [_make_skill("skill1"), _make_skill("skill2")]
-    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: skills)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
 
     result = get_skills_prompt_section(available_skills=set())
     assert result == ""
@@ -37,7 +37,7 @@ def test_get_skills_prompt_section_returns_empty_when_available_skills_empty(mon
 
 def test_get_skills_prompt_section_returns_skills(monkeypatch):
     skills = [_make_skill("skill1"), _make_skill("skill2")]
-    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: skills)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
 
     result = get_skills_prompt_section(available_skills={"skill1"})
     assert "skill1" in result
@@ -47,7 +47,7 @@ def test_get_skills_prompt_section_returns_skills(monkeypatch):
 
 def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(monkeypatch):
     skills = [_make_skill("skill1"), _make_skill("skill2")]
-    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: skills)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
 
     result = get_skills_prompt_section(available_skills=None)
     assert "skill1" in result
@@ -56,7 +56,7 @@ def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(mon
 
 def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
     skills = [_make_skill("skill1")]
-    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: skills)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
     monkeypatch.setattr(
         "deerflow.config.get_app_config",
         lambda: SimpleNamespace(
@@ -70,7 +70,7 @@ def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
 
 
 def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(monkeypatch):
-    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: [])
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: [])
     monkeypatch.setattr(
         "deerflow.config.get_app_config",
         lambda: SimpleNamespace(
@@ -85,7 +85,7 @@ def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(
 
 def test_get_skills_prompt_section_cache_respects_skill_evolution_toggle(monkeypatch):
     skills = [_make_skill("skill1")]
-    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.load_skills", lambda enabled_only: skills)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
     config = SimpleNamespace(
         skills=SimpleNamespace(container_path="/mnt/skills"),
         skill_evolution=SimpleNamespace(enabled=True),
