@@ -60,7 +60,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
-import { uploadFiles } from "@/core/uploads";
+import { deleteUploadedFile, uploadFiles } from "@/core/uploads";
 import { cn } from "@/lib/utils";
 
 import {
@@ -152,8 +152,11 @@ export function InputBox({
   const attachments = usePromptInputAttachments();
   const { textInput } = usePromptInputController();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
-  const ensuredThreadIdsRef = useRef(new Set<string>());
   const activeUploadIdsRef = useRef(new Set<string>());
+  const uploadAbortControllersRef = useRef(new Map<string, AbortController>());
+  const discardedAttachmentIdsRef = useRef(new Set<string>());
+  const committedAttachmentIdsRef = useRef(new Set<string>());
+  const attachmentFilesRef = useRef(attachments.files);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const [followupsHidden, setFollowupsHidden] = useState(false);
@@ -252,6 +255,7 @@ export function InputBox({
   );
 
   const attachmentFiles = attachments.files;
+  attachmentFilesRef.current = attachmentFiles;
   const hasPendingAttachmentUploads = attachmentFiles.some((file) => {
     const uploadStatus = file.upload?.status;
     return uploadStatus === "pending" || uploadStatus === "uploading";
@@ -262,43 +266,47 @@ export function InputBox({
   const hasBlockingAttachmentUploads =
     hasPendingAttachmentUploads || hasFailedAttachmentUploads;
 
-  const readErrorDetail = useCallback(
-    async (response: Response, fallback: string) => {
-      const payload = (await response
-        .json()
-        .catch(() => ({ detail: fallback }))) as { detail?: string };
-      return payload.detail ?? fallback;
+  const cleanupUploadedAttachment = useCallback(
+    async (filename: string) => {
+      try {
+        await deleteUploadedFile(threadId, filename);
+      } catch (error) {
+        console.warn("Failed to clean up preuploaded attachment", {
+          error,
+          filename,
+          threadId,
+        });
+      }
     },
-    [],
+    [threadId],
   );
 
-  const ensureThreadExists = useCallback(async () => {
-    if (!threadId || ensuredThreadIdsRef.current.has(threadId)) {
-      return;
-    }
+  const cleanupDraftAttachment = useCallback(
+    (attachment: (typeof attachmentFiles)[number]) => {
+      if (committedAttachmentIdsRef.current.delete(attachment.id)) {
+        return;
+      }
 
-    const response = await fetch(`${getBackendBaseURL()}/api/threads`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        thread_id: threadId,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
-      }),
-    });
+      discardedAttachmentIdsRef.current.add(attachment.id);
 
-    if (!response.ok) {
-      throw new Error(
-        await readErrorDetail(response, "Failed to create thread for upload"),
-      );
-    }
+      const controller = uploadAbortControllersRef.current.get(attachment.id);
+      if (controller) {
+        controller.abort();
+        uploadAbortControllersRef.current.delete(attachment.id);
+      }
 
-    ensuredThreadIdsRef.current.add(threadId);
-  }, [context.agent_name, readErrorDetail, threadId]);
+      const uploadedFilename = attachment.upload?.info?.filename;
+      if (uploadedFilename) {
+        void cleanupUploadedAttachment(uploadedFilename);
+      }
+    },
+    [cleanupUploadedAttachment],
+  );
 
   const uploadAttachment = useCallback(
     async (attachmentId: string, file: File) => {
+      const abortController = new AbortController();
+      uploadAbortControllersRef.current.set(attachmentId, abortController);
       attachments.update(attachmentId, (current) => ({
         ...current,
         upload: {
@@ -308,9 +316,8 @@ export function InputBox({
       }));
 
       try {
-        await ensureThreadExists();
-
         const response = await uploadFiles(threadId, [file], {
+          signal: abortController.signal,
           onProgress: (progress) => {
             attachments.update(attachmentId, (current) => ({
               ...current,
@@ -327,6 +334,11 @@ export function InputBox({
           throw new Error("Upload failed");
         }
 
+        if (discardedAttachmentIdsRef.current.has(attachmentId)) {
+          void cleanupUploadedAttachment(uploadedFile.filename);
+          return;
+        }
+
         attachments.update(attachmentId, (current) => ({
           ...current,
           upload: {
@@ -336,6 +348,10 @@ export function InputBox({
           },
         }));
       } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+
         attachments.update(attachmentId, (current) => ({
           ...current,
           upload: {
@@ -346,11 +362,41 @@ export function InputBox({
           },
         }));
       } finally {
+        uploadAbortControllersRef.current.delete(attachmentId);
         activeUploadIdsRef.current.delete(attachmentId);
       }
     },
-    [attachments, ensureThreadExists, t.uploads.uploadFailed, threadId],
+    [attachments, cleanupUploadedAttachment, t.uploads.uploadFailed, threadId],
   );
+
+  const previousAttachmentFilesRef = useRef(attachmentFiles);
+
+  useEffect(() => {
+    const previousAttachmentFiles = previousAttachmentFilesRef.current;
+    previousAttachmentFilesRef.current = attachmentFiles;
+
+    const currentAttachmentIds = new Set(attachmentFiles.map((file) => file.id));
+    for (const previousAttachment of previousAttachmentFiles) {
+      if (currentAttachmentIds.has(previousAttachment.id)) {
+        continue;
+      }
+      cleanupDraftAttachment(previousAttachment);
+    }
+  }, [attachmentFiles, cleanupDraftAttachment]);
+
+  useEffect(() => {
+    const uploadAbortControllers = uploadAbortControllersRef.current;
+    return () => {
+      for (const controller of uploadAbortControllers.values()) {
+        controller.abort();
+      }
+      uploadAbortControllers.clear();
+
+      for (const attachment of attachmentFilesRef.current) {
+        cleanupDraftAttachment(attachment);
+      }
+    };
+  }, [cleanupDraftAttachment]);
 
   useEffect(() => {
     if (!threadId || isMock) {
@@ -410,8 +456,12 @@ export function InputBox({
       }
 
       await onSubmit?.(message);
+      for (const attachment of attachmentFiles) {
+        committedAttachmentIdsRef.current.add(attachment.id);
+      }
     },
     [
+      attachmentFiles,
       context,
       hasBlockingAttachmentUploads,
       onContextChange,

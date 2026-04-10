@@ -404,10 +404,6 @@ export function useThreadStream({
       // uses the real server-generated thread id.
       if (threadIdRef.current) {
         _handleOnStart(threadId);
-      } else if (uploadedFileInfoByIndex.some(Boolean)) {
-        threadIdRef.current = threadId;
-        setOnStreamThreadId(threadId);
-        _handleOnStart(threadId);
       }
 
       try {

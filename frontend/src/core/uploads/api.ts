@@ -31,6 +31,7 @@ export interface ListFilesResponse {
 
 export interface UploadFilesOptions {
   onProgress?: (progress: number) => void;
+  signal?: AbortSignal;
 }
 
 async function readErrorDetail(
@@ -57,6 +58,44 @@ export async function uploadFiles(
 
   return new Promise<UploadResponse>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    const abortError = new DOMException("Upload aborted", "AbortError");
+
+    const finalize = () => {
+      settled = true;
+      options?.signal?.removeEventListener("abort", handleAbort);
+    };
+
+    const rejectOnce = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      finalize();
+      reject(error);
+    };
+
+    const resolveOnce = (payload: UploadResponse) => {
+      if (settled) {
+        return;
+      }
+      finalize();
+      resolve(payload);
+    };
+
+    const handleAbort = () => {
+      try {
+        xhr.abort();
+      } catch {
+        // Best-effort: XHR may already be complete.
+      }
+      rejectOnce(abortError);
+    };
+
+    if (options?.signal?.aborted) {
+      rejectOnce(abortError);
+      return;
+    }
+
     xhr.open("POST", `${getBackendBaseURL()}/api/threads/${threadId}/uploads`);
 
     xhr.upload.onprogress = (event) => {
@@ -71,7 +110,11 @@ export async function uploadFiles(
     };
 
     xhr.onerror = () => {
-      reject(new Error("Upload failed"));
+      rejectOnce(new Error("Upload failed"));
+    };
+
+    xhr.onabort = () => {
+      rejectOnce(abortError);
     };
 
     xhr.onload = () => {
@@ -88,14 +131,15 @@ export async function uploadFiles(
       if (xhr.status < 200 || xhr.status >= 300) {
         const detail =
           payload && "detail" in payload ? payload.detail : undefined;
-        reject(new Error(detail ?? "Upload failed"));
+        rejectOnce(new Error(detail ?? "Upload failed"));
         return;
       }
 
       options?.onProgress?.(100);
-      resolve(payload as UploadResponse);
+      resolveOnce(payload as UploadResponse);
     };
 
+    options?.signal?.addEventListener("abort", handleAbort, { once: true });
     xhr.send(formData);
   });
 }
