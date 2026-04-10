@@ -634,7 +634,7 @@ memory:
   retrieval_trace:
     enabled: false # Whether to write retrieval decision traces for memory injection
     storage_path: "" # Default: retrieval_traces.jsonl alongside the active memory file
-    max_file_bytes: 5242880 # Rotate trace file after 5MB
+    max_file_bytes: 5242880 # Rotate trace file after 5MB (rotated files use timestamped names; clean up old files periodically)
 
 # ============================================================================
 # Skill Self-Evolution Configuration

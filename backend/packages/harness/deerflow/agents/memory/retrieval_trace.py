@@ -6,7 +6,7 @@ import json
 import logging
 import threading
 import uuid
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -103,12 +103,6 @@ def build_empty_retrieval_trace(max_tokens: int) -> RetrievalTrace:
     )
 
 
-def _json_default(value: Any) -> Any:
-    if is_dataclass(value):
-        return asdict(value)
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
-
-
 def _resolve_trace_path(agent_name: str | None = None) -> Path:
     config = get_memory_config().retrieval_trace
     if config.storage_path:
@@ -118,7 +112,20 @@ def _resolve_trace_path(agent_name: str | None = None) -> Path:
 
 
 def _serialize_trace(trace: RetrievalTrace) -> dict[str, Any]:
-    return json.loads(json.dumps(trace, default=_json_default, ensure_ascii=False))
+    """Convert a RetrievalTrace dataclass tree to a plain dict.
+
+    Uses ``dataclasses.asdict`` directly instead of a json.dumps→json.loads
+    round-trip.  StrEnum values are converted to plain strings so the result
+    is JSON-serializable without a custom *default* hook.
+    """
+    data = asdict(trace)
+    # asdict preserves StrEnum instances; convert them to plain strings
+    # so json.dumps works without a custom default handler.
+    for sel in data.get("selections", []):
+        reason = sel.get("reason")
+        if isinstance(reason, StrEnum):
+            sel["reason"] = str(reason)
+    return data
 
 
 def emit_retrieval_trace(
@@ -146,9 +153,12 @@ def emit_retrieval_trace(
             if path.exists():
                 current_size = path.stat().st_size
                 if current_size + len(payload_line.encode("utf-8")) > config.max_file_bytes:
-                    rotated_path = path.with_suffix(path.suffix + ".1")
-                    if rotated_path.exists():
-                        rotated_path.unlink()
+                    # Use a timestamped name so previous rotated files are
+                    # not silently deleted.  Operators should clean up old
+                    # rotated files periodically.
+                    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+                    rotated_name = f"{path.stem}.{ts}{path.suffix}"
+                    rotated_path = path.with_name(rotated_name)
                     path.replace(rotated_path)
 
             with path.open("a", encoding="utf-8") as file:

@@ -295,16 +295,33 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
     facts_data = memory_data.get("facts", [])
     if isinstance(facts_data, list) and facts_data:
         ranked_facts: list[tuple[str, dict[str, Any], str, float]] = []
-        for index, fact in enumerate(facts_data):
-            fact_id = _coerce_fact_id(fact, index)
-            category = str(fact.get("category", "context")).strip() if isinstance(fact, dict) else "context"
-            confidence = _coerce_confidence(fact.get("confidence"), default=0.0) if isinstance(fact, dict) else 0.0
-            layer_value = fact.get("layer") if isinstance(fact, dict) else None
-            layer = (str(layer_value).strip() or None) if isinstance(layer_value, str) else None
-            created_at = fact.get("createdAt") if isinstance(fact, dict) and isinstance(fact.get("createdAt"), str) else None
-            content_value = fact.get("content") if isinstance(fact, dict) else None
 
-            if trace is not None:
+        if trace is None:
+            # Fast path: tracing disabled – use lightweight generator-based
+            # filtering identical to the original format_memory_for_injection
+            # to avoid extracting trace-only metadata (layer, created_at,
+            # content_preview, CandidateFact objects).
+            ranked_facts = sorted(
+                (
+                    (_coerce_fact_id(f, i), f, f.get("content", "").strip(), _coerce_confidence(f.get("confidence"), default=0.0))
+                    for i, f in enumerate(facts_data)
+                    if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()
+                ),
+                key=lambda item: item[3],
+                reverse=True,
+            )
+        else:
+            # Slow path: tracing enabled – extract full per-fact metadata
+            # and record CandidateFact / early-rejection SelectionResults.
+            for index, fact in enumerate(facts_data):
+                fact_id = _coerce_fact_id(fact, index)
+                category = str(fact.get("category", "context")).strip() if isinstance(fact, dict) else "context"
+                confidence = _coerce_confidence(fact.get("confidence"), default=0.0) if isinstance(fact, dict) else 0.0
+                layer_value = fact.get("layer") if isinstance(fact, dict) else None
+                layer = (str(layer_value).strip() or None) if isinstance(layer_value, str) else None
+                created_at = fact.get("createdAt") if isinstance(fact, dict) and isinstance(fact.get("createdAt"), str) else None
+                content_value = fact.get("content") if isinstance(fact, dict) else None
+
                 trace.candidates.append(
                     CandidateFact(
                         fact_id=fact_id,
@@ -316,8 +333,7 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
                     )
                 )
 
-            if not isinstance(fact, dict):
-                if trace is not None:
+                if not isinstance(fact, dict):
                     trace.selections.append(
                         SelectionResult(
                             fact_id=fact_id,
@@ -328,10 +344,9 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
                             score_components={},
                         )
                     )
-                continue
+                    continue
 
-            if not isinstance(content_value, str):
-                if trace is not None:
+                if not isinstance(content_value, str):
                     trace.selections.append(
                         SelectionResult(
                             fact_id=fact_id,
@@ -342,11 +357,10 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
                             score_components={},
                         )
                     )
-                continue
+                    continue
 
-            content = content_value.strip()
-            if not content:
-                if trace is not None:
+                content = content_value.strip()
+                if not content:
                     trace.selections.append(
                         SelectionResult(
                             fact_id=fact_id,
@@ -357,14 +371,14 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
                             score_components={},
                         )
                     )
-                continue
+                    continue
 
-            ranked_facts.append((fact_id, fact, content, confidence))
+                ranked_facts.append((fact_id, fact, content, confidence))
 
-        ranked_facts.sort(
-            key=lambda item: item[3],
-            reverse=True,
-        )
+            ranked_facts.sort(
+                key=lambda item: item[3],
+                reverse=True,
+            )
 
         # Compute token count for existing sections once, then account
         # incrementally for each fact line to avoid full-string re-tokenization.
