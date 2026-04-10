@@ -7,6 +7,7 @@ dependencies = [
     "agent-client-protocol>=0.4.0",
     "agent-sandbox>=0.0.19",
     "dotenv>=0.9.9",
+    "exa-py>=1.0.0",
     "httpx>=0.28.0",
     "kubernetes>=30.0.0",
     "langchain>=1.2.3",
