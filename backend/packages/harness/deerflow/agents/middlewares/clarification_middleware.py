@@ -28,11 +28,7 @@ from langgraph.types import Command
 logger = logging.getLogger(__name__)
 
 # Auto-response sent to the agent when clarification is disabled.
-_AUTO_RESPONSE = (
-    "The user is not available for interactive clarification. "
-    "Proceed with your best judgment using the information already provided in the conversation. "
-    "Use web_search or other available tools to find any missing information."
-)
+_AUTO_RESPONSE = "The user is not available for interactive clarification. Proceed with your best judgment using the information already provided in the conversation. Use web_search or other available tools to find any missing information."
 
 
 class ClarificationMiddlewareState(AgentState):
