@@ -68,16 +68,15 @@ export function accumulateUsage(
     totalTokens: 0,
   };
   let hasUsage = false;
-  const counted = new Set<string>();
+  const latestUsageByKey = new Map<string, TokenUsage | null>();
 
   for (const [index, message] of messages.entries()) {
     const key = getMessageUsageKey(message, index);
-    if (counted.has(key)) {
-      continue;
-    }
-    counted.add(key);
-
     const usage = getUsageMetadata(message, cache);
+    latestUsageByKey.set(key, usage);
+  }
+
+  for (const usage of latestUsageByKey.values()) {
     if (usage) {
       hasUsage = true;
       cumulative.inputTokens += usage.inputTokens;
