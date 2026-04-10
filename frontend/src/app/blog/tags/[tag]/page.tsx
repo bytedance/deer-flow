@@ -25,7 +25,9 @@ export default async function TagPage(props) {
   const params = await props.params;
   const tag = params.tag;
   const { locale } = await getI18n();
-  const { posts } = await getBlogIndexData(getPreferredBlogLang(locale), { tag });
+  const { posts } = await getBlogIndexData(getPreferredBlogLang(locale), {
+    tag,
+  });
 
   if (posts.length === 0) {
     notFound();
@@ -34,7 +36,11 @@ export default async function TagPage(props) {
   const title = formatTagName(tag);
 
   return (
-    <Wrapper toc={[]} metadata={{ title, filePath: "blog/index.mdx" }} sourceCode="">
+    <Wrapper
+      toc={[]}
+      metadata={{ title, filePath: "blog/index.mdx" }}
+      sourceCode=""
+    >
       <PostList
         title={title}
         description={`${posts.length} posts with the tag “${title}”`}
