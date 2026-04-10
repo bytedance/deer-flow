@@ -84,7 +84,7 @@ export function ArtifactFileDetail({
   const isSupportPreview = useMemo(() => {
     return language === "html" || language === "markdown";
   }, [language]);
-  const { content, url } = useArtifactContent({
+  const { content } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
@@ -195,7 +195,7 @@ export function ArtifactFileDetail({
                 tooltip={t.common.openInNewWindow}
                 onClick={() => {
                   const w = window.open(
-                    urlOfArtifact({ filepath, threadId }),
+                    urlOfArtifact({ filepath, threadId, isMock }),
                     "_blank",
                     "noopener,noreferrer",
                   );
@@ -227,7 +227,12 @@ export function ArtifactFileDetail({
                 tooltip={t.common.download}
                 onClick={() => {
                   const w = window.open(
-                    urlOfArtifact({ filepath, threadId, download: true }),
+                    urlOfArtifact({
+                      filepath,
+                      threadId,
+                      download: true,
+                      isMock,
+                    }),
                     "_blank",
                     "noopener,noreferrer",
                   );
@@ -250,9 +255,7 @@ export function ArtifactFileDetail({
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
               content={displayContent}
-              isWriteFile={isWriteFile}
               language={language ?? "text"}
-              url={url}
             />
           )}
         {isCodeFile && viewMode === "code" && (
@@ -275,15 +278,28 @@ export function ArtifactFileDetail({
 
 export function ArtifactFilePreview({
   content,
-  isWriteFile,
   language,
-  url,
 }: {
   content: string;
-  isWriteFile: boolean;
   language: string;
-  url?: string;
 }) {
+  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+
+  useEffect(() => {
+    if (language !== "html") {
+      setHtmlPreviewUrl(undefined);
+      return;
+    }
+
+    const blob = new Blob([content ?? ""], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    setHtmlPreviewUrl(url);
+
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [content, language]);
+
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
@@ -303,7 +319,7 @@ export function ArtifactFilePreview({
         className="size-full"
         title="Artifact preview"
         sandbox="allow-scripts allow-forms"
-        {...(isWriteFile ? { srcDoc: content } : url ? { src: url } : {})}
+        src={htmlPreviewUrl}
       />
     );
   }

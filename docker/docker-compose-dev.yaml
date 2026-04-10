@@ -69,10 +69,15 @@ services:
     environment:
       - LANGGRAPH_UPSTREAM=${LANGGRAPH_UPSTREAM:-langgraph:2024}
       - LANGGRAPH_REWRITE=${LANGGRAPH_REWRITE:-/}
-    command: >
-      sh -c "envsubst '$$LANGGRAPH_UPSTREAM $$LANGGRAPH_REWRITE'
-      < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
-      && nginx -g 'daemon off;'"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        envsubst '$$LANGGRAPH_UPSTREAM $$LANGGRAPH_REWRITE' \
+          < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
+        exec nginx -g 'daemon off;'
     depends_on:
       - frontend
       - gateway
@@ -133,8 +138,10 @@ services:
       - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
       - ../logs:/app/logs
-      # Mount uv cache for faster dependency installation
-      - ~/.cache/uv:/root/.cache/uv
+      # Use a Docker-managed uv cache volume instead of a host bind mount.
+      # On macOS/Docker Desktop, uv may fail to create symlinks inside shared
+      # host directories, which causes startup-time `uv sync` to crash.
+      - gateway-uv-cache:/root/.cache/uv
       # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
       - /var/run/docker.sock:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
@@ -190,8 +197,10 @@ services:
       - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
       - ../logs:/app/logs
-      # Mount uv cache for faster dependency installation
-      - ~/.cache/uv:/root/.cache/uv
+      # Use a Docker-managed uv cache volume instead of a host bind mount.
+      # On macOS/Docker Desktop, uv may fail to create symlinks inside shared
+      # host directories, which causes startup-time `uv sync` to crash.
+      - langgraph-uv-cache:/root/.cache/uv
       # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
       - /var/run/docker.sock:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
@@ -228,6 +237,8 @@ volumes:
   # image build are not shadowed by the host backend/ directory mount.
   gateway-venv:
   langgraph-venv:
+  gateway-uv-cache:
+  langgraph-uv-cache:
 
 networks:
   deer-flow-dev:
