@@ -36,6 +36,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ollama = ["langchain-ollama>=0.3.0"]
 pymupdf = ["pymupdf4llm>=0.0.17"]
 
 [build-system]
