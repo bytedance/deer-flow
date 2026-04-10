@@ -105,9 +105,7 @@ def test_normalize_input_preserves_non_user_message_types():
     assert result["messages"][0].id == "sys-1"
     assert isinstance(result["messages"][1], AIMessage)
     assert result["messages"][1].id == "ai-1"
-    assert result["messages"][1].tool_calls == [
-        {"name": "web_search", "id": "tc-1", "args": {"query": "deerflow"}, "type": "tool_call"}
-    ]
+    assert result["messages"][1].tool_calls == [{"name": "web_search", "id": "tc-1", "args": {"query": "deerflow"}, "type": "tool_call"}]
     assert isinstance(result["messages"][2], ToolMessage)
     assert result["messages"][2].tool_call_id == "tc-1"
     assert result["messages"][2].name == "web_search"
