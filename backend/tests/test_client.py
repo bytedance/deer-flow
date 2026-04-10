@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
 
 from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
@@ -225,7 +225,9 @@ class TestStream:
 
         agent.stream.assert_called_once()
         call_kwargs = agent.stream.call_args.kwargs
-        assert call_kwargs["stream_mode"] == ["values", "custom"]
+        # ``messages`` enables token-level streaming of AI text deltas;
+        # see DeerFlowClient.stream() docstring and GitHub issue #1969.
+        assert call_kwargs["stream_mode"] == ["values", "messages", "custom"]
 
         assert events[0].type == "custom"
         assert events[0].data == {"type": "task_started", "task_id": "task-1"}
@@ -351,6 +353,123 @@ class TestStream:
         # Should not raise; end event proves it completed
         assert events[-1].type == "end"
 
+    def test_messages_mode_emits_token_deltas(self, client):
+        """stream() forwards LangGraph ``messages`` mode chunks as delta events.
+
+        Regression for bytedance/deer-flow#1969 — before the fix the client
+        only subscribed to ``values`` mode, so LLM output was delivered as
+        a single cumulative dump after each graph node finished instead of
+        token-by-token deltas as the model generated them.
+        """
+        # Three AI chunks sharing the same id, followed by a terminal
+        # values snapshot with the fully assembled message — this matches
+        # the shape LangGraph emits when ``stream_mode`` includes both
+        # ``messages`` and ``values``.
+        assembled = AIMessage(content="Hel lo world!", id="ai-1", usage_metadata={"input_tokens": 3, "output_tokens": 4, "total_tokens": 7})
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("messages", (AIMessageChunk(content="Hel", id="ai-1"), {})),
+                ("messages", (AIMessageChunk(content=" lo ", id="ai-1"), {})),
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="world!",
+                            id="ai-1",
+                            usage_metadata={"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+                        ),
+                        {},
+                    ),
+                ),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), assembled]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream"))
+
+        # Three delta messages-tuple events, all with the same id, each
+        # carrying only its own delta (not cumulative).
+        ai_text_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
+        assert [e.data["content"] for e in ai_text_events] == ["Hel", " lo ", "world!"]
+        assert all(e.data["id"] == "ai-1" for e in ai_text_events)
+
+        # The values snapshot MUST NOT re-synthesize an AI text event for
+        # the already-streamed id (otherwise consumers see duplicated text).
+        assert len(ai_text_events) == 3
+
+        # Usage metadata attached only to the chunk that actually carried
+        # it, and counted into cumulative usage exactly once (the values
+        # snapshot's duplicate usage on the assembled AIMessage must not
+        # be double-counted).
+        events_with_usage = [e for e in ai_text_events if "usage_metadata" in e.data]
+        assert len(events_with_usage) == 1
+        assert events_with_usage[0].data["usage_metadata"] == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+        end_event = events[-1]
+        assert end_event.type == "end"
+        assert end_event.data["usage"] == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+
+        # The values snapshot itself is still emitted.
+        assert any(e.type == "values" for e in events)
+
+        # stream_mode includes ``messages`` — the whole point of this fix.
+        call_kwargs = agent.stream.call_args.kwargs
+        assert "messages" in call_kwargs["stream_mode"]
+
+    def test_chat_accumulates_streamed_deltas(self, client):
+        """chat() concatenates per-id deltas from messages mode."""
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("messages", (AIMessageChunk(content="Hel", id="ai-1"), {})),
+                ("messages", (AIMessageChunk(content="lo ", id="ai-1"), {})),
+                ("messages", (AIMessageChunk(content="world!", id="ai-1"), {})),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), AIMessage(content="Hello world!", id="ai-1")]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            result = client.chat("hi", thread_id="t-chat-stream")
+
+        assert result == "Hello world!"
+
+    def test_messages_mode_tool_message(self, client):
+        """stream() forwards ToolMessage chunks from messages mode."""
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                (
+                    "messages",
+                    (
+                        ToolMessage(content="file.txt", id="tm-1", tool_call_id="tc-1", name="bash"),
+                        {},
+                    ),
+                ),
+                ("values", {"messages": [HumanMessage(content="ls", id="h-1"), ToolMessage(content="file.txt", id="tm-1", tool_call_id="tc-1", name="bash")]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("ls", thread_id="t-tool-stream"))
+
+        tool_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "tool"]
+        # The tool result must be delivered exactly once (from messages
+        # mode), not duplicated by the values-snapshot synthesis path.
+        assert len(tool_events) == 1
+        assert tool_events[0].data["content"] == "file.txt"
+        assert tool_events[0].data["name"] == "bash"
+        assert tool_events[0].data["tool_call_id"] == "tc-1"
+
     def test_list_content_blocks(self, client):
         """stream() handles AIMessage with list-of-blocks content."""
         ai = AIMessage(
@@ -372,6 +491,253 @@ class TestStream:
         msg_events = _ai_events(events)
         assert len(msg_events) == 1
         assert msg_events[0].data["content"] == "result"
+
+    # ------------------------------------------------------------------
+    # Refactor regression guards (PR #1974 follow-up safety)
+    #
+    # The three tests below are not bug-fix tests — they exist to lock
+    # the *exact* contract of stream() so a future refactor (e.g. moving
+    # to ``agent.astream()``, sharing a core with Gateway's run_agent,
+    # changing the dedup strategy) cannot silently change behavior.
+    # ------------------------------------------------------------------
+
+    def test_dedup_requires_messages_before_values_invariant(self, client):
+        """Canary: locks the order-dependence of cross-mode dedup.
+
+        ``streamed_ids`` is populated only by the ``messages`` branch.
+        If a ``values`` snapshot arrives BEFORE its corresponding
+        ``messages`` chunks for the same id, the values path falls
+        through and synthesizes its own AI text event, then the
+        messages chunk emits another delta — consumers see the same
+        id twice.
+
+        Under normal LangGraph operation this never happens (messages
+        chunks are emitted during LLM streaming, the values snapshot
+        after the node completes), so the implicit invariant is safe
+        in production.  This test exists as a tripwire for refactors
+        that switch to ``agent.astream()`` or share a core with
+        Gateway: if the ordering ever changes, this test fails and
+        forces the refactor to either (a) preserve the ordering or
+        (b) deliberately re-baseline to a stronger order-independent
+        dedup contract — and document the new contract here.
+        """
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                # values arrives FIRST — streamed_ids still empty.
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), AIMessage(content="Hello", id="ai-1")]}),
+                # messages chunk for the same id arrives SECOND.
+                ("messages", (AIMessageChunk(content="Hello", id="ai-1"), {})),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-order-canary"))
+
+        ai_text_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
+        # Current behavior: 2 events (values synthesis + messages delta).
+        # If a refactor makes dedup order-independent, this becomes 1 —
+        # update the assertion AND the docstring above to record the
+        # new contract, do not silently fix this number.
+        assert len(ai_text_events) == 2
+        assert all(e.data["id"] == "ai-1" for e in ai_text_events)
+        assert [e.data["content"] for e in ai_text_events] == ["Hello", "Hello"]
+
+    def test_messages_mode_golden_event_sequence(self, client):
+        """Locks the **exact** event sequence for a canonical streaming turn.
+
+        This is a strong regression guard: any future refactor that
+        changes the order, type, or shape of emitted events fails this
+        test with a clear list-equality diff, forcing either a
+        preserved sequence or a deliberate re-baseline.
+
+        Input shape:
+            messages chunk 1 — text "Hel", no usage
+            messages chunk 2 — text "lo",  with cumulative usage
+            values snapshot  — assembled AIMessage with same usage
+
+        Locked behavior:
+            * Two messages-tuple AI text events (one per chunk), each
+              carrying ONLY its own delta — not cumulative.
+            * ``usage_metadata`` attached only to the chunk that
+              delivered it (not the first chunk).
+            * The values event is still emitted, but its embedded
+              ``messages`` list is the *serialized* form — no
+              synthesized messages-tuple events for the already-
+              streamed id.
+            * ``end`` event carries cumulative usage counted exactly
+              once across both modes.
+        """
+        # Inline the usage literal at construction sites so Pyright can
+        # narrow ``dict[str, int]`` to ``UsageMetadata`` (TypedDict
+        # narrowing only works on literals, not on bound variables).
+        # The local ``usage`` is reused only for assertion comparisons
+        # below, where structural dict equality is sufficient.
+        usage = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("messages", (AIMessageChunk(content="Hel", id="ai-1"), {})),
+                ("messages", (AIMessageChunk(content="lo", id="ai-1", usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}), {})),
+                (
+                    "values",
+                    {
+                        "messages": [
+                            HumanMessage(content="hi", id="h-1"),
+                            AIMessage(content="Hello", id="ai-1", usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}),
+                        ]
+                    },
+                ),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-golden"))
+
+        actual = [(e.type, e.data) for e in events]
+        expected = [
+            ("messages-tuple", {"type": "ai", "content": "Hel", "id": "ai-1"}),
+            ("messages-tuple", {"type": "ai", "content": "lo", "id": "ai-1", "usage_metadata": usage}),
+            (
+                "values",
+                {
+                    "title": None,
+                    "messages": [
+                        {"type": "human", "content": "hi", "id": "h-1"},
+                        {"type": "ai", "content": "Hello", "id": "ai-1", "usage_metadata": usage},
+                    ],
+                    "artifacts": [],
+                },
+            ),
+            ("end", {"usage": usage}),
+        ]
+        assert actual == expected
+
+    def test_chat_accumulates_in_linear_time(self, client):
+        """``chat()`` must use a non-quadratic accumulation strategy.
+
+        PR #1974 commit 2 replaced ``buffer = buffer + delta`` with
+        ``list[str].append`` + ``"".join`` to fix an O(n²) regression
+        introduced in commit 1.  This test guards against a future
+        refactor accidentally restoring the quadratic path.
+
+        Threshold rationale (10,000 single-char chunks, 1 second):
+            * Current O(n) implementation: ~50-200 ms total, including
+              all mock + event yield overhead.
+            * O(n²) regression at n=10,000: chat accumulation alone
+              becomes ~500 ms-2 s (50 M character copies), reliably
+              over the bound on any reasonable CI.
+
+        If this test ever flakes on slow CI, do NOT raise the threshold
+        blindly — first confirm the implementation still uses
+        ``"".join``, then consider whether the test should move to a
+        benchmark suite that excludes mock overhead.
+        """
+        import time
+
+        n = 10_000
+        chunks: list = [("messages", (AIMessageChunk(content="x", id="ai-1"), {})) for _ in range(n)]
+        chunks.append(
+            (
+                "values",
+                {
+                    "messages": [
+                        HumanMessage(content="go", id="h-1"),
+                        AIMessage(content="x" * n, id="ai-1"),
+                    ]
+                },
+            )
+        )
+        agent = MagicMock()
+        agent.stream.return_value = iter(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            start = time.monotonic()
+            result = client.chat("go", thread_id="t-perf")
+            elapsed = time.monotonic() - start
+
+        assert result == "x" * n
+        assert elapsed < 1.0, f"chat() took {elapsed:.3f}s for {n} chunks — possible O(n^2) regression (see PR #1974 commit 2 for the original fix)"
+
+    def test_none_id_chunks_produce_duplicates_known_limitation(self, client):
+        """Documents a known dedup limitation: ``messages`` chunks with ``id=None``.
+
+        Some LLM providers (vLLM, certain custom backends) emit
+        ``AIMessageChunk`` instances without an ``id``.  In that case
+        the cross-mode dedup machinery cannot record the chunk in
+        ``streamed_ids`` (the implementation guards on ``if msg_id``
+        before adding), and a subsequent ``values`` snapshot whose
+        reassembled ``AIMessage`` carries a real id will fall through
+        the dedup check and synthesize a second AI text event for the
+        same logical message — consumers see duplicated text.
+
+        Why this is documented rather than fixed
+        ----------------------------------------
+        Falling back to ``metadata.get("id")`` does **not** help:
+        LangGraph's messages-mode metadata never carries the message
+        id (it carries ``langgraph_node`` / ``langgraph_step`` /
+        ``checkpoint_ns`` / ``tags`` etc.).  Synthesizing a fallback
+        like ``f"_synth_{id(msg_chunk)}"`` only helps if the values
+        snapshot uses the same fallback, which it does not.  A real
+        fix requires either provider cooperation (always emit chunk
+        ids — out of scope for this PR) or content-based dedup (risks
+        false positives for two distinct short messages with identical
+        text).
+
+        This test makes the limitation **explicit and discoverable**
+        so a future contributor debugging "duplicate text in vLLM
+        streaming" finds the answer immediately.  If a real fix lands,
+        replace this test with a positive assertion that dedup works
+        for the None-id case.
+
+        See PR #1974 Copilot review comment on ``client.py:515``.
+        """
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                # Realistic shape: chunk has no id (provider didn't set one),
+                # values snapshot's reassembled AIMessage has a fresh id
+                # assigned somewhere downstream (langgraph or middleware).
+                ("messages", (AIMessageChunk(content="Hello", id=None), {})),
+                (
+                    "values",
+                    {
+                        "messages": [
+                            HumanMessage(content="hi", id="h-1"),
+                            AIMessage(content="Hello", id="ai-1"),
+                        ]
+                    },
+                ),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-none-id-limitation"))
+
+        ai_text_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
+        # KNOWN LIMITATION: 2 events for the same logical message.
+        #   1) from messages chunk (id=None, NOT added to streamed_ids
+        #      because of ``if msg_id:`` guard at client.py line ~522)
+        #   2) from values-snapshot synthesis (ai-1 not in streamed_ids,
+        #      so the skip-branch at line ~549 doesn't trigger)
+        # If this becomes 1, someone fixed the limitation — update this
+        # test to a positive assertion and document the fix.
+        assert len(ai_text_events) == 2
+        assert ai_text_events[0].data["id"] is None
+        assert ai_text_events[1].data["id"] == "ai-1"
+        assert all(e.data["content"] == "Hello" for e in ai_text_events)
 
 
 class TestChat:
