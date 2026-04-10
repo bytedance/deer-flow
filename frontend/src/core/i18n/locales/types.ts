@@ -31,6 +31,7 @@ export interface Translations {
     preview: string;
     cancel: string;
     save: string;
+    retry: string;
     install: string;
     create: string;
     import: string;
@@ -215,6 +216,7 @@ export interface Translations {
   uploads: {
     uploading: string;
     uploadingFiles: string;
+    uploadFailed: string;
   };
 
   // Subtasks

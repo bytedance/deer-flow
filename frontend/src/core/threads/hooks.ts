@@ -336,18 +336,40 @@ export function useThreadStream({
       sendInFlightRef.current = true;
 
       const text = message.text.trim();
+      const messageFiles = message.files ?? [];
+      const uploadedFileInfoByIndex = messageFiles.map((file) =>
+        file.upload?.status === "uploaded" && file.upload.info
+          ? file.upload.info
+          : undefined,
+      );
+      const pendingFilePartsWithIndex = messageFiles
+        .map((file, index) => ({ file, index }))
+        .filter(({ file }) => !file.upload?.info);
 
       // Capture current count before showing optimistic messages
       prevMsgCountRef.current = thread.messages.length;
 
       // Build optimistic files list with uploading status
-      const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
-        (f) => ({
-          filename: f.filename ?? "",
-          size: 0,
-          status: "uploading" as const,
-          progress: 0,
-        }),
+      const optimisticFiles: FileInMessage[] = messageFiles.map(
+        (file, index) => {
+          const uploadedInfo = uploadedFileInfoByIndex[index];
+          if (uploadedInfo) {
+            return {
+              filename: uploadedInfo.filename,
+              size: uploadedInfo.size,
+              path: uploadedInfo.virtual_path,
+              status: "uploaded" as const,
+              progress: 100,
+            };
+          }
+
+          return {
+            filename: file.filename ?? "",
+            size: 0,
+            status: "uploading" as const,
+            progress: file.upload?.progress ?? 0,
+          };
+        },
       );
 
       const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
@@ -366,7 +388,7 @@ export function useThreadStream({
         });
       }
 
-      if (optimisticFiles.length > 0 && !hideFromUI) {
+      if (pendingFilePartsWithIndex.length > 0 && !hideFromUI) {
         // Mock AI message while files are being uploaded
         newOptimistic.push({
           type: "ai",
@@ -382,17 +404,19 @@ export function useThreadStream({
       // uses the real server-generated thread id.
       if (threadIdRef.current) {
         _handleOnStart(threadId);
+      } else if (uploadedFileInfoByIndex.some(Boolean)) {
+        threadIdRef.current = threadId;
+        setOnStreamThreadId(threadId);
+        _handleOnStart(threadId);
       }
-
-      let uploadedFileInfo: UploadedFileInfo[] = [];
 
       try {
         // Upload files first if any
-        if (message.files && message.files.length > 0) {
+        if (pendingFilePartsWithIndex.length > 0) {
           setIsUploading(true);
           try {
-            const filePromises = message.files.map((fileUIPart) =>
-              promptInputFilePartToFile(fileUIPart),
+            const filePromises = pendingFilePartsWithIndex.map(({ file }) =>
+              promptInputFilePartToFile(file),
             );
 
             const conversionResults = await Promise.all(filePromises);
@@ -493,18 +517,22 @@ export function useThreadStream({
                   });
                 },
               });
-              uploadedFileInfo = uploadResponse.files;
+              uploadResponse.files.forEach((info, uploadIndex) => {
+                const originalIndex =
+                  pendingFilePartsWithIndex[uploadIndex]?.index ?? uploadIndex;
+                uploadedFileInfoByIndex[originalIndex] = info;
+              });
 
               // Update optimistic human message with uploaded status + paths
-              const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                (info) => ({
+              const uploadedFiles: FileInMessage[] = uploadedFileInfoByIndex
+                .filter((info): info is UploadedFileInfo => Boolean(info))
+                .map((info) => ({
                   filename: info.filename,
                   size: info.size,
                   path: info.virtual_path,
                   status: "uploaded" as const,
                   progress: 100,
-                }),
-              );
+                }));
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
                   const humanMessage: Message = messages[0];
@@ -536,14 +564,14 @@ export function useThreadStream({
         }
 
         // Build files metadata for submission (included in additional_kwargs)
-        const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
-          (info) => ({
+        const filesForSubmit: FileInMessage[] = uploadedFileInfoByIndex
+          .filter((info): info is UploadedFileInfo => Boolean(info))
+          .map((info) => ({
             filename: info.filename,
             size: info.size,
             path: info.virtual_path,
             status: "uploaded" as const,
-          }),
-        );
+          }));
 
         await thread.submit(
           {

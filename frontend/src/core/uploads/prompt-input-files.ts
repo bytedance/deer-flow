@@ -1,8 +1,24 @@
 import type { FileUIPart } from "ai";
 
+import type { UploadedFileInfo } from "./api";
+
+export type PromptInputFileUploadStatus =
+  | "pending"
+  | "uploading"
+  | "uploaded"
+  | "error";
+
+export interface PromptInputFileUploadState {
+  status: PromptInputFileUploadStatus;
+  progress: number;
+  error?: string;
+  info?: UploadedFileInfo;
+}
+
 export type PromptInputFilePart = FileUIPart & {
   // Transient submit-time handle to the original browser File; not serializable.
   file?: File;
+  upload?: PromptInputFileUploadState;
 };
 
 export async function promptInputFilePartToFile(

@@ -60,6 +60,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import { uploadFiles } from "@/core/uploads";
 import { cn } from "@/lib/utils";
 
 import {
@@ -148,8 +149,11 @@ export function InputBox({
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
   const { thread, isMock } = useThread();
+  const attachments = usePromptInputAttachments();
   const { textInput } = usePromptInputController();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
+  const ensuredThreadIdsRef = useRef(new Set<string>());
+  const activeUploadIdsRef = useRef(new Set<string>());
 
   const [followups, setFollowups] = useState<string[]>([]);
   const [followupsHidden, setFollowupsHidden] = useState(false);
@@ -247,10 +251,138 @@ export function InputBox({
     [onContextChange, context],
   );
 
+  const attachmentFiles = attachments.files;
+  const hasPendingAttachmentUploads = attachmentFiles.some((file) => {
+    const uploadStatus = file.upload?.status;
+    return uploadStatus === "pending" || uploadStatus === "uploading";
+  });
+  const hasFailedAttachmentUploads = attachmentFiles.some(
+    (file) => file.upload?.status === "error",
+  );
+  const hasBlockingAttachmentUploads =
+    hasPendingAttachmentUploads || hasFailedAttachmentUploads;
+
+  const readErrorDetail = useCallback(
+    async (response: Response, fallback: string) => {
+      const payload = (await response
+        .json()
+        .catch(() => ({ detail: fallback }))) as { detail?: string };
+      return payload.detail ?? fallback;
+    },
+    [],
+  );
+
+  const ensureThreadExists = useCallback(async () => {
+    if (!threadId || ensuredThreadIdsRef.current.has(threadId)) {
+      return;
+    }
+
+    const response = await fetch(`${getBackendBaseURL()}/api/threads`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        thread_id: threadId,
+        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        await readErrorDetail(response, "Failed to create thread for upload"),
+      );
+    }
+
+    ensuredThreadIdsRef.current.add(threadId);
+  }, [context.agent_name, readErrorDetail, threadId]);
+
+  const uploadAttachment = useCallback(
+    async (attachmentId: string, file: File) => {
+      attachments.update(attachmentId, (current) => ({
+        ...current,
+        upload: {
+          status: "uploading",
+          progress: 0,
+        },
+      }));
+
+      try {
+        await ensureThreadExists();
+
+        const response = await uploadFiles(threadId, [file], {
+          onProgress: (progress) => {
+            attachments.update(attachmentId, (current) => ({
+              ...current,
+              upload: {
+                status: "uploading",
+                progress,
+              },
+            }));
+          },
+        });
+
+        const uploadedFile = response.files[0];
+        if (!uploadedFile) {
+          throw new Error("Upload failed");
+        }
+
+        attachments.update(attachmentId, (current) => ({
+          ...current,
+          upload: {
+            status: "uploaded",
+            progress: 100,
+            info: uploadedFile,
+          },
+        }));
+      } catch (error) {
+        attachments.update(attachmentId, (current) => ({
+          ...current,
+          upload: {
+            status: "error",
+            progress: 0,
+            error:
+              error instanceof Error ? error.message : t.uploads.uploadFailed,
+          },
+        }));
+      } finally {
+        activeUploadIdsRef.current.delete(attachmentId);
+      }
+    },
+    [attachments, ensureThreadExists, t.uploads.uploadFailed, threadId],
+  );
+
+  useEffect(() => {
+    if (!threadId || isMock) {
+      return;
+    }
+
+    for (const attachment of attachmentFiles) {
+      if (!(attachment.file instanceof File)) {
+        continue;
+      }
+
+      const uploadStatus = attachment.upload?.status ?? "pending";
+      if (uploadStatus !== "pending") {
+        continue;
+      }
+
+      if (activeUploadIdsRef.current.has(attachment.id)) {
+        continue;
+      }
+
+      activeUploadIdsRef.current.add(attachment.id);
+      void uploadAttachment(attachment.id, attachment.file);
+    }
+  }, [attachmentFiles, isMock, threadId, uploadAttachment]);
+
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
       if (status === "streaming") {
         onStop?.();
+        return;
+      }
+      if (hasBlockingAttachmentUploads) {
         return;
       }
       if (!message.text) {
@@ -281,6 +413,7 @@ export function InputBox({
     },
     [
       context,
+      hasBlockingAttachmentUploads,
       onContextChange,
       onSubmit,
       onStop,
@@ -291,9 +424,12 @@ export function InputBox({
   );
 
   const requestFormSubmit = useCallback(() => {
+    if (hasBlockingAttachmentUploads) {
+      return;
+    }
     const form = promptRootRef.current?.querySelector("form");
     form?.requestSubmit();
-  }, []);
+  }, [hasBlockingAttachmentUploads]);
 
   const handleFollowupClick = useCallback(
     (suggestion: string) => {
@@ -431,6 +567,9 @@ export function InputBox({
 
     return () => controller.abort();
   }, [context.model_name, disabled, isMock, status, thread.messages, threadId]);
+
+  const showUploadingHint = isUploading || hasPendingAttachmentUploads;
+  const submitDisabled = (disabled ?? false) || hasBlockingAttachmentUploads;
 
   return (
     <div ref={promptRootRef} className="relative flex flex-col gap-4">
@@ -834,16 +973,16 @@ export function InputBox({
                 </ModelSelectorList>
               </ModelSelectorContent>
             </ModelSelector>
-            {isUploading && (
+            {showUploadingHint && (
               <span className="text-muted-foreground px-1 text-[10px]">
                 {t.uploads.uploadingFiles}
               </span>
             )}
             <PromptInputSubmit
               className="rounded-full"
-              disabled={disabled}
+              disabled={submitDisabled}
               variant="outline"
-              status={isUploading ? "submitted" : status}
+              status={showUploadingHint ? "submitted" : status}
             />
           </PromptInputTools>
         </PromptInputFooter>
