@@ -457,6 +457,8 @@ Direct access (without nginx):
 - LangGraph: `http://localhost:2024`
 - Gateway: `http://localhost:8001`
 
+Docker dev (`docker/docker-compose-dev.yaml`) starts Gateway and LangGraph through `backend/scripts/dev-container-entrypoint.sh`. That script validates that `/app/config.yaml` and `/app/extensions_config.json` are mounted as files and repairs the named `/app/backend/.venv` volume with `uv sync --frozen --reinstall` when `uvicorn` or `langgraph` cannot be launched from the existing environment.
+
 ### Frontend Configuration
 
 The frontend uses environment variables to connect to backend services:

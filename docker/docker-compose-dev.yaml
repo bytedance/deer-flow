@@ -119,7 +119,7 @@ services:
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
     container_name: deer-flow-gateway
-    command: sh -c "cd backend && uv sync && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
+    command: sh -c "/app/backend/scripts/dev-container-entrypoint.sh gateway > /app/logs/gateway.log 2>&1"
     volumes:
       - ../backend/:/app/backend/
       # Preserve the .venv built during Docker image build — mounting the full backend/
@@ -150,6 +150,8 @@ services:
     environment:
       - CI=true
       - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/extensions_config.json
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://langgraph:2024}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
@@ -175,7 +177,7 @@ services:
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
     container_name: deer-flow-langgraph
-    command: sh -c "cd backend && uv sync && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 --n-jobs-per-worker 10 > /app/logs/langgraph.log 2>&1"
+    command: sh -c "/app/backend/scripts/dev-container-entrypoint.sh langgraph > /app/logs/langgraph.log 2>&1"
     volumes:
       - ../backend/:/app/backend/
       # Preserve the .venv built during Docker image build — mounting the full backend/
@@ -206,6 +208,8 @@ services:
     environment:
       - CI=true
       - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/extensions_config.json
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal

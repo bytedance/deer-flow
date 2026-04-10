@@ -221,6 +221,8 @@ Docker builds use the upstream `uv` registry by default. If you need faster mirr
 
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 
+In Docker development mode, `config.yaml` and `extensions_config.json` are mounted at `/app/config.yaml` and `/app/extensions_config.json` instead of under `/app/backend/`, because the full `backend/` source tree is bind-mounted separately. The dev backend startup script also validates those mounts and rebuilds the named `.venv` volume automatically if `uvicorn` or `langgraph` cannot be launched after a Docker restart.
+
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
 
