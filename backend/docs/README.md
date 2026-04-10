@@ -15,6 +15,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 
 | Document | Description |
 |----------|-------------|
+| [STREAMING.md](STREAMING.md) | Token-level streaming design: Gateway vs DeerFlowClient paths, `stream_mode` semantics, per-id dedup |
 | [FILE_UPLOAD.md](FILE_UPLOAD.md) | File upload functionality |
 | [PATH_EXAMPLES.md](PATH_EXAMPLES.md) | Path types and usage examples |
 | [summarization.md](summarization.md) | Context summarization feature |
@@ -47,6 +48,7 @@ docs/
 ├── PATH_EXAMPLES.md           # Path usage examples
 ├── summarization.md           # Summarization feature
 ├── plan_mode_usage.md         # Plan mode feature
+├── STREAMING.md               # Token-level streaming design
 ├── AUTO_TITLE_GENERATION.md   # Title generation
 ├── TITLE_GENERATION_IMPLEMENTATION.md  # Title implementation details
 └── TODO.md                    # Roadmap and issues
