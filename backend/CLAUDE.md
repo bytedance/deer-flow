@@ -395,14 +395,16 @@ Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` me
 **Architecture**: Imports the same `deerflow` modules that LangGraph Server and Gateway API use. Shares the same config files and data directories. No FastAPI dependency.
 
 **Agent Conversation** (replaces LangGraph Server):
-- `chat(message, thread_id)` — synchronous, returns final text
-- `stream(message, thread_id)` — yields `StreamEvent` aligned with LangGraph SSE protocol:
-  - `"values"` — full state snapshot (title, messages, artifacts)
-  - `"messages-tuple"` — per-message update (AI text, tool calls, tool results)
-  - `"end"` — stream finished
+- `chat(message, thread_id)` — synchronous, accumulates streaming deltas per message-id and returns the final AI text
+- `stream(message, thread_id)` — subscribes to LangGraph `stream_mode=["values", "messages", "custom"]` and yields `StreamEvent`:
+  - `"values"` — full state snapshot (title, messages, artifacts); AI text already delivered via `messages` mode is **not** re-synthesized here to avoid duplicate deliveries
+  - `"messages-tuple"` — per-chunk update: for AI text this is a **delta** (concat per `id` to rebuild the full message); tool calls and tool results are emitted once each
+  - `"custom"` — forwarded from `StreamWriter`
+  - `"end"` — stream finished (carries cumulative `usage` counted once per message id)
 - Agent created lazily via `create_agent()` + `_build_middlewares()`, same as `make_lead_agent`
 - Supports `checkpointer` parameter for state persistence across turns
 - `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
+- See [docs/STREAMING.md](docs/STREAMING.md) for the full design: why Gateway and DeerFlowClient are parallel paths, LangGraph's `stream_mode` semantics, the per-id dedup invariants, and regression testing strategy
 
 **Gateway Equivalent Methods** (replaces Gateway API):
 

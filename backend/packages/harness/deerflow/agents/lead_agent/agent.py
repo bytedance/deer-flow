@@ -287,14 +287,14 @@ def make_lead_agent(config: RunnableConfig):
     agent_name = cfg.get("agent_name")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
-    # Custom agent model or fallback to global/default model resolution
-    agent_model_name = agent_config.model if agent_config and agent_config.model else _resolve_model_name()
+    # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
+    agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
-    # Final model name resolution with request override, then agent config, then global default
-    model_name = requested_model_name or agent_model_name
+    # Final model name resolution: request → agent config → global default, with fallback for unknown names
+    model_name = _resolve_model_name(requested_model_name or agent_model_name)
 
     app_config = get_app_config()
-    model_config = app_config.get_model_config(model_name) if model_name else None
+    model_config = app_config.get_model_config(model_name)
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
