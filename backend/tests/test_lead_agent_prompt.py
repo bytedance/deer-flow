@@ -98,6 +98,49 @@ def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatc
         prompt_module._reset_skills_system_prompt_cache_state()
 
 
+def test_get_enabled_skills_refreshes_when_disk_signature_changes(monkeypatch, tmp_path):
+    def make_skill(name: str) -> Skill:
+        skill_dir = tmp_path / name
+        return Skill(
+            name=name,
+            description=f"Description for {name}",
+            license="MIT",
+            skill_dir=skill_dir,
+            skill_file=skill_dir / "SKILL.md",
+            relative_path=skill_dir.relative_to(tmp_path),
+            category="custom",
+            enabled=True,
+        )
+
+    state = {
+        "skills": [make_skill("alpha-skill")],
+        "signature": ("skills-root:/tmp/skills", "custom/alpha-skill/SKILL.md:1:10"),
+    }
+
+    monkeypatch.setattr(prompt_module, "load_skills", lambda enabled_only=True: list(state["skills"]))
+    monkeypatch.setattr(
+        prompt_module,
+        "_get_enabled_skills_source_signature",
+        lambda: state["signature"],
+    )
+    prompt_module._reset_skills_system_prompt_cache_state()
+
+    try:
+        prompt_module.warm_enabled_skills_cache()
+        assert [skill.name for skill in prompt_module._get_enabled_skills()] == ["alpha-skill"]
+
+        state["skills"] = [make_skill("beta-skill")]
+        state["signature"] = (
+            "skills-root:/tmp/skills",
+            "custom/alpha-skill/SKILL.md:1:10",
+            "custom/beta-skill/SKILL.md:2:10",
+        )
+
+        assert [skill.name for skill in prompt_module._get_enabled_skills()] == ["beta-skill"]
+    finally:
+        prompt_module._reset_skills_system_prompt_cache_state()
+
+
 def test_clear_cache_does_not_spawn_parallel_refresh_workers(monkeypatch, tmp_path):
     started = threading.Event()
     release = threading.Event()

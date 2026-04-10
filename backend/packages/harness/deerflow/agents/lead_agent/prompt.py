@@ -3,6 +3,7 @@ import logging
 import threading
 from datetime import datetime
 from functools import lru_cache
+from pathlib import Path
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
 _enabled_skills_lock = threading.Lock()
 _enabled_skills_cache: list[Skill] | None = None
+_enabled_skills_source_signature: tuple[str, ...] | None = None
 _enabled_skills_refresh_active = False
 _enabled_skills_refresh_version = 0
 _enabled_skills_refresh_event = threading.Event()
@@ -21,6 +23,34 @@ _enabled_skills_refresh_event = threading.Event()
 
 def _load_enabled_skills_sync() -> list[Skill]:
     return list(load_skills(enabled_only=True))
+
+
+def _get_enabled_skills_source_signature() -> tuple[str, ...] | None:
+    """Return a deterministic snapshot of skill-related files on disk."""
+    try:
+        from deerflow.config import get_app_config
+        from deerflow.config.extensions_config import ExtensionsConfig
+
+        skills_root = get_app_config().skills.get_skills_path()
+        if not skills_root.exists():
+            return None
+
+        signature = [f"skills-root:{skills_root.resolve()}"]
+        for skill_file in sorted(skills_root.rglob("SKILL.md")):
+            relative_parts = skill_file.relative_to(skills_root).parts
+            if any(part.startswith(".") for part in relative_parts):
+                continue
+            stat = skill_file.stat()
+            signature.append(f"{Path(*relative_parts).as_posix()}:{stat.st_mtime_ns}:{stat.st_size}")
+
+        extensions_path = ExtensionsConfig.resolve_config_path()
+        if extensions_path is not None and extensions_path.exists():
+            stat = extensions_path.stat()
+            signature.append(f"extensions:{Path(extensions_path).resolve()}:{stat.st_mtime_ns}:{stat.st_size}")
+
+        return tuple(signature)
+    except Exception:
+        return None
 
 
 def _start_enabled_skills_refresh_thread() -> None:
@@ -32,7 +62,7 @@ def _start_enabled_skills_refresh_thread() -> None:
 
 
 def _refresh_enabled_skills_cache_worker() -> None:
-    global _enabled_skills_cache, _enabled_skills_refresh_active
+    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_source_signature
 
     while True:
         with _enabled_skills_lock:
@@ -40,13 +70,16 @@ def _refresh_enabled_skills_cache_worker() -> None:
 
         try:
             skills = _load_enabled_skills_sync()
+            source_signature = _get_enabled_skills_source_signature()
         except Exception:
             logger.exception("Failed to load enabled skills for prompt injection")
             skills = []
+            source_signature = None
 
         with _enabled_skills_lock:
             if _enabled_skills_refresh_version == target_version:
                 _enabled_skills_cache = skills
+                _enabled_skills_source_signature = source_signature
                 _enabled_skills_refresh_active = False
                 _enabled_skills_refresh_event.set()
                 return
@@ -73,11 +106,12 @@ def _ensure_enabled_skills_cache() -> threading.Event:
 
 
 def _invalidate_enabled_skills_cache() -> threading.Event:
-    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_refresh_version
+    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_refresh_version, _enabled_skills_source_signature
 
     _get_cached_skills_prompt_section.cache_clear()
     with _enabled_skills_lock:
         _enabled_skills_cache = None
+        _enabled_skills_source_signature = None
         _enabled_skills_refresh_version += 1
         _enabled_skills_refresh_event.clear()
         if _enabled_skills_refresh_active:
@@ -103,12 +137,24 @@ def warm_enabled_skills_cache(timeout_seconds: float = _ENABLED_SKILLS_REFRESH_W
 def _get_enabled_skills():
     with _enabled_skills_lock:
         cached = _enabled_skills_cache
+        source_signature = _enabled_skills_source_signature
+        refresh_active = _enabled_skills_refresh_active
 
-    if cached is not None:
+    current_signature = _get_enabled_skills_source_signature()
+    if cached is not None and (current_signature is None or current_signature == source_signature):
         return list(cached)
 
-    _ensure_enabled_skills_cache()
-    return []
+    if cached is None and refresh_active:
+        if _enabled_skills_refresh_event.wait(timeout=_ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS):
+            with _enabled_skills_lock:
+                refreshed = _enabled_skills_cache
+            if refreshed is not None:
+                return list(refreshed)
+
+    _refresh_enabled_skills_cache()
+    with _enabled_skills_lock:
+        refreshed = _enabled_skills_cache
+    return list(refreshed or [])
 
 
 def _skill_mutability_label(category: str) -> str:
@@ -124,11 +170,12 @@ async def refresh_skills_system_prompt_cache_async() -> None:
 
 
 def _reset_skills_system_prompt_cache_state() -> None:
-    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_refresh_version
+    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_refresh_version, _enabled_skills_source_signature
 
     _get_cached_skills_prompt_section.cache_clear()
     with _enabled_skills_lock:
         _enabled_skills_cache = None
+        _enabled_skills_source_signature = None
         _enabled_skills_refresh_active = False
         _enabled_skills_refresh_version = 0
         _enabled_skills_refresh_event.clear()
@@ -136,14 +183,18 @@ def _reset_skills_system_prompt_cache_state() -> None:
 
 def _refresh_enabled_skills_cache() -> None:
     """Backward-compatible test helper for direct synchronous reload."""
+    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_source_signature
     try:
         skills = _load_enabled_skills_sync()
+        source_signature = _get_enabled_skills_source_signature()
     except Exception:
         logger.exception("Failed to load enabled skills for prompt injection")
         skills = []
+        source_signature = None
 
     with _enabled_skills_lock:
         _enabled_skills_cache = skills
+        _enabled_skills_source_signature = source_signature
         _enabled_skills_refresh_active = False
         _enabled_skills_refresh_event.set()
 
