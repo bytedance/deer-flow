@@ -1,6 +1,6 @@
 ---
 name: systematic-literature-review
-description: Use this skill whenever the user wants to survey, synthesize, or do a systematic literature review (SLR) across multiple academic papers on a topic. Triggers on queries like "review the literature on X", "survey recent papers about Y", "do an SLR on Z", "what does the literature say about W", "summarize recent research in A", or "compare findings across papers on B". Make sure to use this skill even when the user does not say the word "systematic" — the defining signal is that they want a synthesis across MANY papers rather than a deep read of a single one. Distinct from `academic-paper-review`, which does single-paper peer review. This skill searches arXiv, extracts structured metadata from each paper in parallel via subagents, synthesizes themes across the set, and emits a report in APA, IEEE, or BibTeX citation format.
+description: Use this skill when the user wants a systematic literature review, survey, or synthesis across multiple academic papers on a topic. Also covers annotated bibliographies and cross-paper comparisons. Searches arXiv and outputs reports in APA, IEEE, or BibTeX format. Not for single-paper tasks — use academic-paper-review for reviewing one paper.
 ---
 
 # Systematic Literature Review Skill
