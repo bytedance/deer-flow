@@ -70,6 +70,32 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"converted")
 
 
+def test_upload_files_does_not_convert_legacy_doc_files(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.acquire.return_value = "local"
+    sandbox = MagicMock()
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock()) as convert_mock,
+    ):
+        file = UploadFile(filename="legacy.doc", file=BytesIO(b"legacy-word"))
+        result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+
+    assert result.success is True
+    assert len(result.files) == 1
+    assert result.files[0]["filename"] == "legacy.doc"
+    assert "markdown_file" not in result.files[0]
+    assert (thread_uploads_dir / "legacy.doc").read_bytes() == b"legacy-word"
+    convert_mock.assert_not_called()
+
+
 def test_upload_files_makes_non_local_files_sandbox_writable(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

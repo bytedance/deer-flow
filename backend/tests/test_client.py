@@ -1809,6 +1809,29 @@ class TestScenarioEdgeCases:
             assert "markdown_file" not in result["files"][0]  # Conversion failed gracefully
             assert (uploads_dir / "doc.pdf").exists()  # File still uploaded
 
+    def test_upload_legacy_doc_file_skips_markdown_conversion(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            doc_file = tmp_path / "legacy.doc"
+            doc_file.write_bytes(b"legacy-word-content")
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown") as convert_mock,
+            ):
+                result = client.upload_files("t-doc", [doc_file])
+
+            assert result["success"] is True
+            assert len(result["files"]) == 1
+            assert result["files"][0]["filename"] == "legacy.doc"
+            assert "markdown_file" not in result["files"][0]
+            assert (uploads_dir / "legacy.doc").exists()
+            convert_mock.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Gateway conformance — validate client output against Gateway Pydantic models
