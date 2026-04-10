@@ -145,6 +145,24 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
     assert config["configurable"]["agent_name"] == "explicit-agent"
 
 
+def test_resolve_persisted_agent_name_defaults_to_default():
+    from app.gateway.services import resolve_persisted_agent_name
+
+    assert resolve_persisted_agent_name("lead_agent", None) == "default"
+
+
+def test_resolve_persisted_agent_name_uses_custom_assistant():
+    from app.gateway.services import resolve_persisted_agent_name
+
+    assert resolve_persisted_agent_name("Final_Agent", None) == "final-agent"
+
+
+def test_resolve_persisted_agent_name_prefers_explicit_configurable_agent():
+    from app.gateway.services import resolve_persisted_agent_name
+
+    assert resolve_persisted_agent_name("other-agent", {"configurable": {"agent_name": "explicit-agent"}}) == "explicit-agent"
+
+
 def test_resolve_agent_factory_returns_make_lead_agent():
     """resolve_agent_factory always returns make_lead_agent regardless of assistant_id."""
     from app.gateway.services import resolve_agent_factory

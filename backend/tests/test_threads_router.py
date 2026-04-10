@@ -1,3 +1,5 @@
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -107,3 +109,62 @@ def test_delete_thread_data_returns_generic_500_error(tmp_path):
     assert exc_info.value.detail == "Failed to delete local thread data."
     assert "/secret/path" not in exc_info.value.detail
     log_exception.assert_called_once_with("Failed to delete thread data for %s", "thread-cleanup")
+
+
+def test_store_upsert_persists_top_level_agent_name():
+    class FakeStore:
+        def __init__(self):
+            self.records = {}
+
+        async def aget(self, namespace, key):
+            value = self.records.get((namespace, key))
+            if value is None:
+                return None
+            return SimpleNamespace(value=value)
+
+        async def aput(self, namespace, key, value):
+            self.records[(namespace, key)] = value
+
+    store = FakeStore()
+
+    asyncio.run(
+        threads._store_upsert(
+            store,
+            "thread-agent-name",
+            metadata={"agent_name": "lead-agent", "created_by": "system"},
+        )
+    )
+
+    record = store.records[(threads.THREADS_NS, "thread-agent-name")]
+    assert record["agent_name"] == "lead-agent"
+    assert record["metadata"]["agent_name"] == "lead-agent"
+
+
+def test_store_upsert_backfills_agent_name_for_existing_thread():
+    class FakeStore:
+        def __init__(self):
+            self.records = {}
+
+        async def aget(self, namespace, key):
+            value = self.records.get((namespace, key))
+            if value is None:
+                return None
+            return SimpleNamespace(value=value)
+
+        async def aput(self, namespace, key, value):
+            self.records[(namespace, key)] = value
+
+    store = FakeStore()
+    store.records[(threads.THREADS_NS, "thread-existing")] = {
+        "thread_id": "thread-existing",
+        "status": "idle",
+        "created_at": 1.0,
+        "updated_at": 1.0,
+        "metadata": {},
+        "values": {},
+    }
+
+    asyncio.run(threads._store_upsert(store, "thread-existing", agent_name="default"))
+
+    record = store.records[(threads.THREADS_NS, "thread-existing")]
+    assert record["agent_name"] == "default"

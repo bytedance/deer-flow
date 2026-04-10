@@ -166,12 +166,35 @@ def build_run_config(
     return config
 
 
+def resolve_persisted_agent_name(
+    assistant_id: str | None,
+    request_config: dict[str, Any] | None,
+) -> str:
+    """Return the agent name that should be persisted alongside a thread."""
+    configurable = (request_config or {}).get("configurable", {})
+    explicit = configurable.get("agent_name")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
+        normalized = assistant_id.strip().lower().replace("_", "-")
+        if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
+            raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+        return normalized
+    return "default"
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
 
 
-async def _upsert_thread_in_store(store, thread_id: str, metadata: dict | None) -> None:
+async def _upsert_thread_in_store(
+    store,
+    thread_id: str,
+    metadata: dict | None,
+    *,
+    agent_name: str | None = None,
+) -> None:
     """Create or refresh the thread record in the Store.
 
     Called from :func:`start_run` so that threads created via the stateless
@@ -182,7 +205,7 @@ async def _upsert_thread_in_store(store, thread_id: str, metadata: dict | None) 
     from app.gateway.routers.threads import _store_upsert
 
     try:
-        await _store_upsert(store, thread_id, metadata=metadata)
+        await _store_upsert(store, thread_id, metadata=metadata, agent_name=agent_name)
     except Exception:
         logger.warning("Failed to upsert thread %s in store (non-fatal)", thread_id)
 
@@ -277,8 +300,9 @@ async def start_run(
     # Ensure the thread is visible in /threads/search, even for threads that
     # were never explicitly created via POST /threads (e.g. stateless runs).
     store = get_store(request)
+    persisted_agent_name = resolve_persisted_agent_name(body.assistant_id, body.config)
     if store is not None:
-        await _upsert_thread_in_store(store, thread_id, body.metadata)
+        await _upsert_thread_in_store(store, thread_id, body.metadata, agent_name=persisted_agent_name)
 
     agent_factory = resolve_agent_factory(body.assistant_id)
     graph_input = normalize_input(body.input)

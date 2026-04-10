@@ -156,7 +156,30 @@ async def _store_put(store, record: dict) -> None:
     await store.aput(THREADS_NS, record["thread_id"], record)
 
 
-async def _store_upsert(store, thread_id: str, *, metadata: dict | None = None, values: dict | None = None) -> None:
+def _resolve_record_agent_name(
+    metadata: dict[str, Any] | None = None,
+    *,
+    agent_name: str | None = None,
+    existing: dict[str, Any] | None = None,
+) -> str | None:
+    """Resolve the persisted top-level ``agent_name`` for a thread record."""
+    if agent_name:
+        return agent_name
+    if metadata and isinstance(metadata.get("agent_name"), str) and metadata["agent_name"]:
+        return metadata["agent_name"]
+    if existing and isinstance(existing.get("agent_name"), str) and existing["agent_name"]:
+        return existing["agent_name"]
+    return None
+
+
+async def _store_upsert(
+    store,
+    thread_id: str,
+    *,
+    metadata: dict | None = None,
+    values: dict | None = None,
+    agent_name: str | None = None,
+) -> None:
     """Create or refresh a thread record in the Store.
 
     On creation the record is written with ``status="idle"``.  On update only
@@ -168,18 +191,19 @@ async def _store_upsert(store, thread_id: str, *, metadata: dict | None = None, 
     """
     now = time.time()
     existing = await _store_get(store, thread_id)
+    persisted_agent_name = _resolve_record_agent_name(metadata, agent_name=agent_name, existing=existing)
     if existing is None:
-        await _store_put(
-            store,
-            {
-                "thread_id": thread_id,
-                "status": "idle",
-                "created_at": now,
-                "updated_at": now,
-                "metadata": metadata or {},
-                "values": values or {},
-            },
-        )
+        record = {
+            "thread_id": thread_id,
+            "status": "idle",
+            "created_at": now,
+            "updated_at": now,
+            "metadata": metadata or {},
+            "values": values or {},
+        }
+        if persisted_agent_name:
+            record["agent_name"] = persisted_agent_name
+        await _store_put(store, record)
     else:
         val = dict(existing)
         val["updated_at"] = now
@@ -187,6 +211,8 @@ async def _store_upsert(store, thread_id: str, *, metadata: dict | None = None, 
             val.setdefault("metadata", {}).update(metadata)
         if values:
             val.setdefault("values", {}).update(values)
+        if persisted_agent_name:
+            val["agent_name"] = persisted_agent_name
         await _store_put(store, val)
 
 
