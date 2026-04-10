@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 5
+config_version: 6
 
 # ============================================================================
 # Logging
@@ -50,6 +50,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: OpenAI model
   # - name: gpt-4
@@ -75,6 +79,41 @@ models:
   #   output_version: responses/v1
   #   supports_vision: true
 
+  # Example: Ollama (native provider — preserves thinking/reasoning content)
+  #
+  # IMPORTANT: Use langchain_ollama:ChatOllama instead of langchain_openai:ChatOpenAI
+  # for Ollama models. The OpenAI-compatible endpoint (/v1/chat/completions) does NOT
+  # return reasoning_content as a separate field — thinking content is either flattened
+  # into <think> tags or dropped entirely (ollama/ollama#15293). The native Ollama API
+  # (/api/chat) correctly separates thinking from response content.
+  #
+  # Install: cd backend && uv pip install 'deerflow-harness[ollama]'
+  #
+  # - name: qwen3-local
+  #   display_name: Qwen3 32B (Ollama)
+  #   use: langchain_ollama:ChatOllama
+  #   model: qwen3:32b
+  #   base_url: http://localhost:11434   # No /v1 suffix — uses native /api/chat
+  #   num_predict: 8192
+  #   temperature: 0.7
+  #   reasoning: true                    # Passes think:true to Ollama native API
+  #   supports_thinking: true
+  #   supports_vision: false
+  #
+  # - name: gemma4-local
+  #   display_name: Gemma 4 27B (Ollama)
+  #   use: langchain_ollama:ChatOllama
+  #   model: gemma4:27b
+  #   base_url: http://localhost:11434
+  #   num_predict: 8192
+  #   temperature: 0.7
+  #   reasoning: true
+  #   supports_thinking: true
+  #   supports_vision: true
+  #
+  # For Docker deployments, use host.docker.internal instead of localhost:
+  #   base_url: http://host.docker.internal:11434
+
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet
   #   display_name: Claude 3.5 Sonnet
@@ -88,6 +127,9 @@ models:
   #   when_thinking_enabled:
   #     thinking:
   #       type: enabled
+  #   when_thinking_disabled:
+  #     thinking:
+  #       type: disabled
 
   # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
@@ -120,6 +162,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
@@ -136,6 +182,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
@@ -153,6 +203,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: Novita AI (OpenAI-compatible)
   # Novita provides an OpenAI-compatible API with competitive pricing
@@ -173,6 +227,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: MiniMax (OpenAI-compatible) - International Edition
   # MiniMax provides high-performance models with 204K context window

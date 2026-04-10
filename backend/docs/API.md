@@ -86,6 +86,7 @@ Content-Type: application/json
     ]
   },
   "config": {
+    "recursion_limit": 100,
     "configurable": {
       "model_name": "gpt-4",
       "thinking_enabled": false,
@@ -99,6 +100,21 @@ Content-Type: application/json
 **Stream Mode Compatibility:**
 - Use: `values`, `messages-tuple`, `custom`, `updates`, `events`, `debug`, `tasks`, `checkpoints`
 - Do not use: `tools` (deprecated/invalid in current `langgraph-api` and will trigger schema validation errors)
+
+**Recursion Limit:**
+
+`config.recursion_limit` caps the number of graph steps LangGraph will execute
+in a single run. The `/api/langgraph/*` endpoints go straight to the LangGraph
+server and therefore inherit LangGraph's native default of **25**, which is
+too low for plan-mode or subagent-heavy runs — the agent typically errors out
+with `GraphRecursionError` after the first round of subagent results comes
+back, before the lead agent can synthesize the final answer.
+
+DeerFlow's own Gateway and IM-channel paths mitigate this by defaulting to
+`100` in `build_run_config` (see `backend/app/gateway/services.py`), but
+clients calling the LangGraph API directly must set `recursion_limit`
+explicitly in the request body. `100` matches the Gateway default and is a
+safe starting point; increase it if you run deeply nested subagent graphs.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -626,6 +642,14 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs \
   -H "Content-Type: application/json" \
   -d '{
     "input": {"messages": [{"role": "user", "content": "Hello"}]},
-    "config": {"configurable": {"model_name": "gpt-4"}}
+    "config": {
+      "recursion_limit": 100,
+      "configurable": {"model_name": "gpt-4"}
+    }
   }'
 ```
+
+> The `/api/langgraph/*` endpoints bypass DeerFlow's Gateway and inherit
+> LangGraph's native `recursion_limit` default of 25, which is too low for
+> plan-mode or subagent runs. Set `config.recursion_limit` explicitly — see
+> the [Create Run](#create-run) section for details.
