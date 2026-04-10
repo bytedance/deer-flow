@@ -104,35 +104,38 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
    cd deer-flow
    ```
 
-2. **Generate local configuration files**
+2. **Run the setup wizard**
 
    From the project root directory (`deer-flow/`), run:
 
    ```bash
-   make config
+   make setup
    ```
 
-   This command creates local configuration files based on the provided example templates.
+   This launches an interactive wizard that guides you through choosing an LLM provider, optional web search, and execution/safety preferences such as sandbox mode, bash access, and file-write tools. It generates a minimal `config.yaml` and writes your keys to `.env`. Takes about 2 minutes.
 
-3. **Configure your preferred model(s)**
+   The wizard also lets you configure an optional web search provider, or skip it for now.
 
-   Edit `config.yaml` and define at least one model:
+   Run `make doctor` at any time to verify your setup and get actionable fix hints.
+
+   > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, and more.
+
+   <details>
+   <summary>Manual model configuration examples</summary>
 
    ```yaml
    models:
-     - name: gpt-4                       # Internal identifier
-       display_name: GPT-4               # Human-readable name
-       use: langchain_openai:ChatOpenAI  # LangChain class path
-       model: gpt-4                      # Model identifier for API
-       api_key: $OPENAI_API_KEY          # API key (recommended: use env var)
-       max_tokens: 4096                  # Maximum tokens per request
-       temperature: 0.7                  # Sampling temperature
+     - name: gpt-4o
+       display_name: GPT-4o
+       use: langchain_openai:ChatOpenAI
+       model: gpt-4o
+       api_key: $OPENAI_API_KEY
 
      - name: openrouter-gemini-2.5-flash
        display_name: Gemini 2.5 Flash (OpenRouter)
        use: langchain_openai:ChatOpenAI
        model: google/gemini-2.5-flash-preview
-       api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
+       api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
 
      - name: gpt-5-responses
@@ -182,47 +185,22 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
-   - The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
-   - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
-   - ACP agent entries are separate from model providers. If you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`; the standard `codex` CLI binary is not ACP-compatible by itself
-   - On macOS, DeerFlow does not probe Keychain automatically. Export Claude Code auth explicitly if needed:
+   - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
+   - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
+   - On macOS, export Claude Code auth explicitly if needed:
 
    ```bash
    eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
    ```
-   
-4. **Set API keys for your configured model(s)**
 
-   Choose one of the following methods:
-
-- Option A: Edit the `.env` file in the project root (Recommended)
-
+   API keys can also be set manually in `.env` (recommended) or exported in your shell:
 
    ```bash
-   TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
-   # OpenRouter also uses OPENAI_API_KEY when your config uses langchain_openai:ChatOpenAI + base_url.
-   # Add other provider keys as needed
-   INFOQUEST_API_KEY=your-infoquest-api-key
+   TAVILY_API_KEY=your-tavily-api-key
    ```
 
-- Option B: Export environment variables in your shell
-
-   ```bash
-   export OPENAI_API_KEY=your-openai-api-key
-   ```
-
-   For CLI-backed providers:
-   - Codex CLI: `~/.codex/auth.json`
-   - Claude Code OAuth: explicit env/file handoff or `~/.claude/.credentials.json`
-
-- Option C: Edit `config.yaml` directly (Not recommended for production)
-
-   ```yaml
-   models:
-     - name: gpt-4
-       api_key: your-actual-api-key-here  # Replace placeholder
-   ```
+   </details>
 
 ### Running the Application
 
@@ -276,7 +254,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 If you prefer running services locally:
 
-Prerequisite: complete the "Configuration" steps above first (`make config` and model API keys). `make dev` requires a valid configuration file (defaults to `config.yaml` in the project root; can be overridden via `DEER_FLOW_CONFIG_PATH`).
+Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root (can be overridden via `DEER_FLOW_CONFIG_PATH`). Run `make doctor` to verify your setup before starting.
 On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
 
 1. **Check prerequisites**:
