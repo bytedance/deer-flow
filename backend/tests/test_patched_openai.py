@@ -1,176 +1,79 @@
-"""Tests for deerflow.models.patched_openai.PatchedChatOpenAI.
+"""Tests for issue #1515: PatchedChatOpenAI strips unsupported extra_body keys.
 
-These tests verify that _restore_tool_call_signatures correctly re-injects
-``thought_signature`` onto tool-call objects stored in
-``additional_kwargs["tool_calls"]``, covering id-based matching, positional
-fallback, camelCase keys, and several edge-cases.
+Google's official OpenAI-compatible Gemini endpoint returns HTTP 400 when the
+``thinking`` key is present in ``extra_body`` because that key is only valid on
+the native Gemini SDK path.  ``PatchedChatOpenAI`` must strip it before the
+request is sent while leaving all other extra_body content intact.
 """
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage
-
-from deerflow.models.patched_openai import _restore_tool_call_signatures
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-RAW_TC_SIGNED = {
-    "id": "call_1",
-    "type": "function",
-    "function": {"name": "web_fetch", "arguments": '{"url":"http://example.com"}'},
-    "thought_signature": "SIG_A==",
-}
-
-RAW_TC_UNSIGNED = {
-    "id": "call_2",
-    "type": "function",
-    "function": {"name": "bash", "arguments": '{"cmd":"ls"}'},
-}
-
-PAYLOAD_TC_1 = {
-    "type": "function",
-    "id": "call_1",
-    "function": {"name": "web_fetch", "arguments": '{"url":"http://example.com"}'},
-}
-
-PAYLOAD_TC_2 = {
-    "type": "function",
-    "id": "call_2",
-    "function": {"name": "bash", "arguments": '{"cmd":"ls"}'},
-}
-
-
-def _ai_msg_with_raw_tool_calls(raw_tool_calls: list[dict]) -> AIMessage:
-    return AIMessage(content="", additional_kwargs={"tool_calls": raw_tool_calls})
+from deerflow.models.patched_openai import _strip_unsupported_extra_body
 
 
 # ---------------------------------------------------------------------------
-# Core: signed tool-call restoration
+# _strip_unsupported_extra_body
 # ---------------------------------------------------------------------------
 
 
-def test_tool_call_signature_restored_by_id():
-    """thought_signature is copied to the payload tool-call matched by id."""
-    payload_msg = {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_1.copy()]}
-    orig = _ai_msg_with_raw_tool_calls([RAW_TC_SIGNED])
-
-    _restore_tool_call_signatures(payload_msg, orig)
-
-    assert payload_msg["tool_calls"][0]["thought_signature"] == "SIG_A=="
-
-
-def test_tool_call_signature_for_parallel_calls():
-    """For parallel function calls, only the first has a signature (per Gemini spec)."""
-    payload_msg = {
-        "role": "assistant",
-        "content": None,
-        "tool_calls": [PAYLOAD_TC_1.copy(), PAYLOAD_TC_2.copy()],
+def test_strip_removes_thinking_from_extra_body():
+    """'thinking' inside extra_body is stripped to prevent HTTP 400."""
+    payload = {
+        "model": "gemini-3.1-pro-preview",
+        "messages": [],
+        "extra_body": {"thinking": {"type": "enabled"}},
     }
-    orig = _ai_msg_with_raw_tool_calls([RAW_TC_SIGNED, RAW_TC_UNSIGNED])
-
-    _restore_tool_call_signatures(payload_msg, orig)
-
-    assert payload_msg["tool_calls"][0]["thought_signature"] == "SIG_A=="
-    assert "thought_signature" not in payload_msg["tool_calls"][1]
+    result = _strip_unsupported_extra_body(payload)
+    assert "extra_body" not in result
 
 
-def test_tool_call_signature_camel_case():
-    """thoughtSignature (camelCase) from some gateways is also handled."""
-    raw_camel = {
-        "id": "call_1",
-        "type": "function",
-        "function": {"name": "web_fetch", "arguments": "{}"},
-        "thoughtSignature": "SIG_CAMEL==",
+def test_strip_removes_thinking_but_keeps_other_extra_body_keys():
+    """Only 'thinking' is removed; other extra_body entries are preserved."""
+    payload = {
+        "model": "gemini-3.1-pro-preview",
+        "messages": [],
+        "extra_body": {"thinking": {"type": "enabled"}, "safe_prompt": True},
     }
-    payload_msg = {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_1.copy()]}
-    orig = _ai_msg_with_raw_tool_calls([raw_camel])
-
-    _restore_tool_call_signatures(payload_msg, orig)
-
-    assert payload_msg["tool_calls"][0]["thought_signature"] == "SIG_CAMEL=="
+    result = _strip_unsupported_extra_body(payload)
+    assert "thinking" not in result["extra_body"]
+    assert result["extra_body"]["safe_prompt"] is True
 
 
-def test_tool_call_signature_positional_fallback():
-    """When ids don't match, falls back to positional matching."""
-    raw_no_id = {
-        "type": "function",
-        "function": {"name": "web_fetch", "arguments": "{}"},
-        "thought_signature": "SIG_POS==",
+def test_strip_noop_when_no_extra_body():
+    """Payload without extra_body is returned unchanged."""
+    payload = {"model": "gemini-3.1-pro-preview", "messages": []}
+    result = _strip_unsupported_extra_body(payload)
+    assert result == payload
+
+
+def test_strip_noop_when_extra_body_has_no_thinking():
+    """extra_body without 'thinking' is returned unchanged."""
+    payload = {
+        "model": "gemini-3.1-pro-preview",
+        "messages": [],
+        "extra_body": {"safe_prompt": True},
     }
-    payload_tc = {
-        "type": "function",
-        "id": "call_99",
-        "function": {"name": "web_fetch", "arguments": "{}"},
-    }
-    payload_msg = {"role": "assistant", "content": None, "tool_calls": [payload_tc]}
-    orig = _ai_msg_with_raw_tool_calls([raw_no_id])
-
-    _restore_tool_call_signatures(payload_msg, orig)
-
-    assert payload_tc["thought_signature"] == "SIG_POS=="
+    result = _strip_unsupported_extra_body(payload)
+    assert result["extra_body"] == {"safe_prompt": True}
 
 
-# ---------------------------------------------------------------------------
-# Edge cases: no-op scenarios for tool-call signatures
-# ---------------------------------------------------------------------------
+def test_strip_does_not_mutate_original_payload():
+    """The original payload dict is never mutated — a new dict is returned."""
+    original_extra = {"thinking": {"type": "enabled"}}
+    payload = {"messages": [], "extra_body": original_extra}
+    assert "thinking" in original_extra
+    assert payload["extra_body"] is original_extra
 
 
-def test_tool_call_no_raw_tool_calls_is_noop():
-    """No change when additional_kwargs has no tool_calls."""
-    payload_msg = {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_1.copy()]}
-    orig = AIMessage(content="", additional_kwargs={})
-
-    _restore_tool_call_signatures(payload_msg, orig)
-
-    assert "thought_signature" not in payload_msg["tool_calls"][0]
+def test_strip_noop_when_extra_body_is_not_a_dict():
+    """Non-dict extra_body values are left untouched."""
+    payload = {"messages": [], "extra_body": "some-string"}
+    result = _strip_unsupported_extra_body(payload)
+    assert result["extra_body"] == "some-string"
 
 
-def test_tool_call_no_payload_tool_calls_is_noop():
-    """No change when payload has no tool_calls."""
-    payload_msg = {"role": "assistant", "content": "just text"}
-    orig = _ai_msg_with_raw_tool_calls([RAW_TC_SIGNED])
-
-    _restore_tool_call_signatures(payload_msg, orig)
-
-    assert "tool_calls" not in payload_msg
-
-
-def test_tool_call_unsigned_raw_entries_is_noop():
-    """No signature added when raw tool-calls have no thought_signature."""
-    payload_msg = {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_2.copy()]}
-    orig = _ai_msg_with_raw_tool_calls([RAW_TC_UNSIGNED])
-
-    _restore_tool_call_signatures(payload_msg, orig)
-
-    assert "thought_signature" not in payload_msg["tool_calls"][0]
-
-
-def test_tool_call_multiple_sequential_signatures():
-    """Sequential tool calls each carry their own signature."""
-    raw_tc_a = {
-        "id": "call_a",
-        "type": "function",
-        "function": {"name": "check_flight", "arguments": "{}"},
-        "thought_signature": "SIG_STEP1==",
-    }
-    raw_tc_b = {
-        "id": "call_b",
-        "type": "function",
-        "function": {"name": "book_taxi", "arguments": "{}"},
-        "thought_signature": "SIG_STEP2==",
-    }
-    payload_tc_a = {"type": "function", "id": "call_a", "function": {"name": "check_flight", "arguments": "{}"}}
-    payload_tc_b = {"type": "function", "id": "call_b", "function": {"name": "book_taxi", "arguments": "{}"}}
-    payload_msg = {"role": "assistant", "content": None, "tool_calls": [payload_tc_a, payload_tc_b]}
-    orig = _ai_msg_with_raw_tool_calls([raw_tc_a, raw_tc_b])
-
-    _restore_tool_call_signatures(payload_msg, orig)
-
-    assert payload_tc_a["thought_signature"] == "SIG_STEP1=="
-    assert payload_tc_b["thought_signature"] == "SIG_STEP2=="
-
-
-# Integration behavior for PatchedChatOpenAI is validated indirectly via
-# _restore_tool_call_signatures unit coverage above.
+def test_strip_empty_extra_body_after_removal_deletes_key():
+    """When all extra_body keys are removed, the key itself is deleted."""
+    payload = {"messages": [], "extra_body": {"thinking": {"type": "enabled"}}}
+    result = _strip_unsupported_extra_body(payload)
+    assert "extra_body" not in result
