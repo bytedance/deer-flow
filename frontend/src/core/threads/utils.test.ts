@@ -31,3 +31,24 @@ void test("uses provided context when pathOfThread is called with a thread id", 
     "/workspace/agents/ops%20agent/chats/thread-123",
   );
 });
+
+void test("uses agent chat route when thread metadata has agent_name", () => {
+  assert.equal(
+    pathOfThread({
+      thread_id: "thread-456",
+      metadata: { agent_name: "coder" },
+    }),
+    "/workspace/agents/coder/chats/thread-456",
+  );
+});
+
+void test("prefers context.agent_name over metadata.agent_name", () => {
+  assert.equal(
+    pathOfThread({
+      thread_id: "thread-789",
+      context: { agent_name: "from-context" },
+      metadata: { agent_name: "from-metadata" },
+    }),
+    "/workspace/agents/from-context/chats/thread-789",
+  );
+});
