@@ -27,18 +27,14 @@ logger = logging.getLogger(__name__)
 
 _OUTLINE_PREVIEW_LINES = 5
 _VIEW_IMAGE_GUIDANCE = (
-    "  This .docx includes extracted images. Before answering questions that depend on screenshots, diagrams, "
-    "flowcharts, or other visual details, use `view_image` on those image paths instead of relying on markdown alone."
+    "  This .docx includes extracted images. Before answering questions that depend on screenshots, diagrams, flowcharts, or other visual details, use `view_image` on those image paths instead of relying on markdown alone."
 )
 _DESCRIPTION_TAG = "document_image_descriptions"
 _DESCRIPTION_BLOCK_RE = re.compile(
     rf"<{_DESCRIPTION_TAG}>\s*(.*?)\s*</{_DESCRIPTION_TAG}>",
     re.DOTALL,
 )
-_FAILED_DESCRIPTION_TEXT = (
-    "Image descriptions unavailable. This document's extracted images were not successfully described during the "
-    "automatic vision pass. Use `view_image` on the extracted image paths if visual details matter."
-)
+_FAILED_DESCRIPTION_TEXT = "Image descriptions unavailable. This document's extracted images were not successfully described during the automatic vision pass. Use `view_image` on the extracted image paths if visual details matter."
 
 
 def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
@@ -527,11 +523,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         enriched: dict[str, UploadedImageDescriptionDocument] = {}
         for document_name, document in parsed_documents.items():
             file_info = file_lookup.get(document_name) or {}
-            image_lookup = {
-                image["filename"]: image
-                for image in file_info.get("extracted_images", [])
-                if isinstance(image, dict) and image.get("filename")
-            }
+            image_lookup = {image["filename"]: image for image in file_info.get("extracted_images", []) if isinstance(image, dict) and image.get("filename")}
 
             enriched_images = []
             for image in document["images"]:
@@ -598,13 +590,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     return None
                 image_filename = image.get("filename")
                 description = image.get("description")
-                if (
-                    not isinstance(image_filename, str)
-                    or not image_filename
-                    or Path(image_filename).name != image_filename
-                    or not isinstance(description, str)
-                    or not description.strip()
-                ):
+                if not isinstance(image_filename, str) or not image_filename or Path(image_filename).name != image_filename or not isinstance(description, str) or not description.strip():
                     return None
                 parsed_images.append(
                     {

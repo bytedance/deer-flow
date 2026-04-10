@@ -101,6 +101,7 @@ def _claim_unique_path(path: Path) -> Path:
             return candidate
         counter += 1
 
+
 def _pymupdf_output_too_sparse(text: str, file_path: Path) -> bool:
     """Return True if pymupdf4llm output is suspiciously short (image-based PDF).
 
@@ -378,11 +379,7 @@ def _extract_docx_images_sync(file_path: Path) -> list[Path]:
     try:
         with zipfile.ZipFile(file_path) as archive:
             media_entries = sorted(
-                (
-                    name
-                    for name in archive.namelist()
-                    if name.startswith("word/media/") and Path(name).suffix.lower() in _DOCX_IMAGE_EXTENSIONS
-                ),
+                (name for name in archive.namelist() if name.startswith("word/media/") and Path(name).suffix.lower() in _DOCX_IMAGE_EXTENSIONS),
                 key=_natural_sort_key,
             )
 

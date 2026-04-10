@@ -8,7 +8,6 @@ Covers:
 """
 
 import asyncio
-
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -954,12 +953,19 @@ class TestAfterModel:
 
     def test_persists_valid_document_image_description_payload_and_strips_it(self, tmp_path):
         mw = _middleware(tmp_path)
-        ai = AIMessage(content=[{"type": "output_text", "text": (
-            "Final answer.\n\n"
-            "<document_image_descriptions>\n"
-            '{"documents":[{"document":"report.docx","markdown_path":"/mnt/user-data/uploads/report.md","images":[{"filename":"report__image1.png","description":"A workflow diagram with three connected stages."}]}]}\n'
-            "</document_image_descriptions>"
-        )}])
+        ai = AIMessage(
+            content=[
+                {
+                    "type": "output_text",
+                    "text": (
+                        "Final answer.\n\n"
+                        "<document_image_descriptions>\n"
+                        '{"documents":[{"document":"report.docx","markdown_path":"/mnt/user-data/uploads/report.md","images":[{"filename":"report__image1.png","description":"A workflow diagram with three connected stages."}]}]}\n'
+                        "</document_image_descriptions>"
+                    ),
+                }
+            ]
+        )
         state = self._state(
             _human("review"),
             ai,
@@ -982,9 +988,7 @@ class TestAfterModel:
 
         assert result is not None
         assert result["uploaded_image_descriptions"]["report.docx"]["status"] == "parsed"
-        assert result["uploaded_image_descriptions"]["report.docx"]["images"][0]["description"] == (
-            "A workflow diagram with three connected stages."
-        )
+        assert result["uploaded_image_descriptions"]["report.docx"]["images"][0]["description"] == ("A workflow diagram with three connected stages.")
         assert result["messages"][0].content == [{"type": "output_text", "text": "Final answer."}]
 
     def test_malformed_payload_persists_failed_placeholder(self, tmp_path):
@@ -992,14 +996,7 @@ class TestAfterModel:
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "report.docx").write_bytes(b"docx")
         (uploads_dir / "report__image1.png").write_bytes(b"png")
-        ai = AIMessage(
-            content=(
-                "Final answer.\n"
-                "<document_image_descriptions>\n"
-                '{"documents":[{"document":"report.docx","images":[{"filename":"report__image1.png"}]}]}\n'
-                "</document_image_descriptions>"
-            )
-        )
+        ai = AIMessage(content=('Final answer.\n<document_image_descriptions>\n{"documents":[{"document":"report.docx","images":[{"filename":"report__image1.png"}]}]}\n</document_image_descriptions>'))
         state = self._state(
             _human("review"),
             ai,

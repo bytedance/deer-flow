@@ -273,6 +273,7 @@ class TestConvertFileToMarkdown:
         mock_thread.assert_called_once()
         assert md_path == pdf.with_suffix(".md")
         assert md_path.read_text() == "# Large PDF"
+
     def test_returns_none_on_conversion_error(self, tmp_path):
         """If conversion raises, return None without propagating the exception."""
         pdf = tmp_path / "broken.pdf"
@@ -393,11 +394,7 @@ def test_extract_docx_images_returns_empty_for_invalid_docx(tmp_path):
 def test_rewrite_docx_markdown_image_links_rewrites_matching_data_images(tmp_path):
     md_path = tmp_path / "report.md"
     md_path.write_text(
-        "before\n"
-        "![chart](data:image/png;base64,AAA)\n"
-        "middle\n"
-        "![photo](data:image/jpeg;base64,BBB)\n"
-        "after\n",
+        "before\n![chart](data:image/png;base64,AAA)\nmiddle\n![photo](data:image/jpeg;base64,BBB)\nafter\n",
         encoding="utf-8",
     )
     extracted_image_paths = [tmp_path / "report__image1.png", tmp_path / "report__image2.jpeg"]
@@ -405,22 +402,13 @@ def test_rewrite_docx_markdown_image_links_rewrites_matching_data_images(tmp_pat
     rewritten = rewrite_docx_markdown_image_links(md_path, extracted_image_paths)
 
     assert rewritten is True
-    assert md_path.read_text(encoding="utf-8") == (
-        "before\n"
-        "![chart](./report__image1.png)\n"
-        "middle\n"
-        "![photo](./report__image2.jpeg)\n"
-        "after\n"
-    )
+    assert md_path.read_text(encoding="utf-8") == ("before\n![chart](./report__image1.png)\nmiddle\n![photo](./report__image2.jpeg)\nafter\n")
 
 
 def test_rewrite_docx_markdown_image_links_rewrites_supported_prefix_when_counts_mismatch(tmp_path):
     md_path = tmp_path / "report.md"
     md_path.write_text(
-        "![wmf](data:image/x-wmf;base64,AAA)\n"
-        "![chart](data:image/png;base64,BBB)\n"
-        "![photo](data:image/jpeg;base64,CCC)\n"
-        "tail\n",
+        "![wmf](data:image/x-wmf;base64,AAA)\n![chart](data:image/png;base64,BBB)\n![photo](data:image/jpeg;base64,CCC)\ntail\n",
         encoding="utf-8",
     )
     extracted_image_paths = [tmp_path / "report__image1.png", tmp_path / "report__image2.jpeg"]
@@ -428,12 +416,7 @@ def test_rewrite_docx_markdown_image_links_rewrites_supported_prefix_when_counts
     rewritten = rewrite_docx_markdown_image_links(md_path, extracted_image_paths)
 
     assert rewritten is True
-    assert md_path.read_text(encoding="utf-8") == (
-        "![wmf](data:image/x-wmf;base64,AAA)\n"
-        "![chart](./report__image1.png)\n"
-        "![photo](./report__image2.jpeg)\n"
-        "tail\n"
-    )
+    assert md_path.read_text(encoding="utf-8") == ("![wmf](data:image/x-wmf;base64,AAA)\n![chart](./report__image1.png)\n![photo](./report__image2.jpeg)\ntail\n")
 
 
 def test_rewrite_docx_markdown_image_links_keeps_content_when_no_data_images_found(tmp_path):

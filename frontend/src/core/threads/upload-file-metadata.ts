@@ -8,7 +8,9 @@ export function buildMessageFilesFromUploadInfo(
     const file: FileInMessage = {
       filename: info.filename,
       size:
-        typeof info.size === "string" ? Number.parseInt(info.size, 10) : info.size,
+        typeof info.size === "string"
+          ? Number.parseInt(info.size, 10)
+          : info.size,
       path: info.virtual_path,
       status: "uploaded",
     };
