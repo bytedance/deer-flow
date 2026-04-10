@@ -2,8 +2,12 @@
 
 import { Streamdown } from "streamdown";
 
+import { withSafeParagraph } from "@/core/streamdown/components";
+
 import { aboutMarkdown } from "./about-content";
 
 export function AboutSettingsPage() {
-  return <Streamdown>{aboutMarkdown}</Streamdown>;
+  return (
+    <Streamdown components={withSafeParagraph()}>{aboutMarkdown}</Streamdown>
+  );
 }

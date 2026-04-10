@@ -6,6 +6,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { withSafeParagraph } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 import { BrainIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
@@ -177,7 +178,9 @@ export const ReasoningContent = memo(
       )}
       {...props}
     >
-      <Streamdown {...props}>{children}</Streamdown>
+      <Streamdown {...props} components={withSafeParagraph()}>
+        {children}
+      </Streamdown>
     </CollapsibleContent>
   ),
 );
