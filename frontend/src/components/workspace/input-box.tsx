@@ -61,7 +61,11 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
-import { deleteUploadedFile, uploadFiles } from "@/core/uploads";
+import {
+  createDraftUploadFilename,
+  deleteUploadedFile,
+  uploadFiles,
+} from "@/core/uploads";
 import { cn } from "@/lib/utils";
 
 import {
@@ -283,17 +287,48 @@ export function InputBox({
 
   const cleanupUploadedAttachment = useCallback(
     async (filename: string) => {
-      try {
-        await deleteUploadedFile(threadId, filename);
-      } catch (error) {
-        console.warn("Failed to clean up preuploaded attachment", {
-          error,
-          filename,
-          threadId,
-        });
+      let lastError: unknown = null;
+      const retryDelaysMs = [0, 100, 250, 500, 1000];
+
+      for (const delayMs of retryDelaysMs) {
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+
+        try {
+          await deleteUploadedFile(threadId, filename);
+          return;
+        } catch (error) {
+          lastError = error;
+        }
       }
+
+      console.warn("Failed to clean up preuploaded attachment", {
+        error: lastError,
+        filename,
+        threadId,
+      });
     },
     [threadId],
+  );
+
+  const getAttachmentStorageFilename = useCallback(
+    (attachment: (typeof attachmentFiles)[number]) => {
+      if (attachment.upload?.storedFilename) {
+        return attachment.upload.storedFilename;
+      }
+      if (attachment.upload?.info?.filename) {
+        return attachment.upload.info.filename;
+      }
+      const originalFilename =
+        (attachment.file instanceof File && attachment.file.name) ||
+        attachment.filename;
+      if (!originalFilename) {
+        return null;
+      }
+      return createDraftUploadFilename(attachment.id, originalFilename);
+    },
+    [],
   );
 
   const cleanupDraftAttachment = useCallback(
@@ -310,28 +345,37 @@ export function InputBox({
         uploadAbortControllersRef.current.delete(attachment.id);
       }
 
-      const uploadedFilename = attachment.upload?.info?.filename;
+      const uploadedFilename = getAttachmentStorageFilename(attachment);
       if (uploadedFilename) {
         void cleanupUploadedAttachment(uploadedFilename);
       }
     },
-    [cleanupUploadedAttachment],
+    [cleanupUploadedAttachment, getAttachmentStorageFilename],
   );
 
   const uploadAttachment = useCallback(
     async (attachmentId: string, file: File) => {
       const abortController = new AbortController();
+      const storageFilename = createDraftUploadFilename(attachmentId, file.name);
+      const uploadFile =
+        file.name === storageFilename
+          ? file
+          : new File([file], storageFilename, {
+              type: file.type,
+              lastModified: file.lastModified,
+            });
       uploadAbortControllersRef.current.set(attachmentId, abortController);
       attachments.update(attachmentId, (current) => ({
         ...current,
         upload: {
           status: "uploading",
           progress: 0,
+          storedFilename: storageFilename,
         },
       }));
 
       try {
-        const response = await uploadFiles(threadId, [file], {
+        const response = await uploadFiles(threadId, [uploadFile], {
           signal: abortController.signal,
           onProgress: (progress) => {
             attachments.update(attachmentId, (current) => ({
@@ -339,6 +383,8 @@ export function InputBox({
               upload: {
                 status: "uploading",
                 progress,
+                storedFilename:
+                  current.upload?.storedFilename ?? storageFilename,
               },
             }));
           },
@@ -360,6 +406,8 @@ export function InputBox({
             status: "uploaded",
             progress: 100,
             info: uploadedFile,
+            storedFilename:
+              current.upload?.storedFilename ?? uploadedFile.filename,
           },
         }));
       } catch (error) {
@@ -374,6 +422,8 @@ export function InputBox({
             progress: 0,
             error:
               error instanceof Error ? error.message : t.uploads.uploadFailed,
+            storedFilename:
+              current.upload?.storedFilename ?? storageFilename,
           },
         }));
       } finally {

@@ -242,6 +242,7 @@ export function PromptInputProvider({
               upload: {
                 status: "pending",
                 progress: 0,
+                storedFilename: file.upload?.storedFilename,
               },
             }
           : file,
@@ -727,6 +728,7 @@ export const PromptInput = ({
                 upload: {
                   status: "pending",
                   progress: 0,
+                  storedFilename: file.upload?.storedFilename,
                 },
               }
             : file,

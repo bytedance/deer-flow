@@ -13,7 +13,6 @@ import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
-import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import type { AgentThread, AgentThreadState } from "./types";
@@ -355,9 +354,10 @@ export function useThreadStream({
           const uploadedInfo = uploadedFileInfoByIndex[index];
           if (uploadedInfo) {
             return {
-              filename: uploadedInfo.filename,
+              filename: file.filename ?? uploadedInfo.filename,
               size: uploadedInfo.size,
               path: uploadedInfo.virtual_path,
+              stored_filename: uploadedInfo.filename,
               status: "uploaded" as const,
               progress: 100,
             };
@@ -368,6 +368,7 @@ export function useThreadStream({
             size: 0,
             status: "uploading" as const,
             progress: file.upload?.progress ?? 0,
+            stored_filename: file.upload?.storedFilename,
           };
         },
       );
@@ -520,15 +521,23 @@ export function useThreadStream({
               });
 
               // Update optimistic human message with uploaded status + paths
-              const uploadedFiles: FileInMessage[] = uploadedFileInfoByIndex
-                .filter((info): info is UploadedFileInfo => Boolean(info))
-                .map((info) => ({
-                  filename: info.filename,
+              const uploadedFiles: FileInMessage[] = messageFiles.reduce<
+                FileInMessage[]
+              >((acc, file, index) => {
+                const info = uploadedFileInfoByIndex[index];
+                if (!info) {
+                  return acc;
+                }
+                acc.push({
+                  filename: file.filename ?? info.filename,
                   size: info.size,
                   path: info.virtual_path,
+                  stored_filename: info.filename,
                   status: "uploaded" as const,
                   progress: 100,
-                }));
+                });
+                return acc;
+              }, []);
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
                   const humanMessage: Message = messages[0];
@@ -560,14 +569,22 @@ export function useThreadStream({
         }
 
         // Build files metadata for submission (included in additional_kwargs)
-        const filesForSubmit: FileInMessage[] = uploadedFileInfoByIndex
-          .filter((info): info is UploadedFileInfo => Boolean(info))
-          .map((info) => ({
-            filename: info.filename,
+        const filesForSubmit: FileInMessage[] = messageFiles.reduce<
+          FileInMessage[]
+        >((acc, file, index) => {
+          const info = uploadedFileInfoByIndex[index];
+          if (!info) {
+            return acc;
+          }
+          acc.push({
+            filename: file.filename ?? info.filename,
             size: info.size,
             path: info.virtual_path,
+            stored_filename: info.filename,
             status: "uploaded" as const,
-          }));
+          });
+          return acc;
+        }, []);
 
         await thread.submit(
           {

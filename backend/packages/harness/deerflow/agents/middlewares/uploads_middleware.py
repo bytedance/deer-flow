@@ -149,8 +149,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """Extract file info from message additional_kwargs.files.
 
         The frontend sends uploaded file metadata in additional_kwargs.files
-        after a successful upload. Each entry has: filename, size (bytes),
-        path (virtual path), status.
+        after a successful upload. Each entry has: filename (display name),
+        size (bytes), path (virtual path), status, and optionally
+        stored_filename (actual basename on disk).
 
         Args:
             message: The human message to inspect.
@@ -169,15 +170,18 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if not isinstance(f, dict):
                 continue
             filename = f.get("filename") or ""
+            stored_filename = f.get("stored_filename") or filename
             if not filename or Path(filename).name != filename:
                 continue
-            if uploads_dir is not None and not (uploads_dir / filename).is_file():
+            if not stored_filename or Path(stored_filename).name != stored_filename:
+                continue
+            if uploads_dir is not None and not (uploads_dir / stored_filename).is_file():
                 continue
             files.append(
                 {
                     "filename": filename,
                     "size": int(f.get("size") or 0),
-                    "path": f"/mnt/user-data/uploads/{filename}",
+                    "path": f"/mnt/user-data/uploads/{stored_filename}",
                     "extension": Path(filename).suffix,
                 }
             )

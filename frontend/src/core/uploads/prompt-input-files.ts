@@ -13,6 +13,7 @@ export interface PromptInputFileUploadState {
   progress: number;
   error?: string;
   info?: UploadedFileInfo;
+  storedFilename?: string;
 }
 
 export type PromptInputFilePart = FileUIPart & {
@@ -20,6 +21,16 @@ export type PromptInputFilePart = FileUIPart & {
   file?: File;
   upload?: PromptInputFileUploadState;
 };
+
+export function createDraftUploadFilename(
+  attachmentId: string,
+  originalFilename: string,
+): string {
+  const dotIndex = originalFilename.lastIndexOf(".");
+  const extension =
+    dotIndex > 0 ? originalFilename.slice(dotIndex).toLowerCase() : "";
+  return `draft_${attachmentId}${extension}`;
+}
 
 export async function promptInputFilePartToFile(
   filePart: PromptInputFilePart,

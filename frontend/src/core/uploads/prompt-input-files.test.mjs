@@ -19,6 +19,20 @@ test("exports the prompt-input file conversion helper", async () => {
       : "prompt-input-files module is missing",
   );
   assert.equal(typeof loaded.promptInputFilePartToFile, "function");
+  assert.equal(typeof loaded.createDraftUploadFilename, "function");
+});
+
+test("creates deterministic draft upload filenames while preserving extension", async () => {
+  const { createDraftUploadFilename } = await import("./prompt-input-files.ts");
+
+  assert.equal(
+    createDraftUploadFilename("abc123", "Quarterly Report.PDF"),
+    "draft_abc123.pdf",
+  );
+  assert.equal(
+    createDraftUploadFilename("xyz789", "README"),
+    "draft_xyz789",
+  );
 });
 
 test("reuses the original File when a prompt attachment already has one", async () => {

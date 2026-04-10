@@ -106,6 +106,26 @@ class TestFilesFromKwargs:
         assert result[0]["filename"] == "data.csv"
         assert result[0]["path"] == "/mnt/user-data/uploads/data.csv"
 
+    def test_prefers_stored_filename_for_disk_lookup_and_path(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "draft_abc123.pdf").write_text("pdf")
+        msg = _human(
+            "hi",
+            files=[
+                {
+                    "filename": "Quarterly Report.pdf",
+                    "stored_filename": "draft_abc123.pdf",
+                    "size": 3,
+                    "path": "/mnt/user-data/uploads/draft_abc123.pdf",
+                }
+            ],
+        )
+        result = mw._files_from_kwargs(msg, uploads_dir)
+        assert result is not None
+        assert result[0]["filename"] == "Quarterly Report.pdf"
+        assert result[0]["path"] == "/mnt/user-data/uploads/draft_abc123.pdf"
+
     def test_skips_nonexistent_but_accepts_existing_in_mixed_list(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
