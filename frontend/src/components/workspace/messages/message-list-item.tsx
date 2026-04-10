@@ -1,5 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { FileIcon, Loader2Icon } from "lucide-react";
+import { FileIcon } from "lucide-react";
 import { memo, useMemo, type ImgHTMLAttributes } from "react";
 import rehypeKatex from "rehype-katex";
 
@@ -286,27 +286,16 @@ function RichFilesList({
   files: FileInMessage[];
   threadId: string;
 }) {
-  const uploadingFiles = files.filter((file) => file.status === "uploading");
-  const showBatchProgress = uploadingFiles.length > 1;
-  const batchProgress = Math.min(
-    100,
-    Math.max(0, uploadingFiles[0]?.progress ?? 0),
-  );
-
   if (files.length === 0) return null;
   return (
-    <div className="mb-2 flex flex-col items-end gap-2">
-      {showBatchProgress ? <UploadBatchProgress progress={batchProgress} /> : null}
-      <div className="flex flex-wrap justify-end gap-2">
-        {files.map((file, index) => (
-          <RichFileCard
-            key={`${file.filename}-${index}`}
-            file={file}
-            threadId={threadId}
-            showDetailedProgress={!showBatchProgress}
-          />
-        ))}
-      </div>
+    <div className="mb-2 flex flex-wrap justify-end gap-2">
+      {files.map((file, index) => (
+        <RichFileCard
+          key={`${file.filename}-${index}`}
+          file={file}
+          threadId={threadId}
+        />
+      ))}
     </div>
   );
 }
@@ -317,11 +306,9 @@ function RichFilesList({
 function RichFileCard({
   file,
   threadId,
-  showDetailedProgress,
 }: {
   file: FileInMessage;
   threadId: string;
-  showDetailedProgress: boolean;
 }) {
   const { t } = useI18n();
   const isUploading = file.status === "uploading";
@@ -329,33 +316,6 @@ function RichFileCard({
   const progress = Math.min(100, Math.max(0, file.progress ?? 0));
 
   if (isUploading) {
-    if (!showDetailedProgress) {
-      return (
-        <div className="bg-background border-border/40 flex max-w-50 min-w-30 flex-col gap-1 rounded-lg border p-3 opacity-60 shadow-sm">
-          <div className="flex items-start gap-2">
-            <Loader2Icon className="text-muted-foreground mt-0.5 size-4 shrink-0 animate-spin" />
-            <span
-              className="text-foreground truncate text-sm font-medium"
-              title={file.filename}
-            >
-              {file.filename}
-            </span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <Badge
-              variant="secondary"
-              className="rounded px-1.5 py-0.5 text-[10px] font-normal"
-            >
-              {getFileTypeLabel(file.filename)}
-            </Badge>
-            <span className="text-muted-foreground text-[10px]">
-              {t.uploads.uploading}
-            </span>
-          </div>
-        </div>
-      );
-    }
-
     return (
       <div className="bg-background border-border/40 flex max-w-50 min-w-30 flex-col gap-2 rounded-lg border p-3 shadow-sm">
         <div className="flex items-start gap-3">
@@ -434,25 +394,6 @@ function RichFileCard({
         <span className="text-muted-foreground text-[10px]">
           {formatBytes(file.size)}
         </span>
-      </div>
-    </div>
-  );
-}
-
-function UploadBatchProgress({ progress }: { progress: number }) {
-  const { t } = useI18n();
-
-  return (
-    <div className="bg-background border-border/40 w-full max-w-50 rounded-lg border px-3 py-2 shadow-sm">
-      <div className="flex items-center justify-between gap-2 text-[10px]">
-        <span className="text-muted-foreground">{t.uploads.uploading}</span>
-        <span className="text-muted-foreground font-mono">{progress}%</span>
-      </div>
-      <div className="bg-muted mt-1.5 h-1.5 overflow-hidden rounded-full">
-        <div
-          className="bg-foreground/75 h-full transition-[width] duration-200"
-          style={{ width: `${progress}%` }}
-        />
       </div>
     </div>
   );

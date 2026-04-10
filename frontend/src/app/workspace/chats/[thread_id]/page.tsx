@@ -155,6 +155,7 @@ export default function ChatPage() {
                     extraHeader={
                       isNewThread && <Welcome mode={settings.context.mode} />
                     }
+                    isUploading={isUploading}
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                       isUploading

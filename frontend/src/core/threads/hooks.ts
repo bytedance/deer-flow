@@ -412,11 +412,58 @@ export function useThreadStream({
             }
 
             if (files.length > 0) {
+              const totalFileBytes = files.reduce(
+                (sum, file) => sum + Math.max(file.size, 0),
+                0,
+              );
+              const fileByteOffsets = files.reduce<number[]>(
+                (offsets, file, index) => {
+                  if (index === 0) {
+                    offsets.push(0);
+                    return offsets;
+                  }
+
+                  const previousOffset = offsets[index - 1] ?? 0;
+                  const previousSize = Math.max(files[index - 1]?.size ?? 0, 0);
+                  offsets.push(previousOffset + previousSize);
+                  return offsets;
+                },
+                [],
+              );
+
               const uploadResponse = await uploadFiles(threadId, files, {
                 onProgress: (progress) => {
                   if (hideFromUI) {
                     return;
                   }
+
+                  const fileProgresses =
+                    totalFileBytes > 0
+                      ? files.map((file, index) => {
+                          const approximateLoadedBytes = Math.round(
+                            (progress / 100) * totalFileBytes,
+                          );
+                          const fileOffset = fileByteOffsets[index] ?? 0;
+                          const fileSize = Math.max(file.size, 0);
+
+                          if (fileSize === 0) {
+                            return progress > 0 ? 100 : 0;
+                          }
+
+                          const loadedForFile = Math.min(
+                            fileSize,
+                            Math.max(0, approximateLoadedBytes - fileOffset),
+                          );
+
+                          return Math.min(
+                            100,
+                            Math.max(
+                              0,
+                              Math.round((loadedForFile / fileSize) * 100),
+                            ),
+                          );
+                        })
+                      : files.map(() => progress);
 
                   setOptimisticMessages((messages) => {
                     const humanMessage = messages[0];
@@ -434,10 +481,10 @@ export function useThreadStream({
                         ...humanMessage,
                         additional_kwargs: {
                           ...humanMessage.additional_kwargs,
-                          files: existingFiles.map((file) => ({
+                          files: existingFiles.map((file, index) => ({
                             ...file,
                             status: "uploading" as const,
-                            progress,
+                            progress: fileProgresses[index] ?? progress,
                           })),
                         },
                       },

@@ -106,6 +106,7 @@ export function InputBox({
   context,
   extraHeader,
   isNewThread,
+  isUploading = false,
   threadId,
   initialValue,
   onContextChange,
@@ -126,6 +127,7 @@ export function InputBox({
   };
   extraHeader?: React.ReactNode;
   isNewThread?: boolean;
+  isUploading?: boolean;
   threadId: string;
   initialValue?: string;
   onContextChange?: (
@@ -832,11 +834,16 @@ export function InputBox({
                 </ModelSelectorList>
               </ModelSelectorContent>
             </ModelSelector>
+            {isUploading && (
+              <span className="text-muted-foreground px-1 text-[10px]">
+                {t.uploads.uploadingFiles}
+              </span>
+            )}
             <PromptInputSubmit
               className="rounded-full"
               disabled={disabled}
               variant="outline"
-              status={status}
+              status={isUploading ? "submitted" : status}
             />
           </PromptInputTools>
         </PromptInputFooter>

@@ -2,7 +2,7 @@
 
 import type { Message } from "@langchain/langgraph-sdk";
 import { CoinsIcon } from "lucide-react";
-import { useMemo, useRef } from "react";
+import { useMemo } from "react";
 
 import {
   Tooltip,
@@ -10,11 +10,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useI18n } from "@/core/i18n/hooks";
-import {
-  accumulateUsage,
-  formatTokenCount,
-  type TokenUsageCache,
-} from "@/core/messages/usage";
+import { accumulateUsage, formatTokenCount } from "@/core/messages/usage";
 import { cn } from "@/lib/utils";
 
 interface TokenUsageIndicatorProps {
@@ -27,12 +23,8 @@ export function TokenUsageIndicator({
   className,
 }: TokenUsageIndicatorProps) {
   const { t } = useI18n();
-  const usageCacheRef = useRef<TokenUsageCache>(new Map());
 
-  const usage = useMemo(
-    () => accumulateUsage(messages, usageCacheRef.current),
-    [messages],
-  );
+  const usage = useMemo(() => accumulateUsage(messages), [messages]);
 
   if (!usage) {
     return null;
