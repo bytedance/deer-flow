@@ -371,6 +371,13 @@ tools:
   #   contents_max_characters: 1000
   #   # api_key: $EXA_API_KEY
 
+  # Web search tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.firecrawl.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $FIRECRAWL_API_KEY
+
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.
@@ -395,6 +402,12 @@ tools:
   #   fetch_time: 10
   #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
   #   navigation_timeout: 30
+
+  # Web fetch tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.firecrawl.tools:web_fetch_tool
+  #   # api_key: $FIRECRAWL_API_KEY
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation

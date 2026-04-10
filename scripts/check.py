@@ -6,7 +6,6 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from typing import Optional
 
 
 def configure_stdio() -> None:
@@ -20,7 +19,7 @@ def configure_stdio() -> None:
                 continue
 
 
-def run_command(command: list[str]) -> Optional[str]:
+def run_command(command: list[str]) -> str | None:
     """Run a command and return trimmed stdout, or None on failure."""
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True, shell=False)
@@ -29,7 +28,7 @@ def run_command(command: list[str]) -> Optional[str]:
     return result.stdout.strip() or result.stderr.strip()
 
 
-def find_pnpm_command() -> Optional[list[str]]:
+def find_pnpm_command() -> list[str] | None:
     """Return a pnpm-compatible command that exists on this machine."""
     candidates = [["pnpm"], ["pnpm.cmd"]]
     if shutil.which("corepack"):
@@ -41,7 +40,7 @@ def find_pnpm_command() -> Optional[list[str]]:
     return None
 
 
-def parse_node_major(version_text: str) -> Optional[int]:
+def parse_node_major(version_text: str) -> int | None:
     version = version_text.strip()
     if version.startswith("v"):
         version = version[1:]
@@ -145,7 +144,9 @@ def main() -> int:
         print()
         print("You can now run:")
         print("  make install  - Install project dependencies")
-        print("  make config   - Generate local config files")
+        print("  make setup    - Create a minimal working config (recommended)")
+        print("  make config   - Copy the full config template (manual setup)")
+        print("  make doctor   - Verify config and dependency health")
         print("  make dev      - Start development server")
         print("  make start    - Start production server")
         return 0
