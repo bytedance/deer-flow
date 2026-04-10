@@ -21,7 +21,7 @@ from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -126,6 +126,7 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
 _WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
 
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
+_INTERRUPTED_TOOL_MSG = "[Tool call was interrupted due to loop detection and did not return a result.]"
 
 
 class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
@@ -261,12 +262,46 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # Fallback: coerce unexpected types to str to avoid TypeError
         return str(content) + f"\n\n{text}"
 
+    @staticmethod
+    def _build_interrupted_tool_messages(tool_calls: list[dict] | None) -> list[ToolMessage]:
+        """Build placeholder ToolMessages for tool calls we intentionally skipped.
+
+        Loop warnings ask the model to stop calling tools and wrap up. When we
+        short-circuit a repeated tool-call turn, the original assistant message
+        still contains ``tool_calls`` that will never be executed. Emit
+        synthetic error ToolMessages immediately so the next model turn sees a
+        valid assistant-tool history without relying on later repair passes.
+        """
+        if not tool_calls:
+            return []
+
+        placeholders: list[ToolMessage] = []
+        seen_ids: set[str] = set()
+        for tool_call in tool_calls:
+            tool_call_id = tool_call.get("id")
+            if not tool_call_id or tool_call_id in seen_ids:
+                continue
+
+            placeholders.append(
+                ToolMessage(
+                    content=_INTERRUPTED_TOOL_MSG,
+                    tool_call_id=tool_call_id,
+                    name=tool_call.get("name", "unknown"),
+                    status="error",
+                )
+            )
+            seen_ids.add(tool_call_id)
+
+        return placeholders
+
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
         warning, hard_stop = self._track_and_check(state, runtime)
+        messages = state.get("messages", [])
+        last_msg = messages[-1] if messages else None
+        pending_tool_msgs = self._build_interrupted_tool_messages(getattr(last_msg, "tool_calls", None))
 
         if hard_stop:
             # Strip tool_calls from the last AIMessage to force text output
-            messages = state.get("messages", [])
             last_msg = messages[-1]
             stripped_msg = last_msg.model_copy(
                 update={
@@ -283,7 +318,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # the conversation; injecting one mid-conversation crashes
             # langchain_anthropic's _format_messages(). HumanMessage works
             # with all providers. See #1299.
-            return {"messages": [HumanMessage(content=warning)]}
+            return {"messages": [*pending_tool_msgs, HumanMessage(content=warning)]}
 
         return None
 
