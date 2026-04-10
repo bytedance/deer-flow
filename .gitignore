@@ -1,59 +1,81 @@
-# DeerFlow docker image cache
-docker/.cache/
-# oh-my-claudecode state
-.omc/
-# OS generated files
-.DS_Store
-*.local
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Python cache
-__pycache__/
+# Compiled and build artifacts
 *.pyc
-*.pyo
+__pycache__/
+*.o
+*.obj
+*.class
+*.exe
+*.dll
+*.so
+*.a
+*.out
 
-# Virtual environments
-.venv
+# Dependencies
+node_modules/
 venv/
-
-# Environment variables
+.venv/
 .env
+.env.local
+.env.*
 
-# Configuration files
-config.yaml
-mcp_config.json
-extensions_config.json
+# Build directories
+dist/
+build/
+target/
+*.log
+*.tmp
+*.swp
 
-# IDE
-.idea/
+# Editors
 .vscode/
+.idea/
 
-# Coverage report
-coverage.xml
+# Coverage reports
 coverage/
-.deer-flow/
-.claude/
-skills/custom/*
-logs/
-log/
+htmlcov/
+.coverage
 
-# Local git hooks (keep only on this machine, do not push)
-.githooks/
+# Compressed files
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
 
-# pnpm
-.pnpm-store
-sandbox_image_cache.tar
+# Python specific
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+.eggs/
 
-# ignore the legacy `web` folder
-web/
+# Gradle
+.gradle/
 
-# Deployment artifacts
-backend/Dockerfile.langgraph
-config.yaml.bak
-.playwright-mcp
-.gstack/
-.worktrees
+# MyPy cache
+.mypy_cache/
+.pytest_cache/
+
+# System files
+.DS_Store
+Thumbs.db
