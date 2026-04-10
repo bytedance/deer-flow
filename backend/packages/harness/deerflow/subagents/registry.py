@@ -47,6 +47,15 @@ def get_subagent_config(name: str) -> SubagentConfig | None:
             effective_max_turns,
         )
         overrides["max_turns"] = effective_max_turns
+    effective_model = app_config.get_model_for(name)
+    if effective_model is not None and effective_model != config.model:
+        logger.debug(
+            "Subagent '%s': model overridden by config.yaml (%s -> %s)",
+            name,
+            config.model,
+            effective_model,
+        )
+        overrides["model"] = effective_model
     if overrides:
         config = replace(config, **overrides)
 
