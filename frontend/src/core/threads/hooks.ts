@@ -212,6 +212,13 @@ export function useThreadStream({
     onCreated(meta) {
       handleStreamStart(meta.thread_id);
       setOnStreamThreadId(meta.thread_id);
+      if (context.agent_name && !isMock) {
+        void getAPIClient()
+          .threads.update(meta.thread_id, {
+            metadata: { agent_name: context.agent_name },
+          })
+          .catch(() => ({}));
+      }
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {
@@ -528,7 +535,7 @@ export function useThreads(
     limit: 50,
     sortBy: "updated_at",
     sortOrder: "desc",
-    select: ["thread_id", "updated_at", "values", "context"],
+    select: ["thread_id", "updated_at", "values", "metadata"],
   },
 ) {
   const apiClient = getAPIClient();
