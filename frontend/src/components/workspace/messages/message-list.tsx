@@ -65,7 +65,8 @@ function buildDisplayMessages(
     latestMessages
       .filter(
         (message) =>
-          !isHiddenFromUIMessage(message) && !isConversationSummaryMessage(message),
+          !isHiddenFromUIMessage(message) &&
+          !isConversationSummaryMessage(message),
       )
       .map(messageIdentity),
   );
@@ -113,7 +114,9 @@ export function MessageList({
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  const [historyEntries, setHistoryEntries] = useState<ThreadHistoryEntry[]>([]);
+  const [historyEntries, setHistoryEntries] = useState<ThreadHistoryEntry[]>(
+    [],
+  );
   const [historyLoadedForThread, setHistoryLoadedForThread] = useState<
     string | null
   >(null);
@@ -197,7 +200,12 @@ export function MessageList({
     });
 
     return () => controller.abort();
-  }, [hasSummaryMessage, historyLoadedForThread, thread.isThreadLoading, threadId]);
+  }, [
+    hasSummaryMessage,
+    historyLoadedForThread,
+    thread.isThreadLoading,
+    threadId,
+  ]);
 
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;

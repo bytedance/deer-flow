@@ -331,7 +331,8 @@ export function isHiddenFromUIMessage(message: Message) {
   return message.additional_kwargs?.hide_from_ui === true;
 }
 
-const CONVERSATION_SUMMARY_PREFIX = "Here is a summary of the conversation to date:";
+const CONVERSATION_SUMMARY_PREFIX =
+  "Here is a summary of the conversation to date:";
 
 export function isConversationSummaryMessage(message: Message) {
   if (message.type !== "human") {
