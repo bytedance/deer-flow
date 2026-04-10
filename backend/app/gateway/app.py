@@ -40,9 +40,12 @@ logger = logging.getLogger(__name__)
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
-    """Startup hook: detect first boot; migrate orphan threads otherwise.
+    """Startup hook: generate init token on first boot; migrate orphan threads otherwise.
 
     First boot (no admin exists):
+      - Generates a one-time ``init_token`` stored in ``app.state.init_token``
+      - Logs the token to stdout so the operator can copy-paste it into the
+        ``/setup`` form to create the first admin account interactively.
       - Does NOT create any user accounts automatically.
 
     Subsequent boots (admin already exists):
@@ -54,6 +57,8 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     alongside the auth module via create_all, so freshly created tables
     never contain NULL-owner rows.
     """
+    import secrets
+
     from sqlalchemy import select
 
     from app.gateway.deps import get_local_provider
@@ -64,8 +69,13 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     admin_count = await provider.count_admin_users()
 
     if admin_count == 0:
+        init_token = secrets.token_urlsafe(32)
+        app.state.init_token = init_token
         logger.info("=" * 60)
         logger.info("  First boot detected — no admin account exists.")
+        logger.info("  Use the one-time token below to create the admin account.")
+        logger.info("  Copy it into the /setup form when prompted.")
+        logger.info("  INIT TOKEN: %s", init_token)
         logger.info("  Visit /setup to complete admin account creation.")
         logger.info("=" * 60)
         return
@@ -347,6 +357,11 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
             Service health status information.
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
+
+    # Ensure init_token always exists on app.state (None until lifespan sets it
+    # if no admin is found).  This prevents AttributeError in tests that don't
+    # run the full lifespan.
+    app.state.init_token = None
 
     return app
 
