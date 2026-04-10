@@ -339,7 +339,7 @@ function RichFileCard({
               >
                 {getFileTypeLabel(file.filename)}
               </Badge>
-              <span className="text-muted-foreground text-[10px] font-mono">
+              <span className="text-muted-foreground font-mono text-[10px]">
                 {progress}%
               </span>
             </div>

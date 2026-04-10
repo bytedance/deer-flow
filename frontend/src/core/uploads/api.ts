@@ -57,10 +57,7 @@ export async function uploadFiles(
 
   return new Promise<UploadResponse>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open(
-      "POST",
-      `${getBackendBaseURL()}/api/threads/${threadId}/uploads`,
-    );
+    xhr.open("POST", `${getBackendBaseURL()}/api/threads/${threadId}/uploads`);
 
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) {
