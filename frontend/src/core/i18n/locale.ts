@@ -16,6 +16,14 @@ export function getLocaleByLang(lang: string): Locale {
   return DEFAULT_LOCALE;
 }
 
+export function getLangByLocale(locale: Locale): string {
+  const parts = locale.split("-");
+  if (parts.length > 0 && typeof parts[0] === "string") {
+    return parts[0];
+  }
+  return locale;
+}
+
 export function normalizeLocale(locale: string | null | undefined): Locale {
   if (!locale) {
     return DEFAULT_LOCALE;

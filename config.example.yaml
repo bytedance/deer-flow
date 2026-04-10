@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 5
+config_version: 6
 
 # ============================================================================
 # Logging
@@ -50,6 +50,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: OpenAI model
   # - name: gpt-4
@@ -75,6 +79,41 @@ models:
   #   output_version: responses/v1
   #   supports_vision: true
 
+  # Example: Ollama (native provider — preserves thinking/reasoning content)
+  #
+  # IMPORTANT: Use langchain_ollama:ChatOllama instead of langchain_openai:ChatOpenAI
+  # for Ollama models. The OpenAI-compatible endpoint (/v1/chat/completions) does NOT
+  # return reasoning_content as a separate field — thinking content is either flattened
+  # into <think> tags or dropped entirely (ollama/ollama#15293). The native Ollama API
+  # (/api/chat) correctly separates thinking from response content.
+  #
+  # Install: cd backend && uv pip install 'deerflow-harness[ollama]'
+  #
+  # - name: qwen3-local
+  #   display_name: Qwen3 32B (Ollama)
+  #   use: langchain_ollama:ChatOllama
+  #   model: qwen3:32b
+  #   base_url: http://localhost:11434   # No /v1 suffix — uses native /api/chat
+  #   num_predict: 8192
+  #   temperature: 0.7
+  #   reasoning: true                    # Passes think:true to Ollama native API
+  #   supports_thinking: true
+  #   supports_vision: false
+  #
+  # - name: gemma4-local
+  #   display_name: Gemma 4 27B (Ollama)
+  #   use: langchain_ollama:ChatOllama
+  #   model: gemma4:27b
+  #   base_url: http://localhost:11434
+  #   num_predict: 8192
+  #   temperature: 0.7
+  #   reasoning: true
+  #   supports_thinking: true
+  #   supports_vision: true
+  #
+  # For Docker deployments, use host.docker.internal instead of localhost:
+  #   base_url: http://host.docker.internal:11434
+
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet
   #   display_name: Claude 3.5 Sonnet
@@ -88,6 +127,9 @@ models:
   #   when_thinking_enabled:
   #     thinking:
   #       type: enabled
+  #   when_thinking_disabled:
+  #     thinking:
+  #       type: disabled
 
   # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
@@ -120,6 +162,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
@@ -136,6 +182,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
@@ -153,6 +203,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: Novita AI (OpenAI-compatible)
   # Novita provides an OpenAI-compatible API with competitive pricing
@@ -173,6 +227,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: MiniMax (OpenAI-compatible) - International Edition
   # MiniMax provides high-performance models with 204K context window
@@ -313,6 +371,13 @@ tools:
   #   contents_max_characters: 1000
   #   # api_key: $EXA_API_KEY
 
+  # Web search tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.firecrawl.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $FIRECRAWL_API_KEY
+
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.
@@ -337,6 +402,12 @@ tools:
   #   fetch_time: 10
   #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
   #   navigation_timeout: 30
+
+  # Web fetch tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.firecrawl.tools:web_fetch_tool
+  #   # api_key: $FIRECRAWL_API_KEY
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
@@ -722,6 +793,36 @@ checkpointer:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
 #     allowed_users: []               # empty = allow all
+#
+#   wechat:
+#     enabled: false
+#     bot_token: $WECHAT_BOT_TOKEN
+#     ilink_bot_id: $WECHAT_ILINK_BOT_ID
+#     # Optional: allow first-time QR bootstrap when bot_token is absent
+#     qrcode_login_enabled: true
+#     # Optional: sent as iLink-App-Id header when provided
+#     ilink_app_id: ""
+#     # Optional: sent as SKRouteTag header when provided
+#     route_tag: ""
+#     allowed_users: []               # empty = allow all
+#     # Optional: long-polling timeout in seconds
+#     polling_timeout: 35
+#     # Optional: QR poll interval in seconds when qrcode_login_enabled is true
+#     qrcode_poll_interval: 2
+#     # Optional: QR bootstrap timeout in seconds
+#     qrcode_poll_timeout: 180
+#     # Optional: persist getupdates cursor under the gateway container volume
+#     state_dir: ./.deer-flow/wechat/state
+#     # Optional: max inbound image size in bytes before skipping download
+#     max_inbound_image_bytes: 20971520
+#     # Optional: max outbound image size in bytes before skipping upload
+#     max_outbound_image_bytes: 20971520
+#     # Optional: max inbound file size in bytes before skipping download
+#     max_inbound_file_bytes: 52428800
+#     # Optional: max outbound file size in bytes before skipping upload
+#     max_outbound_file_bytes: 52428800
+#     # Optional: allowed file extensions for regular file receive/send
+#     allowed_file_extensions: [".txt", ".md", ".pdf", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".log", ".zip", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf"]
 #
 #     # Optional: channel-level session overrides
 #     session:
