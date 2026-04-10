@@ -70,6 +70,7 @@ KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
 # services on the host Kubernetes node.  On Docker Desktop for macOS this
 # is ``host.docker.internal``; on Linux it may be the host's LAN IP.
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
+SANDBOX_ENV_SECRET = os.environ.get("SANDBOX_ENV_SECRET", "").strip()
 
 
 def join_host_path(base: str, *parts: str) -> str:
@@ -243,6 +244,18 @@ def _sandbox_url(node_port: int) -> str:
     return f"http://{NODE_HOST}:{node_port}"
 
 
+def _build_env_from_sources() -> list[k8s_client.V1EnvFromSource] | None:
+    """Return optional env_from sources for sandbox pods."""
+    if not SANDBOX_ENV_SECRET:
+        return None
+
+    return [
+        k8s_client.V1EnvFromSource(
+            secret_ref=k8s_client.V1SecretEnvSource(name=SANDBOX_ENV_SECRET),
+        )
+    ]
+
+
 def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     thread_id = _validate_thread_id(thread_id)
@@ -263,6 +276,7 @@ def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
                     name="sandbox",
                     image=SANDBOX_IMAGE,
                     image_pull_policy="IfNotPresent",
+                    env_from=_build_env_from_sources(),
                     ports=[
                         k8s_client.V1ContainerPort(
                             name="http",
