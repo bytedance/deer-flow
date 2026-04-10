@@ -171,7 +171,7 @@ export async function deleteUploadedFile(
   filename: string,
 ): Promise<{ success: boolean; message: string }> {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${filename}`,
+    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${encodeURIComponent(filename)}`,
     {
       method: "DELETE",
     },

@@ -21,6 +21,7 @@ import {
   useState,
   type ComponentProps,
 } from "react";
+import { toast } from "sonner";
 
 import {
   PromptInput,
@@ -264,7 +265,21 @@ export function InputBox({
     (file) => file.upload?.status === "error",
   );
   const hasBlockingAttachmentUploads =
-    hasPendingAttachmentUploads || hasFailedAttachmentUploads;
+    !isMock && (hasPendingAttachmentUploads || hasFailedAttachmentUploads);
+
+  useEffect(() => {
+    if (!isMock || attachmentFiles.length === 0) {
+      return;
+    }
+
+    attachments.clear();
+    toast.error(t.common.notAvailableInDemoMode);
+  }, [
+    attachmentFiles.length,
+    attachments,
+    isMock,
+    t.common.notAvailableInDemoMode,
+  ]);
 
   const cleanupUploadedAttachment = useCallback(
     async (filename: string) => {
@@ -455,7 +470,9 @@ export function InputBox({
         return;
       }
 
-      await onSubmit?.(message);
+      const messageForSubmit =
+        isMock && message.files.length > 0 ? { ...message, files: [] } : message;
+      await onSubmit?.(messageForSubmit);
       for (const attachment of attachmentFiles) {
         committedAttachmentIdsRef.current.add(attachment.id);
       }
@@ -464,6 +481,7 @@ export function InputBox({
       attachmentFiles,
       context,
       hasBlockingAttachmentUploads,
+      isMock,
       onContextChange,
       onSubmit,
       onStop,
@@ -618,7 +636,7 @@ export function InputBox({
     return () => controller.abort();
   }, [context.model_name, disabled, isMock, status, thread.messages, threadId]);
 
-  const showUploadingHint = isUploading || hasPendingAttachmentUploads;
+  const showUploadingHint = isUploading || (!isMock && hasPendingAttachmentUploads);
   const submitDisabled = (disabled ?? false) || hasBlockingAttachmentUploads;
 
   return (
@@ -1143,11 +1161,15 @@ function SuggestionList() {
 
 function AddAttachmentsButton({ className }: { className?: string }) {
   const { t } = useI18n();
+  const { isMock } = useThread();
   const attachments = usePromptInputAttachments();
   return (
-    <Tooltip content={t.inputBox.addAttachments}>
+    <Tooltip
+      content={isMock ? t.common.notAvailableInDemoMode : t.inputBox.addAttachments}
+    >
       <PromptInputButton
         className={cn("px-2!", className)}
+        disabled={isMock}
         onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />
