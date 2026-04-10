@@ -1,4 +1,17 @@
-"""Middleware for intercepting clarification requests and presenting them to the user."""
+"""Middleware for intercepting clarification requests and presenting them to the user.
+
+When ``clarification_enabled`` is *True* (the default, matching interactive UI
+sessions), the middleware interrupts execution so the frontend can display the
+question and collect a user response.
+
+When ``clarification_enabled`` is *False* (headless / API-driven runs), the
+middleware auto-responds with a ToolMessage that instructs the agent to proceed
+using its best judgment, keeping the run alive without human intervention.
+
+The flag is read from ``config.configurable["clarification_enabled"]`` at
+construction time and can be set per-run, just like ``thinking_enabled`` or
+``subagent_enabled``.
+"""
 
 import json
 import logging
@@ -14,48 +27,48 @@ from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
+# Auto-response sent to the agent when clarification is disabled.
+_AUTO_RESPONSE = (
+    "The user is not available for interactive clarification. "
+    "Proceed with your best judgment using the information already provided in the conversation. "
+    "Use web_search or other available tools to find any missing information."
+)
+
 
 class ClarificationMiddlewareState(AgentState):
-    """Compatible with the `ThreadState` schema."""
+    """Compatible with the ``ThreadState`` schema."""
 
     pass
 
 
 class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
-    """Intercepts clarification tool calls and interrupts execution to present questions to the user.
+    """Intercepts ``ask_clarification`` tool calls.
 
-    When the model calls the `ask_clarification` tool, this middleware:
-    1. Intercepts the tool call before execution
-    2. Extracts the clarification question and metadata
-    3. Formats a user-friendly message
-    4. Returns a Command that interrupts execution and presents the question
-    5. Waits for user response before continuing
+    Behaviour depends on the ``enabled`` flag:
 
-    This replaces the tool-based approach where clarification continued the conversation flow.
+    * **enabled=True** (default) — interrupts the run via ``Command(goto=END)``
+      so the frontend can present the question and resume later.
+    * **enabled=False** — returns a ``ToolMessage`` that auto-answers the
+      clarification, allowing the run to continue without human input.
+
+    Args:
+        enabled: Whether to actually interrupt for clarification.  When *False*
+            the middleware auto-responds and the agent continues autonomously.
     """
 
     state_schema = ClarificationMiddlewareState
 
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = enabled
+
+    # ── Helpers ──────────────────────────────────────────────────────────
+
     def _is_chinese(self, text: str) -> bool:
-        """Check if text contains Chinese characters.
-
-        Args:
-            text: Text to check
-
-        Returns:
-            True if text contains Chinese characters
-        """
+        """Check if text contains Chinese characters."""
         return any("\u4e00" <= char <= "\u9fff" for char in text)
 
     def _format_clarification_message(self, args: dict) -> str:
-        """Format the clarification arguments into a user-friendly message.
-
-        Args:
-            args: The tool call arguments containing clarification details
-
-        Returns:
-            Formatted message string
-        """
+        """Format the clarification arguments into a user-friendly message."""
         question = args.get("question", "")
         clarification_type = args.get("clarification_type", "missing_info")
         context = args.get("context")
@@ -86,65 +99,60 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         icon = type_icons.get(clarification_type, "❓")
 
-        # Build the message naturally
         message_parts = []
 
-        # Add icon and question together for a more natural flow
         if context:
-            # If there's context, present it first as background
             message_parts.append(f"{icon} {context}")
             message_parts.append(f"\n{question}")
         else:
-            # Just the question with icon
             message_parts.append(f"{icon} {question}")
 
-        # Add options in a cleaner format
         if options and len(options) > 0:
-            message_parts.append("")  # blank line for spacing
+            message_parts.append("")
             for i, option in enumerate(options, 1):
                 message_parts.append(f"  {i}. {option}")
 
         return "\n".join(message_parts)
 
-    def _handle_clarification(self, request: ToolCallRequest) -> Command:
-        """Handle clarification request and return command to interrupt execution.
+    # ── Core logic ───────────────────────────────────────────────────────
 
-        Args:
-            request: Tool call request
+    def _handle_clarification(self, request: ToolCallRequest) -> Command | ToolMessage:
+        """Handle a clarification request.
 
-        Returns:
-            Command that interrupts execution with the formatted clarification message
+        Returns a ``Command`` (interrupt) when enabled, or a ``ToolMessage``
+        (auto-answer) when disabled.
         """
-        # Extract clarification arguments
         args = request.tool_call.get("args", {})
         question = args.get("question", "")
-
-        logger.info("Intercepted clarification request")
-        logger.debug("Clarification question: %s", question)
-
-        # Format the clarification message
-        formatted_message = self._format_clarification_message(args)
-
-        # Get the tool call ID
         tool_call_id = request.tool_call.get("id", "")
 
-        # Create a ToolMessage with the formatted question
-        # This will be added to the message history
+        logger.info("Intercepted clarification request (enabled=%s)", self.enabled)
+        logger.debug("Clarification question: %s", question)
+
+        if not self.enabled:
+            # Headless / API mode — auto-respond so the agent continues.
+            logger.info("Clarification disabled — auto-responding")
+            return ToolMessage(
+                content=_AUTO_RESPONSE,
+                tool_call_id=tool_call_id,
+                name="ask_clarification",
+            )
+
+        # Interactive mode — interrupt and present the question to the user.
+        formatted_message = self._format_clarification_message(args)
+
         tool_message = ToolMessage(
             content=formatted_message,
             tool_call_id=tool_call_id,
             name="ask_clarification",
         )
 
-        # Return a Command that:
-        # 1. Adds the formatted tool message
-        # 2. Interrupts execution by going to __end__
-        # Note: We don't add an extra AIMessage here - the frontend will detect
-        # and display ask_clarification tool messages directly
         return Command(
             update={"messages": [tool_message]},
             goto=END,
         )
+
+    # ── Middleware interface ──────────────────────────────────────────────
 
     @override
     def wrap_tool_call(
@@ -152,20 +160,9 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
-        """Intercept ask_clarification tool calls and interrupt execution (sync version).
-
-        Args:
-            request: Tool call request
-            handler: Original tool execution handler
-
-        Returns:
-            Command that interrupts execution with the formatted clarification message
-        """
-        # Check if this is an ask_clarification tool call
+        """Intercept ``ask_clarification`` tool calls (sync version)."""
         if request.tool_call.get("name") != "ask_clarification":
-            # Not a clarification call, execute normally
             return handler(request)
-
         return self._handle_clarification(request)
 
     @override
@@ -174,18 +171,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
-        """Intercept ask_clarification tool calls and interrupt execution (async version).
-
-        Args:
-            request: Tool call request
-            handler: Original tool execution handler (async)
-
-        Returns:
-            Command that interrupts execution with the formatted clarification message
-        """
-        # Check if this is an ask_clarification tool call
+        """Intercept ``ask_clarification`` tool calls (async version)."""
         if request.tool_call.get("name") != "ask_clarification":
-            # Not a clarification call, execute normally
             return await handler(request)
-
         return self._handle_clarification(request)

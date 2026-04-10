@@ -265,8 +265,11 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
 
-    # ClarificationMiddleware should always be last
-    middlewares.append(ClarificationMiddleware())
+    # ClarificationMiddleware should always be last.
+    # When clarification_enabled is False (e.g. headless API runs), the middleware
+    # auto-responds instead of interrupting, keeping the run alive.
+    clarification_enabled = config.get("configurable", {}).get("clarification_enabled", True)
+    middlewares.append(ClarificationMiddleware(enabled=clarification_enabled))
     return middlewares
 
 
