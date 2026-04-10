@@ -29,6 +29,13 @@ export interface ListFilesResponse {
   count: number;
 }
 
+export function buildDeleteUploadedFileUrl(
+  threadId: string,
+  filename: string,
+) {
+  return `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${encodeURIComponent(filename)}`;
+}
+
 async function readErrorDetail(
   response: Response,
   fallback: string,
@@ -91,12 +98,9 @@ export async function deleteUploadedFile(
   threadId: string,
   filename: string,
 ): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${filename}`,
-    {
-      method: "DELETE",
-    },
-  );
+  const response = await fetch(buildDeleteUploadedFileUrl(threadId, filename), {
+    method: "DELETE",
+  });
 
   if (!response.ok) {
     throw new Error(await readErrorDetail(response, "Failed to delete file"));
