@@ -39,7 +39,7 @@ def is_host_bash_allowed(config=None) -> bool:
 
     sandbox_cfg = getattr(config, "sandbox", None)
     if sandbox_cfg is None:
-        return True
+        return False
     if not uses_local_sandbox_provider(config):
         return True
     return bool(getattr(sandbox_cfg, "allow_host_bash", False))
