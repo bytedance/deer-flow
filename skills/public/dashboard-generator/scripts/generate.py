@@ -270,10 +270,18 @@ def build_echarts_option(
         }
         if chart_type == "area":
             s["areaStyle"] = {}
-        if chart_type == "bar":
-            s["type"] = "bar"
-            s["orient"] = "horizontal" if chart_type == "bar" else None
         series_list.append(s)
+
+    # bar = horizontal bars (swap axes), column = vertical bars (default)
+    if chart_type == "bar":
+        return {
+            "title": {"text": title, "textStyle": {"color": theme["text"]}},
+            "tooltip": {"trigger": "axis"},
+            "color": json.loads(theme["palette"]),
+            "xAxis": {"type": "value", "axisLabel": {"color": theme["text_secondary"]}},
+            "yAxis": {"type": "category", "data": x_values, "axisLabel": {"color": theme["text_secondary"]}},
+            "series": series_list,
+        }
 
     return {
         "title": {"text": title, "textStyle": {"color": theme["text"]}},
@@ -603,9 +611,20 @@ function buildOption(spec, data) {{
     }});
     const s = {{name: yf, type: echartsType, data: yVals}};
     if (chartType === 'area') s.areaStyle = {{}};
-    if (chartType === 'bar') s.orient = 'horizontal';
     return s;
   }});
+
+  // bar = horizontal (swap axes), column = vertical (default)
+  if (chartType === 'bar') {{
+    return {{
+      title: {{text: title, textStyle: {{color: themeColors.text}}}},
+      tooltip: {{trigger: 'axis'}},
+      color: themePalette,
+      xAxis: {{type: 'value', axisLabel: {{color: themeColors.textSecondary}}}},
+      yAxis: {{type: 'category', data: xValues, axisLabel: {{color: themeColors.textSecondary}}}},
+      series: series
+    }};
+  }}
 
   return {{
     title: {{text: title, textStyle: {{color: themeColors.text}}}},
