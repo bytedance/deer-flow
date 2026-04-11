@@ -180,6 +180,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             files.append(
                 {
                     "filename": filename,
+                    "stored_filename": stored_filename,
                     "size": int(f.get("size") or 0),
                     "path": f"/mnt/user-data/uploads/{stored_filename}",
                     "extension": Path(filename).suffix,
@@ -231,11 +232,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
 
         # Collect historical files from the uploads directory (all except the new ones)
-        new_filenames = {f["filename"] for f in new_files}
+        new_stored_filenames = {f["stored_filename"] for f in new_files}
         historical_files: list[dict] = []
         if uploads_dir and uploads_dir.exists():
             for file_path in sorted(uploads_dir.iterdir()):
-                if file_path.is_file() and file_path.name not in new_filenames:
+                if file_path.is_file() and file_path.name not in new_stored_filenames:
                     stat = file_path.stat()
                     outline, preview = _extract_outline_for_file(file_path)
                     historical_files.append(
@@ -252,7 +253,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         # Attach outlines to new files as well
         if uploads_dir:
             for file in new_files:
-                phys_path = uploads_dir / file["filename"]
+                phys_path = uploads_dir / file["stored_filename"]
                 outline, preview = _extract_outline_for_file(phys_path)
                 file["outline"] = outline
                 file["outline_preview"] = preview

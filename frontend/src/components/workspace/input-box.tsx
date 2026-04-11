@@ -507,6 +507,24 @@ export function InputBox({
       setFollowupsHidden(false);
       setFollowupsLoading(false);
 
+      const submitPreparedMessage = async (nextMessage: PromptInputMessage) => {
+        const messageForSubmit =
+          isMock && nextMessage.files.length > 0
+            ? { ...nextMessage, files: [] }
+            : nextMessage;
+        for (const attachment of attachmentFiles) {
+          committedAttachmentIdsRef.current.add(attachment.id);
+        }
+        try {
+          await onSubmit?.(messageForSubmit);
+        } catch (error) {
+          for (const attachment of attachmentFiles) {
+            committedAttachmentIdsRef.current.delete(attachment.id);
+          }
+          throw error;
+        }
+      };
+
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
       if (resolvedModelName && context.model_name !== resolvedModelName) {
@@ -518,25 +536,15 @@ export function InputBox({
             selectedModel?.supports_thinking ?? false,
           ),
         });
-        setTimeout(() => {
-          void onSubmit?.(message);
-        }, 0);
+        await new Promise<void>((resolve, reject) => {
+          setTimeout(() => {
+            void submitPreparedMessage(message).then(resolve, reject);
+          }, 0);
+        });
         return;
       }
 
-      const messageForSubmit =
-        isMock && message.files.length > 0 ? { ...message, files: [] } : message;
-      for (const attachment of attachmentFiles) {
-        committedAttachmentIdsRef.current.add(attachment.id);
-      }
-      try {
-        await onSubmit?.(messageForSubmit);
-      } catch (error) {
-        for (const attachment of attachmentFiles) {
-          committedAttachmentIdsRef.current.delete(attachment.id);
-        }
-        throw error;
-      }
+      await submitPreparedMessage(message);
     },
     [
       attachmentFiles,
