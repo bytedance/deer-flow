@@ -295,7 +295,7 @@ def render_chart(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
             "series": series,
         }
 
-    option_json = json.dumps(option)
+    option_json = json.dumps(option).replace("</script", r"<\/script")
 
     return (
         f'<div style="background:{theme["card_bg"]};border:1px solid {theme["border"]};'

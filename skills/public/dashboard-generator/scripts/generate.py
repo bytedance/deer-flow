@@ -497,7 +497,8 @@ def generate_html(
 
     filter_html = render_filter_html(filters, data, theme)
     charts_html = render_chart_grid_html(charts, data, theme, layout)
-    data_json = json.dumps(data, default=str, ensure_ascii=False)
+    raw_data_json = json.dumps(data, default=str, ensure_ascii=False)
+    data_json = raw_data_json.replace("</script", r"<\/script")
 
     # Build chart spec definitions for client-side filtering
     chart_specs_js = "{"
@@ -511,7 +512,7 @@ def generate_html(
             "limit": c.get("limit"),
             "columns": c.get("columns", []),
         }}
-        chart_specs_js += f'"{cid}": {json.dumps(spec)},'
+        chart_specs_js += f'"{cid}": {json.dumps(spec).replace("</script", r"<\/script")},'
     chart_specs_js += "}"
 
     theme_palette_json = theme["palette"]
