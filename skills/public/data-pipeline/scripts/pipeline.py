@@ -234,19 +234,26 @@ def action_trim_strings(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 
 def action_normalize_dates(con: duckdb.DuckDBPyConnection, step: dict) -> str:
-    """Parse date columns into a standard format."""
+    """Parse date columns into a standard format using strptime."""
     table = validate_identifier(step["table"], "table name")
     columns = step["columns"]
     for c in columns:
         validate_identifier(c, "column name")
-    step.get("format", "%Y-%m-%d")  # date format hint
+    fmt = step.get("format", "%Y-%m-%d")
 
     all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]).fetchall()
+
+    # Escape single quotes in format string to prevent SQL injection
+    safe_fmt = fmt.replace("'", "''")
 
     select_parts = []
     for (col_name,) in all_cols:
         if col_name in columns:
-            select_parts.append(f'TRY_CAST("{col_name}" AS DATE) AS "{col_name}"')
+            # Use try_strptime with the provided format, then cast to DATE
+            # Falls back to TRY_CAST for values that don't match the format
+            select_parts.append(
+                f'COALESCE(TRY_CAST(try_strptime("{col_name}", \'{safe_fmt}\') AS DATE), TRY_CAST("{col_name}" AS DATE)) AS "{col_name}"'
+            )
         else:
             select_parts.append(f'"{col_name}"')
 
