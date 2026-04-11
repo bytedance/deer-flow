@@ -70,7 +70,9 @@ if [ "$FAILED" -eq 0 ]; then
     echo ""
     echo "You can now run:"
     echo "  make install  - Install project dependencies"
-    echo "  make config   - Generate local config files"
+    echo "  make setup    - Create a minimal working config (recommended)"
+    echo "  make config   - Copy the full config template (manual setup)"
+    echo "  make doctor   - Verify config and dependency health"
     echo "  make dev      - Start development server"
     echo "  make start    - Start production server"
 else

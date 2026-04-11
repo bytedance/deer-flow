@@ -36,6 +36,11 @@ services:
       #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
       - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
       - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+      # Production: use PVC instead of hostPath to avoid data loss on node failure.
+      # When set, hostPath vars above are ignored for the corresponding volume.
+      # USERDATA_PVC_NAME uses subPath (threads/{thread_id}/user-data) automatically.
+      # - SKILLS_PVC_NAME=deer-flow-skills-pvc
+      # - USERDATA_PVC_NAME=deer-flow-userdata-pvc
       - KUBECONFIG_PATH=/root/.kube/config
       - NODE_HOST=host.docker.internal
       # Override K8S API server URL since kubeconfig uses 127.0.0.1

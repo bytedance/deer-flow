@@ -262,21 +262,25 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         files_message = self._create_files_message(new_files, historical_files)
 
         # Extract original content - handle both string and list formats
-        original_content = ""
-        if isinstance(last_message.content, str):
-            original_content = last_message.content
-        elif isinstance(last_message.content, list):
-            text_parts = []
-            for block in last_message.content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-            original_content = "\n".join(text_parts)
+        original_content = last_message.content
+        if isinstance(original_content, str):
+            # Simple case: string content, just prepend files message
+            updated_content = f"{files_message}\n\n{original_content}"
+        elif isinstance(original_content, list):
+            # Complex case: list content (multimodal), preserve all blocks
+            # Prepend files message as the first text block
+            files_block = {"type": "text", "text": f"{files_message}\n\n"}
+            # Keep all original blocks (including images)
+            updated_content = [files_block, *original_content]
+        else:
+            # Other types, preserve as-is
+            updated_content = original_content
 
         # Create new message with combined content.
         # Preserve additional_kwargs (including files metadata) so the frontend
         # can read structured file info from the streamed message.
         updated_message = HumanMessage(
-            content=f"{files_message}\n\n{original_content}",
+            content=updated_content,
             id=last_message.id,
             additional_kwargs=last_message.additional_kwargs,
         )
