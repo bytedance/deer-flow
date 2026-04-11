@@ -565,6 +565,10 @@ You have access to skills that provide optimized workflows for specific tasks. E
 5. Follow the skill's instructions precisely
 
 **Skills are located at:** {container_base_path}
+Use the `<location>` path shown for each skill when reading it. In Docker deployments,
+paths such as `/app/skills` belong to DeerFlow service containers and are not readable
+from the agent sandbox; the sandbox-facing skills path is the configured container path
+above, normally `/mnt/skills`.
 {skill_evolution_section}
 {skills_list}
 

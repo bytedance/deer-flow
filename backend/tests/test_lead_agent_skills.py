@@ -6,15 +6,16 @@ from deerflow.config.agents_config import AgentConfig
 from deerflow.skills.types import Skill
 
 
-def _make_skill(name: str) -> Skill:
+def _make_skill(name: str, *, category: str = "public", relative_path: Path | None = None) -> Skill:
+    relative_path = relative_path or Path(name)
     return Skill(
         name=name,
         description=f"Description for {name}",
         license="MIT",
-        skill_dir=Path(f"/tmp/{name}"),
-        skill_file=Path(f"/tmp/{name}/SKILL.md"),
-        relative_path=Path(name),
-        category="public",
+        skill_dir=Path(f"/tmp/{category}") / relative_path,
+        skill_file=Path(f"/tmp/{category}") / relative_path / "SKILL.md",
+        relative_path=relative_path,
+        category=category,
         enabled=True,
     )
 
@@ -43,6 +44,28 @@ def test_get_skills_prompt_section_returns_skills(monkeypatch):
     assert "skill1" in result
     assert "skill2" not in result
     assert "[built-in]" in result
+
+
+def test_get_skills_prompt_section_uses_sandbox_path_for_custom_skills(monkeypatch):
+    skill = _make_skill(
+        "scenic-spot-analytics",
+        category="custom",
+        relative_path=Path("scenic-spot-analytics"),
+    )
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: [skill])
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            skill_evolution=SimpleNamespace(enabled=False),
+        ),
+    )
+
+    result = get_skills_prompt_section(available_skills=None)
+
+    assert "[custom, editable]" in result
+    assert "<location>/mnt/skills/custom/scenic-spot-analytics/SKILL.md</location>" in result
+    assert "<location>/app/skills/custom/scenic-spot-analytics/SKILL.md</location>" not in result
 
 
 def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(monkeypatch):
