@@ -363,6 +363,98 @@ class TestLocalSandboxProviderMounts:
 
         assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills"]
 
+    def test_write_file_resolves_container_paths_in_content(self, tmp_path):
+        """write_file should replace container paths in file content with local paths."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
+            ],
+        )
+        sandbox.write_file(
+            "/mnt/data/script.py",
+            'import pathlib\npath = "/mnt/data/output"\nprint(path)',
+        )
+        written = (data_dir / "script.py").read_text()
+        # Container path should be resolved to local path (forward slashes)
+        assert str(data_dir).replace("\\", "/") in written
+        assert "/mnt/data/output" not in written
+
+    def test_write_file_uses_forward_slashes_on_windows_paths(self, tmp_path):
+        """Resolved paths in content should always use forward slashes."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
+            ],
+        )
+        sandbox.write_file(
+            "/mnt/data/config.py",
+            'DATA_DIR = "/mnt/data/files"',
+        )
+        written = (data_dir / "config.py").read_text()
+        # Must not contain backslashes that could break escape sequences
+        assert "\\" not in written.split("DATA_DIR = ")[1].split("\n")[0]
+
+    def test_read_file_reverse_resolves_local_paths_in_agent_written_files(self, tmp_path):
+        """read_file should convert local paths back to container paths in agent-written files."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
+            ],
+        )
+        # Use write_file so the path is tracked as agent-written
+        sandbox.write_file("/mnt/data/info.txt", "File located at: /mnt/data/info.txt")
+
+        content = sandbox.read_file("/mnt/data/info.txt")
+        assert "/mnt/data/info.txt" in content
+
+    def test_read_file_does_not_reverse_resolve_non_agent_files(self, tmp_path):
+        """read_file should NOT rewrite paths in user-uploaded or external files."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
+            ],
+        )
+        # Write directly to filesystem (simulates user upload or external tool output)
+        local_path = str(data_dir).replace("\\", "/")
+        (data_dir / "config.yml").write_text(f"output_dir: {local_path}/outputs")
+
+        content = sandbox.read_file("/mnt/data/config.yml")
+        # Content should be returned as-is, NOT reverse-resolved
+        assert local_path in content
+
+    def test_write_then_read_roundtrip(self, tmp_path):
+        """Container paths survive a write → read roundtrip."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
+            ],
+        )
+        original = 'cfg = {"path": "/mnt/data/config.json", "flag": true}'
+        sandbox.write_file("/mnt/data/settings.py", original)
+        result = sandbox.read_file("/mnt/data/settings.py")
+        # The container path should be preserved through roundtrip
+        assert "/mnt/data/config.json" in result
+
     def test_setup_path_mappings_normalizes_container_path_trailing_slash(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
