@@ -34,6 +34,13 @@ export interface UploadFilesOptions {
   signal?: AbortSignal;
 }
 
+export class UploadedFileNotFoundError extends Error {
+  constructor(message = "Uploaded file already removed") {
+    super(message);
+    this.name = "UploadedFileNotFoundError";
+  }
+}
+
 async function readErrorDetail(
   response: Response,
   fallback: string,
@@ -178,6 +185,9 @@ export async function deleteUploadedFile(
   );
 
   if (!response.ok) {
+    if (response.status === 404) {
+      throw new UploadedFileNotFoundError();
+    }
     throw new Error(await readErrorDetail(response, "Failed to delete file"));
   }
 

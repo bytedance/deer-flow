@@ -502,11 +502,21 @@ export function useThreadStream({
                         ...humanMessage,
                         additional_kwargs: {
                           ...humanMessage.additional_kwargs,
-                          files: existingFiles.map((file, index) => ({
-                            ...file,
-                            status: "uploading" as const,
-                            progress: fileProgresses[index] ?? progress,
-                          })),
+                          files: existingFiles.map((file, index) => {
+                            if (file.status === "uploaded") {
+                              return {
+                                ...file,
+                                status: "uploaded" as const,
+                                progress: 100,
+                              };
+                            }
+
+                            return {
+                              ...file,
+                              status: "uploading" as const,
+                              progress: fileProgresses[index] ?? progress,
+                            };
+                          }),
                         },
                       },
                       ...messages.slice(1),

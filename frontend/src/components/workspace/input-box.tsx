@@ -64,6 +64,7 @@ import { textOfMessage } from "@/core/threads/utils";
 import {
   createDraftUploadFilename,
   deleteUploadedFile,
+  UploadedFileNotFoundError,
   uploadFiles,
 } from "@/core/uploads";
 import { cn } from "@/lib/utils";
@@ -299,6 +300,9 @@ export function InputBox({
           await deleteUploadedFile(threadId, filename);
           return;
         } catch (error) {
+          if (error instanceof UploadedFileNotFoundError) {
+            return;
+          }
           lastError = error;
         }
       }
@@ -522,9 +526,16 @@ export function InputBox({
 
       const messageForSubmit =
         isMock && message.files.length > 0 ? { ...message, files: [] } : message;
-      await onSubmit?.(messageForSubmit);
       for (const attachment of attachmentFiles) {
         committedAttachmentIdsRef.current.add(attachment.id);
+      }
+      try {
+        await onSubmit?.(messageForSubmit);
+      } catch (error) {
+        for (const attachment of attachmentFiles) {
+          committedAttachmentIdsRef.current.delete(attachment.id);
+        }
+        throw error;
       }
     },
     [
