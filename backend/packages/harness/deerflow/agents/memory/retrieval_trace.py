@@ -163,14 +163,14 @@ def emit_retrieval_trace(
 
             with path.open("a", encoding="utf-8") as file:
                 file.write(payload_line)
+
+        logger.debug(
+            "Persisted memory retrieval trace trace_id=%s path=%s selected=%d dropped=%d bytes=%d",
+            trace.trace_id,
+            path,
+            trace.selected_count,
+            trace.dropped_count,
+            len(payload_line.encode("utf-8")),
+        )
     except OSError as exc:
         logger.warning("Failed to persist memory retrieval trace to %s: %s", path, exc)
-
-    logger.debug(
-        "Persisted memory retrieval trace trace_id=%s path=%s selected=%d dropped=%d bytes=%d",
-        trace.trace_id,
-        path,
-        trace.selected_count,
-        trace.dropped_count,
-        len(payload_line.encode("utf-8")),
-    )
