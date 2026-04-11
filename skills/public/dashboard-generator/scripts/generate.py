@@ -205,12 +205,12 @@ def render_kpi_card(kpi: dict, value: float | int | None, theme: dict) -> str:
     </div>"""
 
 
-def render_echarts_option(
+def build_echarts_option(
     chart_spec: dict,
     data: list[dict],
     theme: dict,
-) -> str:
-    """Build an ECharts option JSON string for a chart spec."""
+) -> dict:
+    """Build an ECharts option dict for a chart spec from the given data."""
     chart_type = chart_spec.get("type", "line")
     x_field = chart_spec.get("x", "")
     y_fields = chart_spec.get("y", [])
@@ -219,7 +219,6 @@ def render_echarts_option(
     echarts_type = ECHART_TYPE_MAP.get(chart_type, "line")
 
     if chart_type in ("pie", "donut"):
-        # Aggregate data by x field
         agg: dict[str, float] = {}
         for row in data:
             key = str(row.get(x_field, ""))
@@ -230,22 +229,20 @@ def render_echarts_option(
             agg[key] = agg.get(key, 0) + val
 
         pie_data = [{"name": k, "value": v} for k, v in agg.items()]
-        radius = '["40%","70%"]' if chart_type == "donut" else '"70%"'
-        return json.dumps(
-            {
-                "title": {"text": title, "textStyle": {"color": theme["text"]}},
-                "tooltip": {"trigger": "item"},
-                "color": json.loads(theme["palette"]),
-                "series": [
-                    {
-                        "type": "pie",
-                        "radius": json.loads(radius),
-                        "data": pie_data,
-                        "emphasis": {"itemStyle": {"shadowBlur": 10, "shadowOffsetX": 0, "shadowColor": "rgba(0,0,0,0.5)"}},
-                    }
-                ],
-            }
-        )
+        radius = ["40%", "70%"] if chart_type == "donut" else ["0%", "70%"]
+        return {
+            "title": {"text": title, "textStyle": {"color": theme["text"]}},
+            "tooltip": {"trigger": "item"},
+            "color": json.loads(theme["palette"]),
+            "series": [
+                {
+                    "type": "pie",
+                    "radius": radius,
+                    "data": pie_data,
+                    "emphasis": {"itemStyle": {"shadowBlur": 10, "shadowOffsetX": 0, "shadowColor": "rgba(0,0,0,0.5)"}},
+                }
+            ],
+        }
 
     # Cartesian charts (line, area, bar, column, scatter)
     x_values: list[str] = []
@@ -278,7 +275,7 @@ def render_echarts_option(
             s["orient"] = "horizontal" if chart_type == "bar" else None
         series_list.append(s)
 
-    option: dict = {
+    return {
         "title": {"text": title, "textStyle": {"color": theme["text"]}},
         "tooltip": {"trigger": "axis"},
         "color": json.loads(theme["palette"]),
@@ -287,7 +284,14 @@ def render_echarts_option(
         "series": series_list,
     }
 
-    return json.dumps(option)
+
+def render_echarts_option(
+    chart_spec: dict,
+    data: list[dict],
+    theme: dict,
+) -> str:
+    """Build an ECharts option JSON string for a chart spec."""
+    return json.dumps(build_echarts_option(chart_spec, data, theme))
 
 
 def render_filter_html(filters: list[dict], data: list[dict], theme: dict) -> str:
@@ -487,6 +491,23 @@ def generate_html(
     charts_html = render_chart_grid_html(charts, data, theme, layout)
     data_json = json.dumps(data, default=str, ensure_ascii=False)
 
+    # Build chart spec definitions for client-side filtering
+    chart_specs_js = "{"
+    for c in charts:
+        cid = c.get("id", "chart")
+        spec = {{
+            "type": c.get("type", "line"),
+            "x": c.get("x", ""),
+            "y": c.get("y", []),
+            "title": c.get("title", ""),
+            "limit": c.get("limit"),
+            "columns": c.get("columns", []),
+        }}
+        chart_specs_js += f'"{cid}": {json.dumps(spec)},'
+    chart_specs_js += "}"
+
+    theme_palette_json = theme["palette"]
+
     return f"""<!DOCTYPE html>
 <html lang="auto">
 <head>
@@ -529,17 +550,93 @@ def generate_html(
 {charts_html}
 <script src="{ECHARTS_CDN}"></script>
 <script>
-// Dashboard data and initialization
+// Dashboard data and chart specs
 const dashboardData = {data_json};
+const chartSpecs = {chart_specs_js};
+const themePalette = {theme_palette_json};
+const themeColors = {{
+  text: {json.dumps(theme["text"])},
+  textSecondary: {json.dumps(theme["text_secondary"])}
+}};
+
+// Build an ECharts option from a chart spec + data
+function buildOption(spec, data) {{
+  const chartType = spec.type || 'line';
+  const xField = spec.x || '';
+  const yFields = spec.y || [];
+  const title = spec.title || '';
+  const typeMap = {{line:'line',area:'line',bar:'bar',column:'bar',pie:'pie',donut:'pie',scatter:'scatter',treemap:'treemap',radar:'radar',funnel:'funnel'}};
+  const echartsType = typeMap[chartType] || 'line';
+
+  if (chartType === 'pie' || chartType === 'donut') {{
+    const agg = {{}};
+    data.forEach(row => {{
+      const key = String(row[xField] || '');
+      let val = 0;
+      yFields.forEach(yf => {{ const v = row[yf]; val += v != null ? Number(v) : 0; }});
+      agg[key] = (agg[key] || 0) + val;
+    }});
+    const pieData = Object.entries(agg).map(([k,v]) => ({{name:k,value:v}}));
+    const radius = chartType === 'donut' ? ['40%','70%'] : ['0%','70%'];
+    return {{
+      title: {{text: title, textStyle: {{color: themeColors.text}}}},
+      tooltip: {{trigger: 'item'}},
+      color: themePalette,
+      series: [{{type: 'pie', radius: radius, data: pieData,
+        emphasis: {{itemStyle: {{shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0,0,0,0.5)'}}}}}}]
+    }};
+  }}
+
+  // Cartesian charts
+  const xValues = [];
+  const seen = new Set();
+  data.forEach(row => {{
+    const xv = String(row[xField] || '');
+    if (!seen.has(xv)) {{ xValues.push(xv); seen.add(xv); }}
+  }});
+
+  const series = yFields.map(yf => {{
+    const yVals = xValues.map(xv => {{
+      const matched = data.find(r => String(r[xField] || '') === xv);
+      const v = matched ? matched[yf] : 0;
+      return v != null ? Number(v) : 0;
+    }});
+    const s = {{name: yf, type: echartsType, data: yVals}};
+    if (chartType === 'area') s.areaStyle = {{}};
+    if (chartType === 'bar') s.orient = 'horizontal';
+    return s;
+  }});
+
+  return {{
+    title: {{text: title, textStyle: {{color: themeColors.text}}}},
+    tooltip: {{trigger: 'axis'}},
+    color: themePalette,
+    xAxis: {{type: 'category', data: xValues, axisLabel: {{color: themeColors.textSecondary}}}},
+    yAxis: {{type: 'value', axisLabel: {{color: themeColors.textSecondary}}}},
+    series: series
+  }};
+}}
+
+// Update a table card with filtered data
+function updateTableCard(chartId, spec, data) {{
+  const container = document.getElementById(chartId);
+  if (!container) return;
+  const columns = spec.columns && spec.columns.length > 0 ? spec.columns : (data.length > 0 ? Object.keys(data[0]) : []);
+  const limit = spec.limit || data.length;
+  const rows = data.slice(0, limit);
+  const tbody = container.querySelector('tbody');
+  if (tbody) {{
+    tbody.innerHTML = rows.map(row => '<tr>' + columns.map(c => '<td>' + (row[c] != null ? row[c] : '') + '</td>').join('') + '</tr>').join('');
+  }}
+}}
 
 // Initialize all ECharts instances
 function initCharts() {{
-  document.querySelectorAll('script[data-chart-id]').forEach(el => {{
-    const chartId = el.getAttribute('data-chart-id');
+  Object.keys(chartSpecs).forEach(chartId => {{
     const dom = document.getElementById(chartId + '-chart');
     if (!dom) return;
     const chart = echarts.init(dom);
-    const option = JSON.parse(el.textContent);
+    const option = buildOption(chartSpecs[chartId], dashboardData);
     chart.setOption(option);
     window.addEventListener('resize', () => chart.resize());
   }});
@@ -573,16 +670,18 @@ function applyFilters() {{
     return true;
   }});
 
-  // Update charts with filtered data
-  document.querySelectorAll('script[data-chart-id]').forEach(el => {{
-    const chartId = el.getAttribute('data-chart-id');
+  // Rebuild each chart with filtered data
+  Object.keys(chartSpecs).forEach(chartId => {{
+    const spec = chartSpecs[chartId];
+    if (spec.type === 'table') {{
+      updateTableCard(chartId, spec, filtered);
+      return;
+    }}
     const dom = document.getElementById(chartId + '-chart');
     if (!dom) return;
     const chart = echarts.getInstanceByDom(dom);
     if (chart) {{
-      // Note: For advanced filtering, re-generate the chart option server-side
-      chart.showLoading({{ text: 'Filter applied — re-generate dashboard for updated data' }});
-      setTimeout(() => chart.hideLoading(), 2000);
+      chart.setOption(buildOption(spec, filtered), true);
     }}
   }});
 }}
