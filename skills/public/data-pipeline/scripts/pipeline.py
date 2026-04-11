@@ -404,6 +404,11 @@ def action_sample(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     n = step.get("n")
     fraction = step.get("fraction")
 
+    if not n and not fraction:
+        raise ValueError("action_sample requires exactly one of 'n' or 'fraction'")
+    if n and fraction:
+        raise ValueError("action_sample requires exactly one of 'n' or 'fraction', not both")
+
     if n:
         con.execute(f'CREATE OR REPLACE TABLE "{output_table}" AS SELECT * FROM "{table}" USING SAMPLE {int(n)} ROWS')
     elif fraction:
