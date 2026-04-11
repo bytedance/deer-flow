@@ -11,6 +11,10 @@ from deerflow.agents.middlewares.llm_error_handling_middleware import (
     LLMErrorHandlingMiddleware,
 )
 
+SLEEP_PATCH_TARGET = (
+    "deerflow.agents.middlewares.llm_error_handling_middleware.asyncio.sleep"
+)
+
 
 class FakeError(Exception):
     def __init__(
@@ -26,7 +30,11 @@ class FakeError(Exception):
         self.status_code = status_code
         self.code = code
         self.body = body
-        self.response = SimpleNamespace(status_code=status_code, headers=headers or {}) if status_code is not None or headers else None
+        self.response = (
+            SimpleNamespace(status_code=status_code, headers=headers or {})
+            if status_code is not None or headers
+            else None
+        )
 
 
 def _build_middleware(**attrs: int) -> LLMErrorHandlingMiddleware:
@@ -39,7 +47,11 @@ def _build_middleware(**attrs: int) -> LLMErrorHandlingMiddleware:
 def test_async_model_call_retries_busy_provider_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=25, retry_cap_delay_ms=25)
+    middleware = _build_middleware(
+        retry_max_attempts=3,
+        retry_base_delay_ms=25,
+        retry_cap_delay_ms=25,
+    )
     attempts = 0
     waits: list[float] = []
     events: list[dict] = []
@@ -54,10 +66,12 @@ def test_async_model_call_retries_busy_provider_then_succeeds(
         nonlocal attempts
         attempts += 1
         if attempts < 3:
-            raise FakeError("当前服务集群负载较高，请稍后重试，感谢您的耐心等待。 (2064)")
+            raise FakeError(
+                "当前服务集群负载较高，请稍后重试，感谢您的耐心等待。 (2064)"
+            )
         return AIMessage(content="ok")
 
-    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(SLEEP_PATCH_TARGET, fake_sleep)
     monkeypatch.setattr(
         "langgraph.config.get_stream_writer",
         fake_writer,
@@ -91,12 +105,18 @@ def test_async_model_call_returns_user_message_for_quota_errors() -> None:
 def test_async_model_call_retries_incomplete_chunked_read_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=25, retry_cap_delay_ms=25)
+    middleware = _build_middleware(
+        retry_max_attempts=2,
+        retry_base_delay_ms=25,
+        retry_cap_delay_ms=25,
+    )
     attempts = 0
     waits: list[float] = []
 
     class ReadError(Exception):
         pass
+
+    ReadError.__module__ = "httpx"
 
     async def fake_sleep(delay: float) -> None:
         waits.append(delay)
@@ -110,7 +130,7 @@ def test_async_model_call_retries_incomplete_chunked_read_then_succeeds(
             )
         return AIMessage(content="ok")
 
-    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(SLEEP_PATCH_TARGET, fake_sleep)
 
     result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
 
@@ -121,7 +141,11 @@ def test_async_model_call_retries_incomplete_chunked_read_then_succeeds(
 
 
 def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
-    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    middleware = _build_middleware(
+        retry_max_attempts=2,
+        retry_base_delay_ms=10,
+        retry_cap_delay_ms=10,
+    )
     waits: list[float] = []
     attempts = 0
 
