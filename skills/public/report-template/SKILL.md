@@ -16,7 +16,7 @@ This skill creates reusable report templates that can be filled with data to pro
 - **Custom template creation** — define your own sections and data bindings
 - **Section types** — KPI cards, charts, data tables, text blocks
 - **Data binding** — SQL queries against uploaded files via DuckDB
-- **Self-contained HTML output** — inline ECharts, no server required
+- **HTML output** — loads Apache ECharts from CDN, requires internet to open
 - **Theme support** — light, dark, corporate
 - **Parameter placeholders** — `{{key}}` syntax for recurring reports
 

@@ -15,7 +15,7 @@ This skill generates complete, interactive HTML dashboards from structured data.
 - **KPI summary cards** with formatting (currency, number, percent) and trend indicators
 - **Interactive filters** — dropdown selects and date range pickers with client-side filtering
 - **Responsive design** — adapts to desktop and tablet viewports
-- **Self-contained single HTML file** — inline Apache ECharts, no server required
+- **Single HTML file** — loads Apache ECharts from CDN, requires internet to open
 - **Multi-source data** — supports CSV/Excel files via DuckDB or pre-processed JSON
 - **Theme presets** — light, dark, and corporate
 
@@ -262,14 +262,14 @@ Use `present_files` to share `/mnt/user-data/outputs/sales-dashboard.html`.
 
 After generation:
 
-- The HTML file is fully self-contained — open in any browser, no server needed
+- The HTML file requires an internet connection to load Apache ECharts from CDN on first open
 - Share the file with the user using `present_files`
 - Suggest iterative refinements: add charts, change theme, adjust layout
 - If the user wants a single chart, use the `chart-visualization` skill instead
 
 ## Notes
 
-- Generated HTML uses inline Apache ECharts — no internet required
+- Generated HTML loads Apache ECharts from jsDelivr CDN — internet connection required
 - For large datasets (100K+ rows), aggregation is handled via DuckDB before rendering
 - All data is embedded in the HTML file — be mindful of file size with very large datasets
 - Supports Chinese and English UI — auto-detected from the dashboard title language
