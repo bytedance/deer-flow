@@ -893,6 +893,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+ollama = [
+    { name = "langchain-ollama" },
+]
 postgres = [
     { name = "asyncpg" },
     { name = "langgraph-checkpoint-postgres" },
@@ -945,10 +948,14 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.8.0" },
 ]
 <<<<<<< HEAD
+<<<<<<< HEAD
 provides-extras = ["ollama", "pymupdf"]
 =======
 provides-extras = ["postgres", "pymupdf"]
 >>>>>>> 185f5649 (feat(persistence): add unified persistence layer with event store, token tracking, and feedback (#1930))
+=======
+provides-extras = ["ollama", "postgres", "pymupdf"]
+>>>>>>> 6cbec134 (feat(dependencies): add langchain-ollama and ollama packages with optional dependencies)
 
 [[package]]
 name = "defusedxml"
