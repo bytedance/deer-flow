@@ -272,8 +272,15 @@ def _assemble_from_features(
 
     # --- [12] LoopDetection (always) ---
     from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+    from deerflow.config.loop_detection_config import LoopDetectionConfig
 
-    chain.append(LoopDetectionMiddleware())
+    loop_cfg = feat.loop_detection if isinstance(feat.loop_detection, LoopDetectionConfig) else LoopDetectionConfig()
+    chain.append(LoopDetectionMiddleware(
+        warn_threshold=loop_cfg.warn_threshold,
+        hard_limit=loop_cfg.hard_limit,
+        window_size=loop_cfg.window_size,
+        max_tracked_threads=loop_cfg.max_tracked_threads,
+    ))
 
     # --- [13] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())

@@ -704,6 +704,19 @@ memory:
   max_injection_tokens: 2000 # Maximum tokens for memory injection
 
 # ============================================================================
+# Loop Detection Configuration
+# ============================================================================
+# Tune the LoopDetectionMiddleware thresholds that prevent the agent from
+# calling the same tool with the same arguments indefinitely.
+# Higher values reduce false positives on retry-heavy tasks or models with
+# smaller context windows (e.g. DeepSeek).
+loop_detection:
+  warn_threshold: 3      # Inject a warning after N identical tool call sets (default: 3)
+  hard_limit: 5          # Force-stop tool calls after N identical sets (default: 5)
+  window_size: 20        # Sliding window of recent tool call hashes per thread (default: 20)
+  max_tracked_threads: 100  # Max concurrent threads tracked before LRU eviction (default: 100)
+
+# ============================================================================
 # Skill Self-Evolution Configuration
 # ============================================================================
 # Allow the agent to autonomously create and improve skills in skills/custom/.

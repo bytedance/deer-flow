@@ -5,10 +5,12 @@ Pure data classes and decorators — no I/O, no side effects.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from langchain.agents.middleware import AgentMiddleware
+
+from deerflow.config.loop_detection_config import LoopDetectionConfig
 
 
 @dataclass
@@ -31,6 +33,7 @@ class RuntimeFeatures:
     vision: bool | AgentMiddleware = False
     auto_title: bool | AgentMiddleware = False
     guardrail: Literal[False] | AgentMiddleware = False
+    loop_detection: LoopDetectionConfig = field(default_factory=LoopDetectionConfig)
 
 
 # ---------------------------------------------------------------------------
