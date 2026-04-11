@@ -269,11 +269,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         elif isinstance(original_content, list):
             # Complex case: list content (multimodal), preserve all blocks
             # Prepend files message as the first text block
-            files_block = {"type": "text", "text": files_message}
-            # Add a separator block
-            separator_block = {"type": "text", "text": "\n\n"}
+            files_block = {"type": "text", "text": f"{files_message}\n\n"}
             # Keep all original blocks (including images)
-            updated_content = [files_block, separator_block, *original_content]
+            updated_content = [files_block, *original_content]
         else:
             # Other types, preserve as-is
             updated_content = original_content
