@@ -371,16 +371,31 @@ def render_text(section: dict, theme: dict) -> str:
     # Simple Markdown → HTML with escaping
     lines = content.split("\\n")
     html_parts = []
+    in_list = False
     for line in lines:
         line = line.strip()
         if not line:
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
             html_parts.append("<br>")
         elif line.startswith("**") and line.endswith("**"):
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
             html_parts.append(f"<strong>{esc(line[2:-2])}</strong>")
         elif line.startswith("- "):
+            if not in_list:
+                html_parts.append("<ul style='margin:4px 0;padding-left:20px;'>")
+                in_list = True
             html_parts.append(f"<li>{esc(line[2:])}</li>")
         else:
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
             html_parts.append(f"<p style='margin:4px 0;'>{esc(line)}</p>")
+    if in_list:
+        html_parts.append("</ul>")
 
     content_html = "\n".join(html_parts)
 
