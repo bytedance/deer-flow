@@ -6,21 +6,56 @@ self-contained interactive HTML dashboard using Apache ECharts.
 """
 
 import argparse
+import html
 import json
 import os
-import subprocess
+import re
 import sys
 
 try:
     import duckdb
 except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "-q"], check=True)
-    import duckdb
+    print("ERROR: duckdb is required. Install with: pip install duckdb")
+    sys.exit(1)
 
 try:
     import openpyxl  # noqa: F401
 except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
+    print("ERROR: openpyxl is required. Install with: pip install openpyxl")
+    sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# Security helpers
+# ---------------------------------------------------------------------------
+
+_ALLOWED_PATH_PREFIXES = (
+    "/mnt/user-data/",
+    "/mnt/skills/",
+)
+
+
+def validate_path(file_path: str, context: str = "file path") -> str:
+    """Validate that a file path stays within allowed directories."""
+    resolved = os.path.realpath(file_path)
+    if not any(resolved.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+        cwd = os.path.realpath(os.getcwd())
+        if not resolved.startswith(cwd + os.sep) and resolved != cwd:
+            raise ValueError(
+                f"Invalid {context}: '{file_path}' resolves to '{resolved}', "
+                f"which is outside allowed directories."
+            )
+    return file_path
+
+
+def sanitize_identifier(name: str) -> str:
+    """Sanitize a string to be a safe SQL identifier (table/view name)."""
+    return re.sub(r"[^a-zA-Z0-9_]", "_", name)
+
+
+def esc(value) -> str:
+    """HTML-escape a value for safe embedding in HTML output."""
+    return html.escape(str(value), quote=True)
+
 
 # ---------------------------------------------------------------------------
 # Theme definitions
@@ -96,20 +131,28 @@ def load_data(
     if not sql:
         return []
 
-    # Register files as views
+    # Register files as views using parameterized queries
     for f in files:
+        validate_path(f, "data file")
         ext = os.path.splitext(f)[1].lower()
-        base = os.path.splitext(os.path.basename(f))[0]
+        base = sanitize_identifier(os.path.splitext(os.path.basename(f))[0])
         if ext == ".csv":
-            con.execute(f"CREATE OR REPLACE VIEW \"{base}\" AS SELECT * FROM read_csv_auto('{f}')")
+            con.execute(f'CREATE OR REPLACE VIEW "{base}" AS SELECT * FROM read_csv_auto(?)', [f])
         elif ext in (".xlsx", ".xls"):
             con.execute("INSTALL spatial; LOAD spatial;")
             wb = __import__("openpyxl").load_workbook(f, read_only=True)
             sheets = wb.sheetnames
             wb.close()
             for sheet in sheets:
-                con.execute(f"CREATE OR REPLACE VIEW \"{sheet}\" AS SELECT * FROM st_read('{f}', layer = '{sheet}', open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO'])")
+                safe_sheet = sanitize_identifier(sheet)
+                con.execute(
+                    f'CREATE OR REPLACE VIEW "{safe_sheet}" AS SELECT * FROM st_read(?, layer = ?, open_options = [\'HEADERS=FORCE\', \'FIELD_TYPES=AUTO\'])',
+                    [f, sheet],
+                )
 
+    # NOTE: 'sql' is intentionally a raw DuckDB SQL query written by the Agent.
+    # This is by design — the Agent constructs queries based on user instructions
+    # and they run inside a sandboxed DuckDB instance.
     result = con.execute(sql)
     columns = [desc[0] for desc in result.description]
     rows = result.fetchall()
@@ -125,6 +168,7 @@ def load_kpi_value(
     if not sql:
         return None
     try:
+        # NOTE: 'sql' is intentionally raw DuckDB SQL (same as load_data).
         row = con.execute(sql).fetchone()
         return row[0] if row else None
     except Exception:
@@ -152,9 +196,9 @@ def format_kpi_value(value: float | int | None, fmt: str) -> str:
 
 def render_kpi_card(kpi: dict, value: float | int | None, theme: dict) -> str:
     """Render a single KPI card as HTML."""
-    label = kpi.get("label", "KPI")
+    label = esc(kpi.get("label", "KPI"))
     fmt = kpi.get("format", "number")
-    display = format_kpi_value(value, fmt)
+    display = esc(format_kpi_value(value, fmt))
     return f"""<div class="kpi-card" style="background:{theme["kpi_bg"]};border:1px solid {theme["border"]};box-shadow:{theme["shadow"]};border-radius:8px;padding:20px;text-align:center;">
       <div style="color:{theme["text_secondary"]};font-size:14px;margin-bottom:8px;">{label}</div>
       <div style="color:{theme["text"]};font-size:28px;font-weight:700;">{display}</div>
@@ -204,7 +248,6 @@ def render_echarts_option(
         )
 
     # Cartesian charts (line, area, bar, column, scatter)
-    # Collect unique x values
     x_values: list[str] = []
     seen_x: set[str] = set()
     for row in data:
@@ -254,15 +297,16 @@ def render_filter_html(filters: list[dict], data: list[dict], theme: dict) -> st
 
     parts = ['<div class="filter-bar" style="display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap;">']
     for f in filters:
-        field = f["field"]
-        label = f.get("label", field)
+        field = esc(f["field"])
+        label = esc(f.get("label", f["field"]))
         ftype = f.get("type", "select")
 
         if ftype == "select":
-            unique_vals = sorted(set(str(row.get(field, "")) for row in data))
+            unique_vals = sorted(set(str(row.get(f["field"], "")) for row in data))
             options_html = "<option value=''>All</option>"
             for v in unique_vals:
-                options_html += f"<option value='{v}'>{v}</option>"
+                safe_v = esc(v)
+                options_html += f"<option value='{safe_v}'>{safe_v}</option>"
             parts.append(
                 f"<div style='display:flex;align-items:center;gap:8px;'>"
                 f"<label style='color:{theme['text_secondary']};font-size:13px;'>{label}:</label>"
@@ -311,7 +355,7 @@ def render_chart_grid_html(
 
     for row_num in sorted(rows.keys()):
         for c in rows[row_num]:
-            cid = c.get("id", f"chart-{row_num}")
+            cid = esc(c.get("id", f"chart-{row_num}"))
             pos = c.get("position", {"row": 1, "col": 1, "width": 12})
             width = min(pos.get("width", 12), 12)
             chart_html = _render_chart_card(cid, c, data, theme, width)
@@ -357,7 +401,7 @@ def _render_table_card(
 ) -> str:
     """Render a data table card."""
     columns = chart_spec.get("columns", [])
-    title = chart_spec.get("title", "")
+    title = esc(chart_spec.get("title", ""))
     limit = chart_spec.get("limit", len(data))
 
     if not columns and data:
@@ -365,10 +409,10 @@ def _render_table_card(
 
     rows_to_show = data[:limit]
 
-    header_cells = "".join(f"<th>{c}</th>" for c in columns)
+    header_cells = "".join(f"<th>{esc(c)}</th>" for c in columns)
     body_rows = ""
     for row in rows_to_show:
-        cells = "".join(f"<td>{row.get(c, '')}</td>" for c in columns)
+        cells = "".join(f"<td>{esc(row.get(c, ''))}</td>" for c in columns)
         body_rows += f"<tr>{cells}</tr>"
 
     return (
@@ -390,7 +434,6 @@ def _render_tabs_layout(
     theme: dict,
 ) -> str:
     """Render tabs layout HTML (fallback to grid if no tabs defined)."""
-    # Default: render all charts in a single tab
     parts = ['<div class="tab-container">']
     parts.append('<div class="tab-buttons" style="display:flex;gap:8px;margin-bottom:16px;">')
     parts.append(f'<button class="tab-btn active" onclick="switchTab(0)" style="padding:8px 16px;border:1px solid {theme["border"]};border-radius:4px;background:{theme["card_bg"]};color:{theme["text"]};cursor:pointer;">Overview</button>')
@@ -400,7 +443,7 @@ def _render_tabs_layout(
     parts.append('<div class="tab-panel active" data-tab="0" style="display:grid;grid-template-columns:repeat(12,1fr);gap:16px;">')
 
     for c in charts:
-        cid = c.get("id", "chart")
+        cid = esc(c.get("id", "chart"))
         pos = c.get("position", {"row": 1, "col": 1, "width": 6})
         width = min(pos.get("width", 6), 12)
         parts.append(_render_chart_card(cid, c, data, theme, width))
@@ -425,7 +468,7 @@ def generate_html(
 ) -> str:
     """Generate the complete dashboard HTML string."""
     theme = THEMES.get(theme_name, THEMES["light"])
-    title = spec.get("title", "Dashboard")
+    title = esc(spec.get("title", "Dashboard"))
     layout = spec.get("layout", "grid")
     charts = spec.get("charts", [])
     kpis = spec.get("kpis", [])
@@ -592,8 +635,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Validate paths
+    spec_path = validate_path(args.spec_file, "spec file")
+    output_path = validate_path(args.output_file, "output file")
+
     # Load spec
-    with open(args.spec_file, encoding="utf-8") as f:
+    with open(spec_path, encoding="utf-8") as f:
         spec = json.load(f)
 
     theme_name = args.theme or spec.get("theme", "light")
@@ -602,6 +649,7 @@ def main() -> None:
     con = duckdb.connect()
 
     if args.data_file:
+        validate_path(args.data_file, "data file")
         with open(args.data_file, encoding="utf-8") as f:
             data = json.load(f)
     else:
@@ -620,14 +668,14 @@ def main() -> None:
     con.close()
 
     # Generate HTML
-    html = generate_html(spec, data, theme_name, kpi_values)
+    html_output = generate_html(spec, data, theme_name, kpi_values)
 
     # Write output
-    os.makedirs(os.path.dirname(args.output_file) or ".", exist_ok=True)
-    with open(args.output_file, "w", encoding="utf-8") as f:
-        f.write(html)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html_output)
 
-    print(f"Dashboard generated: {args.output_file}")
+    print(f"Dashboard generated: {output_path}")
     print(f"  Theme: {theme_name}")
     print(f"  Data rows: {len(data)}")
     print(f"  Charts: {len(spec.get('charts', []))}")

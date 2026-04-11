@@ -6,23 +6,85 @@ Uses DuckDB for all data operations: load → clean → transform → merge → 
 """
 
 import argparse
+import html
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 
 try:
     import duckdb
 except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "-q"], check=True)
-    import duckdb
+    print("ERROR: duckdb is required. Install with: pip install duckdb")
+    sys.exit(1)
 
 try:
     import openpyxl  # noqa: F401
 except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
+    print("ERROR: openpyxl is required. Install with: pip install openpyxl")
+    sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# Security helpers
+# ---------------------------------------------------------------------------
+
+# Allowed DuckDB types for cast_types action
+ALLOWED_SQL_TYPES = frozenset({
+    "INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT",
+    "DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC",
+    "VARCHAR", "TEXT", "STRING", "CHAR", "BPCHAR",
+    "DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME", "TIMETZ",
+    "BOOLEAN", "BOOL", "BLOB", "BYTEA",
+    "INTERVAL", "UUID", "JSON", "HUGEINT", "UHUGEINT",
+    "UBIGINT", "USMALLINT", "UTINYINT", "UMEDIUMINT",
+})
+
+# Path prefixes that are allowed for file operations
+_ALLOWED_PATH_PREFIXES = (
+    "/mnt/user-data/",
+    "/mnt/skills/",
+)
+
+
+def validate_identifier(name: str, context: str = "identifier") -> str:
+    """Validate that a name is a safe SQL identifier (table/column name).
+
+    Only allows alphanumeric characters and underscores.
+    Raises ValueError if the name contains unsafe characters.
+    """
+    if not re.match(r"^[a-zA-Z0-9_]+$", name):
+        raise ValueError(f"Invalid {context}: '{name}'. Only alphanumeric characters and underscores are allowed.")
+    return name
+
+
+def validate_path(file_path: str, context: str = "file path") -> str:
+    """Validate that a file path stays within allowed directories.
+
+    Raises ValueError if the resolved path escapes allowed prefixes.
+    """
+    resolved = os.path.realpath(file_path)
+    if not any(resolved.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+        # Also allow paths under CWD (for spec files run locally)
+        cwd = os.path.realpath(os.getcwd())
+        if not resolved.startswith(cwd + os.sep) and resolved != cwd:
+            raise ValueError(
+                f"Invalid {context}: '{file_path}' resolves to '{resolved}', "
+                f"which is outside allowed directories."
+            )
+    return file_path
+
+
+def validate_sql_type(type_name: str) -> str:
+    """Validate that a SQL type name is in the allowed whitelist."""
+    upper = type_name.upper().strip()
+    # Handle DECIMAL(p,s) etc.
+    base_type = upper.split("(")[0].strip()
+    if base_type not in ALLOWED_SQL_TYPES:
+        raise ValueError(
+            f"Invalid SQL type: '{type_name}'. Allowed types: {sorted(ALLOWED_SQL_TYPES)}"
+        )
+    return upper
 
 
 # ---------------------------------------------------------------------------
@@ -32,9 +94,9 @@ except ImportError:
 
 def action_load_csv(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Load a CSV file into a DuckDB table."""
-    file_path = step["file"]
-    table_name = step["as"]
-    con.execute(f"CREATE TABLE \"{table_name}\" AS SELECT * FROM read_csv_auto('{file_path}')")
+    file_path = validate_path(step["file"], "load_csv file")
+    table_name = validate_identifier(step["as"], "table name")
+    con.execute(f"CREATE TABLE \"{table_name}\" AS SELECT * FROM read_csv_auto(?)", [file_path])
     cnt = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
     return f"load_csv → {table_name} ({cnt:,} rows)"
 
@@ -43,8 +105,8 @@ def action_load_excel(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Load an Excel file (all sheets) into DuckDB tables."""
     import openpyxl
 
-    file_path = step["file"]
-    base_name = step["as"]
+    file_path = validate_path(step["file"], "load_excel file")
+    base_name = validate_identifier(step["as"], "table base name")
     con.execute("INSTALL spatial; LOAD spatial;")
 
     wb = openpyxl.load_workbook(file_path, read_only=True)
@@ -53,8 +115,11 @@ def action_load_excel(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
     loaded = []
     for sheet in sheets:
-        safe_name = f"{base_name}_{re.sub(r'[^\\w]', '_', sheet)}"
-        con.execute(f"CREATE TABLE \"{safe_name}\" AS SELECT * FROM st_read('{file_path}', layer = '{sheet}', open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO'])")
+        safe_name = f"{base_name}_{re.sub(r'[^a-zA-Z0-9_]', '_', sheet)}"
+        con.execute(
+            f"CREATE TABLE \"{safe_name}\" AS SELECT * FROM st_read(?, layer = ?, open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO'])",
+            [file_path, sheet],
+        )
         cnt = con.execute(f'SELECT COUNT(*) FROM "{safe_name}"').fetchone()[0]
         loaded.append(f"{safe_name} ({cnt:,} rows)")
 
@@ -63,17 +128,19 @@ def action_load_excel(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_load_json(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Load a JSON file (array of objects) into a DuckDB table."""
-    file_path = step["file"]
-    table_name = step["as"]
-    con.execute(f"CREATE TABLE \"{table_name}\" AS SELECT * FROM read_json_auto('{file_path}', format='array_of_objects')")
+    file_path = validate_path(step["file"], "load_json file")
+    table_name = validate_identifier(step["as"], "table name")
+    con.execute(f"CREATE TABLE \"{table_name}\" AS SELECT * FROM read_json_auto(?, format='array_of_objects')", [file_path])
     cnt = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
     return f"load_json → {table_name} ({cnt:,} rows)"
 
 
 def action_drop_nulls(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Drop rows with null values in specified columns."""
-    table = step["table"]
+    table = validate_identifier(step["table"], "table name")
     columns = step["columns"]
+    for c in columns:
+        validate_identifier(c, "column name")
     before = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
 
     null_checks = " AND ".join(f'"{c}" IS NOT NULL' for c in columns)
@@ -85,8 +152,10 @@ def action_drop_nulls(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_fill_nulls(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Fill null values with specified defaults."""
-    table = step["table"]
+    table = validate_identifier(step["table"], "table name")
     columns: dict[str, str] = step["columns"]
+    for c in columns:
+        validate_identifier(c, "column name in fill_nulls")
 
     # Count nulls before
     null_counts: dict[str, int] = {}
@@ -94,15 +163,22 @@ def action_fill_nulls(con: duckdb.DuckDBPyConnection, step: dict) -> str:
         cnt = con.execute(f'SELECT COUNT(*) FROM "{table}" WHERE "{col}" IS NULL').fetchone()[0]
         null_counts[col] = cnt
 
-    # Build COALESCE expressions
+    # Build COALESCE expressions using parameterized defaults
     coalesce_parts = []
-    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'").fetchall()
+    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]).fetchall()
+    # We need to build the COALESCE with literal values since DuckDB doesn't
+    # support parameterized defaults inside a SELECT expression list easily.
+    # Use the connection's escape mechanism for string defaults.
     for (col_name,) in all_cols:
         if col_name in columns:
             default = columns[col_name]
-            if isinstance(default, str):
-                default = f"'{default}'"
-            coalesce_parts.append(f'COALESCE("{col_name}", {default}) AS "{col_name}"')
+            # For numeric defaults, use as-is after validation; for strings, use quoted literal
+            if isinstance(default, (int, float)):
+                coalesce_parts.append(f'COALESCE("{col_name}", {default}) AS "{col_name}"')
+            else:
+                # Escape single quotes in string defaults to prevent SQL injection
+                safe_default = str(default).replace("'", "''")
+                coalesce_parts.append(f"COALESCE(\"{col_name}\", '{safe_default}') AS \"{col_name}\"")
         else:
             coalesce_parts.append(f'"{col_name}"')
 
@@ -115,12 +191,14 @@ def action_fill_nulls(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_drop_duplicates(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Remove duplicate rows based on specified columns."""
-    table = step["table"]
+    table = validate_identifier(step["table"], "table name")
     columns = step["columns"]
+    for c in columns:
+        validate_identifier(c, "column name")
     before = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
 
     partition_cols = ", ".join(f'"{c}"' for c in columns)
-    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'").fetchall()
+    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]).fetchall()
     select_cols = ", ".join(f'"{c[0]}"' for c in all_cols)
 
     con.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT {select_cols} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY {partition_cols}) as _rn FROM "{table}") sub WHERE _rn = 1')
@@ -131,10 +209,10 @@ def action_drop_duplicates(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_trim_strings(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Trim whitespace from string columns."""
-    table = step["table"]
+    table = validate_identifier(step["table"], "table name")
     columns = step.get("columns")
 
-    all_cols = con.execute(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{table}'").fetchall()
+    all_cols = con.execute(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ?", [table]).fetchall()
 
     if not columns:
         columns = [c[0] for c in all_cols if "VARCHAR" in c[1].upper() or "TEXT" in c[1].upper()]
@@ -157,11 +235,13 @@ def action_trim_strings(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_normalize_dates(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Parse date columns into a standard format."""
-    table = step["table"]
+    table = validate_identifier(step["table"], "table name")
     columns = step["columns"]
+    for c in columns:
+        validate_identifier(c, "column name")
     step.get("format", "%Y-%m-%d")  # date format hint
 
-    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'").fetchall()
+    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]).fetchall()
 
     select_parts = []
     for (col_name,) in all_cols:
@@ -177,10 +257,14 @@ def action_normalize_dates(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_cast_types(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Cast columns to specified data types."""
-    table = step["table"]
+    table = validate_identifier(step["table"], "table name")
     columns: dict[str, str] = step["columns"]
+    for c in columns:
+        validate_identifier(c, "column name")
+    for t in columns.values():
+        validate_sql_type(t)
 
-    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'").fetchall()
+    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]).fetchall()
 
     select_parts = []
     for (col_name,) in all_cols:
@@ -197,10 +281,13 @@ def action_cast_types(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_rename_columns(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Rename columns in a table."""
-    table = step["table"]
+    table = validate_identifier(step["table"], "table name")
     mapping: dict[str, str] = step["mapping"]
+    for old, new in mapping.items():
+        validate_identifier(old, "old column name")
+        validate_identifier(new, "new column name")
 
-    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'").fetchall()
+    all_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]).fetchall()
 
     select_parts = []
     for (col_name,) in all_cols:
@@ -216,9 +303,15 @@ def action_rename_columns(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 
 def action_add_computed_column(con: duckdb.DuckDBPyConnection, step: dict) -> str:
-    """Add a new column computed from a SQL expression."""
-    table = step["table"]
-    column = step["column"]
+    """Add a new column computed from a SQL expression.
+
+    NOTE: The 'expr' parameter is intentionally a raw DuckDB SQL expression,
+    as documented in SKILL.md ("any valid DuckDB SQL expression"). This is
+    by design — the expression is written by the Agent based on user instructions
+    and runs inside a sandboxed DuckDB instance.
+    """
+    table = validate_identifier(step["table"], "table name")
+    column = validate_identifier(step["column"], "computed column name")
     expr = step["expr"]
 
     con.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT *, ({expr}) AS "{column}" FROM "{table}"')
@@ -228,10 +321,16 @@ def action_add_computed_column(con: duckdb.DuckDBPyConnection, step: dict) -> st
 
 def action_group_by(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Group and aggregate a table."""
-    table = step["table"]
+    table = validate_identifier(step["table"], "table name")
     by_cols = step["by"]
+    for c in by_cols:
+        validate_identifier(c, "group by column")
     aggregations: dict[str, str] = step["aggregations"]
+    for alias in aggregations:
+        validate_identifier(alias, "aggregation alias")
     output_table = step.get("as", table)
+    if output_table != table:
+        validate_identifier(output_table, "output table name")
 
     by_parts = ", ".join(f'"{c}"' for c in by_cols)
     agg_parts = [f'{expr} AS "{alias}"' for alias, expr in aggregations.items()]
@@ -244,16 +343,18 @@ def action_group_by(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_join(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Join two tables."""
-    left = step["left"]
-    right = step["right"]
+    left = validate_identifier(step["left"], "left table")
+    right = validate_identifier(step["right"], "right table")
     on_cols = step["on"]
+    for c in on_cols:
+        validate_identifier(c, "join column")
     how = step.get("how", "inner")
-    output_table = step["as"]
+    output_table = validate_identifier(step["as"], "output table name")
 
     on_clause = " AND ".join(f'"{left}"."{c}" = "{right}"."{c}"' for c in on_cols)
 
-    left_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{left}'").fetchall()
-    right_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{right}'").fetchall()
+    left_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = ?", [left]).fetchall()
+    right_cols = con.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = ?", [right]).fetchall()
 
     left_select = ", ".join(f'"{left}"."{c[0]}" AS "{c[0]}"' for c in left_cols)
     right_select = ", ".join(f'"{right}"."{c[0]}" AS "{c[0]}_right"' for c in right_cols if c[0] not in [lc[0] for lc in left_cols])
@@ -267,7 +368,9 @@ def action_join(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 def action_union(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Union (stack) multiple tables."""
     tables = step["tables"]
-    output_table = step["as"]
+    for t in tables:
+        validate_identifier(t, "union table")
+    output_table = validate_identifier(step["as"], "output table name")
 
     union_parts = [f'SELECT * FROM "{t}"' for t in tables]
     con.execute(f'CREATE TABLE "{output_table}" AS ' + " UNION ALL ".join(union_parts))
@@ -276,8 +379,13 @@ def action_union(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 
 def action_filter(con: duckdb.DuckDBPyConnection, step: dict) -> str:
-    """Filter rows by a SQL WHERE condition."""
-    table = step["table"]
+    """Filter rows by a SQL WHERE condition.
+
+    NOTE: The 'condition' parameter is intentionally a raw DuckDB SQL WHERE clause,
+    as documented in SKILL.md. This is by design — the condition is written by the
+    Agent based on user instructions and runs inside a sandboxed DuckDB instance.
+    """
+    table = validate_identifier(step["table"], "table name")
     condition = step["condition"]
     before = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
 
@@ -289,8 +397,10 @@ def action_filter(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_sample(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Take a random sample of rows."""
-    table = step["table"]
+    table = validate_identifier(step["table"], "table name")
     output_table = step.get("as", table)
+    if output_table != table:
+        validate_identifier(output_table, "output table name")
     n = step.get("n")
     fraction = step.get("fraction")
 
@@ -306,11 +416,13 @@ def action_sample(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_top_n(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Get top N rows ordered by a column."""
-    table = step["table"]
-    order_by = step["order_by"]
+    table = validate_identifier(step["table"], "table name")
+    order_by = validate_identifier(step["order_by"], "order by column")
     n = step.get("n", 10)
     direction = step.get("direction", "DESC")
     output_table = step.get("as", table)
+    if output_table != table:
+        validate_identifier(output_table, "output table name")
 
     con.execute(f'CREATE OR REPLACE TABLE "{output_table}" AS SELECT * FROM "{table}" ORDER BY "{order_by}" {direction} LIMIT {int(n)}')
     cnt = con.execute(f'SELECT COUNT(*) FROM "{output_table}"').fetchone()[0]
@@ -319,31 +431,29 @@ def action_top_n(con: duckdb.DuckDBPyConnection, step: dict) -> str:
 
 def action_export_csv(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Export a table to CSV."""
-    table = step["table"]
-    file_path = step["file"]
+    table = validate_identifier(step["table"], "table name")
+    file_path = validate_path(step["file"], "export file path")
     os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-    con.execute(f"COPY \"{table}\" TO '{file_path}' (HEADER, DELIMITER ',')")
+    con.execute(f"COPY \"{table}\" TO ? (HEADER, DELIMITER ',')", [file_path])
     cnt = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
     return f"export_csv → {file_path} ({cnt:,} rows)"
 
 
 def action_export_json(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     """Export a table to JSON."""
-    table = step["table"]
-    file_path = step["file"]
+    table = validate_identifier(step["table"], "table name")
+    file_path = validate_path(step["file"], "export file path")
     os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-    con.execute(f"COPY \"{table}\" TO '{file_path}' (FORMAT JSON, ARRAY true)")
+    con.execute(f"COPY \"{table}\" TO ? (FORMAT JSON, ARRAY true)", [file_path])
     cnt = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
     return f"export_json → {file_path} ({cnt:,} rows)"
 
 
 def action_export_excel(con: duckdb.DuckDBPyConnection, step: dict) -> str:
-    """Export a table to Excel via CSV intermediate."""
-    table = step["table"]
-    file_path = step["file"]
+    """Export a table to Excel via openpyxl."""
+    table = validate_identifier(step["table"], "table name")
+    file_path = validate_path(step["file"], "export file path")
     os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-
-    # Export to CSV first, then convert to Excel via openpyxl
 
     import openpyxl
 
@@ -404,7 +514,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    with open(args.spec_file, encoding="utf-8") as f:
+    spec_path = validate_path(args.spec_file, "spec file")
+    with open(spec_path, encoding="utf-8") as f:
         spec = json.load(f)
 
     steps = spec.get("steps", [])

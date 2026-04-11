@@ -7,21 +7,56 @@ and text sections.
 """
 
 import argparse
+import html
 import json
 import os
-import subprocess
+import re
 import sys
 
 try:
     import duckdb
 except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "-q"], check=True)
-    import duckdb
+    print("ERROR: duckdb is required. Install with: pip install duckdb")
+    sys.exit(1)
 
 try:
     import openpyxl  # noqa: F401
 except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
+    print("ERROR: openpyxl is required. Install with: pip install openpyxl")
+    sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# Security helpers
+# ---------------------------------------------------------------------------
+
+_ALLOWED_PATH_PREFIXES = (
+    "/mnt/user-data/",
+    "/mnt/skills/",
+)
+
+
+def validate_path(file_path: str, context: str = "file path") -> str:
+    """Validate that a file path stays within allowed directories."""
+    resolved = os.path.realpath(file_path)
+    if not any(resolved.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+        cwd = os.path.realpath(os.getcwd())
+        if not resolved.startswith(cwd + os.sep) and resolved != cwd:
+            raise ValueError(
+                f"Invalid {context}: '{file_path}' resolves to '{resolved}', "
+                f"which is outside allowed directories."
+            )
+    return file_path
+
+
+def sanitize_identifier(name: str) -> str:
+    """Sanitize a string to be a safe SQL identifier."""
+    return re.sub(r"[^a-zA-Z0-9_]", "_", name)
+
+
+def esc(value) -> str:
+    """HTML-escape a value for safe embedding in HTML output."""
+    return html.escape(str(value), quote=True)
+
 
 # ---------------------------------------------------------------------------
 # Theme definitions
@@ -83,10 +118,10 @@ def load_data_files(
         return
 
     # Load first file as the main 'data' table
-    first = data_files[0]
+    first = validate_path(data_files[0], "data file")
     ext = os.path.splitext(first)[1].lower()
     if ext == ".csv":
-        con.execute(f"CREATE TABLE data AS SELECT * FROM read_csv_auto('{first}')")
+        con.execute("CREATE TABLE data AS SELECT * FROM read_csv_auto(?)", [first])
     elif ext in (".xlsx", ".xls"):
         con.execute("INSTALL spatial; LOAD spatial;")
         import openpyxl
@@ -94,26 +129,32 @@ def load_data_files(
         wb = openpyxl.load_workbook(first, read_only=True)
         first_sheet = wb.sheetnames[0]
         wb.close()
-        con.execute(f"CREATE TABLE data AS SELECT * FROM st_read('{first}', layer = '{first_sheet}', open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO'])")
+        con.execute(
+            "CREATE TABLE data AS SELECT * FROM st_read(?, layer = ?, open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO'])",
+            [first, first_sheet],
+        )
     elif ext == ".json":
-        con.execute(f"CREATE TABLE data AS SELECT * FROM read_json_auto('{first}', format='array_of_objects')")
+        con.execute("CREATE TABLE data AS SELECT * FROM read_json_auto(?, format='array_of_objects')", [first])
 
     # Load additional files as separate tables
     for f in data_files[1:]:
-        base = os.path.splitext(os.path.basename(f))[0]
-        safe_name = "".join(c if c.isalnum() else "_" for c in base)
+        validate_path(f, "data file")
+        base = sanitize_identifier(os.path.splitext(os.path.basename(f))[0])
         ext = os.path.splitext(f)[1].lower()
         if ext == ".csv":
-            con.execute(f"CREATE TABLE \"{safe_name}\" AS SELECT * FROM read_csv_auto('{f}')")
+            con.execute(f"CREATE TABLE \"{base}\" AS SELECT * FROM read_csv_auto(?)", [f])
         elif ext in (".xlsx", ".xls"):
             import openpyxl
 
             wb = openpyxl.load_workbook(f, read_only=True)
             first_sheet = wb.sheetnames[0]
             wb.close()
-            con.execute(f"CREATE TABLE \"{safe_name}\" AS SELECT * FROM st_read('{f}', layer = '{first_sheet}', open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO'])")
+            con.execute(
+                f"CREATE TABLE \"{base}\" AS SELECT * FROM st_read(?, layer = ?, open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO'])",
+                [f, first_sheet],
+            )
         elif ext == ".json":
-            con.execute(f"CREATE TABLE \"{safe_name}\" AS SELECT * FROM read_json_auto('{f}', format='array_of_objects')")
+            con.execute(f"CREATE TABLE \"{base}\" AS SELECT * FROM read_json_auto(?, format='array_of_objects')", [f])
 
 
 # ---------------------------------------------------------------------------
@@ -139,13 +180,13 @@ def render_kpi_row(section: dict, data_results: dict, theme: dict) -> str:
     kpis = section.get("kpis", [])
     cards = []
     for kpi in kpis:
-        label = kpi.get("label", "")
+        label = esc(kpi.get("label", ""))
         field = kpi.get("field", "")
         fmt = kpi.get("format", "number")
         target = kpi.get("target")
 
         value = data_results.get(field)
-        display = format_value(value, fmt)
+        display = esc(format_value(value, fmt))
 
         progress_html = ""
         if target and value is not None:
@@ -156,7 +197,7 @@ def render_kpi_row(section: dict, data_results: dict, theme: dict) -> str:
                 f'border-radius:2px;"><div style="width:{pct:.0f}%;height:100%;'
                 f'background:{color};border-radius:2px;"></div></div>'
                 f'<div style="font-size:11px;color:{theme["text_secondary"]};'
-                f'margin-top:4px;">Target: {format_value(target, fmt)}</div>'
+                f'margin-top:4px;">Target: {esc(format_value(target, fmt))}</div>'
             )
 
         cards.append(
@@ -179,19 +220,20 @@ def render_chart(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
     chart_type = section.get("chart_type", "line")
     x_field = ds.get("x", "")
     y_fields = ds.get("y", [])
-    title = section.get("title", "")
-    chart_id = f"chart-{hash(title) % 10000}"
+    title = esc(section.get("title", ""))
+    chart_id = f"chart-{abs(hash(section.get('title', ''))) % 10000}"
 
     # Execute SQL
     data: list[dict] = []
     if sql:
         try:
+            # NOTE: 'sql' is intentionally a raw DuckDB SQL query written by the Agent.
             result = con.execute(sql)
             columns = [desc[0] for desc in result.description]
             rows = result.fetchall()
             data = [dict(zip(columns, row)) for row in rows]
         except Exception as e:
-            return f'<div style="color:red;padding:16px;">Chart error: {e}</div>'
+            return f'<div style="color:red;padding:16px;">Chart error: {esc(e)}</div>'
 
     # Build ECharts option
     echarts_type_map = {
@@ -219,7 +261,7 @@ def render_chart(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
         pie_data = [{"name": k, "value": v} for k, v in agg.items()]
         radius = ["40%", "70%"] if chart_type == "donut" else ["0%", "70%"]
         option = {
-            "title": {"text": title, "textStyle": {"color": theme["text"]}},
+            "title": {"text": section.get("title", ""), "textStyle": {"color": theme["text"]}},
             "tooltip": {"trigger": "item"},
             "color": json.loads(theme["palette"]),
             "series": [{"type": "pie", "radius": radius, "data": pie_data}],
@@ -245,7 +287,7 @@ def render_chart(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
             series.append(s)
 
         option = {
-            "title": {"text": title, "textStyle": {"color": theme["text"]}},
+            "title": {"text": section.get("title", ""), "textStyle": {"color": theme["text"]}},
             "tooltip": {"trigger": "axis"},
             "color": json.loads(theme["palette"]),
             "xAxis": {"type": "category", "data": x_values, "axisLabel": {"color": theme["text_secondary"]}},
@@ -268,23 +310,24 @@ def render_table(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
     ds = section.get("data_source", {})
     sql = ds.get("sql", "")
     columns = section.get("columns", [])
-    title = section.get("title", "")
+    title = esc(section.get("title", ""))
     highlight = section.get("highlight")
 
     if not sql:
         return ""
 
     try:
+        # NOTE: 'sql' is intentionally a raw DuckDB SQL query written by the Agent.
         result = con.execute(sql)
         all_cols = [desc[0] for desc in result.description]
         rows = result.fetchall()
     except Exception as e:
-        return f'<div style="color:red;padding:16px;">Table error: {e}</div>'
+        return f'<div style="color:red;padding:16px;">Table error: {esc(e)}</div>'
 
     if not columns:
         columns = all_cols
 
-    header_cells = "".join(f'<th style="padding:10px 12px;text-align:left;border-bottom:2px solid {theme["border"]};color:{theme["text"]};font-weight:600;">{c}</th>' for c in columns)
+    header_cells = "".join(f'<th style="padding:10px 12px;text-align:left;border-bottom:2px solid {theme["border"]};color:{theme["text"]};font-weight:600;">{esc(c)}</th>' for c in columns)
 
     body_rows = ""
     for row_tuple in rows:
@@ -305,7 +348,7 @@ def render_table(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
                 except (ValueError, TypeError):
                     pass
 
-            cells += f"<td style='{style}'>{val}</td>"
+            cells += f"<td style='{style}'>{esc(val)}</td>"
         body_rows += f"<tr>{cells}</tr>"
 
     return (
@@ -322,10 +365,10 @@ def render_table(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
 
 def render_text(section: dict, theme: dict) -> str:
     """Render a text section with basic Markdown support."""
-    title = section.get("title", "")
+    title = esc(section.get("title", ""))
     content = section.get("content", "")
 
-    # Simple Markdown → HTML
+    # Simple Markdown → HTML with escaping
     lines = content.split("\\n")
     html_parts = []
     for line in lines:
@@ -333,11 +376,11 @@ def render_text(section: dict, theme: dict) -> str:
         if not line:
             html_parts.append("<br>")
         elif line.startswith("**") and line.endswith("**"):
-            html_parts.append(f"<strong>{line[2:-2]}</strong>")
+            html_parts.append(f"<strong>{esc(line[2:-2])}</strong>")
         elif line.startswith("- "):
-            html_parts.append(f"<li>{line[2:]}</li>")
+            html_parts.append(f"<li>{esc(line[2:])}</li>")
         else:
-            html_parts.append(f"<p style='margin:4px 0;'>{line}</p>")
+            html_parts.append(f"<p style='margin:4px 0;'>{esc(line)}</p>")
 
     content_html = "\n".join(html_parts)
 
@@ -466,11 +509,12 @@ def generate_report(
 ) -> str:
     """Generate the complete report HTML."""
     theme = THEMES.get(theme_name, THEMES["light"])
-    title = template.get("title", "Report")
+    title_raw = template.get("title", "Report")
 
     # Replace placeholders in title
     for key, val in params.items():
-        title = title.replace(f"{{{{{key}}}}}", str(val))
+        title_raw = title_raw.replace(f"{{{{{key}}}}}", str(val))
+    title = esc(title_raw)
 
     sections = template.get("sections", [])
 
@@ -575,7 +619,7 @@ def generate_report(
 </div>
 {sections_html}
 <div class="report-footer">
-  Report generated automatically &mdash; DeerFlow
+Report generated automatically &mdash; DeerFlow
 </div>
 <script src="{ECHARTS_CDN}"></script>
 <script>
@@ -631,10 +675,14 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Validate output path
+    output_path = validate_path(args.output_file, "output file")
+
     # Load template
     if args.template in BUILTIN_TEMPLATES:
         template = BUILTIN_TEMPLATES[args.template]
     elif os.path.exists(args.template):
+        validate_path(args.template, "template file")
         with open(args.template, encoding="utf-8") as f:
             template = json.load(f)
     else:
@@ -656,15 +704,15 @@ def main() -> None:
         load_data_files(con, args.data_files)
 
     # Generate report
-    html = generate_report(template, con, theme_name, params)
+    html_output = generate_report(template, con, theme_name, params)
 
     # Write output
-    os.makedirs(os.path.dirname(args.output_file) or ".", exist_ok=True)
-    with open(args.output_file, "w", encoding="utf-8") as f:
-        f.write(html)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html_output)
 
     section_count = len(template.get("sections", []))
-    print(f"Report generated: {args.output_file}")
+    print(f"Report generated: {output_path}")
     print(f"  Template: {template.get('name', args.template)}")
     print(f"  Theme: {theme_name}")
     print(f"  Sections: {section_count}")
