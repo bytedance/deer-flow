@@ -23,7 +23,8 @@ def get_subagent_config(name: str) -> SubagentConfig | None:
     if config is None:
         return None
 
-    # Apply timeout override from config.yaml (lazy import to avoid circular deps)
+    # Apply runtime overrides (timeout, max_turns, model) from config.yaml
+    # Lazy import to avoid circular deps.
     from deerflow.config.subagents_config import get_subagents_app_config
 
     app_config = get_subagents_app_config()
