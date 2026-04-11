@@ -17,10 +17,10 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.gateway.deps import get_checkpointer, get_run_manager, get_stream_bridge
-from app.gateway.services import sse_consumer, start_run
+from app.gateway.services import normalize_agent_name, resolve_persisted_agent_name, sse_consumer, start_run
 from deerflow.runtime import RunRecord, serialize_channel_values
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,16 @@ class RunCreateRequest(BaseModel):
     after_seconds: float | None = Field(default=None, description="Delayed execution")
     if_not_exists: Literal["reject", "create"] = Field(default="create", description="Thread creation policy")
     feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
+
+    @model_validator(mode="after")
+    def validate_agent_selection(self) -> "RunCreateRequest":
+        """Normalize and validate agent selection before any run record is created."""
+        resolve_persisted_agent_name(self.assistant_id, self.config)
+        if isinstance(self.config, dict) and isinstance(self.config.get("configurable"), dict):
+            explicit = self.config["configurable"].get("agent_name")
+            if isinstance(explicit, str):
+                self.config["configurable"]["agent_name"] = normalize_agent_name(explicit, source="configurable.agent_name")
+        return self
 
 
 class RunResponse(BaseModel):

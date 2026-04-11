@@ -8,6 +8,7 @@ frames, and consuming stream bridge events.  Router modules
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 import json
 import logging
 import re
@@ -95,6 +96,29 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
+_CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[a-z0-9-]+$")
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def normalize_agent_name(raw_value: str, *, source: str) -> str:
+    """Normalize and validate a DeerFlow agent name."""
+    normalized = raw_value.strip().lower().replace("_", "-")
+    if not normalized or not _CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
+        raise ValueError(f"Invalid {source} {raw_value!r}: must contain only letters, digits, and hyphens after normalization.")
+    return normalized
+
+
+def _resolve_explicit_agent_name(request_config: dict[str, Any] | None) -> str | None:
+    configurable = _as_dict((request_config or {}).get("configurable"))
+    explicit = configurable.get("agent_name")
+    if explicit is None:
+        return None
+    if not isinstance(explicit, str):
+        raise ValueError("Invalid configurable.agent_name: must be a string.")
+    return normalize_agent_name(explicit, source="configurable.agent_name")
 
 
 def resolve_agent_factory(assistant_id: str | None):
@@ -131,6 +155,8 @@ def build_run_config(
     """
     config: dict[str, Any] = {"recursion_limit": 100}
     if request_config:
+        request_config = _as_dict(request_config)
+        request_configurable = _as_dict(request_config.get("configurable"))
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
         # pass thread-level data and rejects requests that include both
         # ``configurable`` and ``context``.  If the caller already sends
@@ -140,12 +166,12 @@ def build_run_config(
                 logger.warning(
                     "build_run_config: client sent both 'context' and 'configurable'; preferring 'context' (LangGraph >= 0.6.0). thread_id=%s, caller_configurable keys=%s",
                     thread_id,
-                    list(request_config.get("configurable", {}).keys()),
+                    list(request_configurable.keys()),
                 )
             config["context"] = request_config["context"]
         else:
             configurable = {"thread_id": thread_id}
-            configurable.update(request_config.get("configurable", {}))
+            configurable.update(request_configurable)
             config["configurable"] = configurable
         for k, v in request_config.items():
             if k not in ("configurable", "context"):
@@ -157,10 +183,9 @@ def build_run_config(
     # Honour an explicit configurable["agent_name"] in the request if already set.
     if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID and "configurable" in config:
         if "agent_name" not in config["configurable"]:
-            normalized = assistant_id.strip().lower().replace("_", "-")
-            if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-                raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
-            config["configurable"]["agent_name"] = normalized
+            config["configurable"]["agent_name"] = normalize_agent_name(assistant_id, source="assistant_id")
+    if "configurable" in config and "agent_name" in config["configurable"]:
+        config["configurable"]["agent_name"] = _resolve_explicit_agent_name({"configurable": config["configurable"]})
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config
@@ -171,15 +196,11 @@ def resolve_persisted_agent_name(
     request_config: dict[str, Any] | None,
 ) -> str:
     """Return the agent name that should be persisted alongside a thread."""
-    configurable = (request_config or {}).get("configurable", {})
-    explicit = configurable.get("agent_name")
-    if isinstance(explicit, str) and explicit:
+    explicit = _resolve_explicit_agent_name(request_config)
+    if explicit:
         return explicit
     if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
-        normalized = assistant_id.strip().lower().replace("_", "-")
-        if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-            raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
-        return normalized
+        return normalize_agent_name(assistant_id, source="assistant_id")
     return "default"
 
 
@@ -282,6 +303,8 @@ async def start_run(
     store = get_store(request)
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
+    persisted_agent_name = resolve_persisted_agent_name(body.assistant_id, body.config)
+    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
 
     try:
         record = await run_mgr.create_or_reject(
@@ -300,13 +323,11 @@ async def start_run(
     # Ensure the thread is visible in /threads/search, even for threads that
     # were never explicitly created via POST /threads (e.g. stateless runs).
     store = get_store(request)
-    persisted_agent_name = resolve_persisted_agent_name(body.assistant_id, body.config)
     if store is not None:
         await _upsert_thread_in_store(store, thread_id, body.metadata, agent_name=persisted_agent_name)
 
     agent_factory = resolve_agent_factory(body.assistant_id)
     graph_input = normalize_input(body.input)
-    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
 
     # Merge DeerFlow-specific context overrides into configurable.
     # The ``context`` field is a custom extension for the langgraph-compat layer

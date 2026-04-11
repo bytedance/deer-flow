@@ -183,8 +183,8 @@ async def _store_upsert(
     """Create or refresh a thread record in the Store.
 
     On creation the record is written with ``status="idle"``.  On update only
-    ``updated_at`` (and optionally ``metadata`` / ``values``) are changed so
-    that existing fields are preserved.
+    ``updated_at`` and any supplied ``metadata`` / ``values`` / top-level
+    ``agent_name`` are refreshed while preserving other existing fields.
 
     ``values`` carries the agent-state snapshot exposed to the frontend
     (currently just ``{"title": "..."}``).

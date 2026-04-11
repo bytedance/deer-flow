@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from pydantic import ValidationError
+
 
 def test_format_sse_basic():
     from app.gateway.services import format_sse
@@ -160,7 +163,37 @@ def test_resolve_persisted_agent_name_uses_custom_assistant():
 def test_resolve_persisted_agent_name_prefers_explicit_configurable_agent():
     from app.gateway.services import resolve_persisted_agent_name
 
-    assert resolve_persisted_agent_name("other-agent", {"configurable": {"agent_name": "explicit-agent"}}) == "explicit-agent"
+    assert resolve_persisted_agent_name("other-agent", {"configurable": {"agent_name": "Explicit_Agent"}}) == "explicit-agent"
+
+
+def test_resolve_persisted_agent_name_ignores_non_dict_configurable():
+    from app.gateway.services import resolve_persisted_agent_name
+
+    assert resolve_persisted_agent_name("Final_Agent", {"configurable": "bad-shape"}) == "final-agent"
+
+
+def test_run_create_request_normalizes_explicit_agent_name():
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "hi"}]},
+        config={"configurable": {"agent_name": "Explicit_Agent"}, "tags": ["demo"]},
+    )
+
+    assert body.config is not None
+    assert body.config["configurable"]["agent_name"] == "explicit-agent"
+    assert body.config["tags"] == ["demo"]
+
+
+def test_run_create_request_rejects_invalid_agent_selection_before_run_creation():
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    with pytest.raises(ValidationError):
+        RunCreateRequest(
+            input={"messages": [{"role": "user", "content": "hi"}]},
+            assistant_id="bad name!",
+            config={"configurable": {"agent_name": "still_bad!"}},
+        )
 
 
 def test_resolve_agent_factory_returns_make_lead_agent():
