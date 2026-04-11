@@ -390,7 +390,7 @@ def _render_chart_card(
     if chart_type == "table":
         return _render_table_card(cid, chart_spec, data, theme, width)
 
-    option_json = render_echarts_option(chart_spec, data, theme)
+    option_json = render_echarts_option(chart_spec, data, theme).replace("</script", r"<\/script")
     height = chart_spec.get("height", 400)
 
     return (
