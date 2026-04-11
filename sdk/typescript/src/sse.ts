@@ -13,6 +13,12 @@ export async function* parseSSEStream(body: ReadableStream<Uint8Array>): AsyncGe
             transform(chunk, controller) {
               controller.enqueue(utf8Decoder.decode(chunk, { stream: true }));
             },
+            flush(controller) {
+              const tail = utf8Decoder.decode();
+              if (tail) {
+                controller.enqueue(tail);
+              }
+            },
           }),
         );
 
@@ -35,37 +41,46 @@ export async function* parseSSEStream(body: ReadableStream<Uint8Array>): AsyncGe
     return event;
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
 
-    if (done) {
-      if (pending.length > 0) {
-        pending += "\n";
-      }
-      const tail = await flushPending(pending);
-      pending = tail.pending;
-      if (tail.events.length > 0) {
-        for (const evt of tail.events) {
-          if (evt.event !== "message" || evt.data !== "") {
-            yield evt;
+      if (done) {
+        if (pending.length > 0) {
+          pending += "\n";
+        }
+        const tail = await flushPending(pending);
+        pending = tail.pending;
+        if (tail.events.length > 0) {
+          for (const evt of tail.events) {
+            if (evt.event !== "message" || evt.data !== "") {
+              yield evt;
+            }
           }
         }
+        const evt = await flush();
+        if (evt) {
+          yield evt;
+        }
+        break;
       }
-      const evt = await flush();
-      if (evt) {
-        yield evt;
-      }
-      break;
-    }
 
-    pending += value;
-    const result = await flushPending(pending);
-    pending = result.pending;
-    for (const evt of result.events) {
-      if (evt.event !== "message" || evt.data !== "") {
-        yield evt;
+      pending += value;
+      const result = await flushPending(pending);
+      pending = result.pending;
+      for (const evt of result.events) {
+        if (evt.event !== "message" || evt.data !== "") {
+          yield evt;
+        }
       }
     }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // Reader may already be closed; ignore.
+    }
+    reader.releaseLock();
   }
 
   async function flushPending(input: string): Promise<{ pending: string; events: RawSSEEvent[] }> {

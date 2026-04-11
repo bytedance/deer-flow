@@ -23,6 +23,8 @@ console.log(reply);
 
 ## Streaming Usage
 
+The client requests `stream_mode: ["values", "messages-tuple", "custom"]` by default, matching the `useStream` contract the DeerFlow frontend relies on. `StreamEvent` is a discriminated union covering every SSE event the gateway can emit (`values`, `messages`, `messages-tuple`, `custom`, `metadata`, `error`, `end`), so handlers can branch safely on `event.event` without casting.
+
 ```ts
 import { DeerFlowClient } from "@deerflow/client";
 
@@ -32,13 +34,16 @@ const client = new DeerFlowClient({
 
 for await (const event of client.stream("Summarize the latest roadmap updates")) {
   if (event.event === "messages-tuple") {
-    const [message] = event.data as [{ type?: string; content?: string }, Record<string, unknown>];
-    if (message.type === "ai" && message.content) {
+    const [message] = event.data;
+    if (message.type === "ai" && typeof message.content === "string") {
       process.stdout.write(message.content);
     }
-  }
-
-  if (event.event === "end") {
+  } else if (event.event === "messages") {
+    // Plain stream_mode=messages (no tuple wrapper)
+    if (event.data.type === "ai" && typeof event.data.content === "string") {
+      process.stdout.write(event.data.content);
+    }
+  } else if (event.event === "end") {
     process.stdout.write("\n");
   }
 }

@@ -1,11 +1,23 @@
 import { parseSSEStream } from "./sse.js";
 import type {
   DeerFlowClientOptions,
+  MessageChunk,
   MessagesTupleEvent,
   StreamEvent,
+  StreamEventName,
   ThreadInfo,
   ValuesEvent,
 } from "./types.js";
+
+const KNOWN_STREAM_EVENTS = new Set<StreamEventName>([
+  "values",
+  "messages",
+  "messages-tuple",
+  "custom",
+  "metadata",
+  "error",
+  "end",
+]);
 
 type RunStreamRequest = {
   assistant_id: string;
@@ -90,7 +102,7 @@ export class DeerFlowClient {
     }
 
     for await (const rawEvent of parseSSEStream(response.body)) {
-      if (rawEvent.event !== "values" && rawEvent.event !== "messages-tuple" && rawEvent.event !== "custom" && rawEvent.event !== "end") {
+      if (!KNOWN_STREAM_EVENTS.has(rawEvent.event as StreamEventName)) {
         continue;
       }
 
@@ -104,7 +116,7 @@ export class DeerFlowClient {
       yield {
         event: rawEvent.event,
         data: parsed,
-      };
+      } as StreamEvent;
     }
   }
 
@@ -118,13 +130,15 @@ export class DeerFlowClient {
         continue;
       }
 
-      if (event.event !== "messages-tuple" || !Array.isArray(event.data)) {
-        continue;
+      let chunk: MessageChunk | undefined;
+
+      if (event.event === "messages-tuple" && Array.isArray(event.data)) {
+        chunk = (event.data as MessagesTupleEvent)[0];
+      } else if (event.event === "messages" && event.data && typeof event.data === "object") {
+        chunk = event.data as MessageChunk;
       }
 
-      const tuple = event.data as MessagesTupleEvent;
-      const chunk = tuple[0];
-      if (chunk?.type !== "ai" || typeof chunk.content !== "string") {
+      if (!chunk || chunk.type !== "ai" || typeof chunk.content !== "string") {
         continue;
       }
 
