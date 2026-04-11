@@ -58,8 +58,9 @@ class TestSubagentOverrideConfig:
         assert override.max_turns == 42
         assert override.model == "gpt-5.4"
 
-    def test_model_accepts_any_string(self):
-        """Model name is a free-form string; validation happens at registry lookup time."""
+    def test_model_accepts_any_non_empty_string(self):
+        """Model name is a free-form non-empty string; cross-reference validation
+        against the `models:` section happens at registry lookup time."""
         override = SubagentOverrideConfig(model="any-arbitrary-model-name")
         assert override.model == "any-arbitrary-model-name"
 
@@ -74,6 +75,13 @@ class TestSubagentOverrideConfig:
             SubagentOverrideConfig(timeout_seconds=-1)
         with pytest.raises(ValueError):
             SubagentOverrideConfig(max_turns=-1)
+
+    def test_rejects_empty_model(self):
+        """Empty-string model would silently bypass the `is not None` check and
+        reach `create_chat_model(name="")` as a runtime error. Reject at load time
+        instead, symmetric with the `ge=1` guard on timeout_seconds / max_turns."""
+        with pytest.raises(ValueError):
+            SubagentOverrideConfig(model="")
 
     def test_minimum_valid_value(self):
         override = SubagentOverrideConfig(timeout_seconds=1, max_turns=1)

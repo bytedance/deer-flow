@@ -22,6 +22,7 @@ class SubagentOverrideConfig(BaseModel):
     )
     model: str | None = Field(
         default=None,
+        min_length=1,
         description="Model name for this subagent (None = inherit from parent agent)",
     )
 
