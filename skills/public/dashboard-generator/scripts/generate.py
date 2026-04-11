@@ -144,7 +144,7 @@ def load_data(
             sheets = wb.sheetnames
             wb.close()
             for sheet in sheets:
-                safe_sheet = sanitize_identifier(sheet)
+                safe_sheet = f"{base}_{sanitize_identifier(sheet)}"
                 con.execute(
                     f'CREATE OR REPLACE VIEW "{safe_sheet}" AS SELECT * FROM st_read(?, layer = ?, open_options = [\'HEADERS=FORCE\', \'FIELD_TYPES=AUTO\'])',
                     [f, sheet],
