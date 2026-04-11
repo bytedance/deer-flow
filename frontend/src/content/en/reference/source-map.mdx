@@ -1,3 +1,88 @@
 # Source Map
 
-TBD
+This page maps DeerFlow's core concepts to where they are implemented in the codebase, helping you quickly locate specific features.
+
+## Backend core paths
+
+```
+backend/
+├── app/
+│   └── gateway/              # FastAPI Gateway API
+│       ├── routers/
+│       │   ├── agents.py     # Custom agent CRUD
+│       │   ├── extensions.py # MCP/skill enable/disable
+│       │   ├── memory.py     # Memory read/clear
+│       │   ├── threads.py    # Thread management
+│       │   └── uploads.py    # File uploads
+│       └── app.py            # FastAPI app entry point (create_app())
+│
+└── packages/harness/deerflow/
+    ├── agents/
+    │   ├── lead_agent/
+    │   │   ├── agent.py      # make_lead_agent() factory
+    │   │   └── prompt.py     # System prompt templates
+    │   ├── middlewares/      # All middleware implementations
+    │   ├── memory/
+    │   │   ├── middleware.py # MemoryMiddleware
+    │   │   └── storage.py   # Memory file storage
+    │   └── thread_state.py  # ThreadState dataclass
+    │
+    ├── config/
+    │   ├── app_config.py    # AppConfig (top-level config)
+    │   ├── model_config.py  # ModelConfig
+    │   ├── paths.py         # Path resolution utilities
+    │   └── *.py             # Per-module config classes
+    │
+    ├── mcp/
+    │   ├── cache.py         # mtime-based tool cache
+    │   └── oauth.py         # MCP OAuth support
+    │
+    ├── models/
+    │   └── factory.py       # create_chat_model() LLM factory
+    │
+    ├── sandbox/
+    │   ├── local/           # LocalSandboxProvider
+    │   └── sandbox.py       # Sandbox base class
+    │
+    ├── skills/
+    │   ├── loader.py        # load_skills() (hot reload)
+    │   ├── parser.py        # SKILL.md parsing
+    │   ├── installer.py     # Dependency installation
+    │   └── manager.py       # Skill lifecycle management
+    │
+    ├── subagents/
+    │   └── registry.py      # Subagent lookup and config override
+    │
+    └── tools/
+        └── builtins/        # Built-in tool implementations
+```
+
+## Frontend core paths
+
+```
+frontend/src/
+├── app/                     # Next.js routes and pages
+├── components/
+│   └── workspace/           # Workspace UI components
+├── core/
+│   ├── agents/              # Agent types and API client
+│   ├── messages/            # Message types and tool call handling
+│   └── threads/             # Thread state management
+└── content/                 # Documentation content (MDX)
+    ├── en/                  # English documentation
+    └── zh/                  # Chinese documentation
+```
+
+## Quick index
+
+| Goal                       | File                          |
+| -------------------------- | ----------------------------- |
+| Lead agent creation        | `agents/lead_agent/agent.py`  |
+| System prompt template     | `agents/lead_agent/prompt.py` |
+| All middleware             | `agents/middlewares/`         |
+| Config loading             | `config/app_config.py`        |
+| Model factory              | `models/factory.py`           |
+| Skill loading (hot reload) | `skills/loader.py`            |
+| MCP tool cache             | `mcp/cache.py`                |
+| File upload handling       | `uploads/manager.py`          |
+| Gateway app factory        | `app/gateway/app.py`          |
