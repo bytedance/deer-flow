@@ -360,7 +360,7 @@ def action_join(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     right_select = ", ".join(f'"{right}"."{c[0]}" AS "{c[0]}_right"' for c in right_cols if c[0] not in [lc[0] for lc in left_cols])
     all_select = f"{left_select}, {right_select}" if right_select else left_select
 
-    con.execute(f'CREATE TABLE "{output_table}" AS SELECT {all_select} FROM "{left}" {how.upper()} JOIN "{right}" ON {on_clause}')
+    con.execute(f'CREATE OR REPLACE TABLE "{output_table}" AS SELECT {all_select} FROM "{left}" {how.upper()} JOIN "{right}" ON {on_clause}')
     cnt = con.execute(f'SELECT COUNT(*) FROM "{output_table}"').fetchone()[0]
     return f"join {left} + {right} → {output_table} ({cnt:,} rows, {how})"
 
@@ -373,7 +373,7 @@ def action_union(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     output_table = validate_identifier(step["as"], "output table name")
 
     union_parts = [f'SELECT * FROM "{t}"' for t in tables]
-    con.execute(f'CREATE TABLE "{output_table}" AS ' + " UNION ALL ".join(union_parts))
+    con.execute(f'CREATE OR REPLACE TABLE "{output_table}" AS ' + " UNION ALL ".join(union_parts))
     cnt = con.execute(f'SELECT COUNT(*) FROM "{output_table}"').fetchone()[0]
     return f"union {', '.join(tables)} → {output_table} ({cnt:,} rows)"
 
