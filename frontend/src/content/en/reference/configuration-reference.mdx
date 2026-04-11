@@ -1,3 +1,5 @@
+import { Callout } from "nextra/components";
+
 # Configuration Reference
 
 This page is the complete reference for all top-level fields in `config.yaml`.
@@ -43,11 +45,8 @@ models:
     base_url: null # Optional: custom endpoint URL
     request_timeout: 600.0 # Request timeout in seconds
     max_retries: 2 # Number of retries on failure
-    supports_vision: true # Whether the model accepts image inputs
-    supports_thinking: false # Whether the model supports extended thinking
-    # thinking: {}                   # Optional thinking config (passed when thinking is active)
-    # when_thinking_enabled: {}      # Optional overrides applied when thinking is enabled
-    # when_thinking_disabled: {}     # Optional overrides applied when thinking is disabled
+    supports_vision: true # Whether to enable vision capabilities
+    thinking_enabled: false # Whether to enable extended thinking
     # Any additional fields are passed through to the model constructor
 ```
 

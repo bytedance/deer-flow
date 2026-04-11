@@ -1,3 +1,155 @@
+import { Callout, Cards, Steps } from "nextra/components";
+
 # Quick Start
 
-TBD
+<Callout type="info" emoji="🚀">
+  This guide shows you how to use the DeerFlow Harness programmatically — not
+  through the App UI, but by importing and calling the harness directly in
+  Python.
+</Callout>
+
+The DeerFlow Harness is the Python SDK and runtime foundation. This quick start walks you through the key APIs for running an agent, streaming its output, and working with threads.
+
+## Prerequisites
+
+DeerFlow Harness requires Python 3.12 or later. The package is part of the `deerflow` repository under `backend/packages/harness`.
+
+If you are working from the repository clone:
+
+```bash
+cd backend
+uv sync
+```
+
+## Configuration
+
+All harness behaviors are driven by `config.yaml`. At minimum, you need at least one model configured:
+
+```yaml
+# config.yaml
+config_version: 6
+
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+Copy `config.example.yaml` to `config.yaml` and fill in your API key.
+
+## Running the harness
+
+The primary entry point for the DeerFlow Harness is `DeerFlowClient`. It manages thread state, invokes the Lead Agent, and streams the response.
+
+<Steps>
+
+### Import and configure
+
+```python
+import asyncio
+from deerflow.client import DeerFlowClient
+from deerflow.config import load_config
+
+# Load config.yaml from the current directory or DEER_FLOW_CONFIG_PATH
+load_config()
+
+client = DeerFlowClient()
+```
+
+### Create a thread
+
+```python
+thread_id = "my-thread-001"
+```
+
+Thread IDs are arbitrary strings. Reusing the same ID continues the existing conversation (if a checkpointer is configured).
+
+### Send a message and stream the response
+
+```python
+async def run():
+    async for event in client.astream(
+        thread_id=thread_id,
+        message="Research the top 3 open-source LLM frameworks and summarize them.",
+        config={
+            "configurable": {
+                "model_name": "gpt-4o",
+                "thinking_enabled": False,
+                "is_plan_mode": True,
+                "subagent_enabled": True,
+            }
+        },
+    ):
+        print(event)
+
+asyncio.run(run())
+```
+
+</Steps>
+
+## Configurable options
+
+The `config.configurable` dict controls per-request behavior:
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `model_name` | `str \| None` | first model in config | Model to use for this request |
+| `thinking_enabled` | `bool` | `True` | Enable extended thinking mode (if supported) |
+| `reasoning_effort` | `str \| None` | `None` | Reasoning effort level (model-specific) |
+| `is_plan_mode` | `bool` | `False` | Enable TodoList middleware for task tracking |
+| `subagent_enabled` | `bool` | `False` | Allow the agent to delegate subtasks |
+| `max_concurrent_subagents` | `int` | `3` | Maximum parallel subagent calls per turn |
+| `agent_name` | `str \| None` | `None` | Name of a custom agent to load |
+
+## Streaming event types
+
+`client.astream()` yields events from the LangGraph runtime. The key event types are:
+
+| Event type | Description |
+|---|---|
+| `messages` | Individual message chunks (text, thinking, tool calls) |
+| `thread_state` | Thread state updates (title, artifacts, todo list) |
+
+Message chunks contain the token stream as the agent generates its response.
+
+## Working with a custom agent
+
+If you have defined a custom agent, pass its `name` in the configurable:
+
+```python
+async for event in client.astream(
+    thread_id="thread-002",
+    message="Analyze the attached CSV and generate a summary chart.",
+    config={
+        "configurable": {
+            "agent_name": "data-analyst",
+            "subagent_enabled": True,
+        }
+    },
+):
+    ...
+```
+
+The custom agent's configuration (model, skills, tool groups) is loaded automatically from `agents/data-analyst/config.yaml`.
+
+## Next steps
+
+<Cards num={3}>
+  <Cards.Card title="Design Principles" href="/docs/harness/design-principles" />
+  <Cards.Card title="Lead Agent" href="/docs/harness/lead-agent" />
+  <Cards.Card title="Configuration" href="/docs/harness/configuration" />
+</Cards>

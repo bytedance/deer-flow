@@ -1,0 +1,151 @@
+import { Callout, Cards, Steps } from "nextra/components";
+
+# 快速上手
+
+<Callout type="info" emoji="🚀">
+  本指南介绍如何以编程方式使用 DeerFlow Harness——不是通过应用界面，而是直接在 Python 中导入和调用 Harness。
+</Callout>
+
+DeerFlow Harness 是 Python SDK 和运行时基础。本快速上手指南将带你了解运行 Agent、流式传输输出和使用线程的核心 API。
+
+## 前置条件
+
+DeerFlow Harness 需要 Python 3.12 或更高版本。该包是 `deerflow` 代码库的一部分，位于 `backend/packages/harness` 下。
+
+如果你从仓库克隆开始：
+
+```bash
+cd backend
+uv sync
+```
+
+## 配置
+
+所有 Harness 行为由 `config.yaml` 驱动。至少需要配置一个模型：
+
+```yaml
+# config.yaml
+config_version: 6
+
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+将 `config.example.yaml` 复制到 `config.yaml` 并填写你的 API Key。
+
+## 运行 Harness
+
+DeerFlow Harness 的主要入口是 `DeerFlowClient`。它管理线程状态、调用 Lead Agent，并流式传输响应。
+
+<Steps>
+
+### 导入并配置
+
+```python
+import asyncio
+from deerflow.client import DeerFlowClient
+from deerflow.config import load_config
+
+# 从当前目录或 DEER_FLOW_CONFIG_PATH 加载 config.yaml
+load_config()
+
+client = DeerFlowClient()
+```
+
+### 创建线程
+
+```python
+thread_id = "my-thread-001"
+```
+
+线程 ID 是任意字符串。使用相同 ID 可以继续已有对话（需要配置检查点）。
+
+### 发送消息并流式传输响应
+
+```python
+async def run():
+    async for event in client.astream(
+        thread_id=thread_id,
+        message="研究前三大开源 LLM 框架并进行总结。",
+        config={
+            "configurable": {
+                "model_name": "gpt-4o",
+                "thinking_enabled": False,
+                "is_plan_mode": True,
+                "subagent_enabled": True,
+            }
+        },
+    ):
+        print(event)
+
+asyncio.run(run())
+```
+
+</Steps>
+
+## 可配置选项
+
+`config.configurable` 字典控制每次请求的行为：
+
+| 键 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `model_name` | `str \| None` | 配置中第一个模型 | 本次请求使用的模型 |
+| `thinking_enabled` | `bool` | `True` | 启用扩展思考模式（如果支持） |
+| `reasoning_effort` | `str \| None` | `None` | 推理努力程度（特定模型参数） |
+| `is_plan_mode` | `bool` | `False` | 启用 TodoList 中间件进行任务跟踪 |
+| `subagent_enabled` | `bool` | `False` | 允许 Agent 委派子任务 |
+| `max_concurrent_subagents` | `int` | `3` | 每轮最大并行子 Agent 调用数 |
+| `agent_name` | `str \| None` | `None` | 要加载的自定义 Agent 名称 |
+
+## 流式事件类型
+
+`client.astream()` 从 LangGraph 运行时产生事件，主要事件类型如下：
+
+| 事件类型 | 说明 |
+|---|---|
+| `messages` | 消息块（文本、思考过程、工具调用） |
+| `thread_state` | 线程状态更新（标题、产出物、待办列表） |
+
+消息块包含 Agent 生成响应时的 token 流。
+
+## 使用自定义 Agent
+
+如果已定义自定义 Agent，在 configurable 中传入其 `name`：
+
+```python
+async for event in client.astream(
+    thread_id="thread-002",
+    message="分析上传的 CSV 并生成摘要图表。",
+    config={
+        "configurable": {
+            "agent_name": "data-analyst",
+            "subagent_enabled": True,
+        }
+    },
+):
+    ...
+```
+
+自定义 Agent 的配置（模型、技能、工具组）将从 `agents/data-analyst/config.yaml` 自动加载。
+
+<Cards num={3}>
+  <Cards.Card title="设计理念" href="/docs/harness/design-principles" />
+  <Cards.Card title="Lead Agent" href="/docs/harness/lead-agent" />
+  <Cards.Card title="配置" href="/docs/harness/configuration" />
+</Cards>

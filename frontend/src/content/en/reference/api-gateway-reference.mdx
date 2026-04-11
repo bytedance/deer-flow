@@ -1,3 +1,5 @@
+import { Callout } from "nextra/components";
+
 # API / Gateway Reference
 
 <Callout type="info">
@@ -39,21 +41,13 @@ http://localhost:2026/api
 
 ### Threads and memory
 
-| Method   | Path                          | Description                                        |
-| -------- | ----------------------------- | -------------------------------------------------- |
-| `GET`    | `/api/threads`                | List threads                                       |
-| `DELETE` | `/api/threads/{thread_id}`    | Delete a thread                                    |
-| `GET`    | `/api/memory`                 | Get global memory data (context + facts)           |
-| `DELETE` | `/api/memory`                 | Clear all memory data                              |
-| `POST`   | `/api/memory/reload`          | Reload memory from storage file                    |
-| `GET`    | `/api/memory/facts`           | (included in `/api/memory` response `facts` array) |
-| `POST`   | `/api/memory/facts`           | Create a memory fact                               |
-| `PATCH`  | `/api/memory/facts/{fact_id}` | Update a memory fact                               |
-| `DELETE` | `/api/memory/facts/{fact_id}` | Delete a memory fact                               |
-| `GET`    | `/api/memory/export`          | Export memory data as JSON                         |
-| `POST`   | `/api/memory/import`          | Import and overwrite memory data                   |
-| `GET`    | `/api/memory/config`          | Get memory configuration                           |
-| `GET`    | `/api/memory/status`          | Get memory config + data in one request            |
+| Method   | Path                       | Description               |
+| -------- | -------------------------- | ------------------------- |
+| `GET`    | `/api/threads`             | List threads              |
+| `DELETE` | `/api/threads/{thread_id}` | Delete a thread           |
+| `GET`    | `/api/memory`              | Get global memory         |
+| `GET`    | `/api/memory/{agent_name}` | Get agent-specific memory |
+| `DELETE` | `/api/memory`              | Clear global memory       |
 
 ### Extensions
 
