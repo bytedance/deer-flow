@@ -309,10 +309,13 @@ def action_add_computed_column(con: duckdb.DuckDBPyConnection, step: dict) -> st
     as documented in SKILL.md ("any valid DuckDB SQL expression"). This is
     by design — the expression is written by the Agent based on user instructions
     and runs inside a sandboxed DuckDB instance.
+    Semicolons are rejected to prevent multi-statement injection.
     """
     table = validate_identifier(step["table"], "table name")
     column = validate_identifier(step["column"], "computed column name")
     expr = step["expr"]
+    if ";" in expr:
+        raise ValueError(f"action_add_computed_column expr must be a single SQL expression, semicolons are not allowed: '{expr}'")
 
     con.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT *, ({expr}) AS "{column}" FROM "{table}"')
     cnt = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
@@ -328,6 +331,9 @@ def action_group_by(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     aggregations: dict[str, str] = step["aggregations"]
     for alias in aggregations:
         validate_identifier(alias, "aggregation alias")
+    for expr in aggregations.values():
+        if ";" in expr:
+            raise ValueError(f"group_by aggregation expression must not contain semicolons: '{expr}'")
     output_table = step.get("as", table)
     if output_table != table:
         validate_identifier(output_table, "output table name")
@@ -384,9 +390,12 @@ def action_filter(con: duckdb.DuckDBPyConnection, step: dict) -> str:
     NOTE: The 'condition' parameter is intentionally a raw DuckDB SQL WHERE clause,
     as documented in SKILL.md. This is by design — the condition is written by the
     Agent based on user instructions and runs inside a sandboxed DuckDB instance.
+    Semicolons are rejected to prevent multi-statement injection.
     """
     table = validate_identifier(step["table"], "table name")
     condition = step["condition"]
+    if ";" in condition:
+        raise ValueError(f"action_filter condition must be a single WHERE expression, semicolons are not allowed: '{condition}'")
     before = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
 
     con.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT * FROM "{table}" WHERE {condition}')
