@@ -259,7 +259,14 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
-    middlewares.append(LoopDetectionMiddleware())
+    # Read thresholds from config.yaml (loop_detection section) with safe defaults
+    loop_cfg = app_config.loop_detection
+    middlewares.append(LoopDetectionMiddleware(
+        warn_threshold=loop_cfg.warn_threshold,
+        hard_limit=loop_cfg.hard_limit,
+        window_size=loop_cfg.window_size,
+        max_tracked_threads=loop_cfg.max_tracked_threads,
+    ))
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
