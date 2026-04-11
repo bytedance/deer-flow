@@ -221,7 +221,7 @@ def render_chart(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
     x_field = ds.get("x", "")
     y_fields = ds.get("y", [])
     title = esc(section.get("title", ""))
-    chart_id = f"chart-{abs(hash(section.get('title', ''))) % 10000}"
+    chart_id = section.get("id", f"chart-{id(section) % 100000}")
 
     # Execute SQL
     data: list[dict] = []
