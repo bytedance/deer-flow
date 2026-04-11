@@ -56,10 +56,10 @@ tests/
 # Exclude directories not needed in Docker context
 # Frontend build only needs frontend/
 # Backend build only needs backend/
-scripts/
+#scripts/
 logs/
 docker/
-skills/
+#skills/
 frontend/.next
 frontend/node_modules
 backend/.venv
