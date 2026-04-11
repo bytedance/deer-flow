@@ -78,14 +78,14 @@ Replace NULL values with specified defaults per column.
 {
   "action": "fill_nulls",
   "table": "sales",
-  "columns": {"region": "Unknown", "notes": "", "discount": "0"}
+  "columns": {"region": "Unknown", "notes": "", "discount": 0, "quantity": 1}
 }
 ```
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `table` | string | Yes | Target table name |
-| `columns` | object | Yes | Mapping of column name → default value |
+| `columns` | object | Yes | Mapping of column name → default value. Use JSON types matching the column: strings for text columns, numbers for numeric columns (e.g., `0` not `"0"`) |
 
 SQL equivalent: `COALESCE(col, default) AS col`
 

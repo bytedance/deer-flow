@@ -113,7 +113,7 @@ For detailed parameter specifications of each action, consult `references/transf
 | Action | Required Params | Description |
 |--------|----------------|-------------|
 | `drop_nulls` | `table`, `columns` (array) | Drop rows with null values in specified columns |
-| `fill_nulls` | `table`, `columns` (object of col:value) | Fill null values with specified defaults |
+| `fill_nulls` | `table`, `columns` (object of col:value) | Fill null values with specified defaults. Use matching JSON types: strings for text (`"Unknown"`), numbers for numeric columns (`0` not `"0"`) |
 | `drop_duplicates` | `table`, `columns` (array) | Remove duplicate rows based on columns |
 | `trim_strings` | `table`, `columns` (optional) | Trim whitespace from string columns |
 | `normalize_dates` | `table`, `columns`, `format` | Parse date columns into standard format |
