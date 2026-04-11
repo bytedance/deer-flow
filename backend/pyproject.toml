@@ -23,9 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-postgres = [
-    "deerflow-harness[postgres]",
-]
+postgres = ["deerflow-harness[postgres]"]
 
 [dependency-groups]
 dev = [

@@ -20,7 +20,34 @@ export async function getServerSideUser(): Promise<AuthResult> {
     return { tag: "config_error", message: String(err) };
   }
 
-  if (!sessionCookie) return { tag: "unauthenticated" };
+  if (!sessionCookie) {
+    // No session — check whether the system has been initialised yet.
+    const setupController = new AbortController();
+    const setupTimeout = setTimeout(
+      () => setupController.abort(),
+      SSR_AUTH_TIMEOUT_MS,
+    );
+    try {
+      const setupRes = await fetch(
+        `${internalGatewayUrl}/api/v1/auth/setup-status`,
+        {
+          cache: "no-store",
+          signal: setupController.signal,
+        },
+      );
+      clearTimeout(setupTimeout);
+      if (setupRes.ok) {
+        const setupData = (await setupRes.json()) as { needs_setup?: boolean };
+        if (setupData.needs_setup) {
+          return { tag: "system_setup_required" };
+        }
+      }
+    } catch {
+      clearTimeout(setupTimeout);
+      // If setup-status is unreachable/times out, fall through to unauthenticated.
+    }
+    return { tag: "unauthenticated" };
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SSR_AUTH_TIMEOUT_MS);

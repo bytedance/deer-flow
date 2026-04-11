@@ -114,6 +114,35 @@ async def run_agent(
             content = human_msg.content
             journal.set_first_human_message(content if isinstance(content, str) else str(content))
 
+    # Initialize RunJournal for event capture
+    journal = None
+    if event_store is not None:
+        from deerflow.runtime.journal import RunJournal
+
+        journal = RunJournal(
+            run_id=run_id,
+            thread_id=thread_id,
+            event_store=event_store,
+            track_token_usage=getattr(run_events_config, "track_token_usage", True),
+        )
+
+        # Write human_message event (model_dump format, aligned with checkpoint)
+        human_msg = _extract_human_message(graph_input)
+        if human_msg is not None:
+            msg_metadata = {}
+            if follow_up_to_run_id:
+                msg_metadata["follow_up_to_run_id"] = follow_up_to_run_id
+            await event_store.put(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type="human_message",
+                category="message",
+                content=human_msg.model_dump(),
+                metadata=msg_metadata or None,
+            )
+            content = human_msg.content
+            journal.set_first_human_message(content if isinstance(content, str) else str(content))
+
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
         logger.info(

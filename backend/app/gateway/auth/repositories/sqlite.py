@@ -114,6 +114,11 @@ class SQLiteUserRepository(UserRepository):
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
+    async def count_admin_users(self) -> int:
+        stmt = select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin")
+        async with self._sf() as session:
+            return await session.scalar(stmt) or 0
+
     async def get_user_by_oauth(self, provider: str, oauth_id: str) -> User | None:
         stmt = select(UserRow).where(UserRow.oauth_provider == provider, UserRow.oauth_id == oauth_id)
         async with self._sf() as session:

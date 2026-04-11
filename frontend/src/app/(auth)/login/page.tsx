@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
@@ -46,6 +48,7 @@ export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { isAuthenticated } = useAuth();
+  const { theme, resolvedTheme } = useTheme();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -63,6 +66,26 @@ export default function LoginPage() {
       router.push(redirectPath);
     }
   }, [isAuthenticated, redirectPath, router]);
+
+  // Redirect to setup if the system has no users yet
+  useEffect(() => {
+    let cancelled = false;
+
+    void fetch("/api/v1/auth/setup-status")
+      .then((r) => r.json())
+      .then((data: { needs_setup?: boolean }) => {
+        if (!cancelled && data.needs_setup) {
+          router.push("/setup");
+        }
+      })
+      .catch(() => {
+        // Ignore errors; user stays on login page
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -97,25 +120,35 @@ export default function LoginPage() {
 
       // Both login and register set a cookie — redirect to workspace
       router.push(redirectPath);
-    } catch (_err) {
+    } catch {
       setError("Network error. Please try again.");
     } finally {
       setLoading(false);
     }
   };
 
+  const actualTheme = theme === "system" ? resolvedTheme : theme;
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#0a0a0a]">
-      <div className="border-border/20 w-full max-w-md space-y-6 rounded-lg border bg-black/50 p-8 backdrop-blur-sm">
+    <div className="bg-background flex min-h-screen items-center justify-center">
+      <FlickeringGrid
+        className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+        squareSize={4}
+        gridGap={4}
+        color={actualTheme === "dark" ? "white" : "black"}
+        maxOpacity={0.3}
+        flickerChance={0.25}
+      />
+      <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
         <div className="text-center">
-          <h1 className="font-serif text-3xl">DeerFlow</h1>
+          <h1 className="text-foreground font-serif text-3xl">DeerFlow</h1>
           <p className="text-muted-foreground mt-2">
             {isLogin ? "Sign in to your account" : "Create a new account"}
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
+        <form onSubmit={handleSubmit} className="space-y-2">
+          <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
               Email
             </label>
@@ -126,11 +159,9 @@ export default function LoginPage() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@example.com"
               required
-              className="mt-1 bg-white text-black"
             />
           </div>
-
-          <div>
+          <div className="flex flex-col space-y-1">
             <label htmlFor="password" className="text-sm font-medium">
               Password
             </label>
@@ -142,7 +173,6 @@ export default function LoginPage() {
               placeholder="•••••••"
               required
               minLength={isLogin ? 6 : 8}
-              className="mt-1 bg-white text-black"
             />
           </div>
 

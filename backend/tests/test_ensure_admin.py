@@ -1,21 +1,19 @@
 """Tests for _ensure_admin_user() in app.py.
 
-Covers: first-boot admin creation, auto-reset on needs_setup=True,
-no-op on needs_setup=False, migration, and edge cases.
+Covers: first-boot no-op (admin creation removed), orphan migration
+when admin exists, no-op on no admin found, and edge cases.
 """
 
 import asyncio
 import os
-from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-ensure-admin-testing-min-32")
 
 from app.gateway.auth.config import AuthConfig, set_auth_config
-from app.gateway.auth.models import User
 
 _JWT_SECRET = "test-secret-key-ensure-admin-testing-min-32"
 
@@ -35,53 +33,90 @@ def _make_app_stub(store=None):
     return app
 
 
-def _make_provider(user_count=0, admin_user=None):
+def _make_provider(admin_count=0):
     p = AsyncMock()
-    p.count_users = AsyncMock(return_value=user_count)
-    p.create_user = AsyncMock(
-        side_effect=lambda **kw: User(
-            email=kw["email"],
-            password_hash="hashed",
-            system_role=kw.get("system_role", "user"),
-            needs_setup=kw.get("needs_setup", False),
-        )
-    )
-    p.get_user_by_email = AsyncMock(return_value=admin_user)
+    p.count_users = AsyncMock(return_value=admin_count)
+    p.count_admin_users = AsyncMock(return_value=admin_count)
+    p.create_user = AsyncMock()
     p.update_user = AsyncMock(side_effect=lambda u: u)
     return p
 
 
-# ── First boot: no users ─────────────────────────────────────────────────
+def _make_session_factory(admin_row=None):
+    """Build a mock async session factory that returns a row from execute()."""
+    row_result = MagicMock()
+    row_result.scalar_one_or_none.return_value = admin_row
+
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none.return_value = admin_row
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=execute_result)
+
+    # Async context manager
+    session_cm = AsyncMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+
+    sf = MagicMock()
+    sf.return_value = session_cm
+    return sf
 
 
-def test_first_boot_creates_admin():
-    """count_users==0 → create admin with needs_setup=True."""
-    provider = _make_provider(user_count=0)
+# ── First boot: no admin → generate init_token, return early ─────────────
+
+
+def test_first_boot_does_not_create_admin():
+    """admin_count==0 → generate init_token, do NOT create admin automatically."""
+    provider = _make_provider(admin_count=0)
     app = _make_app_stub()
+    app.state.init_token = None  # lifespan sets this
 
     with patch("app.gateway.deps.get_local_provider", return_value=provider):
-        with patch("app.gateway.auth.password.hash_password_async", new_callable=AsyncMock, return_value="hashed"):
-            from app.gateway.app import _ensure_admin_user
+        from app.gateway.app import _ensure_admin_user
 
-            asyncio.run(_ensure_admin_user(app))
+        asyncio.run(_ensure_admin_user(app))
 
-    provider.create_user.assert_called_once()
-    call_kwargs = provider.create_user.call_args[1]
-    assert call_kwargs["email"] == "admin@deerflow.dev"
-    assert call_kwargs["system_role"] == "admin"
-    assert call_kwargs["needs_setup"] is True
-    assert len(call_kwargs["password"]) > 10  # random password generated
+    provider.create_user.assert_not_called()
+    # init_token must have been set on app.state
+    assert app.state.init_token is not None
+    assert len(app.state.init_token) > 10
 
 
-def test_first_boot_triggers_migration_if_store_present():
-    """First boot with store → _migrate_orphaned_threads called."""
-    provider = _make_provider(user_count=0)
+def test_first_boot_skips_migration():
+    """No admin → return early before any migration attempt."""
+    provider = _make_provider(admin_count=0)
+    store = AsyncMock()
+    store.asearch = AsyncMock(return_value=[])
+    app = _make_app_stub(store=store)
+    app.state.init_token = None  # lifespan sets this
+
+    with patch("app.gateway.deps.get_local_provider", return_value=provider):
+        from app.gateway.app import _ensure_admin_user
+
+        asyncio.run(_ensure_admin_user(app))
+
+    store.asearch.assert_not_called()
+
+
+# ── Admin exists: migration runs when admin row found ────────────────────
+
+
+def test_admin_exists_triggers_migration():
+    """Admin exists and admin row found → _migrate_orphaned_threads called."""
+    from uuid import uuid4
+
+    admin_row = MagicMock()
+    admin_row.id = uuid4()
+
+    provider = _make_provider(admin_count=1)
+    sf = _make_session_factory(admin_row=admin_row)
     store = AsyncMock()
     store.asearch = AsyncMock(return_value=[])
     app = _make_app_stub(store=store)
 
     with patch("app.gateway.deps.get_local_provider", return_value=provider):
-        with patch("app.gateway.auth.password.hash_password_async", new_callable=AsyncMock, return_value="hashed"):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=sf):
             from app.gateway.app import _ensure_admin_user
 
             asyncio.run(_ensure_admin_user(app))
@@ -89,129 +124,76 @@ def test_first_boot_triggers_migration_if_store_present():
     store.asearch.assert_called_once()
 
 
-def test_first_boot_no_store_skips_migration():
-    """First boot without store → no crash, migration skipped."""
-    provider = _make_provider(user_count=0)
+def test_admin_exists_no_admin_row_skips_migration():
+    """Admin count > 0 but DB row missing (edge case) → skip migration gracefully."""
+    provider = _make_provider(admin_count=2)
+    sf = _make_session_factory(admin_row=None)
+    store = AsyncMock()
+    app = _make_app_stub(store=store)
+
+    with patch("app.gateway.deps.get_local_provider", return_value=provider):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=sf):
+            from app.gateway.app import _ensure_admin_user
+
+            asyncio.run(_ensure_admin_user(app))
+
+    store.asearch.assert_not_called()
+
+
+def test_admin_exists_no_store_skips_migration():
+    """Admin exists, row found, but no store → no crash, no migration."""
+    from uuid import uuid4
+
+    admin_row = MagicMock()
+    admin_row.id = uuid4()
+
+    provider = _make_provider(admin_count=1)
+    sf = _make_session_factory(admin_row=admin_row)
     app = _make_app_stub(store=None)
 
     with patch("app.gateway.deps.get_local_provider", return_value=provider):
-        with patch("app.gateway.auth.password.hash_password_async", new_callable=AsyncMock, return_value="hashed"):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=sf):
             from app.gateway.app import _ensure_admin_user
 
             asyncio.run(_ensure_admin_user(app))
 
-    provider.create_user.assert_called_once()
+    # No assertion needed — just verify no crash
 
 
-# ── Subsequent boot: needs_setup=True → auto-reset ───────────────────────
-
-
-def test_needs_setup_true_resets_password():
-    """Existing admin with needs_setup=True → password reset + token_version bumped."""
-    admin = User(
-        email="admin@deerflow.dev",
-        password_hash="old-hash",
-        system_role="admin",
-        needs_setup=True,
-        token_version=0,
-        created_at=datetime.now(UTC) - timedelta(seconds=30),
-    )
-    provider = _make_provider(user_count=1, admin_user=admin)
-    app = _make_app_stub()
+def test_admin_exists_session_factory_none_skips_migration():
+    """get_session_factory() returns None → return early, no crash."""
+    provider = _make_provider(admin_count=1)
+    store = AsyncMock()
+    app = _make_app_stub(store=store)
 
     with patch("app.gateway.deps.get_local_provider", return_value=provider):
-        with patch("app.gateway.auth.password.hash_password_async", new_callable=AsyncMock, return_value="new-hash"):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=None):
             from app.gateway.app import _ensure_admin_user
 
             asyncio.run(_ensure_admin_user(app))
 
-    # Password was reset
-    provider.update_user.assert_called_once()
-    updated = provider.update_user.call_args[0][0]
-    assert updated.password_hash == "new-hash"
-    assert updated.token_version == 1
-
-
-def test_needs_setup_true_consecutive_resets_increment_version():
-    """Two boots with needs_setup=True → token_version increments each time."""
-    admin = User(
-        email="admin@deerflow.dev",
-        password_hash="hash",
-        system_role="admin",
-        needs_setup=True,
-        token_version=3,
-        created_at=datetime.now(UTC) - timedelta(seconds=30),
-    )
-    provider = _make_provider(user_count=1, admin_user=admin)
-    app = _make_app_stub()
-
-    with patch("app.gateway.deps.get_local_provider", return_value=provider):
-        with patch("app.gateway.auth.password.hash_password_async", new_callable=AsyncMock, return_value="new-hash"):
-            from app.gateway.app import _ensure_admin_user
-
-            asyncio.run(_ensure_admin_user(app))
-
-    updated = provider.update_user.call_args[0][0]
-    assert updated.token_version == 4
-
-
-# ── Subsequent boot: needs_setup=False → no-op ──────────────────────────
-
-
-def test_needs_setup_false_no_reset():
-    """Admin with needs_setup=False → no password reset, no update."""
-    admin = User(
-        email="admin@deerflow.dev",
-        password_hash="stable-hash",
-        system_role="admin",
-        needs_setup=False,
-        token_version=2,
-    )
-    provider = _make_provider(user_count=1, admin_user=admin)
-    app = _make_app_stub()
-
-    with patch("app.gateway.deps.get_local_provider", return_value=provider):
-        from app.gateway.app import _ensure_admin_user
-
-        asyncio.run(_ensure_admin_user(app))
-
-    provider.update_user.assert_not_called()
-    assert admin.password_hash == "stable-hash"
-    assert admin.token_version == 2
-
-
-# ── Edge cases ───────────────────────────────────────────────────────────
-
-
-def test_no_admin_email_found_no_crash():
-    """Users exist but no admin@deerflow.dev → no crash, no reset."""
-    provider = _make_provider(user_count=3, admin_user=None)
-    app = _make_app_stub()
-
-    with patch("app.gateway.deps.get_local_provider", return_value=provider):
-        from app.gateway.app import _ensure_admin_user
-
-        asyncio.run(_ensure_admin_user(app))
-
-    provider.update_user.assert_not_called()
-    provider.create_user.assert_not_called()
+    store.asearch.assert_not_called()
 
 
 def test_migration_failure_is_non_fatal():
     """_migrate_orphaned_threads exception is caught and logged."""
-    provider = _make_provider(user_count=0)
+    from uuid import uuid4
+
+    admin_row = MagicMock()
+    admin_row.id = uuid4()
+
+    provider = _make_provider(admin_count=1)
+    sf = _make_session_factory(admin_row=admin_row)
     store = AsyncMock()
     store.asearch = AsyncMock(side_effect=RuntimeError("store crashed"))
     app = _make_app_stub(store=store)
 
     with patch("app.gateway.deps.get_local_provider", return_value=provider):
-        with patch("app.gateway.auth.password.hash_password_async", new_callable=AsyncMock, return_value="hashed"):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=sf):
             from app.gateway.app import _ensure_admin_user
 
             # Should not raise
             asyncio.run(_ensure_admin_user(app))
-
-    provider.create_user.assert_called_once()
 
 
 # ── Section 5.1-5.6 upgrade path: orphan thread migration ────────────────

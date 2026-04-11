@@ -69,12 +69,10 @@ export function AccountSettingsPage() {
   return (
     <div className="space-y-8">
       <SettingsSection title="Profile">
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
+        <div className="space-y-2">
+          <div className="grid grid-cols-[max-content_max-content] items-center gap-4">
             <span className="text-muted-foreground text-sm">Email</span>
             <span className="text-sm font-medium">{user?.email ?? "—"}</span>
-          </div>
-          <div className="flex items-center justify-between">
             <span className="text-muted-foreground text-sm">Role</span>
             <span className="text-sm font-medium capitalize">
               {user?.system_role ?? "—"}
@@ -83,7 +81,10 @@ export function AccountSettingsPage() {
         </div>
       </SettingsSection>
 
-      <SettingsSection title="Change Password">
+      <SettingsSection
+        title="Change Password"
+        description="Update your account password."
+      >
         <form onSubmit={handleChangePassword} className="max-w-sm space-y-3">
           <Input
             type="password"
@@ -116,7 +117,7 @@ export function AccountSettingsPage() {
         </form>
       </SettingsSection>
 
-      <SettingsSection title="Session">
+      <SettingsSection title="" description="">
         <Button
           variant="destructive"
           size="sm"

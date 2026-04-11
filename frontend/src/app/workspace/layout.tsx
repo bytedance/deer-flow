@@ -23,6 +23,8 @@ export default async function WorkspaceLayout({
       );
     case "needs_setup":
       redirect("/setup");
+    case "system_setup_required":
+      redirect("/setup");
     case "unauthenticated":
       redirect("/login");
     case "gateway_unavailable":
