@@ -35,6 +35,7 @@ STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
+    "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
     "telegram": {"supports_streaming": False},
