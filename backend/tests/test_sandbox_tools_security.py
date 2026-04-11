@@ -42,6 +42,53 @@ def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
     assert Path(replace_virtual_path("/mnt/user-data", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
 
 
+def test_replace_virtual_path_preserves_trailing_slash() -> None:
+    """Trailing slash must survive virtual-to-actual path replacement.
+
+    Regression: '/mnt/user-data/workspace/' was previously returned without
+    the trailing slash, causing string concatenations like
+    output_dir + 'file.txt' to produce a missing-separator path.
+    """
+    result = replace_virtual_path("/mnt/user-data/workspace/", _THREAD_DATA)
+    assert result.endswith("/"), f"Expected trailing slash, got: {result!r}"
+    assert result == "/tmp/deer-flow/threads/t1/user-data/workspace/"
+
+
+def test_replace_virtual_path_preserves_trailing_slash_windows_style() -> None:
+    """Trailing slash must be preserved as backslash when actual_base is Windows-style.
+
+    If actual_base uses backslash separators, appending '/' would produce a
+    mixed-separator path.  The separator must match the style of actual_base.
+    """
+    win_thread_data = {
+        "workspace_path": r"C:\deer-flow\threads\t1\user-data\workspace",
+        "uploads_path": r"C:\deer-flow\threads\t1\user-data\uploads",
+        "outputs_path": r"C:\deer-flow\threads\t1\user-data\outputs",
+    }
+    result = replace_virtual_path("/mnt/user-data/workspace/", win_thread_data)
+    assert result.endswith("\\"), f"Expected trailing backslash for Windows path, got: {result!r}"
+    assert "/" not in result, f"Mixed separators in Windows path: {result!r}"
+
+
+def test_replace_virtual_path_preserves_windows_style_for_nested_subdir_trailing_slash() -> None:
+    """Nested Windows-style subdirectories must keep backslashes throughout."""
+    win_thread_data = {
+        "workspace_path": r"C:\deer-flow\threads\t1\user-data\workspace",
+        "uploads_path": r"C:\deer-flow\threads\t1\user-data\uploads",
+        "outputs_path": r"C:\deer-flow\threads\t1\user-data\outputs",
+    }
+    result = replace_virtual_path("/mnt/user-data/workspace/subdir/", win_thread_data)
+    assert result == "C:\\deer-flow\\threads\\t1\\user-data\\workspace\\subdir\\"
+    assert "/" not in result, f"Mixed separators in Windows path: {result!r}"
+
+
+def test_replace_virtual_paths_in_command_preserves_trailing_slash() -> None:
+    """Trailing slash on a virtual path inside a command must be preserved."""
+    cmd = """python -c "output_dir = '/mnt/user-data/workspace/'; print(output_dir + 'some_file.txt')\""""
+    result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
+    assert "/tmp/deer-flow/threads/t1/user-data/workspace/" in result, f"Trailing slash lost in: {result!r}"
+
+
 # ---------- mask_local_paths_in_output ----------
 
 
@@ -255,6 +302,22 @@ def test_replace_virtual_paths_in_command_replaces_both() -> None:
 def test_validate_local_bash_command_paths_blocks_host_paths() -> None:
     with pytest.raises(PermissionError, match="Unsafe absolute paths"):
         validate_local_bash_command_paths("cat /etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_allows_https_urls() -> None:
+    """URLs like https://github.com/... must not be flagged as unsafe absolute paths."""
+    validate_local_bash_command_paths(
+        "cd /mnt/user-data/workspace && git clone https://github.com/CherryHQ/cherry-studio.git",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_allows_http_urls() -> None:
+    """HTTP URLs must not be flagged as unsafe absolute paths."""
+    validate_local_bash_command_paths(
+        "curl http://example.com/file.tar.gz -o /mnt/user-data/workspace/file.tar.gz",
+        _THREAD_DATA,
+    )
 
 
 def test_validate_local_bash_command_paths_allows_virtual_and_system_paths() -> None:
@@ -955,3 +1018,39 @@ def test_str_replace_and_append_on_same_path_should_preserve_both_updates(monkey
 
     assert failures == []
     assert sandbox.content == "ALPHA\ntail\n"
+
+
+def test_file_operation_lock_memory_cleanup() -> None:
+    """Verify that released locks are eventually cleaned up by WeakValueDictionary.
+
+    This ensures that the sandbox component doesn't leak memory over time when
+    operating on many unique file paths.
+    """
+    import gc
+
+    from deerflow.sandbox.file_operation_lock import _FILE_OPERATION_LOCKS, get_file_operation_lock
+
+    class MockSandbox:
+        id = "test_cleanup_sandbox"
+
+    test_path = "/tmp/deer-flow/memory_leak_test_file.txt"
+    lock_key = (MockSandbox.id, test_path)
+
+    # 确保测试开始前 key 不存在
+    assert lock_key not in _FILE_OPERATION_LOCKS
+
+    def _use_lock_and_release() -> None:
+        # Create and acquire the lock within this scope
+        lock = get_file_operation_lock(MockSandbox(), test_path)
+        with lock:
+            pass
+        # As soon as this function returns, the local 'lock' variable is destroyed.
+        # Its reference count goes to zero, triggering WeakValueDictionary cleanup.
+
+    _use_lock_and_release()
+
+    # Force a garbage collection to be absolutely sure
+    gc.collect()
+
+    # 检查特定 key 是否被清理（而不是检查总长度）
+    assert lock_key not in _FILE_OPERATION_LOCKS

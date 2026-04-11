@@ -25,7 +25,7 @@ import uuid
 from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -55,6 +55,9 @@ from deerflow.uploads.manager import (
 logger = logging.getLogger(__name__)
 
 
+StreamEventType = Literal["values", "messages-tuple", "custom", "end"]
+
+
 @dataclass
 class StreamEvent:
     """A single event from the streaming agent response.
@@ -69,7 +72,7 @@ class StreamEvent:
         data: Event payload. Contents vary by type.
     """
 
-    type: str
+    type: StreamEventType
     data: dict[str, Any] = field(default_factory=dict)
 
 
@@ -255,12 +258,52 @@ class DeerFlowClient:
         return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
 
     @staticmethod
+    def _serialize_tool_calls(tool_calls) -> list[dict]:
+        """Reshape LangChain tool_calls into the wire format used in events."""
+        return [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in tool_calls]
+
+    @staticmethod
+    def _ai_text_event(msg_id: str | None, text: str, usage: dict | None) -> "StreamEvent":
+        """Build a ``messages-tuple`` AI text event, attaching usage when present."""
+        data: dict[str, Any] = {"type": "ai", "content": text, "id": msg_id}
+        if usage:
+            data["usage_metadata"] = usage
+        return StreamEvent(type="messages-tuple", data=data)
+
+    @staticmethod
+    def _ai_tool_calls_event(msg_id: str | None, tool_calls) -> "StreamEvent":
+        """Build a ``messages-tuple`` AI tool-calls event."""
+        return StreamEvent(
+            type="messages-tuple",
+            data={
+                "type": "ai",
+                "content": "",
+                "id": msg_id,
+                "tool_calls": DeerFlowClient._serialize_tool_calls(tool_calls),
+            },
+        )
+
+    @staticmethod
+    def _tool_message_event(msg: ToolMessage) -> "StreamEvent":
+        """Build a ``messages-tuple`` tool-result event from a ToolMessage."""
+        return StreamEvent(
+            type="messages-tuple",
+            data={
+                "type": "tool",
+                "content": DeerFlowClient._extract_text(msg.content),
+                "name": msg.name,
+                "tool_call_id": msg.tool_call_id,
+                "id": msg.id,
+            },
+        )
+
+    @staticmethod
     def _serialize_message(msg) -> dict:
         """Serialize a LangChain message to a plain dict for values events."""
         if isinstance(msg, AIMessage):
             d: dict[str, Any] = {"type": "ai", "content": msg.content, "id": getattr(msg, "id", None)}
             if msg.tool_calls:
-                d["tool_calls"] = [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in msg.tool_calls]
+                d["tool_calls"] = DeerFlowClient._serialize_tool_calls(msg.tool_calls)
             if getattr(msg, "usage_metadata", None):
                 d["usage_metadata"] = msg.usage_metadata
             return d
@@ -316,6 +359,108 @@ class DeerFlowClient:
         return str(content)
 
     # ------------------------------------------------------------------
+    # Public API — threads
+    # ------------------------------------------------------------------
+
+    def list_threads(self, limit: int = 10) -> dict:
+        """List the recent N threads.
+
+        Args:
+            limit: Maximum number of threads to return. Default is 10.
+
+        Returns:
+            Dict with "thread_list" key containing list of thread info dicts,
+            sorted by thread creation time descending.
+        """
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.agents.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+
+        thread_info_map = {}
+
+        for cp in checkpointer.list(config=None, limit=limit):
+            cfg = cp.config.get("configurable", {})
+            thread_id = cfg.get("thread_id")
+            if not thread_id:
+                continue
+
+            ts = cp.checkpoint.get("ts")
+            checkpoint_id = cfg.get("checkpoint_id")
+
+            if thread_id not in thread_info_map:
+                channel_values = cp.checkpoint.get("channel_values", {})
+                thread_info_map[thread_id] = {
+                    "thread_id": thread_id,
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "latest_checkpoint_id": checkpoint_id,
+                    "title": channel_values.get("title"),
+                }
+            else:
+                # Explicitly compare timestamps to ensure accuracy when iterating over unordered namespaces.
+                # Treat None as "missing" and only compare when existing values are non-None.
+                if ts is not None:
+                    current_created = thread_info_map[thread_id]["created_at"]
+                    if current_created is None or ts < current_created:
+                        thread_info_map[thread_id]["created_at"] = ts
+
+                    current_updated = thread_info_map[thread_id]["updated_at"]
+                    if current_updated is None or ts > current_updated:
+                        thread_info_map[thread_id]["updated_at"] = ts
+                        thread_info_map[thread_id]["latest_checkpoint_id"] = checkpoint_id
+                        channel_values = cp.checkpoint.get("channel_values", {})
+                        thread_info_map[thread_id]["title"] = channel_values.get("title")
+
+        threads = list(thread_info_map.values())
+        threads.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+
+        return {"thread_list": threads[:limit]}
+
+    def get_thread(self, thread_id: str) -> dict:
+        """Get the complete thread record, including all node execution records.
+
+        Args:
+            thread_id: Thread ID.
+
+        Returns:
+            Dict containing the thread's full checkpoint history.
+        """
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.agents.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+
+        config = {"configurable": {"thread_id": thread_id}}
+        checkpoints = []
+
+        for cp in checkpointer.list(config):
+            channel_values = dict(cp.checkpoint.get("channel_values", {}))
+            if "messages" in channel_values:
+                channel_values["messages"] = [self._serialize_message(m) if hasattr(m, "content") else m for m in channel_values["messages"]]
+
+            cfg = cp.config.get("configurable", {})
+            parent_cfg = cp.parent_config.get("configurable", {}) if cp.parent_config else {}
+
+            checkpoints.append(
+                {
+                    "checkpoint_id": cfg.get("checkpoint_id"),
+                    "parent_checkpoint_id": parent_cfg.get("checkpoint_id"),
+                    "ts": cp.checkpoint.get("ts"),
+                    "metadata": cp.metadata,
+                    "values": channel_values,
+                    "pending_writes": [{"task_id": w[0], "channel": w[1], "value": w[2]} for w in getattr(cp, "pending_writes", [])],
+                }
+            )
+
+        # Sort globally by timestamp to prevent partial ordering issues caused by different namespaces (e.g., subgraphs)
+        checkpoints.sort(key=lambda x: x["ts"] if x["ts"] else "")
+
+        return {"thread_id": thread_id, "checkpoints": checkpoints}
+
+    # ------------------------------------------------------------------
     # Public API — conversation
     # ------------------------------------------------------------------
 
@@ -336,6 +481,53 @@ class DeerFlowClient:
         consumers can switch between HTTP streaming and embedded mode
         without changing their event-handling logic.
 
+        Token-level streaming
+        ~~~~~~~~~~~~~~~~~~~~~
+        This method subscribes to LangGraph's ``messages`` stream mode, so
+        ``messages-tuple`` events for AI text are emitted as **deltas** as
+        the model generates tokens, not as one cumulative dump at node
+        completion.  Each delta carries a stable ``id`` — consumers that
+        want the full text must accumulate ``content`` per ``id``.
+        ``chat()`` already does this for you.
+
+        Tool calls and tool results are still emitted once per logical
+        message.  ``values`` events continue to carry full state snapshots
+        after each graph node finishes; AI text already delivered via the
+        ``messages`` stream is **not** re-synthesized from the snapshot to
+        avoid duplicate deliveries.
+
+        Why not reuse Gateway's ``run_agent``?
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        Gateway (``runtime/runs/worker.py``) has a complete streaming
+        pipeline: ``run_agent`` → ``StreamBridge`` → ``sse_consumer``.  It
+        looks like this client duplicates that work, but the two paths
+        serve different audiences and **cannot** share execution:
+
+        * ``run_agent`` is ``async def`` and uses ``agent.astream()``;
+          this method is a sync generator using ``agent.stream()`` so
+          callers can write ``for event in client.stream(...)`` without
+          touching asyncio.  Bridging the two would require spinning up
+          an event loop + thread per call.
+        * Gateway events are JSON-serialized by ``serialize()`` for SSE
+          wire transmission.  This client yields in-process stream event
+          payloads directly as Python data structures (``StreamEvent``
+          with ``data`` as a plain ``dict``), without the extra
+          JSON/SSE serialization layer used for HTTP delivery.
+        * ``StreamBridge`` is an asyncio-queue decoupling producers from
+          consumers across an HTTP boundary (``Last-Event-ID`` replay,
+          heartbeats, multi-subscriber fan-out).  A single in-process
+          caller with a direct iterator needs none of that.
+
+        So ``DeerFlowClient.stream()`` is a parallel, sync, in-process
+        consumer of the same ``create_agent()`` factory — not a wrapper
+        around Gateway.  The two paths **should** stay in sync on which
+        LangGraph stream modes they subscribe to; that invariant is
+        enforced by ``tests/test_client.py::test_messages_mode_emits_token_deltas``
+        rather than by a shared constant, because the three layers
+        (Graph, Platform SDK, HTTP) each use their own naming
+        (``messages`` vs ``messages-tuple``) and cannot literally share
+        a string.
+
         Args:
             message: User message text.
             thread_id: Thread ID for conversation context. Auto-generated if None.
@@ -345,8 +537,9 @@ class DeerFlowClient:
         Yields:
             StreamEvent with one of:
             - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...]}
-            - type="messages-tuple"  data={"type": "ai", "content": str, "id": str}
-            - type="messages-tuple"  data={"type": "ai", "content": str, "id": str, "usage_metadata": {...}}
+            - type="custom"          data={...}
+            - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str}
+            - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str, "usage_metadata": {...}}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
             - type="messages-tuple"  data={"type": "tool", "content": str, "name": str, "tool_call_id": str, "id": str}
             - type="end"             data={"usage": {"input_tokens": int, "output_tokens": int, "total_tokens": int}}
@@ -363,9 +556,88 @@ class DeerFlowClient:
             context["agent_name"] = self._agent_name
 
         seen_ids: set[str] = set()
+        # Cross-mode handoff: ids already streamed via LangGraph ``messages``
+        # mode so the ``values`` path skips re-synthesis of the same message.
+        streamed_ids: set[str] = set()
+        # The same message id carries identical cumulative ``usage_metadata``
+        # in both the final ``messages`` chunk and the values snapshot —
+        # count it only on whichever arrives first.
+        counted_usage_ids: set[str] = set()
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-        for chunk in self._agent.stream(state, config=config, context=context, stream_mode="values"):
+        def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
+            """Add *usage* to cumulative totals if this id has not been counted.
+
+            ``usage`` is a ``langchain_core.messages.UsageMetadata`` TypedDict
+            or ``None``; typed as ``Any`` because TypedDicts are not
+            structurally assignable to plain ``dict`` under strict type
+            checking.  Returns the normalized usage dict (for attaching
+            to an event) when we accepted it, otherwise ``None``.
+            """
+            if not usage:
+                return None
+            if msg_id and msg_id in counted_usage_ids:
+                return None
+            if msg_id:
+                counted_usage_ids.add(msg_id)
+            input_tokens = usage.get("input_tokens", 0) or 0
+            output_tokens = usage.get("output_tokens", 0) or 0
+            total_tokens = usage.get("total_tokens", 0) or 0
+            cumulative_usage["input_tokens"] += input_tokens
+            cumulative_usage["output_tokens"] += output_tokens
+            cumulative_usage["total_tokens"] += total_tokens
+            return {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            }
+
+        for item in self._agent.stream(
+            state,
+            config=config,
+            context=context,
+            stream_mode=["values", "messages", "custom"],
+        ):
+            if isinstance(item, tuple) and len(item) == 2:
+                mode, chunk = item
+                mode = str(mode)
+            else:
+                mode, chunk = "values", item
+
+            if mode == "custom":
+                yield StreamEvent(type="custom", data=chunk)
+                continue
+
+            if mode == "messages":
+                # LangGraph ``messages`` mode emits ``(message_chunk, metadata)``.
+                if isinstance(chunk, tuple) and len(chunk) == 2:
+                    msg_chunk, _metadata = chunk
+                else:
+                    msg_chunk = chunk
+
+                msg_id = getattr(msg_chunk, "id", None)
+
+                if isinstance(msg_chunk, AIMessage):
+                    text = self._extract_text(msg_chunk.content)
+                    counted_usage = _account_usage(msg_id, msg_chunk.usage_metadata)
+
+                    if text:
+                        if msg_id:
+                            streamed_ids.add(msg_id)
+                        yield self._ai_text_event(msg_id, text, counted_usage)
+
+                    if msg_chunk.tool_calls:
+                        if msg_id:
+                            streamed_ids.add(msg_id)
+                        yield self._ai_tool_calls_event(msg_id, msg_chunk.tool_calls)
+
+                elif isinstance(msg_chunk, ToolMessage):
+                    if msg_id:
+                        streamed_ids.add(msg_id)
+                    yield self._tool_message_event(msg_chunk)
+                continue
+
+            # mode == "values"
             messages = chunk.get("messages", [])
 
             for msg in messages:
@@ -375,47 +647,25 @@ class DeerFlowClient:
                 if msg_id:
                     seen_ids.add(msg_id)
 
+                # Already streamed via ``messages`` mode; only (defensively)
+                # capture usage here and skip re-synthesizing the event.
+                if msg_id and msg_id in streamed_ids:
+                    if isinstance(msg, AIMessage):
+                        _account_usage(msg_id, getattr(msg, "usage_metadata", None))
+                    continue
+
                 if isinstance(msg, AIMessage):
-                    # Track token usage from AI messages
-                    usage = getattr(msg, "usage_metadata", None)
-                    if usage:
-                        cumulative_usage["input_tokens"] += usage.get("input_tokens", 0) or 0
-                        cumulative_usage["output_tokens"] += usage.get("output_tokens", 0) or 0
-                        cumulative_usage["total_tokens"] += usage.get("total_tokens", 0) or 0
+                    counted_usage = _account_usage(msg_id, msg.usage_metadata)
 
                     if msg.tool_calls:
-                        yield StreamEvent(
-                            type="messages-tuple",
-                            data={
-                                "type": "ai",
-                                "content": "",
-                                "id": msg_id,
-                                "tool_calls": [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in msg.tool_calls],
-                            },
-                        )
+                        yield self._ai_tool_calls_event(msg_id, msg.tool_calls)
 
                     text = self._extract_text(msg.content)
                     if text:
-                        event_data: dict[str, Any] = {"type": "ai", "content": text, "id": msg_id}
-                        if usage:
-                            event_data["usage_metadata"] = {
-                                "input_tokens": usage.get("input_tokens", 0) or 0,
-                                "output_tokens": usage.get("output_tokens", 0) or 0,
-                                "total_tokens": usage.get("total_tokens", 0) or 0,
-                            }
-                        yield StreamEvent(type="messages-tuple", data=event_data)
+                        yield self._ai_text_event(msg_id, text, counted_usage)
 
                 elif isinstance(msg, ToolMessage):
-                    yield StreamEvent(
-                        type="messages-tuple",
-                        data={
-                            "type": "tool",
-                            "content": self._extract_text(msg.content),
-                            "name": getattr(msg, "name", None),
-                            "tool_call_id": getattr(msg, "tool_call_id", None),
-                            "id": msg_id,
-                        },
-                    )
+                    yield self._tool_message_event(msg)
 
             # Emit a values event for each state snapshot
             yield StreamEvent(
@@ -432,10 +682,12 @@ class DeerFlowClient:
     def chat(self, message: str, *, thread_id: str | None = None, **kwargs) -> str:
         """Send a message and return the final text response.
 
-        Convenience wrapper around :meth:`stream` that returns only the
-        **last** AI text from ``messages-tuple`` events. If the agent emits
-        multiple text segments in one turn, intermediate segments are
-        discarded. Use :meth:`stream` directly to capture all events.
+        Convenience wrapper around :meth:`stream` that accumulates delta
+        ``messages-tuple`` events per ``id`` and returns the text of the
+        **last** AI message to complete.  Intermediate AI messages (e.g.
+        planner drafts) are discarded — only the final id's accumulated
+        text is returned.  Use :meth:`stream` directly if you need every
+        delta as it arrives.
 
         Args:
             message: User message text.
@@ -443,15 +695,21 @@ class DeerFlowClient:
             **kwargs: Override client defaults (same as stream()).
 
         Returns:
-            The last AI message text, or empty string if no response.
+            The accumulated text of the last AI message, or empty string
+            if no AI text was produced.
         """
-        last_text = ""
+        # Per-id delta lists joined once at the end — avoids the O(n²) cost
+        # of repeated ``str + str`` on a growing buffer for long responses.
+        chunks: dict[str, list[str]] = {}
+        last_id: str = ""
         for event in self.stream(message, thread_id=thread_id, **kwargs):
             if event.type == "messages-tuple" and event.data.get("type") == "ai":
-                content = event.data.get("content", "")
-                if content:
-                    last_text = content
-        return last_text
+                msg_id = event.data.get("id") or ""
+                delta = event.data.get("content", "")
+                if delta:
+                    chunks.setdefault(msg_id, []).append(delta)
+                    last_id = msg_id
+        return "".join(chunks.get(last_id, ()))
 
     # ------------------------------------------------------------------
     # Public API — configuration queries
