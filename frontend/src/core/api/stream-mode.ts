@@ -8,6 +8,7 @@ const SUPPORTED_RUN_STREAM_MODES = new Set([
   "tasks",
   "checkpoints",
   "custom",
+  "tools",
 ] as const);
 
 const warnedUnsupportedStreamModes = new Set<string>();
