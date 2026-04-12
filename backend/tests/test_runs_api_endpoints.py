@@ -1,4 +1,4 @@
-"""Tests for GET /api/runs/{run_id}/messages endpoint."""
+"""Tests for GET /api/runs/{run_id}/messages and GET /api/runs/{run_id}/feedback endpoints."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,7 +15,7 @@ from app.gateway.routers import runs
 # ---------------------------------------------------------------------------
 
 
-def _make_app(run_store=None, event_store=None):
+def _make_app(run_store=None, event_store=None, feedback_repo=None):
     """Build a test FastAPI app with stub auth and mocked state."""
     app = make_authed_test_app()
     app.include_router(runs.router)
@@ -24,6 +24,8 @@ def _make_app(run_store=None, event_store=None):
         app.state.run_store = run_store
     if event_store is not None:
         app.state.run_event_store = event_store
+    if feedback_repo is not None:
+        app.state.feedback_repo = feedback_repo
 
     return app
 
@@ -171,3 +173,71 @@ def test_run_messages_empty_data():
     body = response.json()
     assert body["data"] == []
     assert body["has_more"] is False
+
+
+def _make_feedback_repo(rows: list[dict]):
+    """Return an AsyncMock feedback repo whose list_by_run() returns rows."""
+    repo = MagicMock()
+    repo.list_by_run = AsyncMock(return_value=rows)
+    return repo
+
+
+def _make_feedback(run_id: str, idx: int) -> dict:
+    return {"id": f"fb-{idx}", "run_id": run_id, "thread_id": "thread-x", "value": "up"}
+
+
+# ---------------------------------------------------------------------------
+# TestRunFeedback
+# ---------------------------------------------------------------------------
+
+
+class TestRunFeedback:
+    def test_returns_list_of_feedback_dicts(self):
+        """GET /api/runs/{run_id}/feedback returns a list of feedback dicts."""
+        run_record = {"run_id": "run-fb-1", "thread_id": "thread-fb-1"}
+        rows = [_make_feedback("run-fb-1", i) for i in range(3)]
+        app = _make_app(
+            run_store=_make_run_store(run_record),
+            feedback_repo=_make_feedback_repo(rows),
+        )
+        with TestClient(app) as client:
+            response = client.get("/api/runs/run-fb-1/feedback")
+        assert response.status_code == 200
+        body = response.json()
+        assert isinstance(body, list)
+        assert len(body) == 3
+
+    def test_404_when_run_not_found(self):
+        """Returns 404 when run store returns None."""
+        app = _make_app(
+            run_store=_make_run_store(None),
+            feedback_repo=_make_feedback_repo([]),
+        )
+        with TestClient(app) as client:
+            response = client.get("/api/runs/missing-run/feedback")
+        assert response.status_code == 404
+        assert "missing-run" in response.json()["detail"]
+
+    def test_empty_list_when_no_feedback(self):
+        """Returns empty list when no feedback exists for the run."""
+        run_record = {"run_id": "run-fb-2", "thread_id": "thread-fb-2"}
+        app = _make_app(
+            run_store=_make_run_store(run_record),
+            feedback_repo=_make_feedback_repo([]),
+        )
+        with TestClient(app) as client:
+            response = client.get("/api/runs/run-fb-2/feedback")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_503_when_feedback_repo_not_configured(self):
+        """Returns 503 when feedback_repo is None (no DB configured)."""
+        run_record = {"run_id": "run-fb-3", "thread_id": "thread-fb-3"}
+        app = _make_app(
+            run_store=_make_run_store(run_record),
+        )
+        # Explicitly set feedback_repo to None to simulate missing DB
+        app.state.feedback_repo = None
+        with TestClient(app) as client:
+            response = client.get("/api/runs/run-fb-3/feedback")
+        assert response.status_code == 503

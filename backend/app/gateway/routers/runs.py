@@ -131,3 +131,12 @@ async def run_messages(
     has_more = len(rows) > limit
     data = rows[:limit] if has_more else rows
     return {"data": data, "has_more": has_more}
+
+
+@router.get("/{run_id}/feedback")
+@require_permission("runs", "read")
+async def run_feedback(run_id: str, request: Request) -> list[dict]:
+    """Return all feedback for a run."""
+    run = await _resolve_run(run_id, request)
+    feedback_repo = get_feedback_repo(request)
+    return await feedback_repo.list_by_run(run["thread_id"], run_id)
