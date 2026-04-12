@@ -40,6 +40,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.installer import install_skill_from_archive
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -769,19 +770,19 @@ class DeerFlowClient:
         """
         from deerflow.agents.memory.updater import get_memory_data
 
-        return get_memory_data()
+        return get_memory_data(user_id=get_effective_user_id())
 
     def export_memory(self) -> dict:
         """Export current memory data for backup or transfer."""
         from deerflow.agents.memory.updater import get_memory_data
 
-        return get_memory_data()
+        return get_memory_data(user_id=get_effective_user_id())
 
     def import_memory(self, memory_data: dict) -> dict:
         """Import and persist full memory data."""
         from deerflow.agents.memory.updater import import_memory_data
 
-        return import_memory_data(memory_data)
+        return import_memory_data(memory_data, user_id=get_effective_user_id())
 
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
@@ -956,13 +957,13 @@ class DeerFlowClient:
         """
         from deerflow.agents.memory.updater import reload_memory_data
 
-        return reload_memory_data()
+        return reload_memory_data(user_id=get_effective_user_id())
 
     def clear_memory(self) -> dict:
         """Clear all persisted memory data."""
         from deerflow.agents.memory.updater import clear_memory_data
 
-        return clear_memory_data()
+        return clear_memory_data(user_id=get_effective_user_id())
 
     def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
         """Create a single fact manually."""
@@ -1179,7 +1180,7 @@ class DeerFlowClient:
             ValueError: If the path is invalid.
         """
         try:
-            actual = get_paths().resolve_virtual_path(thread_id, path)
+            actual = get_paths().resolve_virtual_path(thread_id, path, user_id=get_effective_user_id())
         except ValueError as exc:
             if "traversal" in str(exc):
                 from deerflow.uploads.manager import PathTraversalError

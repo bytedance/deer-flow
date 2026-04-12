@@ -26,6 +26,7 @@ from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_re
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
@@ -143,11 +144,11 @@ class ThreadHistoryRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _delete_thread_data(thread_id: str, paths: Paths | None = None) -> ThreadDeleteResponse:
+def _delete_thread_data(thread_id: str, paths: Paths | None = None, *, user_id: str | None = None) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread."""
     path_manager = paths or get_paths()
     try:
-        path_manager.delete_thread_dir(thread_id)
+        path_manager.delete_thread_dir(thread_id, user_id=user_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except FileNotFoundError:
@@ -198,7 +199,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     from app.gateway.deps import get_thread_store
 
     # Clean local filesystem
-    response = _delete_thread_data(thread_id)
+    response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)

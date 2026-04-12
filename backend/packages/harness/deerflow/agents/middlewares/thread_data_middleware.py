@@ -8,6 +8,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import Paths, get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -46,32 +47,34 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         self._paths = Paths(base_dir) if base_dir else get_paths()
         self._lazy_init = lazy_init
 
-    def _get_thread_paths(self, thread_id: str) -> dict[str, str]:
+    def _get_thread_paths(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
         """Get the paths for a thread's data directories.
 
         Args:
             thread_id: The thread ID.
+            user_id: Optional user ID for per-user path isolation.
 
         Returns:
             Dictionary with workspace_path, uploads_path, and outputs_path.
         """
         return {
-            "workspace_path": str(self._paths.sandbox_work_dir(thread_id)),
-            "uploads_path": str(self._paths.sandbox_uploads_dir(thread_id)),
-            "outputs_path": str(self._paths.sandbox_outputs_dir(thread_id)),
+            "workspace_path": str(self._paths.sandbox_work_dir(thread_id, user_id=user_id)),
+            "uploads_path": str(self._paths.sandbox_uploads_dir(thread_id, user_id=user_id)),
+            "outputs_path": str(self._paths.sandbox_outputs_dir(thread_id, user_id=user_id)),
         }
 
-    def _create_thread_directories(self, thread_id: str) -> dict[str, str]:
+    def _create_thread_directories(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
         """Create the thread data directories.
 
         Args:
             thread_id: The thread ID.
+            user_id: Optional user ID for per-user path isolation.
 
         Returns:
             Dictionary with the created directory paths.
         """
-        self._paths.ensure_thread_dirs(thread_id)
-        return self._get_thread_paths(thread_id)
+        self._paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        return self._get_thread_paths(thread_id, user_id=user_id)
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
@@ -84,12 +87,14 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")
 
+        user_id = get_effective_user_id()
+
         if self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories
-            paths = self._get_thread_paths(thread_id)
+            paths = self._get_thread_paths(thread_id, user_id=user_id)
         else:
             # Eager initialization: create directories immediately
-            paths = self._create_thread_directories(thread_id)
+            paths = self._create_thread_directories(thread_id, user_id=user_id)
             logger.debug("Created thread data directories for thread %s", thread_id)
 
         return {

@@ -17,6 +17,7 @@ from langgraph_sdk.errors import ConflictError
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -341,14 +342,15 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
-    outputs_dir = paths.sandbox_outputs_dir(thread_id).resolve()
+    user_id = get_effective_user_id()
+    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve()
     for virtual_path in artifacts:
         # Security: only allow files from the agent outputs directory
         if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
             logger.warning("[Manager] rejected non-outputs artifact path: %s", virtual_path)
             continue
         try:
-            actual = paths.resolve_virtual_path(thread_id, virtual_path)
+            actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=user_id)
             # Verify the resolved path is actually under the outputs directory
             # (guards against path-traversal even after prefix check)
             try:
