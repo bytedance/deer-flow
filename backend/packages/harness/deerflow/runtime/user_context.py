@@ -91,6 +91,25 @@ def require_current_user() -> CurrentUser:
 
 
 # ---------------------------------------------------------------------------
+# Effective user_id helpers (filesystem isolation)
+# ---------------------------------------------------------------------------
+
+DEFAULT_USER_ID: Final[str] = "default"
+
+
+def get_effective_user_id() -> str:
+    """Return the current user's id as a string, or DEFAULT_USER_ID if unset.
+
+    Unlike :func:`require_current_user` this never raises — it is designed
+    for filesystem-path resolution where a valid user bucket is always needed.
+    """
+    user = _current_user.get()
+    if user is None:
+        return DEFAULT_USER_ID
+    return str(user.id)
+
+
+# ---------------------------------------------------------------------------
 # Sentinel-based user_id resolution
 # ---------------------------------------------------------------------------
 #
