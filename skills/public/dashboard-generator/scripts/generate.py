@@ -57,6 +57,14 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _safe_float(v, default: float = 0.0) -> float:
+    """Safely convert a value to float, returning *default* on failure."""
+    try:
+        return float(v) if v is not None else default
+    except (ValueError, TypeError):
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Theme definitions
 # ---------------------------------------------------------------------------
@@ -222,10 +230,7 @@ def build_echarts_option(
         agg: dict[str, float] = {}
         for row in data:
             key = str(row.get(x_field, ""))
-            val = 0
-            for yf in y_fields:
-                v = row.get(yf, 0)
-                val += float(v) if v is not None else 0
+            val = sum(_safe_float(row.get(yf, 0)) for yf in y_fields)
             agg[key] = agg.get(key, 0) + val
 
         pie_data = [{"name": k, "value": v} for k, v in agg.items()]
@@ -258,15 +263,12 @@ def build_echarts_option(
         y_values = []
         for xv in x_values:
             matched = [r for r in data if str(r.get(x_field, "")) == xv]
-            if matched:
-                y_values.append(matched[0].get(yf, 0))
-            else:
-                y_values.append(0)
+            y_values.append(sum(_safe_float(r.get(yf, 0)) for r in matched) if matched else 0)
 
         s: dict = {
             "name": yf,
             "type": echarts_type,
-            "data": [float(v) if v is not None else 0 for v in y_values],
+            "data": y_values,
         }
         if chart_type == "area":
             s["areaStyle"] = {}
@@ -445,22 +447,46 @@ def _render_tabs_layout(
     data: list[dict],
     theme: dict,
 ) -> str:
-    """Render tabs layout HTML (fallback to grid if no tabs defined)."""
-    parts = ['<div class="tab-container">']
-    parts.append('<div class="tab-buttons" style="display:flex;gap:8px;margin-bottom:16px;">')
-    parts.append(f'<button class="tab-btn active" onclick="switchTab(0)" style="padding:8px 16px;border:1px solid {theme["border"]};border-radius:4px;background:{theme["card_bg"]};color:{theme["text"]};cursor:pointer;">Overview</button>')
-    parts.append("</div>")
-
-    parts.append('<div class="tab-panels">')
-    parts.append('<div class="tab-panel active" data-tab="0" style="display:grid;grid-template-columns:repeat(12,1fr);gap:16px;">')
-
+    """Render tabs layout HTML, grouping charts by their ``tab`` field."""
+    # Group charts by tab name
+    tab_groups: dict[str, list[dict]] = {}
     for c in charts:
-        cid = esc(c.get("id", "chart"))
-        pos = c.get("position", {"row": 1, "col": 1, "width": 6})
-        width = min(pos.get("width", 6), 12)
-        parts.append(_render_chart_card(cid, c, data, theme, width))
+        tab_name = c.get("tab", "Overview")
+        tab_groups.setdefault(tab_name, []).append(c)
 
+    if not tab_groups:
+        tab_groups["Overview"] = charts
+
+    tab_names = list(tab_groups.keys())
+
+    parts = ['<div class="tab-container">']
+
+    # Tab buttons
+    parts.append('<div class="tab-buttons" style="display:flex;gap:8px;margin-bottom:16px;">')
+    for i, name in enumerate(tab_names):
+        active_cls = " active" if i == 0 else ""
+        parts.append(
+            f'<button class="tab-btn{active_cls}" onclick="switchTab({i})" '
+            f'style="padding:8px 16px;border:1px solid {theme["border"]};'
+            f'border-radius:4px;background:{theme["card_bg"]};color:{theme["text"]};cursor:pointer;">'
+            f"{esc(name)}</button>"
+        )
     parts.append("</div>")
+
+    # Tab panels
+    parts.append('<div class="tab-panels">')
+    for i, (_name, tab_charts) in enumerate(tab_groups.items()):
+        display = "grid" if i == 0 else "none"
+        parts.append(
+            f'<div class="tab-panel{" active" if i == 0 else ""}" data-tab="{i}" '
+            f'style="display:{display};grid-template-columns:repeat(12,1fr);gap:16px;">'
+        )
+        for c in tab_charts:
+            cid = esc(c.get("id", "chart"))
+            pos = c.get("position", {"row": 1, "col": 1, "width": 6})
+            width = min(pos.get("width", 6), 12)
+            parts.append(_render_chart_card(cid, c, data, theme, width))
+        parts.append("</div>")
     parts.append("</div></div>")
     return "\n".join(parts)
 
@@ -476,7 +502,7 @@ def generate_html(
     spec: dict,
     data: list[dict],
     theme_name: str,
-    kpi_values: dict[str, float | int | None],
+    kpi_values: dict[int, float | int | None],
 ) -> str:
     """Generate the complete dashboard HTML string."""
     theme = THEMES.get(theme_name, THEMES["light"])
@@ -490,8 +516,8 @@ def generate_html(
     kpi_html = ""
     if kpis:
         kpi_cards = []
-        for kpi in kpis:
-            val = kpi_values.get(kpi.get("label", ""), None)
+        for i, kpi in enumerate(kpis):
+            val = kpi_values.get(i, None)
             kpi_cards.append(render_kpi_card(kpi, val, theme))
         kpi_html = f'<div class="kpi-row" style="display:grid;grid-template-columns:repeat({len(kpis)},1fr);gap:16px;margin-bottom:24px;">' + "\n".join(kpi_cards) + "</div>"
 
@@ -504,15 +530,16 @@ def generate_html(
     chart_specs_js = "{"
     for c in charts:
         cid = c.get("id", "chart")
-        spec = {{
+        chart_spec = {
             "type": c.get("type", "line"),
             "x": c.get("x", ""),
             "y": c.get("y", []),
             "title": c.get("title", ""),
             "limit": c.get("limit"),
             "columns": c.get("columns", []),
-        }}
-        chart_specs_js += f'"{cid}": {json.dumps(spec).replace("</script", r"<\/script")},'
+        }
+        _spec_json = json.dumps(chart_spec).replace("</script", r"<\/script")
+        chart_specs_js += f'"{cid}": {_spec_json},'
     chart_specs_js += "}"
 
     theme_palette_json = theme["palette"]
@@ -582,7 +609,7 @@ function buildOption(spec, data) {{
     data.forEach(row => {{
       const key = String(row[xField] || '');
       let val = 0;
-      yFields.forEach(yf => {{ const v = row[yf]; val += v != null ? Number(v) : 0; }});
+      yFields.forEach(yf => {{ const v = row[yf]; val += (v != null && !isNaN(Number(v))) ? Number(v) : 0; }});
       agg[key] = (agg[key] || 0) + val;
     }});
     const pieData = Object.entries(agg).map(([k,v]) => ({{name:k,value:v}}));
@@ -606,9 +633,8 @@ function buildOption(spec, data) {{
 
   const series = yFields.map(yf => {{
     const yVals = xValues.map(xv => {{
-      const matched = data.find(r => String(r[xField] || '') === xv);
-      const v = matched ? matched[yf] : 0;
-      return v != null ? Number(v) : 0;
+      const matched = data.filter(r => String(r[xField] || '') === xv);
+      return matched.reduce((s, r) => s + (r[yf] != null && !isNaN(Number(r[yf])) ? Number(r[yf]) : 0), 0);
     }});
     const s = {{name: yf, type: echartsType, data: yVals}};
     if (chartType === 'area') s.areaStyle = {{}};
@@ -637,6 +663,12 @@ function buildOption(spec, data) {{
   }};
 }}
 
+// HTML-escape a value for safe innerHTML insertion (client-side)
+function escapeHtml(s) {{
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}}
+
 // Update a table card with filtered data
 function updateTableCard(chartId, spec, data) {{
   const container = document.getElementById(chartId);
@@ -646,7 +678,7 @@ function updateTableCard(chartId, spec, data) {{
   const rows = data.slice(0, limit);
   const tbody = container.querySelector('tbody');
   if (tbody) {{
-    tbody.innerHTML = rows.map(row => '<tr>' + columns.map(c => '<td>' + (row[c] != null ? row[c] : '') + '</td>').join('') + '</tr>').join('');
+    tbody.innerHTML = rows.map(row => '<tr>' + columns.map(c => '<td>' + escapeHtml(row[c]) + '</td>').join('') + '</tr>').join('');
   }}
 }}
 
@@ -682,7 +714,11 @@ function applyFilters() {{
       if (typeof val === 'object') {{
         const cellDate = new Date(row[field]);
         if (val.start && cellDate < new Date(val.start)) return false;
-        if (val.end && cellDate > new Date(val.end)) return false;
+        if (val.end) {{
+          const endDate = new Date(val.end);
+          endDate.setHours(23, 59, 59, 999);
+          if (cellDate > endDate) return false;
+        }}
       }} else if (val) {{
         if (String(row[field]) !== val) return false;
       }}
@@ -766,25 +802,24 @@ def main() -> None:
 
     # Load data
     con = duckdb.connect()
-
-    if args.data_file:
-        validate_path(args.data_file, "data file")
-        with open(args.data_file, encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        data_source = spec.get("data_source", {})
-        if data_source:
-            data = load_data(con, data_source)
+    try:
+        if args.data_file:
+            validate_path(args.data_file, "data file")
+            with open(args.data_file, encoding="utf-8") as f:
+                data = json.load(f)
         else:
-            data = []
+            data_source = spec.get("data_source", {})
+            if data_source:
+                data = load_data(con, data_source)
+            else:
+                data = []
 
-    # Load KPI values
-    kpi_values: dict[str, float | int | None] = {}
-    for kpi in spec.get("kpis", []):
-        label = kpi.get("label", "")
-        kpi_values[label] = load_kpi_value(con, kpi)
-
-    con.close()
+        # Load KPI values
+        kpi_values: dict[int, float | int | None] = {}
+        for i, kpi in enumerate(spec.get("kpis", [])):
+            kpi_values[i] = load_kpi_value(con, kpi)
+    finally:
+        con.close()
 
     # Generate HTML
     html_output = generate_html(spec, data, theme_name, kpi_values)

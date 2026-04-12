@@ -58,6 +58,65 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _safe_float(v, default: float = 0.0) -> float:
+    """Safely convert a value to float, returning *default* on failure."""
+    try:
+        return float(v) if v is not None else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _inline_bold(text: str) -> str:
+    """Replace ``**bold**`` patterns with ``<strong>bold</strong>``."""
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+
+
+# ---------------------------------------------------------------------------
+# KPI computation
+# ---------------------------------------------------------------------------
+
+
+def _compute_kpis(con: duckdb.DuckDBPyConnection, table_name: str = "data") -> dict[str, float | int | None]:
+    """Dynamically compute KPI values based on the columns that actually exist."""
+    result: dict[str, float | int | None] = {}
+    try:
+        cols = {row[0] for row in con.execute(f"DESCRIBE {table_name}").fetchall()}
+    except Exception:
+        return result
+
+    if "revenue" in cols:
+        try:
+            row = con.execute(f"SELECT SUM(revenue) as v FROM {table_name}").fetchone()
+            result["kpi_revenue"] = row[0] if row else None
+        except Exception:
+            result["kpi_revenue"] = None
+        try:
+            row = con.execute(f"SELECT AVG(revenue) as v FROM {table_name}").fetchone()
+            result["kpi_avg"] = row[0] if row else None
+        except Exception:
+            result["kpi_avg"] = None
+
+    if "customer_id" in cols:
+        try:
+            row = con.execute(f"SELECT COUNT(DISTINCT customer_id) as v FROM {table_name}").fetchone()
+            result["kpi_customers"] = row[0] if row else None
+        except Exception:
+            result["kpi_customers"] = None
+
+    # Total row count is always available
+    try:
+        row = con.execute(f"SELECT COUNT(*) as v FROM {table_name}").fetchone()
+        result["kpi_orders"] = row[0] if row else None
+    except Exception:
+        result["kpi_orders"] = None
+
+    # WoW and satisfaction cannot be inferred from generic data
+    result["kpi_wow"] = None
+    result["kpi_satisfaction"] = None
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Theme definitions
 # ---------------------------------------------------------------------------
@@ -189,13 +248,17 @@ def render_kpi_row(section: dict, data_results: dict, theme: dict) -> str:
         display = esc(format_value(value, fmt))
 
         progress_html = ""
-        if target and value is not None:
-            pct = min(float(value) / float(target) * 100, 100)
-            color = "#27ae60" if pct >= 100 else "#f39c12" if pct >= 70 else "#e74c3c"
-            progress_html = (
-                f'<div style="margin-top:8px;height:4px;background:{theme["border"]};'
-                f'border-radius:2px;"><div style="width:{pct:.0f}%;height:100%;'
-                f'background:{color};border-radius:2px;"></div></div>'
+        if value is not None and target is not None:
+            target_f = float(target)
+            if target_f != 0:
+                pct = max(0, min(float(value) / target_f * 100, 100))
+                color = "#27ae60" if pct >= 100 else "#f39c12" if pct >= 70 else "#e74c3c"
+                progress_html = (
+                    f'<div style="margin-top:8px;height:4px;background:{theme["border"]};'
+                    f'border-radius:2px;"><div style="width:{pct:.0f}%;height:100%;'
+                    f'background:{color};border-radius:2px;"></div></div>'
+                )
+            progress_html += (
                 f'<div style="font-size:11px;color:{theme["text_secondary"]};'
                 f'margin-top:4px;">Target: {esc(format_value(target, fmt))}</div>'
             )
@@ -256,7 +319,7 @@ def render_chart(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
         agg: dict[str, float] = {}
         for row in data:
             key = str(row.get(x_field, ""))
-            val = sum(float(row.get(yf, 0) or 0) for yf in y_fields)
+            val = sum(_safe_float(row.get(yf, 0)) for yf in y_fields)
             agg[key] = agg.get(key, 0) + val
         pie_data = [{"name": k, "value": v} for k, v in agg.items()]
         radius = ["40%", "70%"] if chart_type == "donut" else ["0%", "70%"]
@@ -280,7 +343,7 @@ def render_chart(section: dict, con: duckdb.DuckDBPyConnection, theme: dict) -> 
             y_vals = []
             for xv in x_values:
                 matched = [r for r in data if str(r.get(x_field, "")) == xv]
-                y_vals.append(float(matched[0].get(yf, 0)) if matched else 0)
+                y_vals.append(sum(_safe_float(r.get(yf, 0)) for r in matched) if matched else 0)
             s: dict = {"name": yf, "type": echarts_type, "data": y_vals}
             if chart_type == "area":
                 s["areaStyle"] = {}
@@ -368,8 +431,9 @@ def render_text(section: dict, theme: dict) -> str:
     title = esc(section.get("title", ""))
     content = section.get("content", "")
 
-    # Simple Markdown → HTML with escaping
-    lines = content.split("\\n")
+    # Normalize literal \n to actual newlines, then split on real newlines
+    content = content.replace("\\n", "\n")
+    lines = content.split("\n")
     html_parts = []
     in_list = False
     for line in lines:
@@ -379,7 +443,7 @@ def render_text(section: dict, theme: dict) -> str:
                 html_parts.append("</ul>")
                 in_list = False
             html_parts.append("<br>")
-        elif line.startswith("**") and line.endswith("**"):
+        elif line.startswith("**") and line.endswith("**") and len(line) > 4:
             if in_list:
                 html_parts.append("</ul>")
                 in_list = False
@@ -388,12 +452,12 @@ def render_text(section: dict, theme: dict) -> str:
             if not in_list:
                 html_parts.append("<ul style='margin:4px 0;padding-left:20px;'>")
                 in_list = True
-            html_parts.append(f"<li>{esc(line[2:])}</li>")
+            html_parts.append(f"<li>{_inline_bold(esc(line[2:]))}</li>")
         else:
             if in_list:
                 html_parts.append("</ul>")
                 in_list = False
-            html_parts.append(f"<p style='margin:4px 0;'>{esc(line)}</p>")
+            html_parts.append(f"<p style='margin:4px 0;'>{_inline_bold(esc(line))}</p>")
     if in_list:
         html_parts.append("</ul>")
 
@@ -534,33 +598,7 @@ def generate_report(
     sections = template.get("sections", [])
 
     # Pre-compute KPI values from data
-    data_results: dict[str, float | int | None] = {}
-    try:
-        row = con.execute("SELECT SUM(revenue) as v FROM data").fetchone()
-        data_results["kpi_revenue"] = row[0] if row else None
-    except Exception:
-        data_results["kpi_revenue"] = None
-
-    try:
-        row = con.execute("SELECT COUNT(*) as v FROM data").fetchone()
-        data_results["kpi_orders"] = row[0] if row else None
-    except Exception:
-        data_results["kpi_orders"] = None
-
-    try:
-        row = con.execute("SELECT AVG(revenue) as v FROM data").fetchone()
-        data_results["kpi_avg"] = row[0] if row else None
-    except Exception:
-        data_results["kpi_avg"] = None
-
-    try:
-        row = con.execute("SELECT COUNT(DISTINCT customer_id) as v FROM data").fetchone()
-        data_results["kpi_customers"] = row[0] if row else None
-    except Exception:
-        data_results["kpi_customers"] = None
-
-    data_results["kpi_wow"] = 0
-    data_results["kpi_satisfaction"] = 0
+    data_results = _compute_kpis(con)
 
     # Render sections
     section_parts: list[str] = []
@@ -715,11 +753,14 @@ def main() -> None:
 
     # Load data
     con = duckdb.connect()
-    if args.data_files:
-        load_data_files(con, args.data_files)
+    try:
+        if args.data_files:
+            load_data_files(con, args.data_files)
 
-    # Generate report
-    html_output = generate_report(template, con, theme_name, params)
+        # Generate report
+        html_output = generate_report(template, con, theme_name, params)
+    finally:
+        con.close()
 
     # Write output
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -731,8 +772,6 @@ def main() -> None:
     print(f"  Template: {template.get('name', args.template)}")
     print(f"  Theme: {theme_name}")
     print(f"  Sections: {section_count}")
-
-    con.close()
 
 
 if __name__ == "__main__":
