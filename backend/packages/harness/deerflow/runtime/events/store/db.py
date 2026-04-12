@@ -205,16 +205,35 @@ class DbRunEventStore(RunEventStore):
         thread_id,
         run_id,
         *,
+        limit=50,
+        before_seq=None,
+        after_seq=None,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_messages_by_run")
-        stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id, RunEventRow.category == "message")
+        stmt = select(RunEventRow).where(
+            RunEventRow.thread_id == thread_id,
+            RunEventRow.run_id == run_id,
+            RunEventRow.category == "message",
+        )
         if resolved_user_id is not None:
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
-        stmt = stmt.order_by(RunEventRow.seq.asc())
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_dict(r) for r in result.scalars()]
+        if before_seq is not None:
+            stmt = stmt.where(RunEventRow.seq < before_seq)
+        if after_seq is not None:
+            stmt = stmt.where(RunEventRow.seq > after_seq)
+
+        if after_seq is not None:
+            stmt = stmt.order_by(RunEventRow.seq.asc()).limit(limit)
+            async with self._sf() as session:
+                result = await session.execute(stmt)
+                return [self._row_to_dict(r) for r in result.scalars()]
+        else:
+            stmt = stmt.order_by(RunEventRow.seq.desc()).limit(limit)
+            async with self._sf() as session:
+                result = await session.execute(stmt)
+                rows = list(result.scalars())
+                return [self._row_to_dict(r) for r in reversed(rows)]
 
     async def count_messages(
         self,

@@ -83,8 +83,18 @@ class RunEventStore(abc.ABC):
         self,
         thread_id: str,
         run_id: str,
+        *,
+        limit: int = 50,
+        before_seq: int | None = None,
+        after_seq: int | None = None,
     ) -> list[dict]:
-        """Return displayable messages (category=message) for a specific run, ordered by seq ascending."""
+        """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
+
+        Supports bidirectional cursor pagination:
+        - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
+        - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
+        - neither: return the latest ``limit`` records (ascending)
+        """
 
     @abc.abstractmethod
     async def count_messages(self, thread_id: str) -> int:
