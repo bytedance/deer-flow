@@ -883,3 +883,20 @@ checkpointer:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# Circuit Breaker Configuration
+# ============================================================================
+# Circuit breaker for LLM calls prevents repeated requests to a failing provider.
+# When the failure threshold is reached, subsequent calls fast-fail until recovery.
+#
+# This is useful for:
+# - Avoiding rate-limit bans during provider outages
+# - Reducing resource exhaustion from retry loops
+# - Gracefully degrading when LLM services are unavailable
+
+# circuit_breaker:
+#   # Number of consecutive failures before opening the circuit (default: 5)
+#   failure_threshold: 5
+#   # Time in seconds before attempting to recover (default: 60)
+#   recovery_timeout_sec: 60
