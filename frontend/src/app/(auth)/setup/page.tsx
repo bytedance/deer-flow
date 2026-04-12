@@ -26,9 +26,6 @@ export default function SetupPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // --- Init-admin mode only ---
-  const [initToken, setInitToken] = useState("");
-
   // --- Change-password mode only ---
   const [currentPassword, setCurrentPassword] = useState("");
 
@@ -82,7 +79,6 @@ export default function SetupPage() {
         body: JSON.stringify({
           email,
           password: newPassword,
-          init_token: initToken,
         }),
       });
 
@@ -189,23 +185,6 @@ export default function SetupPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 required
               />
-            </div>
-            <div className="flex flex-col space-y-1">
-              <label htmlFor="initToken" className="text-sm font-medium">
-                Initialization Token
-              </label>
-              <Input
-                id="initToken"
-                type="text"
-                placeholder="Copy from server startup logs"
-                value={initToken}
-                onChange={(e) => setInitToken(e.target.value)}
-                required
-                autoComplete="off"
-              />
-              <p className="text-muted-foreground text-xs">
-                Find the <code>INIT TOKEN</code> printed in the server startup logs.
-              </p>
             </div>
             <div className="flex flex-col space-y-1">
               <label htmlFor="password" className="text-sm font-medium">

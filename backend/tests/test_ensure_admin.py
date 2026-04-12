@@ -63,14 +63,13 @@ def _make_session_factory(admin_row=None):
     return sf
 
 
-# ── First boot: no admin → generate init_token, return early ─────────────
+# ── First boot: no admin → return early ──────────────────────────────────
 
 
 def test_first_boot_does_not_create_admin():
-    """admin_count==0 → generate init_token, do NOT create admin automatically."""
+    """admin_count==0 → do NOT create admin automatically."""
     provider = _make_provider(admin_count=0)
     app = _make_app_stub()
-    app.state.init_token = None  # lifespan sets this
 
     with patch("app.gateway.deps.get_local_provider", return_value=provider):
         from app.gateway.app import _ensure_admin_user
@@ -78,9 +77,6 @@ def test_first_boot_does_not_create_admin():
         asyncio.run(_ensure_admin_user(app))
 
     provider.create_user.assert_not_called()
-    # init_token must have been set on app.state
-    assert app.state.init_token is not None
-    assert len(app.state.init_token) > 10
 
 
 def test_first_boot_skips_migration():
@@ -89,7 +85,6 @@ def test_first_boot_skips_migration():
     store = AsyncMock()
     store.asearch = AsyncMock(return_value=[])
     app = _make_app_stub(store=store)
-    app.state.init_token = None  # lifespan sets this
 
     with patch("app.gateway.deps.get_local_provider", return_value=provider):
         from app.gateway.app import _ensure_admin_user

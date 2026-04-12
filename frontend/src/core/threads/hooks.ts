@@ -322,7 +322,7 @@ export function useThreadStream({
   useEffect(() => {
     if (
       optimisticMessages.length > 0 &&
-      thread.messages.length > prevMsgCountRef.current
+      thread.messages.length > prevMsgCountRef.current + 1
     ) {
       setOptimisticMessages([]);
     }
