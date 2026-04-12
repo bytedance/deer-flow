@@ -140,7 +140,7 @@ def load_data(
             con.execute(f'CREATE OR REPLACE VIEW "{base}" AS SELECT * FROM read_csv_auto(?)', [f])
         elif ext in (".xlsx", ".xls"):
             con.execute("INSTALL spatial; LOAD spatial;")
-            wb = __import__("openpyxl").load_workbook(f, read_only=True)
+            wb = openpyxl.load_workbook(f, read_only=True)
             sheets = wb.sheetnames
             wb.close()
             for sheet in sheets:
