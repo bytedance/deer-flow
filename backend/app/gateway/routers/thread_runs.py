@@ -20,7 +20,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
 from deerflow.runtime import RunRecord, serialize_channel_values
 
@@ -291,9 +291,36 @@ async def list_thread_messages(
     before_seq: int | None = Query(default=None),
     after_seq: int | None = Query(default=None),
 ) -> list[dict]:
-    """Return displayable messages for a thread (across all runs)."""
+    """Return displayable messages for a thread (across all runs), with feedback attached."""
     event_store = get_run_event_store(request)
-    return await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
+    messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
+
+    # Attach feedback to the last AI message of each run
+    feedback_repo = get_feedback_repo(request)
+    user_id = await get_current_user(request)
+    feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
+
+    # Find the last ai_message per run_id
+    last_ai_per_run: dict[str, int] = {}  # run_id -> index in messages list
+    for i, msg in enumerate(messages):
+        if msg.get("event_type") == "ai_message":
+            last_ai_per_run[msg["run_id"]] = i
+
+    # Attach feedback field
+    last_ai_indices = set(last_ai_per_run.values())
+    for i, msg in enumerate(messages):
+        if i in last_ai_indices:
+            run_id = msg["run_id"]
+            fb = feedback_map.get(run_id)
+            msg["feedback"] = {
+                "feedback_id": fb["feedback_id"],
+                "rating": fb["rating"],
+                "comment": fb.get("comment"),
+            } if fb else None
+        else:
+            msg["feedback"] = None
+
+    return messages
 
 
 @router.get("/{thread_id}/runs/{run_id}/messages")

@@ -48,6 +48,11 @@ _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 async def _ensure_admin_user(app: FastAPI) -> None:
     """Startup hook: generate init token on first boot; migrate orphan threads otherwise.
 
+    After admin creation, migrate orphan threads from the LangGraph
+    store (metadata.user_id unset) to the admin account. This is the
+    "no-auth → with-auth" upgrade path: users who ran DeerFlow without
+    authentication have existing LangGraph thread data that needs an
+    owner assigned.
     First boot (no admin exists):
       - Generates a one-time ``init_token`` stored in ``app.state.init_token``
       - Logs the token to stdout so the operator can copy-paste it into the
@@ -58,7 +63,7 @@ async def _ensure_admin_user(app: FastAPI) -> None:
       - Runs the one-time "no-auth → with-auth" orphan thread migration for
         existing LangGraph thread metadata that has no owner_id.
 
-    No SQL persistence migration is needed: the four owner_id columns
+    No SQL persistence migration is needed: the four user_id columns
     (threads_meta, runs, run_events, feedback) only come into existence
     alongside the auth module via create_all, so freshly created tables
     never contain NULL-owner rows.
@@ -102,6 +107,8 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     admin_id = str(row.id)
 
     # LangGraph store orphan migration — non-fatal.
+    # This covers the "no-auth → with-auth" upgrade path for users
+    # whose existing LangGraph thread metadata has no user_id set.
     store = getattr(app.state, "store", None)
     if store is not None:
         try:
@@ -133,7 +140,7 @@ async def _iter_store_items(store, namespace, *, page_size: int = 500):
 
 
 async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
-    """Migrate LangGraph store threads with no owner_id to the given admin.
+    """Migrate LangGraph store threads with no user_id to the given admin.
 
     Uses cursor pagination so all orphans are migrated regardless of
     count. Returns the number of rows migrated.
@@ -141,8 +148,8 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
     migrated = 0
     async for item in _iter_store_items(store, ("threads",)):
         metadata = item.value.get("metadata", {})
-        if not metadata.get("owner_id"):
-            metadata["owner_id"] = admin_user_id
+        if not metadata.get("user_id"):
+            metadata["user_id"] = admin_user_id
             item.value["metadata"] = metadata
             await store.aput(("threads",), item.key, item.value)
             migrated += 1

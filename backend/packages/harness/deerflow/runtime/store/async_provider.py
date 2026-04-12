@@ -91,7 +91,7 @@ async def make_store() -> AsyncIterator[BaseStore]:
     configured checkpointer.
 
     Reads from the same ``checkpointer`` section of *config.yaml* used by
-    :func:`deerflow.agents.checkpointer.async_provider.make_checkpointer` so
+    :func:`deerflow.runtime.checkpointer.async_provider.make_checkpointer` so
     that both singletons always use the same persistence technology::
 
         async with make_store() as store:

@@ -47,7 +47,7 @@ def test_generate_suggestions_parses_and_limits(monkeypatch):
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     # Bypass the require_permission decorator (which needs request +
-    # thread_meta_repo) — these tests cover the parsing logic.
+    # thread_store) — these tests cover the parsing logic.
     result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None))
 
     assert result.suggestions == ["Q1", "Q2", "Q3"]
@@ -69,7 +69,7 @@ def test_generate_suggestions_parses_list_block_content(monkeypatch):
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     # Bypass the require_permission decorator (which needs request +
-    # thread_meta_repo) — these tests cover the parsing logic.
+    # thread_store) — these tests cover the parsing logic.
     result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None))
 
     assert result.suggestions == ["Q1", "Q2"]
@@ -91,7 +91,7 @@ def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     # Bypass the require_permission decorator (which needs request +
-    # thread_meta_repo) — these tests cover the parsing logic.
+    # thread_store) — these tests cover the parsing logic.
     result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None))
 
     assert result.suggestions == ["Q1", "Q2"]
@@ -110,7 +110,7 @@ def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     # Bypass the require_permission decorator (which needs request +
-    # thread_meta_repo) — these tests cover the parsing logic.
+    # thread_store) — these tests cover the parsing logic.
     result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None))
 
     assert result.suggestions == []

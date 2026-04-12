@@ -247,15 +247,15 @@ async def start_run(
     # even for threads that were never explicitly created via POST /threads
     # (e.g. stateless runs).
     try:
-        existing = await run_ctx.thread_meta_repo.get(thread_id)
+        existing = await run_ctx.thread_store.get(thread_id)
         if existing is None:
-            await run_ctx.thread_meta_repo.create(
+            await run_ctx.thread_store.create(
                 thread_id,
                 assistant_id=body.assistant_id,
                 metadata=body.metadata,
             )
         else:
-            await run_ctx.thread_meta_repo.update_status(thread_id, "running")
+            await run_ctx.thread_store.update_status(thread_id, "running")
     except Exception:
         logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
@@ -305,7 +305,7 @@ async def start_run(
     record.task = task
 
     # Title sync is handled by worker.py's finally block which reads the
-    # title from the checkpoint and calls thread_meta_repo.update_display_name
+    # title from the checkpoint and calls thread_store.update_display_name
     # after the run completes.
 
     return record

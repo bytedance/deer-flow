@@ -98,6 +98,11 @@ async def init_engine(
         # SQLite deployment (TC-UPG-06 in AUTH_TEST_PLAN.md). The companion
         # ``synchronous=NORMAL`` is the safe-and-fast pairing — fsync only
         # at WAL checkpoint boundaries instead of every commit.
+        # Note: we do not set PRAGMA busy_timeout here — Python's sqlite3
+        # driver already defaults to a 5-second busy timeout (see the
+        # ``timeout`` kwarg of ``sqlite3.connect``), and aiosqlite /
+        # SQLAlchemy's aiosqlite dialect inherit that default.  Setting
+        # it again would be a no-op.
         @event.listens_for(_engine.sync_engine, "connect")
         def _enable_sqlite_wal(dbapi_conn, _record):  # noqa: ARG001 — SQLAlchemy contract
             cursor = dbapi_conn.cursor()

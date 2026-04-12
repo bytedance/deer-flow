@@ -15,7 +15,7 @@ class ThreadMetaRow(Base):
 
     thread_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     assistant_id: Mapped[str | None] = mapped_column(String(128), index=True)
-    owner_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     display_name: Mapped[str | None] = mapped_column(String(256))
     status: Mapped[str] = mapped_column(String(20), default="idle")
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)

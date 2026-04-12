@@ -1,8 +1,7 @@
 """Centralized accessors for singleton objects stored on ``app.state``.
 
 **Getters** (used by routers): raise 503 when a required dependency is
-missing, except ``get_store`` and ``get_thread_meta_repo`` which return
-``None``.
+missing, except ``get_store`` which returns ``None``.
 
 Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 """
@@ -20,6 +19,7 @@ from deerflow.runtime import RunContext, RunManager
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.thread_meta.base import ThreadMetaStore
 
 
 @asynccontextmanager
@@ -31,10 +31,10 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         async with langgraph_runtime(app):
             yield
     """
-    from deerflow.agents.checkpointer.async_provider import make_checkpointer
     from deerflow.config import get_app_config
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.runtime import make_store, make_stream_bridge
+    from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
 
     async with AsyncExitStack() as stack:
@@ -53,18 +53,18 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.run import RunRepository
-            from deerflow.persistence.thread_meta import ThreadMetaRepository
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
-            app.state.thread_meta_repo = ThreadMetaRepository(sf)
         else:
-            from deerflow.persistence.thread_meta import MemoryThreadMetaStore
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
-            app.state.thread_meta_repo = MemoryThreadMetaStore(app.state.store)
+
+        from deerflow.persistence.thread_meta import make_thread_store
+
+        app.state.thread_store = make_thread_store(sf, app.state.store)
 
         # Run event store (has its own factory with config-driven backend selection)
         run_events_config = getattr(config, "run_events", None)
@@ -80,7 +80,7 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 # ---------------------------------------------------------------------------
-# Getters -- called by routers per-request
+# Getters – called by routers per-request
 # ---------------------------------------------------------------------------
 
 
@@ -110,7 +110,12 @@ def get_store(request: Request):
     return getattr(request.app.state, "store", None)
 
 
-get_thread_meta_repo = _require("thread_meta_repo", "Thread metadata store")
+def get_thread_store(request: Request) -> ThreadMetaStore:
+    """Return the thread metadata store (SQL or memory-backed)."""
+    val = getattr(request.app.state, "thread_store", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Thread metadata store not available")
+    return val
 
 
 def get_run_context(request: Request) -> RunContext:
@@ -128,8 +133,9 @@ def get_run_context(request: Request) -> RunContext:
         store=get_store(request),
         event_store=get_run_event_store(request),
         run_events_config=getattr(get_app_config(), "run_events", None),
-        thread_meta_repo=get_thread_meta_repo(request),
+        thread_store=get_thread_store(request),
     )
+
 
 
 # ---------------------------------------------------------------------------

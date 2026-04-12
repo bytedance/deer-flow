@@ -1,11 +1,11 @@
-"""Request-scoped user context for owner-based authorization.
+"""Request-scoped user context for user-based authorization.
 
 This module holds a :class:`~contextvars.ContextVar` that the gateway's
 auth middleware sets after a successful authentication. Repository
 methods read the contextvar via a sentinel default parameter, letting
-routers stay free of ``owner_id`` boilerplate.
+routers stay free of ``user_id`` boilerplate.
 
-Three-state semantics for the repository ``owner_id`` parameter (the
+Three-state semantics for the repository ``user_id`` parameter (the
 consumer side of this module lives in ``deerflow.persistence.*``):
 
 - ``_AUTO`` (module-private sentinel, default): read from contextvar;
@@ -91,16 +91,16 @@ def require_current_user() -> CurrentUser:
 
 
 # ---------------------------------------------------------------------------
-# Sentinel-based owner_id resolution
+# Sentinel-based user_id resolution
 # ---------------------------------------------------------------------------
 #
-# Repository methods accept an ``owner_id`` keyword-only argument that
+# Repository methods accept a ``user_id`` keyword-only argument that
 # defaults to ``AUTO``. The three possible values drive distinct
-# behaviours; see the docstring on :func:`resolve_owner_id`.
+# behaviours; see the docstring on :func:`resolve_user_id`.
 
 
 class _AutoSentinel:
-    """Singleton marker meaning 'resolve owner_id from contextvar'."""
+    """Singleton marker meaning 'resolve user_id from contextvar'."""
 
     _instance: _AutoSentinel | None = None
 
@@ -116,12 +116,12 @@ class _AutoSentinel:
 AUTO: Final[_AutoSentinel] = _AutoSentinel()
 
 
-def resolve_owner_id(
+def resolve_user_id(
     value: str | None | _AutoSentinel,
     *,
     method_name: str = "repository method",
 ) -> str | None:
-    """Resolve the owner_id parameter passed to a repository method.
+    """Resolve the user_id parameter passed to a repository method.
 
     Three-state semantics:
 
@@ -131,16 +131,16 @@ def resolve_owner_id(
     - Explicit ``str``: use the provided id verbatim, overriding any
       contextvar value. Useful for tests and admin-override flows.
     - Explicit ``None``: no filter — the repository should skip the
-      owner_id WHERE clause entirely. Reserved for migration scripts
+      user_id WHERE clause entirely. Reserved for migration scripts
       and CLI tools that intentionally bypass isolation.
     """
     if isinstance(value, _AutoSentinel):
         user = _current_user.get()
         if user is None:
-            raise RuntimeError(f"{method_name} called with owner_id=AUTO but no user context is set; pass an explicit owner_id, set the contextvar via auth middleware, or opt out with owner_id=None for migration/CLI paths.")
+            raise RuntimeError(f"{method_name} called with user_id=AUTO but no user context is set; pass an explicit user_id, set the contextvar via auth middleware, or opt out with user_id=None for migration/CLI paths.")
         # Coerce to ``str`` at the boundary: ``User.id`` is typed as
         # ``UUID`` for the API surface, but the persistence layer
-        # stores ``owner_id`` as ``String(64)`` and aiosqlite cannot
+        # stores ``user_id`` as ``String(64)`` and aiosqlite cannot
         # bind a raw UUID object to a VARCHAR column ("type 'UUID' is
         # not supported"). Honour the documented return type here
         # rather than ripple a type change through every caller.

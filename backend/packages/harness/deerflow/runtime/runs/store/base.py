@@ -4,8 +4,8 @@ RunManager depends on this interface. Implementations:
 - MemoryRunStore: in-memory dict (development, tests)
 - Future: RunRepository backed by SQLAlchemy ORM
 
-All methods accept an optional owner_id for user isolation.
-When owner_id is None, no user filtering is applied (single-user mode).
+All methods accept an optional user_id for user isolation.
+When user_id is None, no user filtering is applied (single-user mode).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ class RunStore(abc.ABC):
         *,
         thread_id: str,
         assistant_id: str | None = None,
-        owner_id: str | None = None,
+        user_id: str | None = None,
         status: str = "pending",
         multitask_strategy: str = "reject",
         metadata: dict[str, Any] | None = None,
@@ -42,7 +42,7 @@ class RunStore(abc.ABC):
         self,
         thread_id: str,
         *,
-        owner_id: str | None = None,
+        user_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         pass

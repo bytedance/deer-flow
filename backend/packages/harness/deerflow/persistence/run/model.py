@@ -16,7 +16,7 @@ class RunRow(Base):
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     assistant_id: Mapped[str | None] = mapped_column(String(128))
-    owner_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
 

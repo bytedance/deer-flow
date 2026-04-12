@@ -2,7 +2,7 @@
 
 Tests:
 1. DatabaseConfig property derivation (paths, URLs)
-2. MemoryRunStore CRUD + owner_id filtering
+2. MemoryRunStore CRUD + user_id filtering
 3. Base.to_dict() via inspect mixin
 4. Engine init/close lifecycle (memory + SQLite)
 5. Postgres missing-dep error message
@@ -24,18 +24,19 @@ class TestDatabaseConfig:
         assert c.backend == "memory"
         assert c.pool_size == 5
 
-    def test_sqlite_paths_are_different(self):
+    def test_sqlite_paths_unified(self):
         c = DatabaseConfig(backend="sqlite", sqlite_dir="./mydata")
-        assert c.checkpointer_sqlite_path.endswith("checkpoints.db")
-        assert c.app_sqlite_path.endswith("app.db")
-        assert "mydata" in c.checkpointer_sqlite_path
-        assert c.checkpointer_sqlite_path != c.app_sqlite_path
+        assert c.sqlite_path.endswith("deerflow.db")
+        assert "mydata" in c.sqlite_path
+        # Backward-compatible aliases point to the same file
+        assert c.checkpointer_sqlite_path == c.sqlite_path
+        assert c.app_sqlite_path == c.sqlite_path
 
     def test_app_sqlalchemy_url_sqlite(self):
         c = DatabaseConfig(backend="sqlite", sqlite_dir="./data")
         url = c.app_sqlalchemy_url
         assert url.startswith("sqlite+aiosqlite:///")
-        assert "app.db" in url
+        assert "deerflow.db" in url
 
     def test_app_sqlalchemy_url_postgres(self):
         c = DatabaseConfig(
@@ -105,17 +106,17 @@ class TestMemoryRunStore:
 
     @pytest.mark.anyio
     async def test_list_by_thread_owner_filter(self, store):
-        await store.put("r1", thread_id="t1", owner_id="alice")
-        await store.put("r2", thread_id="t1", owner_id="bob")
-        rows = await store.list_by_thread("t1", owner_id="alice")
+        await store.put("r1", thread_id="t1", user_id="alice")
+        await store.put("r2", thread_id="t1", user_id="bob")
+        rows = await store.list_by_thread("t1", user_id="alice")
         assert len(rows) == 1
-        assert rows[0]["owner_id"] == "alice"
+        assert rows[0]["user_id"] == "alice"
 
     @pytest.mark.anyio
     async def test_owner_none_returns_all(self, store):
-        await store.put("r1", thread_id="t1", owner_id="alice")
-        await store.put("r2", thread_id="t1", owner_id="bob")
-        rows = await store.list_by_thread("t1", owner_id=None)
+        await store.put("r1", thread_id="t1", user_id="alice")
+        await store.put("r2", thread_id="t1", user_id="bob")
+        rows = await store.list_by_thread("t1", user_id=None)
         assert len(rows) == 2
 
     @pytest.mark.anyio

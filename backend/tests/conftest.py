@@ -60,7 +60,7 @@ def provisioner_module():
 # Auto-set user context for every test unless marked no_auto_user
 # ---------------------------------------------------------------------------
 #
-# Repository methods read ``owner_id`` from a contextvar by default
+# Repository methods read ``user_id`` from a contextvar by default
 # (see ``deerflow.runtime.user_context``). Without this fixture, every
 # pre-existing persistence test would raise RuntimeError because the
 # contextvar is unset. The fixture sets a default test user on every

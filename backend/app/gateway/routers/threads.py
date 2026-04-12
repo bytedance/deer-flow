@@ -13,6 +13,7 @@ matching the LangGraph Platform wire format expected by the
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from typing import Any
@@ -21,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer
+from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
@@ -34,7 +35,7 @@ router = APIRouter(prefix="/api/threads", tags=["threads"])
 # them. Pydantic ``@field_validator("metadata")`` strips them on every
 # inbound model below so a malicious client cannot reflect a forged
 # owner identity through the API surface. Defense-in-depth — the
-# row-level invariant is still ``threads_meta.owner_id`` populated from
+# row-level invariant is still ``threads_meta.user_id`` populated from
 # the auth contextvar; this list closes the metadata-blob echo gap.
 _SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
 
@@ -194,7 +195,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     and removes the thread_meta row from the configured ThreadMetaStore
     (sqlite or memory).
     """
-    from app.gateway.deps import get_thread_meta_repo
+    from app.gateway.deps import get_thread_store
 
     # Clean local filesystem
     response = _delete_thread_data(thread_id)
@@ -211,8 +212,8 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search.
     try:
-        thread_meta_repo = get_thread_meta_repo(request)
-        await thread_meta_repo.delete(thread_id)
+        thread_store = get_thread_store(request)
+        await thread_store.delete(thread_id)
     except Exception:
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
@@ -227,17 +228,17 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     and an empty checkpoint (so state endpoints work immediately).
     Idempotent: returns the existing record when ``thread_id`` already exists.
     """
-    from app.gateway.deps import get_thread_meta_repo
+    from app.gateway.deps import get_thread_store
 
     checkpointer = get_checkpointer(request)
-    thread_meta_repo = get_thread_meta_repo(request)
+    thread_store = get_thread_store(request)
     thread_id = body.thread_id or str(uuid.uuid4())
     now = time.time()
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
 
     # Idempotency: return existing record when already present
-    existing_record = await thread_meta_repo.get(thread_id)
+    existing_record = await thread_store.get(thread_id)
     if existing_record is not None:
         return ThreadResponse(
             thread_id=thread_id,
@@ -249,7 +250,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
     # Write thread_meta so the thread appears in /threads/search immediately
     try:
-        await thread_meta_repo.create(
+        await thread_store.create(
             thread_id,
             assistant_id=getattr(body, "assistant_id", None),
             metadata=body.metadata,
@@ -293,9 +294,9 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     Delegates to the configured ThreadMetaStore implementation
     (SQL-backed for sqlite/postgres, Store-backed for memory mode).
     """
-    from app.gateway.deps import get_thread_meta_repo
+    from app.gateway.deps import get_thread_store
 
-    repo = get_thread_meta_repo(request)
+    repo = get_thread_store(request)
     rows = await repo.search(
         metadata=body.metadata or None,
         status=body.status,
@@ -320,22 +321,22 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Request) -> ThreadResponse:
     """Merge metadata into a thread record."""
-    from app.gateway.deps import get_thread_meta_repo
+    from app.gateway.deps import get_thread_store
 
-    thread_meta_repo = get_thread_meta_repo(request)
-    record = await thread_meta_repo.get(thread_id)
+    thread_store = get_thread_store(request)
+    record = await thread_store.get(thread_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     # ``body.metadata`` already stripped by ``ThreadPatchRequest._strip_reserved``.
     try:
-        await thread_meta_repo.update_metadata(thread_id, body.metadata)
+        await thread_store.update_metadata(thread_id, body.metadata)
     except Exception:
         logger.exception("Failed to patch thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread")
 
     # Re-read to get the merged metadata + refreshed updated_at
-    record = await thread_meta_repo.get(thread_id) or record
+    record = await thread_store.get(thread_id) or record
     return ThreadResponse(
         thread_id=thread_id,
         status=record.get("status", "idle"),
@@ -354,12 +355,12 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     execution status from the checkpointer.  Falls back to the checkpointer
     alone for threads that pre-date ThreadMetaStore adoption (backward compat).
     """
-    from app.gateway.deps import get_thread_meta_repo
+    from app.gateway.deps import get_thread_store
 
-    thread_meta_repo = get_thread_meta_repo(request)
+    thread_store = get_thread_store(request)
     checkpointer = get_checkpointer(request)
 
-    record: dict | None = await thread_meta_repo.get(thread_id)
+    record: dict | None = await thread_store.get(thread_id)
 
     # Derive accurate status from the checkpointer
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -402,6 +403,165 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     )
 
 
+# ---------------------------------------------------------------------------
+# Event-store-backed message loader
+# ---------------------------------------------------------------------------
+
+_LEGACY_CMD_INNER_CONTENT_RE = re.compile(
+    r"ToolMessage\(content=(?P<q>['\"])(?P<inner>.*?)(?P=q)",
+    re.DOTALL,
+)
+
+
+def _sanitize_legacy_command_repr(content_field: Any) -> Any:
+    """Recover the inner ToolMessage text from a legacy ``str(Command(...))`` repr.
+
+    Runs captured before the ``on_tool_end`` fix in ``journal.py`` stored
+    ``str(Command(update={'messages':[ToolMessage(content='X', ...)]}))`` as the
+    tool_result content. New runs store ``'X'`` directly. For legacy rows, try
+    to extract ``'X'`` defensively; return the original string if extraction
+    fails (still no worse than the checkpoint fallback for summarized threads).
+    """
+    if not isinstance(content_field, str) or not content_field.startswith("Command(update="):
+        return content_field
+    match = _LEGACY_CMD_INNER_CONTENT_RE.search(content_field)
+    return match.group("inner") if match else content_field
+
+
+async def _get_event_store_messages(request: Request, thread_id: str) -> list[dict] | None:
+    """Load the full message stream for ``thread_id`` from the event store.
+
+    The event store is append-only and unaffected by summarization — the
+    checkpoint's ``channel_values["messages"]`` is rewritten in-place when the
+    SummarizationMiddleware runs, which drops all pre-summarize messages. The
+    event store retains the full transcript, so callers in Gateway mode should
+    prefer it for rendering the conversation history.
+
+    In addition to the core message content, this helper attaches two extra
+    fields to every returned dict:
+
+    - ``run_id``: the ``run_id`` of the event that produced this message.
+      Always present.
+    - ``feedback``: thumbs-up/down data. Present only on the **final
+      ``ai_message`` of each run** (matching the per-run feedback semantics
+      of ``POST /api/threads/{id}/runs/{run_id}/feedback``). The frontend uses
+      the presence of this field to decide whether to render the feedback
+      button, which sidesteps the positional-index mapping bug that an
+      out-of-band ``/messages`` fetch exhibited.
+
+    Behaviour contract:
+
+    - **Full pagination.** ``RunEventStore.list_messages`` returns the newest
+      ``limit`` records when no cursor is given, so a fixed limit silently
+      drops older messages on long threads. We size the read from
+      ``count_messages()`` and then page forward with ``after_seq`` cursors.
+    - **Copy-on-read.** Each content dict is copied before ``id`` is patched
+      so the live store object is never mutated; ``MemoryRunEventStore``
+      returns live references.
+    - **Stable ids.** Messages with ``id=None`` (human + tool_result) receive
+      a deterministic ``uuid5(NAMESPACE_URL, f"{thread_id}:{seq}")`` so React
+      keys are stable across requests without altering stored data. AI messages
+      retain their LLM-assigned ``lc_run--*`` ids.
+    - **Legacy Command repr.** Rows captured before the ``journal.py``
+      ``on_tool_end`` fix stored ``str(Command(update={...}))`` as the tool
+      result content. ``_sanitize_legacy_command_repr`` extracts the inner
+      ToolMessage text.
+    - **User context.** ``DbRunEventStore`` is user-scoped by default via
+      ``resolve_user_id(AUTO)`` in ``runtime/user_context.py``. This helper
+      must run inside a request where ``@require_permission`` has populated
+      the user contextvar. Both callers below are decorated appropriately.
+      Do not call this helper from CLI or migration scripts without passing
+      ``user_id=None`` explicitly to the underlying store methods.
+
+    Returns ``None`` when the event store is not configured or has no message
+    events for this thread, so callers fall back to checkpoint messages.
+    """
+    try:
+        event_store = get_run_event_store(request)
+    except Exception:
+        return None
+
+    try:
+        total = await event_store.count_messages(thread_id)
+    except Exception:
+        logger.exception("count_messages failed for thread %s", sanitize_log_param(thread_id))
+        return None
+    if not total:
+        return None
+
+    # Batch by page_size to keep memory bounded for very long threads.
+    page_size = 500
+    collected: list[dict] = []
+    after_seq: int | None = None
+    while True:
+        try:
+            page = await event_store.list_messages(thread_id, limit=page_size, after_seq=after_seq)
+        except Exception:
+            logger.exception("list_messages failed for thread %s", sanitize_log_param(thread_id))
+            return None
+        if not page:
+            break
+        collected.extend(page)
+        if len(page) < page_size:
+            break
+        next_cursor = page[-1].get("seq")
+        if next_cursor is None or (after_seq is not None and next_cursor <= after_seq):
+            break
+        after_seq = next_cursor
+
+    # Build the message list; track the final ``ai_message`` index per run so
+    # feedback can be attached at the right position (matches thread_runs.py).
+    messages: list[dict] = []
+    last_ai_per_run: dict[str, int] = {}
+    for evt in collected:
+        raw = evt.get("content")
+        if not isinstance(raw, dict) or "type" not in raw:
+            continue
+        content = dict(raw)
+        if content.get("id") is None:
+            content["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{thread_id}:{evt['seq']}"))
+        if content.get("type") == "tool":
+            content["content"] = _sanitize_legacy_command_repr(content.get("content"))
+        run_id = evt.get("run_id")
+        if run_id:
+            content["run_id"] = run_id
+        if evt.get("event_type") == "ai_message" and run_id:
+            last_ai_per_run[run_id] = len(messages)
+        messages.append(content)
+
+    if not messages:
+        return None
+
+    # Attach feedback to the final ai_message of each run. If the feedback
+    # subsystem is unavailable, leave the ``feedback`` field absent entirely
+    # so the frontend hides the button rather than showing it over a broken
+    # write path.
+    feedback_available = False
+    feedback_map: dict[str, dict] = {}
+    try:
+        feedback_repo = get_feedback_repo(request)
+        user_id = await get_current_user(request)
+        feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
+        feedback_available = True
+    except Exception:
+        logger.exception("feedback lookup failed for thread %s", sanitize_log_param(thread_id))
+
+    if feedback_available:
+        for run_id, idx in last_ai_per_run.items():
+            fb = feedback_map.get(run_id)
+            messages[idx]["feedback"] = (
+                {
+                    "feedback_id": fb["feedback_id"],
+                    "rating": fb["rating"],
+                    "comment": fb.get("comment"),
+                }
+                if fb
+                else None
+            )
+
+    return messages
+
+
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_state(thread_id: str, request: Request) -> ThreadStateResponse:
@@ -440,8 +600,15 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
     next_tasks = [t.name for t in tasks_raw if hasattr(t, "name")]
     tasks = [{"id": getattr(t, "id", ""), "name": getattr(t, "name", "")} for t in tasks_raw]
 
+    values = serialize_channel_values(channel_values)
+
+    # Prefer event-store messages: append-only, immune to summarization.
+    es_messages = await _get_event_store_messages(request, thread_id)
+    if es_messages is not None:
+        values["messages"] = es_messages
+
     return ThreadStateResponse(
-        values=serialize_channel_values(channel_values),
+        values=values,
         next=next_tasks,
         metadata=metadata,
         checkpoint={"id": checkpoint_id, "ts": str(metadata.get("created_at", ""))},
@@ -462,10 +629,10 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     ThreadMetaStore abstraction so that ``/threads/search`` reflects the
     change immediately in both sqlite and memory backends.
     """
-    from app.gateway.deps import get_thread_meta_repo
+    from app.gateway.deps import get_thread_store
 
     checkpointer = get_checkpointer(request)
-    thread_meta_repo = get_thread_meta_repo(request)
+    thread_store = get_thread_store(request)
 
     # checkpoint_ns must be present in the config for aput — default to ""
     # (the root graph namespace).  checkpoint_id is optional; omitting it
@@ -529,7 +696,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         new_title = body.values["title"]
         if new_title:  # Skip empty strings and None
             try:
-                await thread_meta_repo.update_display_name(thread_id, new_title)
+                await thread_store.update_display_name(thread_id, new_title)
             except Exception:
                 logger.debug("Failed to sync title to thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
@@ -559,6 +726,11 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
     if body.before:
         config["configurable"]["checkpoint_id"] = body.before
 
+    # Load the full event-store message stream once; attach to the latest
+    # checkpoint entry only (matching the prior semantics). The event store
+    # is append-only and immune to summarization.
+    es_messages = await _get_event_store_messages(request, thread_id)
+
     entries: list[HistoryEntry] = []
     is_latest_checkpoint = True
     try:
@@ -582,11 +754,17 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
             if thread_data := channel_values.get("thread_data"):
                 values["thread_data"] = thread_data
 
-            # Attach messages from checkpointer only for the latest checkpoint
+            # Attach messages only to the latest checkpoint. Prefer the
+            # event-store stream (complete and unaffected by summarization);
+            # fall back to checkpoint channel_values when the event store is
+            # unavailable or empty.
             if is_latest_checkpoint:
-                messages = channel_values.get("messages")
-                if messages:
-                    values["messages"] = serialize_channel_values({"messages": messages}).get("messages", [])
+                if es_messages is not None:
+                    values["messages"] = es_messages
+                else:
+                    messages = channel_values.get("messages")
+                    if messages:
+                        values["messages"] = serialize_channel_values({"messages": messages}).get("messages", [])
             is_latest_checkpoint = False
 
             # Derive next tasks

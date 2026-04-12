@@ -233,18 +233,18 @@ def require_permission(
             # (``threads_meta`` table). We verify ownership via
             # ``ThreadMetaStore.check_access``: it returns True for
             # missing rows (untracked legacy thread) and for rows whose
-            # ``owner_id`` is NULL (shared / pre-auth data), so this is
+            # ``user_id`` is NULL (shared / pre-auth data), so this is
             # strict-deny rather than strict-allow — only an *existing*
-            # row with a *different* owner_id triggers 404.
+            # row with a *different* user_id triggers 404.
             if owner_check:
                 thread_id = kwargs.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")
 
-                from app.gateway.deps import get_thread_meta_repo
+                from app.gateway.deps import get_thread_store
 
-                thread_meta_repo = get_thread_meta_repo(request)
-                allowed = await thread_meta_repo.check_access(
+                thread_store = get_thread_store(request)
+                allowed = await thread_store.check_access(
                     thread_id,
                     str(auth.user.id),
                     require_existing=require_existing,

@@ -7,7 +7,7 @@ Supported backends: memory, sqlite, postgres.
 
 Usage::
 
-    from deerflow.agents.checkpointer.provider import get_checkpointer, checkpointer_context
+    from deerflow.runtime.checkpointer.provider import get_checkpointer, checkpointer_context
 
     # Singleton — reused across calls, closed on process exit
     cp = get_checkpointer()

@@ -710,6 +710,81 @@ class TestToolResultMessage:
         assert tool_end["metadata"]["tool_name"] == "web_search"
 
     @pytest.mark.anyio
+    async def test_tool_invoke_end_to_end_unwraps_command(self, journal_setup):
+        """End-to-end: invoke a real LangChain tool that returns Command(update={'messages':[ToolMessage]}).
+
+        This goes through the real LangChain callback path (tool.invoke -> CallbackManager
+        -> on_tool_start/on_tool_end), which is what the production agent uses. Mirrors
+        the ``present_files`` tool shape exactly.
+        """
+        from langchain_core.callbacks import CallbackManager
+        from langchain_core.messages import ToolMessage
+        from langchain_core.tools import tool
+        from langgraph.types import Command
+
+        j, store = journal_setup
+
+        @tool
+        def fake_present_files(filepaths: list[str]) -> Command:
+            """Fake present_files that returns a Command with an inner ToolMessage."""
+            return Command(
+                update={
+                    "artifacts": filepaths,
+                    "messages": [ToolMessage("Successfully presented files", tool_call_id="tc_123")],
+                },
+            )
+
+        # Real LangChain callback dispatch (matches production agent path)
+        cm = CallbackManager(handlers=[j])
+        fake_present_files.invoke(
+            {"filepaths": ["/mnt/user-data/outputs/report.md"]},
+            config={"callbacks": cm, "run_id": uuid4()},
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1, f"expected 1 message event, got {len(messages)}: {messages}"
+        content = messages[0]["content"]
+        assert content["type"] == "tool"
+        # CRITICAL: must be the inner ToolMessage text, not str(Command(...))
+        assert content["content"] == "Successfully presented files", (
+            f"Command unwrap failed; stored content = {content['content']!r}"
+        )
+        assert "Command(update=" not in str(content["content"])
+
+    @pytest.mark.anyio
+    async def test_tool_end_unwraps_command_with_inner_tool_message(self, journal_setup):
+        """Tools like ``present_files`` return Command(update={'messages': [ToolMessage(...)]}).
+
+        LangGraph unwraps the inner ToolMessage into checkpoint state, so the
+        event store must do the same — otherwise it captures ``str(Command(...))``
+        and the /history response diverges from the real rendered message.
+        """
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        run_id = uuid4()
+        inner = ToolMessage(
+            content="Successfully presented files",
+            tool_call_id="call_present",
+            name="present_files",
+            status="success",
+        )
+        cmd = Command(update={"artifacts": ["/mnt/user-data/outputs/report.md"], "messages": [inner]})
+        j.on_tool_end(cmd, run_id=run_id)
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        content = messages[0]["content"]
+        assert content["type"] == "tool"
+        assert content["content"] == "Successfully presented files"
+        assert content["tool_call_id"] == "call_present"
+        assert content["name"] == "present_files"
+        assert "Command(update=" not in str(content["content"])
+
+    @pytest.mark.anyio
     async def test_tool_message_object_overrides_kwargs(self, journal_setup):
         """ToolMessage object fields take priority over kwargs."""
         from langchain_core.messages import ToolMessage

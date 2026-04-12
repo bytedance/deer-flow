@@ -73,11 +73,11 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_list_by_thread_owner_filter(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1", owner_id="alice")
-        await repo.put("r2", thread_id="t1", owner_id="bob")
-        rows = await repo.list_by_thread("t1", owner_id="alice")
+        await repo.put("r1", thread_id="t1", user_id="alice")
+        await repo.put("r2", thread_id="t1", user_id="bob")
+        rows = await repo.list_by_thread("t1", user_id="alice")
         assert len(rows) == 1
-        assert rows[0]["owner_id"] == "alice"
+        assert rows[0]["user_id"] == "alice"
         await _cleanup()
 
     @pytest.mark.anyio
@@ -189,8 +189,8 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_owner_none_returns_all(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1", owner_id="alice")
-        await repo.put("r2", thread_id="t1", owner_id="bob")
-        rows = await repo.list_by_thread("t1", owner_id=None)
+        await repo.put("r1", thread_id="t1", user_id="alice")
+        await repo.put("r2", thread_id="t1", user_id="bob")
+        rows = await repo.list_by_thread("t1", user_id=None)
         assert len(rows) == 2
         await _cleanup()

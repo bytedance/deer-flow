@@ -30,11 +30,16 @@ class FeedbackCreateRequest(BaseModel):
     message_id: str | None = Field(default=None, description="Optional: scope feedback to a specific message")
 
 
+class FeedbackUpsertRequest(BaseModel):
+    rating: int = Field(..., description="Feedback rating: +1 (positive) or -1 (negative)")
+    comment: str | None = Field(default=None, description="Optional text feedback")
+
+
 class FeedbackResponse(BaseModel):
     feedback_id: str
     run_id: str
     thread_id: str
-    owner_id: str | None = None
+    user_id: str | None = None
     message_id: str | None = None
     rating: int
     comment: str | None = None
@@ -51,6 +56,57 @@ class FeedbackStatsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.put("/{thread_id}/runs/{run_id}/feedback", response_model=FeedbackResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def upsert_feedback(
+    thread_id: str,
+    run_id: str,
+    body: FeedbackUpsertRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Create or update feedback for a run (idempotent)."""
+    if body.rating not in (1, -1):
+        raise HTTPException(status_code=400, detail="rating must be +1 or -1")
+
+    user_id = await get_current_user(request)
+
+    run_store = get_run_store(request)
+    run = await run_store.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    if run.get("thread_id") != thread_id:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found in thread {thread_id}")
+
+    feedback_repo = get_feedback_repo(request)
+    return await feedback_repo.upsert(
+        run_id=run_id,
+        thread_id=thread_id,
+        rating=body.rating,
+        user_id=user_id,
+        comment=body.comment,
+    )
+
+
+@router.delete("/{thread_id}/runs/{run_id}/feedback")
+@require_permission("threads", "delete", owner_check=True, require_existing=True)
+async def delete_run_feedback(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+) -> dict[str, bool]:
+    """Delete the current user's feedback for a run."""
+    user_id = await get_current_user(request)
+    feedback_repo = get_feedback_repo(request)
+    deleted = await feedback_repo.delete_by_run(
+        thread_id=thread_id,
+        run_id=run_id,
+        user_id=user_id,
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No feedback found for this run")
+    return {"success": True}
 
 
 @router.post("/{thread_id}/runs/{run_id}/feedback", response_model=FeedbackResponse)
@@ -80,7 +136,7 @@ async def create_feedback(
         run_id=run_id,
         thread_id=thread_id,
         rating=body.rating,
-        owner_id=user_id,
+        user_id=user_id,
         message_id=body.message_id,
         comment=body.comment,
     )

@@ -113,14 +113,8 @@ def test_delete_thread_data_returns_generic_500_error(tmp_path):
 # ── Server-reserved metadata key stripping ──────────────────────────────────
 
 
-def test_strip_reserved_metadata_removes_owner_id():
-    """Client-supplied owner_id is dropped to prevent reflection attacks."""
-    out = threads._strip_reserved_metadata({"owner_id": "victim-id", "title": "ok"})
-    assert out == {"title": "ok"}
-
-
 def test_strip_reserved_metadata_removes_user_id():
-    """user_id is also reserved (defense in depth for any future use)."""
+    """Client-supplied user_id is dropped to prevent reflection attacks."""
     out = threads._strip_reserved_metadata({"user_id": "victim-id", "title": "ok"})
     assert out == {"title": "ok"}
 
@@ -136,6 +130,6 @@ def test_strip_reserved_metadata_empty_input():
     assert threads._strip_reserved_metadata({}) == {}
 
 
-def test_strip_reserved_metadata_strips_both_simultaneously():
-    out = threads._strip_reserved_metadata({"owner_id": "x", "user_id": "y", "keep": "me"})
+def test_strip_reserved_metadata_strips_all_reserved_keys():
+    out = threads._strip_reserved_metadata({"user_id": "x", "keep": "me"})
     assert out == {"keep": "me"}

@@ -240,7 +240,7 @@ class DeerFlowClient:
         }
         checkpointer = self._checkpointer
         if checkpointer is None:
-            from deerflow.agents.checkpointer import get_checkpointer
+            from deerflow.runtime.checkpointer import get_checkpointer
 
             checkpointer = get_checkpointer()
         if checkpointer is not None:
@@ -374,7 +374,7 @@ class DeerFlowClient:
         """
         checkpointer = self._checkpointer
         if checkpointer is None:
-            from deerflow.agents.checkpointer.provider import get_checkpointer
+            from deerflow.runtime.checkpointer.provider import get_checkpointer
 
             checkpointer = get_checkpointer()
 
@@ -429,7 +429,7 @@ class DeerFlowClient:
         """
         checkpointer = self._checkpointer
         if checkpointer is None:
-            from deerflow.agents.checkpointer.provider import get_checkpointer
+            from deerflow.runtime.checkpointer.provider import get_checkpointer
 
             checkpointer = get_checkpointer()
 

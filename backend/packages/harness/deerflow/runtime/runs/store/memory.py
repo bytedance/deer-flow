@@ -21,7 +21,7 @@ class MemoryRunStore(RunStore):
         *,
         thread_id,
         assistant_id=None,
-        owner_id=None,
+        user_id=None,
         status="pending",
         multitask_strategy="reject",
         metadata=None,
@@ -35,7 +35,7 @@ class MemoryRunStore(RunStore):
             "run_id": run_id,
             "thread_id": thread_id,
             "assistant_id": assistant_id,
-            "owner_id": owner_id,
+            "user_id": user_id,
             "status": status,
             "multitask_strategy": multitask_strategy,
             "metadata": metadata or {},
@@ -49,8 +49,8 @@ class MemoryRunStore(RunStore):
     async def get(self, run_id):
         return self._runs.get(run_id)
 
-    async def list_by_thread(self, thread_id, *, owner_id=None, limit=100):
-        results = [r for r in self._runs.values() if r["thread_id"] == thread_id and (owner_id is None or r.get("owner_id") == owner_id)]
+    async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
+        results = [r for r in self._runs.values() if r["thread_id"] == thread_id and (user_id is None or r.get("user_id") == user_id)]
         results.sort(key=lambda r: r["created_at"], reverse=True)
         return results[:limit]
 

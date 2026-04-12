@@ -175,46 +175,46 @@ def _make_ctx(user_id):
 def test_filter_injects_user_id():
     value = {}
     asyncio.run(add_owner_filter(_make_ctx("user-a"), value))
-    assert value["metadata"]["owner_id"] == "user-a"
+    assert value["metadata"]["user_id"] == "user-a"
 
 
 def test_filter_preserves_existing_metadata():
     value = {"metadata": {"title": "hello"}}
     asyncio.run(add_owner_filter(_make_ctx("user-a"), value))
-    assert value["metadata"]["owner_id"] == "user-a"
+    assert value["metadata"]["user_id"] == "user-a"
     assert value["metadata"]["title"] == "hello"
 
 
 def test_filter_returns_user_id_dict():
     result = asyncio.run(add_owner_filter(_make_ctx("user-x"), {}))
-    assert result == {"owner_id": "user-x"}
+    assert result == {"user_id": "user-x"}
 
 
 def test_filter_read_write_consistency():
     value = {}
     filter_dict = asyncio.run(add_owner_filter(_make_ctx("user-1"), value))
-    assert value["metadata"]["owner_id"] == filter_dict["owner_id"]
+    assert value["metadata"]["user_id"] == filter_dict["user_id"]
 
 
 def test_different_users_different_filters():
     f_a = asyncio.run(add_owner_filter(_make_ctx("a"), {}))
     f_b = asyncio.run(add_owner_filter(_make_ctx("b"), {}))
-    assert f_a["owner_id"] != f_b["owner_id"]
+    assert f_a["user_id"] != f_b["user_id"]
 
 
 def test_filter_overrides_conflicting_user_id():
     """If value already has a different user_id in metadata, it gets overwritten."""
-    value = {"metadata": {"owner_id": "attacker"}}
+    value = {"metadata": {"user_id": "attacker"}}
     asyncio.run(add_owner_filter(_make_ctx("real-owner"), value))
-    assert value["metadata"]["owner_id"] == "real-owner"
+    assert value["metadata"]["user_id"] == "real-owner"
 
 
 def test_filter_with_empty_metadata():
     """Explicit empty metadata dict is fine."""
     value = {"metadata": {}}
     result = asyncio.run(add_owner_filter(_make_ctx("user-z"), value))
-    assert value["metadata"]["owner_id"] == "user-z"
-    assert result == {"owner_id": "user-z"}
+    assert value["metadata"]["user_id"] == "user-z"
+    assert result == {"user_id": "user-z"}
 
 
 # ── Gateway parity ───────────────────────────────────────────────────────

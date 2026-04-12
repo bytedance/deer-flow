@@ -199,12 +199,12 @@ def test_migration_failure_is_non_fatal():
 # ── Section 5.1-5.6 upgrade path: orphan thread migration ────────────────
 
 
-def test_migrate_orphaned_threads_stamps_owner_id_on_unowned_rows():
+def test_migrate_orphaned_threads_stamps_user_id_on_unowned_rows():
     """First boot finds Store-only legacy threads → stamps admin's id.
 
     Validates the **TC-UPG-02 upgrade story**: an operator running main
     (no auth) accumulates threads in the LangGraph Store namespace
-    ``("threads",)`` with no ``metadata.owner_id``. After upgrading to
+    ``("threads",)`` with no ``metadata.user_id``. After upgrading to
     feat/auth-on-2.0-rc, the first ``_ensure_admin_user`` boot should
     rewrite each unowned item with the freshly created admin's id.
     """
@@ -215,7 +215,7 @@ def test_migrate_orphaned_threads_stamps_owner_id_on_unowned_rows():
         SimpleNamespace(key="t1", value={"metadata": {"title": "old-thread-1"}}),
         SimpleNamespace(key="t2", value={"metadata": {"title": "old-thread-2"}}),
         SimpleNamespace(key="t3", value={"metadata": {}}),
-        SimpleNamespace(key="t4", value={"metadata": {"owner_id": "someone-else", "title": "preserved"}}),
+        SimpleNamespace(key="t4", value={"metadata": {"user_id": "someone-else", "title": "preserved"}}),
     ]
     store = AsyncMock()
     # asearch returns the entire batch on first call, then an empty page
@@ -235,11 +235,11 @@ def test_migrate_orphaned_threads_stamps_owner_id_on_unowned_rows():
     assert len(aput_calls) == 3
     rewritten_keys = {call[1] for call in aput_calls}
     assert rewritten_keys == {"t1", "t2", "t3"}
-    # Each rewrite carries the new owner_id; titles preserved where present.
+    # Each rewrite carries the new user_id; titles preserved where present.
     by_key = {call[1]: call[2] for call in aput_calls}
-    assert by_key["t1"]["metadata"]["owner_id"] == "admin-id-42"
+    assert by_key["t1"]["metadata"]["user_id"] == "admin-id-42"
     assert by_key["t1"]["metadata"]["title"] == "old-thread-1"
-    assert by_key["t3"]["metadata"]["owner_id"] == "admin-id-42"
+    assert by_key["t3"]["metadata"]["user_id"] == "admin-id-42"
     # The pre-owned item must NOT have been rewritten.
     assert "t4" not in rewritten_keys
 

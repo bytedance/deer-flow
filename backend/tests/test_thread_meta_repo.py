@@ -43,8 +43,8 @@ class TestThreadMetaRepository:
     @pytest.mark.anyio
     async def test_create_with_owner_and_display_name(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        record = await repo.create("t1", owner_id="user1", display_name="My Thread")
-        assert record["owner_id"] == "user1"
+        record = await repo.create("t1", user_id="user1", display_name="My Thread")
+        assert record["user_id"] == "user1"
         assert record["display_name"] == "My Thread"
         await _cleanup()
 
@@ -62,26 +62,6 @@ class TestThreadMetaRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_list_by_owner(self, tmp_path):
-        repo = await _make_repo(tmp_path)
-        await repo.create("t1", owner_id="user1")
-        await repo.create("t2", owner_id="user1")
-        await repo.create("t3", owner_id="user2")
-        results = await repo.list_by_owner("user1")
-        assert len(results) == 2
-        assert all(r["owner_id"] == "user1" for r in results)
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_list_by_owner_with_limit_and_offset(self, tmp_path):
-        repo = await _make_repo(tmp_path)
-        for i in range(5):
-            await repo.create(f"t{i}", owner_id="user1")
-        results = await repo.list_by_owner("user1", limit=2, offset=1)
-        assert len(results) == 2
-        await _cleanup()
-
-    @pytest.mark.anyio
     async def test_check_access_no_record_allows(self, tmp_path):
         repo = await _make_repo(tmp_path)
         assert await repo.check_access("unknown", "user1") is True
@@ -90,23 +70,23 @@ class TestThreadMetaRepository:
     @pytest.mark.anyio
     async def test_check_access_owner_matches(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.create("t1", owner_id="user1")
+        await repo.create("t1", user_id="user1")
         assert await repo.check_access("t1", "user1") is True
         await _cleanup()
 
     @pytest.mark.anyio
     async def test_check_access_owner_mismatch(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.create("t1", owner_id="user1")
+        await repo.create("t1", user_id="user1")
         assert await repo.check_access("t1", "user2") is False
         await _cleanup()
 
     @pytest.mark.anyio
     async def test_check_access_no_owner_allows_all(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        # Explicit owner_id=None to bypass the new AUTO default that
+        # Explicit user_id=None to bypass the new AUTO default that
         # would otherwise pick up the test user from the autouse fixture.
-        await repo.create("t1", owner_id=None)
+        await repo.create("t1", user_id=None)
         assert await repo.check_access("t1", "anyone") is True
         await _cleanup()
 
@@ -125,27 +105,27 @@ class TestThreadMetaRepository:
     @pytest.mark.anyio
     async def test_check_access_strict_owner_match_allowed(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.create("t1", owner_id="user1")
+        await repo.create("t1", user_id="user1")
         assert await repo.check_access("t1", "user1", require_existing=True) is True
         await _cleanup()
 
     @pytest.mark.anyio
     async def test_check_access_strict_owner_mismatch_denied(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.create("t1", owner_id="user1")
+        await repo.create("t1", user_id="user1")
         assert await repo.check_access("t1", "user2", require_existing=True) is False
         await _cleanup()
 
     @pytest.mark.anyio
     async def test_check_access_strict_null_owner_still_allowed(self, tmp_path):
-        """Even in strict mode, a row with NULL owner_id stays shared.
+        """Even in strict mode, a row with NULL user_id stays shared.
 
         The strict flag tightens the *missing row* case, not the *shared
         row* case — legacy pre-auth rows that survived a clean migration
         without an owner are still everyone's.
         """
         repo = await _make_repo(tmp_path)
-        await repo.create("t1", owner_id=None)
+        await repo.create("t1", user_id=None)
         assert await repo.check_access("t1", "anyone", require_existing=True) is True
         await _cleanup()
 

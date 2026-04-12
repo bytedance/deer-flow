@@ -60,8 +60,8 @@ class TestFeedbackRepository:
     @pytest.mark.anyio
     async def test_create_with_owner(self, tmp_path):
         repo = await _make_feedback_repo(tmp_path)
-        record = await repo.create(run_id="r1", thread_id="t1", rating=1, owner_id="user-1")
-        assert record["owner_id"] == "user-1"
+        record = await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
+        assert record["user_id"] == "user-1"
         await _cleanup()
 
     @pytest.mark.anyio
@@ -97,10 +97,10 @@ class TestFeedbackRepository:
     @pytest.mark.anyio
     async def test_list_by_run(self, tmp_path):
         repo = await _make_feedback_repo(tmp_path)
-        await repo.create(run_id="r1", thread_id="t1", rating=1)
-        await repo.create(run_id="r1", thread_id="t1", rating=-1)
-        await repo.create(run_id="r2", thread_id="t1", rating=1)
-        results = await repo.list_by_run("t1", "r1")
+        await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
+        await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="user-2")
+        await repo.create(run_id="r2", thread_id="t1", rating=1, user_id="user-1")
+        results = await repo.list_by_run("t1", "r1", user_id=None)
         assert len(results) == 2
         assert all(r["run_id"] == "r1" for r in results)
         await _cleanup()
@@ -135,9 +135,9 @@ class TestFeedbackRepository:
     @pytest.mark.anyio
     async def test_aggregate_by_run(self, tmp_path):
         repo = await _make_feedback_repo(tmp_path)
-        await repo.create(run_id="r1", thread_id="t1", rating=1)
-        await repo.create(run_id="r1", thread_id="t1", rating=1)
-        await repo.create(run_id="r1", thread_id="t1", rating=-1)
+        await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
+        await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-2")
+        await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="user-3")
         stats = await repo.aggregate_by_run("t1", "r1")
         assert stats["total"] == 3
         assert stats["positive"] == 2
@@ -152,6 +152,80 @@ class TestFeedbackRepository:
         assert stats["total"] == 0
         assert stats["positive"] == 0
         assert stats["negative"] == 0
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_upsert_creates_new(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        record = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+        assert record["rating"] == 1
+        assert record["feedback_id"]
+        assert record["user_id"] == "u1"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_upsert_updates_existing(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        first = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+        second = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u1", comment="changed my mind")
+        assert second["feedback_id"] == first["feedback_id"]
+        assert second["rating"] == -1
+        assert second["comment"] == "changed my mind"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_upsert_different_users_separate(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        r1 = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+        r2 = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u2")
+        assert r1["feedback_id"] != r2["feedback_id"]
+        assert r1["rating"] == 1
+        assert r2["rating"] == -1
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_upsert_invalid_rating(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        with pytest.raises(ValueError):
+            await repo.upsert(run_id="r1", thread_id="t1", rating=0, user_id="u1")
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_delete_by_run(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+        deleted = await repo.delete_by_run(thread_id="t1", run_id="r1", user_id="u1")
+        assert deleted is True
+        results = await repo.list_by_run("t1", "r1", user_id="u1")
+        assert len(results) == 0
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_delete_by_run_nonexistent(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        deleted = await repo.delete_by_run(thread_id="t1", run_id="r1", user_id="u1")
+        assert deleted is False
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_list_by_thread_grouped(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+        await repo.upsert(run_id="r2", thread_id="t1", rating=-1, user_id="u1")
+        await repo.upsert(run_id="r3", thread_id="t2", rating=1, user_id="u1")
+        grouped = await repo.list_by_thread_grouped("t1", user_id="u1")
+        assert "r1" in grouped
+        assert "r2" in grouped
+        assert "r3" not in grouped
+        assert grouped["r1"]["rating"] == 1
+        assert grouped["r2"]["rating"] == -1
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_list_by_thread_grouped_empty(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        grouped = await repo.list_by_thread_grouped("t1", user_id="u1")
+        assert grouped == {}
         await _cleanup()
 
 

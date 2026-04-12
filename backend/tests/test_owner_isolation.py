@@ -9,8 +9,8 @@ These tests bypass the HTTP layer and exercise the storage-layer
 owner filter directly by switching the ``user_context`` contextvar
 between two users. The safety property under test is:
 
-  After a repository write with owner_id=A, a subsequent read with
-  owner_id=B must not return the row, and vice versa.
+  After a repository write with user_id=A, a subsequent read with
+  user_id=B must not return the row, and vice versa.
 
 The HTTP layer is covered by test_auth_middleware.py, which proves
 that a request cookie reaches the ``set_current_user`` call. Together
@@ -431,13 +431,13 @@ async def test_repository_without_context_raises(tmp_path):
         await cleanup()
 
 
-# ── Escape hatch: explicit owner_id=None bypasses filter (for migration) ──
+# ── Escape hatch: explicit user_id=None bypasses filter (for migration) ──
 
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
 async def test_explicit_none_bypasses_filter(tmp_path):
-    """Migration scripts pass owner_id=None to see all rows regardless of owner."""
+    """Migration scripts pass user_id=None to see all rows regardless of owner."""
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.thread_meta import ThreadMetaRepository
 
@@ -452,14 +452,14 @@ async def test_explicit_none_bypasses_filter(tmp_path):
             await repo.create("t-beta")
 
         # Migration-style read: no contextvar, explicit None bypass.
-        all_rows = await repo.search(owner_id=None)
+        all_rows = await repo.search(user_id=None)
         thread_ids = {r["thread_id"] for r in all_rows}
         assert thread_ids == {"t-alpha", "t-beta"}
 
         # Explicit get with None does not apply the filter either.
-        row_a = await repo.get("t-alpha", owner_id=None)
+        row_a = await repo.get("t-alpha", user_id=None)
         assert row_a is not None
-        row_b = await repo.get("t-beta", owner_id=None)
+        row_b = await repo.get("t-beta", user_id=None)
         assert row_b is not None
     finally:
         await cleanup()

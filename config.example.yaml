@@ -820,8 +820,8 @@ skill_evolution:
 # backend: sqlite  -- Single-node deployment, files in sqlite_dir
 # backend: postgres -- Production multi-node deployment
 #
-# SQLite mode automatically uses separate .db files for checkpointer
-# and application data to avoid write-lock contention.
+# SQLite mode uses a single deerflow.db file with WAL journal mode
+# for both checkpointer and application data.
 #
 # Postgres mode: put your connection URL in .env as DATABASE_URL,
 # then reference it here with $DATABASE_URL.

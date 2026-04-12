@@ -19,6 +19,7 @@ import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
 import type { AgentThreadState } from "@/core/threads";
+import { useThreadMessageEnrichment } from "@/core/threads/hooks";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
@@ -51,6 +52,8 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
+  const { data: enrichment } = useThreadMessageEnrichment(threadId);
+
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
@@ -62,13 +65,16 @@ export function MessageList({
         {groupMessages(messages, (group) => {
           if (group.type === "human" || group.type === "assistant") {
             return group.messages.map((msg) => {
+              const entry = msg.id ? enrichment?.get(msg.id) : undefined;
               return (
                 <MessageListItem
                   key={`${group.id}/${msg.id}`}
+                  threadId={threadId}
                   message={msg}
                   isLoading={thread.isLoading}
-                  threadId={threadId}
                   tokenUsageEnabled={tokenUsageEnabled}
+                  runId={entry?.run_id}
+                  feedback={entry?.feedback}
                 />
               );
             });
@@ -183,7 +189,7 @@ export function MessageList({
               results.push(
                 <div
                   key="subtask-count"
-                  className="text-muted-foreground pt-2 text-sm font-normal"
+                  className="text-muted-foreground font-norma pt-2 text-sm"
                 >
                   {t.subtasks.executing(tasks.size)}
                 </div>,

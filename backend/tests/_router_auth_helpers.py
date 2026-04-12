@@ -3,16 +3,16 @@
 The production gateway runs ``AuthMiddleware`` (validates the JWT cookie)
 ahead of every router, plus ``@require_permission(owner_check=True)``
 decorators that read ``request.state.auth`` and call
-``thread_meta_repo.check_access``. Router-level unit tests construct
+``thread_store.check_access``. Router-level unit tests construct
 **bare** FastAPI apps that include only one router — they have neither
-the auth middleware nor a real thread_meta_repo, so the decorators raise
+the auth middleware nor a real thread_store, so the decorators raise
 401 (TestClient path) or ValueError (direct-call path).
 
 This module provides two surfaces:
 
 1. :func:`make_authed_test_app` — wraps ``FastAPI()`` with a tiny
    ``BaseHTTPMiddleware`` that stamps a fake user / AuthContext on every
-   request, plus a permissive ``thread_meta_repo`` mock on
+   request, plus a permissive ``thread_store`` mock on
    ``app.state``. Use from TestClient-based router tests.
 
 2. :func:`call_unwrapped` — invokes the underlying function bypassing
@@ -86,20 +86,20 @@ def make_authed_test_app(
     user_factory: Callable[[], User] | None = None,
     owner_check_passes: bool = True,
 ) -> FastAPI:
-    """Build a FastAPI test app with stub auth + permissive thread_meta_repo.
+    """Build a FastAPI test app with stub auth + permissive thread_store.
 
     Args:
         user_factory: Override the default test user. Must return a fully
             populated :class:`User`. Useful for cross-user isolation tests
             that need a stable id across requests.
-        owner_check_passes: When True (default), ``thread_meta_repo.check_access``
+        owner_check_passes: When True (default), ``thread_store.check_access``
             returns True for every call so ``@require_permission(owner_check=True)``
             never blocks the route under test. Pass False to verify that
             permission failures surface correctly.
 
     Returns:
         A ``FastAPI`` app with the stub middleware installed and
-        ``app.state.thread_meta_repo`` set to a permissive mock. The
+        ``app.state.thread_store`` set to a permissive mock. The
         caller is still responsible for ``app.include_router(...)``.
     """
     factory = user_factory or _make_stub_user
@@ -108,7 +108,7 @@ def make_authed_test_app(
 
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)
-    app.state.thread_meta_repo = repo
+    app.state.thread_store = repo
 
     return app
 
