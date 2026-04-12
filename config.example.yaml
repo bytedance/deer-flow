@@ -575,9 +575,14 @@ sandbox:
 #     general-purpose:
 #       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
 #       max_turns: 160
+#       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 #       max_turns: 80
+#
+#   # Model override: by default, subagents inherit the lead agent's model.
+#   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
+#   # The model name must match a name defined in the `models:` section above.
 
 # ============================================================================
 # ACP Agents Configuration
