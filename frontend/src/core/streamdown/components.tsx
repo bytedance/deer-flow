@@ -1,5 +1,3 @@
-"use client";
-
 import {
   Children,
   Fragment,
@@ -92,6 +90,10 @@ function isOnlyImage(children: ReactNode) {
 }
 
 function isMultilineCodeNode(node: StreamdownNode | undefined): boolean {
+  if (node?.tagName !== "code" && node?.tagName !== "pre") {
+    return false;
+  }
+
   const startLine = node?.position?.start?.line;
   const endLine = node?.position?.end?.line;
 
