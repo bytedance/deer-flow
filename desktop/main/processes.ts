@@ -1,19 +1,35 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 
 import type { DesktopPaths } from "./paths.js";
-import { readDesktopSettings, PROVIDER_PRESETS, type DesktopProviderSetting } from "./config.js";
+import { PROVIDER_PRESETS } from "./config.js";
+import {
+  getBundledFrontendURL,
+  getBundledRuntimeEnv,
+  getBundledRuntimePorts,
+} from "./runtime-ports.js";
+import { waitForModelsApiReady } from "./runtime-readiness.js";
 import { getSecret } from "./secrets.js";
+import { buildRuntimeConfigContent } from "./runtime-config.js";
+import type { DesktopSettings } from "./config.js";
+
+export type RuntimeMode = "shared" | "bundled";
 
 export type RuntimeProcessController = {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   restart: () => Promise<void>;
+  syncConfig: () => Promise<void>;
   waitUntilReady: () => Promise<void>;
   getURL: () => string;
 };
+
+export function getDesktopRepoConfigPath(paths: DesktopPaths, mode: RuntimeMode) {
+  return mode === "shared" ? paths.repoDesktopConfigPath : paths.repoConfigPath;
+}
 
 function waitForPort(port: number, host: string, timeoutMs: number) {
   return new Promise<void>((resolve, reject) => {
@@ -41,136 +57,188 @@ function waitForPort(port: number, host: string, timeoutMs: number) {
   });
 }
 
+function getBackendPythonPath(venvRoot: string) {
+  if (process.platform === "win32") {
+    return path.join(venvRoot, "Scripts", "python.exe");
+  }
+  return path.join(venvRoot, "bin", "python");
+}
+
+async function getNodeRunnerBinary(paths: DesktopPaths) {
+  try {
+    await fs.access(paths.bundledNodeBinaryPath);
+    return paths.bundledNodeBinaryPath;
+  } catch {
+    return process.execPath;
+  }
+}
+
+async function createLogFiles(runtimeDir: string, name: string) {
+  const logsDir = path.join(runtimeDir, "logs");
+  await fs.mkdir(logsDir, { recursive: true });
+  return {
+    stdout: openSync(path.join(logsDir, `${name}.log`), "a"),
+    stderr: openSync(path.join(logsDir, `${name}.err.log`), "a"),
+  };
+}
+
 export function createRuntimeProcessController(options: {
-  repoRoot: string;
   paths: DesktopPaths;
+  getSettings: () => Promise<DesktopSettings>;
+  mode: RuntimeMode;
 }): RuntimeProcessController {
-  let runtimeProcess: ChildProcess | null = null;
+  let gatewayProcess: ChildProcess | null = null;
+  let frontendProcess: ChildProcess | null = null;
 
-  const frontendURL = "http://127.0.0.1:2026";
+  const bundledPorts = getBundledRuntimePorts();
+  const frontendURL = options.mode === "bundled"
+    ? getBundledFrontendURL()
+    : "http://127.0.0.1:2026";
 
-  function generateModelEntry(provider: DesktopProviderSetting) {
-    const preset = PROVIDER_PRESETS[provider.providerType];
-    const use = preset?.use ?? "langchain_openai:ChatOpenAI";
-    const apiKeyField = preset?.apiKeyField ?? "api_key";
-
-    const entry: Record<string, unknown> = {
-      name: provider.defaultModel || provider.id,
-      display_name: `${provider.label} - ${provider.defaultModel || "default"}`,
-      use,
-      model: provider.defaultModel,
-      [apiKeyField]: `$${provider.apiKeyEnv}`,
-      request_timeout: 600.0,
-      max_retries: 2,
-    };
-
-    if (provider.baseUrl) {
-      const baseUrlField = use.includes("patched_deepseek") ? "api_base" : "base_url";
-      entry[baseUrlField] = provider.baseUrl;
-    }
-
-    return entry;
-  }
-
-  function serializeModelEntryYaml(entry: Record<string, unknown>): string {
-    const kvLines = Object.entries(entry).map(([key, value]) => {
-      if (typeof value === "string") {
-        return `    ${key}: ${value.startsWith("$") ? value : JSON.stringify(value)}`;
-      }
-      return `    ${key}: ${value}`;
-    });
-    const [first, ...rest] = kvLines;
-    return `  - ${first.trimStart()}\n${rest.join("\n")}`;
-  }
-
-  async function generateRuntimeConfig(
-    repoConfigPath: string,
-    runtimeConfigPath: string,
-    providers: DesktopProviderSetting[],
-  ) {
-    const configContent = await fs.readFile(repoConfigPath, "utf8");
-
-    const modelEntries = providers
-      .filter((p) => p.defaultModel)
-      .map(generateModelEntry);
-
-    const modelsYaml =
-      modelEntries.length === 0
-        ? "models: []"
-        : "models:\n" + modelEntries.map(serializeModelEntryYaml).join("\n");
-
-    const result = configContent.replace(/^models:.*$/m, modelsYaml);
-
-    await fs.writeFile(runtimeConfigPath, result, "utf8");
-  }
-
-  async function start() {
-    if (runtimeProcess !== null) {
-      return;
-    }
-
-    const settings = await readDesktopSettings(options.paths);
-    const runtimeConfigPath = options.paths.runtimeConfigPath;
-    await generateRuntimeConfig(
-      options.paths.repoConfigPath,
-      runtimeConfigPath,
-      settings.providers,
-    );
+  async function readSettingsAndSecrets() {
+    const settings = await options.getSettings();
     const providerSecrets = Object.fromEntries(
       await Promise.all(
-        settings.providers.map(async (provider) => [provider.apiKeyEnv, (await getSecret(provider.apiKeyEnv)) ?? undefined] as const),
+        settings.providers.map(async (provider) => [
+          provider.apiKeyEnv,
+          (await getSecret(provider.apiKeyEnv)) ?? undefined,
+        ] as const),
       ),
     );
 
-    const providerBaseUrls = Object.fromEntries(
-      settings.providers
-        .filter((provider) => provider.baseUrl.trim())
-        .map((provider) => [`DEER_DESKTOP_PROVIDER_BASE_URL_${provider.id.toUpperCase()}`, provider.baseUrl.trim()] as const),
-    );
-
-    const env = {
-      ...process.env,
-      DEER_DESKTOP: "1",
-      DEER_FLOW_CONFIG_PATH: runtimeConfigPath,
-      DEER_FLOW_EXTENSIONS_CONFIG_PATH: options.paths.repoExtensionsConfigPath,
-      DEER_FLOW_HOME: options.paths.runtimeDir,
-      ...providerSecrets,
-      ...providerBaseUrls,
-    };
-
-    const child = spawn(
-      "bash",
-      [path.join(options.repoRoot, "scripts/serve.sh"), "--restart", "--dev", "--gateway", "--skip-install"],
-      {
-        cwd: options.repoRoot,
-        env,
-        stdio: "pipe",
-      },
-    );
-
-    runtimeProcess = child;
-
-    child.once("exit", () => {
-      runtimeProcess = null;
-    });
+    return { settings, providerSecrets };
   }
 
-  async function stop() {
-    if (runtimeProcess === null) {
+  async function readConfigTemplate() {
+    try {
+      return await fs.readFile(getDesktopRepoConfigPath(options.paths, options.mode), "utf8");
+    } catch {
+      return await fs.readFile(options.paths.repoConfigExamplePath, "utf8");
+    }
+  }
+
+  async function syncSharedConfig() {
+    const configTemplate = await readConfigTemplate();
+    const { settings, providerSecrets } = await readSettingsAndSecrets();
+    const nextConfigContent = buildRuntimeConfigContent(
+      configTemplate,
+      settings.providers,
+      PROVIDER_PRESETS,
+      providerSecrets,
+    );
+
+    await fs.writeFile(options.paths.runtimeConfigPath, nextConfigContent, "utf8");
+
+    if (options.mode === "shared") {
+      await fs.writeFile(options.paths.repoDesktopConfigPath, nextConfigContent, "utf8");
+    }
+  }
+
+  async function startBundledGateway() {
+    if (gatewayProcess !== null) {
       return;
     }
 
-    const child = runtimeProcess;
-    runtimeProcess = null;
+    const pythonBin = getBackendPythonPath(options.paths.bundledBackendVenvPath);
+    const logs = await createLogFiles(options.paths.runtimeDir, "gateway");
+    const env = {
+      ...process.env,
+      PYTHONPATH: options.paths.bundledBackendRootPath,
+      DEER_DESKTOP: "1",
+      DEER_FLOW_CONFIG_PATH: options.paths.runtimeConfigPath,
+      DEER_FLOW_EXTENSIONS_CONFIG_PATH: options.paths.repoExtensionsConfigPath,
+      DEER_FLOW_HOME: options.paths.runtimeDir,
+    };
 
-    await new Promise<void>((resolve) => {
-      child.once("exit", () => resolve());
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        child.kill("SIGKILL");
-        resolve();
-      }, 10_000);
+    gatewayProcess = spawn(
+      pythonBin,
+      [
+        "-m",
+        "uvicorn",
+        "app.gateway.app:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(bundledPorts.gatewayPort),
+      ],
+      {
+        cwd: options.paths.bundledBackendRootPath,
+        env,
+        stdio: ["ignore", logs.stdout, logs.stderr],
+      },
+    );
+
+    gatewayProcess.once("exit", () => {
+      closeSync(logs.stdout);
+      closeSync(logs.stderr);
+      gatewayProcess = null;
     });
+  }
+
+  async function startBundledFrontend() {
+    if (frontendProcess !== null) {
+      return;
+    }
+
+    const logs = await createLogFiles(options.paths.runtimeDir, "frontend");
+    const env = {
+      ...process.env,
+      ...getBundledRuntimeEnv(),
+    };
+
+    frontendProcess = spawn(
+      await getNodeRunnerBinary(options.paths),
+      [options.paths.bundledFrontendServerPath],
+      {
+        cwd: options.paths.bundledFrontendRootPath,
+        env,
+        stdio: ["ignore", logs.stdout, logs.stderr],
+      },
+    );
+
+    frontendProcess.once("exit", () => {
+      closeSync(logs.stdout);
+      closeSync(logs.stderr);
+      frontendProcess = null;
+    });
+  }
+
+  async function start() {
+    const settings = await options.getSettings();
+    if (options.mode === "bundled" || settings.providers.length > 0) {
+      await syncSharedConfig();
+    }
+
+    if (options.mode === "shared") {
+      return;
+    }
+
+    await startBundledGateway();
+    await waitForPort(bundledPorts.gatewayPort, "127.0.0.1", 120_000);
+    await startBundledFrontend();
+  }
+
+  async function stop() {
+    const children = [frontendProcess, gatewayProcess].filter(
+      (child): child is ChildProcess => child !== null,
+    );
+
+    frontendProcess = null;
+    gatewayProcess = null;
+
+    await Promise.all(
+      children.map(
+        (child) =>
+          new Promise<void>((resolve) => {
+            child.once("exit", () => resolve());
+            child.kill("SIGTERM");
+            setTimeout(() => {
+              child.kill("SIGKILL");
+              resolve();
+            }, 10_000);
+          }),
+      ),
+    );
   }
 
   return {
@@ -180,8 +248,12 @@ export function createRuntimeProcessController(options: {
       await stop();
       await start();
     },
+    syncConfig: async () => {
+      await syncSharedConfig();
+    },
     waitUntilReady: async () => {
-      await waitForPort(2026, "127.0.0.1", 120_000);
+      await waitForPort(options.mode === "bundled" ? 3000 : 2026, "127.0.0.1", 120_000);
+      await waitForModelsApiReady(`${frontendURL}/api/models`);
     },
     getURL: () => frontendURL,
   };

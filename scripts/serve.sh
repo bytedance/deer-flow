@@ -102,6 +102,21 @@ if $GATEWAY_MODE; then
     export SKIP_LANGGRAPH_SERVER=1
 fi
 
+CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$REPO_ROOT/config.yaml}"
+case "$CONFIG_PATH" in
+    /*) ;;
+    *) CONFIG_PATH="$REPO_ROOT/${CONFIG_PATH#./}" ;;
+esac
+export DEER_FLOW_CONFIG_PATH="$CONFIG_PATH"
+
+if [ -n "$DEER_FLOW_CONFIG_PATH" ] && [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+    if [ -f "$REPO_ROOT/config.yaml" ]; then
+        cp "$REPO_ROOT/config.yaml" "$DEER_FLOW_CONFIG_PATH"
+    elif [ -f "$REPO_ROOT/config.example.yaml" ]; then
+        cp "$REPO_ROOT/config.example.yaml" "$DEER_FLOW_CONFIG_PATH"
+    fi
+fi
+
 # Mode label for banner
 if $DEV_MODE && $GATEWAY_MODE; then
     MODE_LABEL="DEV + GATEWAY (experimental)"
@@ -257,7 +272,7 @@ mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp
 
 # 1. LangGraph (skip in gateway mode)
 if ! $GATEWAY_MODE; then
-    CONFIG_LOG_LEVEL=$(grep -m1 '^log_level:' config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ')
+    CONFIG_LOG_LEVEL=$(grep -m1 '^log_level:' "$CONFIG_PATH" 2>/dev/null | awk '{print $2}' | tr -d ' ')
     LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
     LANGGRAPH_JOBS_PER_WORKER="${LANGGRAPH_JOBS_PER_WORKER:-10}"
     LANGGRAPH_ALLOW_BLOCKING="${LANGGRAPH_ALLOW_BLOCKING:-0}"

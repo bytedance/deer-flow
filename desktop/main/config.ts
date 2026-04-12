@@ -134,9 +134,33 @@ export async function writeDesktopSettings(paths: DesktopPaths, settings: Deskto
   await fs.writeFile(paths.preferencesPath, JSON.stringify(settings, null, 2), "utf8");
 }
 
-export async function ensureDesktopConfigFiles(paths: DesktopPaths, settings: DesktopSettings) {
-  await fs.access(paths.repoConfigPath);
-  await fs.access(paths.repoExtensionsConfigPath);
+export async function ensureDesktopConfigFiles(
+  paths: DesktopPaths,
+  settings: DesktopSettings,
+  mode: "shared" | "bundled",
+) {
+  let seedConfigPath = paths.repoConfigPath;
+  try {
+    await fs.access(paths.repoConfigPath);
+  } catch {
+    await fs.access(paths.repoConfigExamplePath);
+    seedConfigPath = paths.repoConfigExamplePath;
+  }
+
+  if (mode === "shared") {
+    try {
+      await fs.access(paths.repoDesktopConfigPath);
+    } catch {
+      const configContent = await fs.readFile(seedConfigPath, "utf8");
+      await fs.writeFile(paths.repoDesktopConfigPath, configContent, "utf8");
+    }
+  }
+
+  try {
+    await fs.access(paths.repoExtensionsConfigPath);
+  } catch {
+    await fs.access(paths.repoExtensionsConfigExamplePath);
+  }
   await fs.access(paths.repoSkillsPath);
   await writeDesktopSettings(paths, settings);
 }

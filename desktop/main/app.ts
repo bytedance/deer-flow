@@ -3,47 +3,56 @@ import { fileURLToPath } from "node:url";
 
 import { app, BrowserWindow, dialog } from "electron";
 
-app.disableHardwareAcceleration();
-
 import {
   ensureDesktopConfigFiles,
   ensureDesktopDirectories,
   readDesktopSettings,
   writeDesktopSettings,
 } from "./config.js";
+import { registerDevtoolsShortcuts } from "./devtools.js";
 import { registerDesktopIpc } from "./ipc.js";
 import { getDesktopPaths } from "./paths.js";
 import { createRuntimeProcessController } from "./processes.js";
 import { configureSecretsStore } from "./secrets.js";
+import { getPreloadScriptPath } from "./window-paths.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const repoRoot = path.resolve(__dirname, "../../..");
+const developmentRepoRoot = path.resolve(__dirname, "../../..");
+const packagedBundleRoot = path.join(process.resourcesPath, "app-bundle");
+const repoRoot = app.isPackaged ? packagedBundleRoot : developmentRepoRoot;
 const userData = app.getPath("userData");
 const paths = getDesktopPaths(userData, repoRoot);
-const runtime = createRuntimeProcessController({ repoRoot, paths });
+const runtimeMode = app.isPackaged ? "bundled" : "shared";
+const runtime = createRuntimeProcessController({
+  paths,
+  getSettings: () => readDesktopSettings(paths),
+  mode: runtimeMode,
+});
 
 let runtimeStarted = false;
 let ipcRegistered = false;
 let windowCreationPromise: Promise<void> | null = null;
 let mainWindow: BrowserWindow | null = null;
+let unregisterDevtoolsShortcuts: (() => void) | null = null;
 
 async function ensureRuntime() {
   await ensureDesktopDirectories(paths);
 
   const settings = await readDesktopSettings(paths);
-  await ensureDesktopConfigFiles(paths, settings);
+  await ensureDesktopConfigFiles(paths, settings, runtimeMode);
 
   configureSecretsStore(paths.secretsPath);
 
   if (!ipcRegistered) {
     registerDesktopIpc({
       paths,
+      mode: runtimeMode,
       runtime,
       getSettings: () => readDesktopSettings(paths),
       setSettings: async (nextSettings: Awaited<ReturnType<typeof readDesktopSettings>>) => {
         await writeDesktopSettings(paths, nextSettings);
-        await ensureDesktopConfigFiles(paths, nextSettings);
+        await ensureDesktopConfigFiles(paths, nextSettings, runtimeMode);
       },
     });
     ipcRegistered = true;
@@ -138,13 +147,15 @@ async function createMainWindow() {
       show: true,
       backgroundColor: "#292929",
       webPreferences: {
-        preload: path.join(__dirname, "../../preload/index.cjs"),
+        preload: getPreloadScriptPath(__dirname),
         contextIsolation: true,
         nodeIntegration: false,
       },
     });
 
     mainWindow.on("closed", () => {
+      unregisterDevtoolsShortcuts?.();
+      unregisterDevtoolsShortcuts = null;
       mainWindow = null;
     });
 
@@ -164,6 +175,8 @@ async function createMainWindow() {
       `data:text/html;charset=utf-8,${encodeURIComponent(startupLoadingHtml())}`,
     );
 
+    unregisterDevtoolsShortcuts?.();
+    unregisterDevtoolsShortcuts = registerDevtoolsShortcuts(mainWindow);
 
     try {
       await runtime.waitUntilReady();
@@ -172,11 +185,14 @@ async function createMainWindow() {
       mainWindow.focus();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const startupMessage = app.isPackaged
+        ? `Desktop startup requires packaged runtime assets.\n\nExpected bundled resources:\n- frontend standalone bundle\n- backend source + backend/.venv\n- config.example.yaml\n- extensions_config.json\n\nCurrent error:\n${message}`
+        : `Desktop now uses the existing shared DeerFlow web/backend service.\n\nRequired local service:\n- frontend/nginx at http://127.0.0.1:2026\n- gateway reachable behind that shared service\n\nStart the shared service first, for example:\n./scripts/serve.sh --dev --gateway\n\nCurrent error:\n${message}`;
       await mainWindow.loadURL(
         `data:text/html;charset=utf-8,${encodeURIComponent(
           startupPageHtml(
             "DeerFlow Desktop startup failed",
-            `Desktop startup requires repo-local runtime files and a healthy local runtime.\n\nRequired files:\n- config.yaml\n- extensions_config.json\n- .env\n\nBootstrap commands:\npython3 scripts/configure.py\ncp extensions_config.example.json extensions_config.json\n\nCurrent error:\n${message}`,
+            startupMessage,
           ),
         )}`,
       );
@@ -195,6 +211,8 @@ app.whenReady().then(() => createMainWindow()).catch(async (error: unknown) => {
 });
 
 app.on("before-quit", () => {
+  unregisterDevtoolsShortcuts?.();
+  unregisterDevtoolsShortcuts = null;
   runtimeStarted = false;
   void runtime.stop();
 });
