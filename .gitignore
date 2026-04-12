@@ -57,3 +57,6 @@ config.yaml.bak
 .playwright-mcp
 .gstack/
 .worktrees
+
+# ByteRover — .brv/context-tree/ contains a nested .git managed by brv vc.
+.brv/

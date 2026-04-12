@@ -10,11 +10,15 @@ from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.queue import get_memory_queue
+from deerflow.agents.middlewares.message_utils import (
+    extract_message_text as _extract_message_text,
+)
+from deerflow.agents.middlewares.message_utils import (
+    filter_messages_for_terminal_conversation as _filter_messages_for_memory,
+)
 from deerflow.config.memory_config import get_memory_config
 
 logger = logging.getLogger(__name__)
-
-_UPLOAD_BLOCK_RE = re.compile(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", re.IGNORECASE)
 _CORRECTION_PATTERNS = (
     re.compile(r"\bthat(?:'s| is) (?:wrong|incorrect)\b", re.IGNORECASE),
     re.compile(r"\byou misunderstood\b", re.IGNORECASE),
@@ -50,83 +54,6 @@ class MemoryMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
     pass
-
-
-def _extract_message_text(message: Any) -> str:
-    """Extract plain text from message content for filtering and signal detection."""
-    content = getattr(message, "content", "")
-    if isinstance(content, list):
-        text_parts: list[str] = []
-        for part in content:
-            if isinstance(part, str):
-                text_parts.append(part)
-            elif isinstance(part, dict):
-                text_val = part.get("text")
-                if isinstance(text_val, str):
-                    text_parts.append(text_val)
-        return " ".join(text_parts)
-    return str(content)
-
-
-def _filter_messages_for_memory(messages: list[Any]) -> list[Any]:
-    """Filter messages to keep only user inputs and final assistant responses.
-
-    This filters out:
-    - Tool messages (intermediate tool call results)
-    - AI messages with tool_calls (intermediate steps, not final responses)
-    - The <uploaded_files> block injected by UploadsMiddleware into human messages
-      (file paths are session-scoped and must not persist in long-term memory).
-      The user's actual question is preserved; only turns whose content is entirely
-      the upload block (nothing remains after stripping) are dropped along with
-      their paired assistant response.
-
-    Only keeps:
-    - Human messages (with the ephemeral upload block removed)
-    - AI messages without tool_calls (final assistant responses), unless the
-      paired human turn was upload-only and had no real user text.
-
-    Args:
-        messages: List of all conversation messages.
-
-    Returns:
-        Filtered list containing only user inputs and final assistant responses.
-    """
-    filtered = []
-    skip_next_ai = False
-    for msg in messages:
-        msg_type = getattr(msg, "type", None)
-
-        if msg_type == "human":
-            content_str = _extract_message_text(msg)
-            if "<uploaded_files>" in content_str:
-                # Strip the ephemeral upload block; keep the user's real question.
-                stripped = _UPLOAD_BLOCK_RE.sub("", content_str).strip()
-                if not stripped:
-                    # Nothing left — the entire turn was upload bookkeeping;
-                    # skip it and the paired assistant response.
-                    skip_next_ai = True
-                    continue
-                # Rebuild the message with cleaned content so the user's question
-                # is still available for memory summarisation.
-                from copy import copy
-
-                clean_msg = copy(msg)
-                clean_msg.content = stripped
-                filtered.append(clean_msg)
-                skip_next_ai = False
-            else:
-                filtered.append(msg)
-                skip_next_ai = False
-        elif msg_type == "ai":
-            tool_calls = getattr(msg, "tool_calls", None)
-            if not tool_calls:
-                if skip_next_ai:
-                    skip_next_ai = False
-                    continue
-                filtered.append(msg)
-        # Skip tool messages and AI messages with tool_calls
-
-    return filtered
 
 
 def detect_correction(messages: list[Any]) -> bool:

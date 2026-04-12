@@ -136,7 +136,7 @@ models:
   #   display_name: Gemini 2.5 Pro
   #   use: langchain_google_genai:ChatGoogleGenerativeAI
   #   model: gemini-2.5-pro
-  #   gemini_api_key: $GEMINI_API_KEY
+  #   google_api_key: $GEMINI_API_KEY
   #   timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
@@ -878,3 +878,19 @@ checkpointer:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# ByteRover Configuration
+# ============================================================================
+# When enabled, the agent will:
+#   - Query the ByteRover context tree before each run (brv query)
+#     and inject results into the user prompt as <byterover_knowledge_context>
+#   - Curate the Q&A exchange into the context tree after each run (brv curate --detach)
+#
+# Requires the `brv` CLI to be installed and a ByteRover project initialized.
+
+# byterover:
+#   enabled: true
+#   query_timeout: 30      # seconds to wait for brv query
+#   curate_timeout: 180    # seconds to wait for brv curate --detach
+#   cwd: null              # working dir for brv commands (null = repo root)
