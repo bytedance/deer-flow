@@ -413,6 +413,45 @@ class TestHardStopWithListContent:
         assert msg.content.startswith("thinking...")
         assert _HARD_STOP_MSG in msg.content
 
+    def test_hard_stop_clears_raw_tool_call_metadata(self):
+        """Forced-stop messages must not retain provider-level raw tool-call payloads."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        def _make_provider_state():
+            return {
+                "messages": [
+                    AIMessage(
+                        content="thinking...",
+                        tool_calls=call,
+                        additional_kwargs={
+                            "tool_calls": [
+                                {
+                                    "id": "call_ls",
+                                    "type": "function",
+                                    "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+                                    "thought_signature": "sig-1",
+                                }
+                            ],
+                            "function_call": {"name": "bash", "arguments": '{"command":"ls"}'},
+                        },
+                        response_metadata={"finish_reason": "tool_calls"},
+                    )
+                ]
+            }
+
+        for _ in range(3):
+            mw._apply(_make_provider_state(), runtime)
+
+        result = mw._apply(_make_provider_state(), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert msg.tool_calls == []
+        assert "tool_calls" not in msg.additional_kwargs
+        assert "function_call" not in msg.additional_kwargs
+        assert msg.response_metadata["finish_reason"] == "stop"
+
 
 class TestToolFrequencyDetection:
     """Tests for per-tool-type frequency detection (Layer 2).

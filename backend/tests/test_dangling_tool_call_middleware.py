@@ -119,6 +119,31 @@ class TestBuildPatchedMessagesPatching:
         assert "interrupted" in tool_msg.content.lower()
         assert tool_msg.name == "bash"
 
+    def test_raw_provider_tool_calls_are_patched(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[],
+                additional_kwargs={
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+                        }
+                    ]
+                },
+            )
+        ]
+        patched = mw._build_patched_messages(msgs)
+        assert patched is not None
+        assert len(patched) == 2
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "call_1"
+        assert patched[1].name == "bash"
+        assert patched[1].status == "error"
+
 
 class TestWrapModelCall:
     def test_no_patch_passthrough(self):
