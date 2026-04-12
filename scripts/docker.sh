@@ -209,6 +209,7 @@ start() {
             echo -e "${YELLOW}  configuration before starting DeerFlow.                  ${NC}"
             echo -e "${YELLOW}============================================================${NC}"
             echo ""
+            echo -e "${YELLOW}  Recommended: run 'make setup' before starting Docker.    ${NC}"
             echo -e "${YELLOW}  Edit the file:  $PROJECT_ROOT/config.yaml${NC}"
             echo -e "${YELLOW}  Then run:        make docker-start${NC}"
             echo ""
