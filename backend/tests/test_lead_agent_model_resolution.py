@@ -8,6 +8,7 @@ import pytest
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.config.app_config import AppConfig
+from deerflow.config.byterover_config import ByteRoverConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.summarization_config import SummarizationConfig
@@ -137,6 +138,28 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)
     # verify the custom middleware is injected correctly
     assert len(middlewares) > 0 and isinstance(middlewares[-2], MagicMock)
+
+
+def test_build_middlewares_includes_byterover_before_memory_when_enabled(monkeypatch):
+    app_config = _make_app_config([_make_model("default-model", supports_thinking=False)])
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "get_byterover_config", lambda: ByteRoverConfig(enabled=True))
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module._build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="default-model",
+    )
+
+    mw_types = [type(m).__name__ for m in middlewares]
+    title_idx = mw_types.index("TitleMiddleware")
+    byterover_idx = mw_types.index("ByteRoverContextMiddleware")
+    memory_idx = mw_types.index("MemoryMiddleware")
+
+    assert byterover_idx == title_idx + 1
+    assert memory_idx == byterover_idx + 1
 
 
 def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch):

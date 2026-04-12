@@ -8,11 +8,13 @@ from pydantic import ValidationError
 
 from deerflow.config.acp_config import ACPAgentConfig, get_acp_agents, load_acp_config_from_dict
 from deerflow.config.app_config import AppConfig
+from deerflow.config.byterover_config import ByteRoverConfig, get_byterover_config, set_byterover_config
 
 
 def setup_function():
     """Reset ACP config before each test."""
     load_acp_config_from_dict({})
+    set_byterover_config(ByteRoverConfig())
 
 
 def test_load_acp_config_sets_agents():
@@ -163,3 +165,47 @@ def test_app_config_reload_without_acp_agents_clears_previous_state(tmp_path, mo
     config_path.write_text(yaml.safe_dump(config_without_acp), encoding="utf-8")
     AppConfig.from_file(str(config_path))
     assert get_acp_agents() == {}
+
+
+def test_app_config_reload_without_byterover_clears_previous_state(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+
+    config_with_byterover = {
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        "models": [
+            {
+                "name": "test-model",
+                "use": "langchain_openai:ChatOpenAI",
+                "model": "gpt-test",
+            }
+        ],
+        "byterover": {
+            "enabled": True,
+            "cwd": "backend",
+        },
+    }
+    config_without_byterover = {
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        "models": [
+            {
+                "name": "test-model",
+                "use": "langchain_openai:ChatOpenAI",
+                "model": "gpt-test",
+            }
+        ],
+    }
+
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config_path.write_text(yaml.safe_dump(config_with_byterover), encoding="utf-8")
+    AppConfig.from_file(str(config_path))
+    assert get_byterover_config().enabled is True
+    assert get_byterover_config().cwd == "backend"
+
+    config_path.write_text(yaml.safe_dump(config_without_byterover), encoding="utf-8")
+    AppConfig.from_file(str(config_path))
+
+    byterover_config = get_byterover_config()
+    assert byterover_config == ByteRoverConfig()

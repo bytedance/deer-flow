@@ -106,8 +106,17 @@ def e2e_env(tmp_path, monkeypatch):
     monkeypatch.setattr("deerflow.config.title_config._title_config", TitleConfig(enabled=False))
 
     # 4. Disable memory queueing (avoids background threads & file writes)
+    from deerflow.config.byterover_config import ByteRoverConfig
     from deerflow.config.memory_config import MemoryConfig
 
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.agent.get_byterover_config",
+        lambda: ByteRoverConfig(enabled=False),
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.byterover_context_middleware.get_byterover_config",
+        lambda: ByteRoverConfig(enabled=False),
+    )
     monkeypatch.setattr(
         "deerflow.agents.middlewares.memory_middleware.get_memory_config",
         lambda: MemoryConfig(enabled=False),

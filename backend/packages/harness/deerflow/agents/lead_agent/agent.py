@@ -5,6 +5,7 @@ from langchain.agents.middleware import AgentMiddleware, SummarizationMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.agents.middlewares.byterover_context_middleware import ByteRoverContextMiddleware
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
@@ -17,6 +18,7 @@ from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddlewar
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
+from deerflow.config.byterover_config import get_byterover_config
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 
@@ -201,7 +203,8 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # SummarizationMiddleware should be early to reduce context before other processing
 # TodoListMiddleware should be before ClarificationMiddleware to allow todo management
 # TitleMiddleware generates title after first exchange
-# MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
+# ByteRoverContextMiddleware injects hidden retrieval context after TitleMiddleware
+# MemoryMiddleware queues conversation for memory update after ByteRoverContextMiddleware
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
@@ -236,7 +239,11 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware())
 
-    # Add MemoryMiddleware (after TitleMiddleware)
+    # Add ByteRoverContextMiddleware only when the integration is enabled
+    if get_byterover_config().enabled:
+        middlewares.append(ByteRoverContextMiddleware())
+
+    # Add MemoryMiddleware after the conversation-level augmentation middlewares
     middlewares.append(MemoryMiddleware(agent_name=agent_name))
 
     # Add ViewImageMiddleware only if the current model supports vision.
