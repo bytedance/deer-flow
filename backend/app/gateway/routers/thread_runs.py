@@ -325,10 +325,28 @@ async def list_thread_messages(
 
 @router.get("/{thread_id}/runs/{run_id}/messages")
 @require_permission("runs", "read", owner_check=True)
-async def list_run_messages(thread_id: str, run_id: str, request: Request) -> list[dict]:
-    """Return displayable messages for a specific run."""
+async def list_run_messages(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=50, le=200, ge=1),
+    before_seq: int | None = Query(default=None),
+    after_seq: int | None = Query(default=None),
+) -> dict:
+    """Return paginated messages for a specific run.
+
+    Response: { data: [...], has_more: bool }
+    """
     event_store = get_run_event_store(request)
-    return await event_store.list_messages_by_run(thread_id, run_id)
+    rows = await event_store.list_messages_by_run(
+        thread_id, run_id,
+        limit=limit + 1,
+        before_seq=before_seq,
+        after_seq=after_seq,
+    )
+    has_more = len(rows) > limit
+    data = rows[:limit] if has_more else rows
+    return {"data": data, "has_more": has_more}
 
 
 @router.get("/{thread_id}/runs/{run_id}/events")

@@ -152,9 +152,17 @@ class JsonlRunEventStore(RunEventStore):
             events = [e for e in events if e.get("event_type") in event_types]
         return events[:limit]
 
-    async def list_messages_by_run(self, thread_id, run_id):
+    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
         events = self._read_run_events(thread_id, run_id)
-        return [e for e in events if e.get("category") == "message"]
+        filtered = [e for e in events if e.get("category") == "message"]
+        if before_seq is not None:
+            filtered = [e for e in filtered if e.get("seq", 0) < before_seq]
+        if after_seq is not None:
+            filtered = [e for e in filtered if e.get("seq", 0) > after_seq]
+        if after_seq is not None:
+            return filtered[:limit]
+        else:
+            return filtered[-limit:] if len(filtered) > limit else filtered
 
     async def count_messages(self, thread_id):
         all_events = self._read_thread_events(thread_id)

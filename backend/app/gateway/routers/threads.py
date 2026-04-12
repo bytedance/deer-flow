@@ -22,10 +22,11 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store
+from app.gateway.deps import get_checkpointer
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
@@ -143,11 +144,11 @@ class ThreadHistoryRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _delete_thread_data(thread_id: str, paths: Paths | None = None) -> ThreadDeleteResponse:
+def _delete_thread_data(thread_id: str, paths: Paths | None = None, *, user_id: str | None = None) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread."""
     path_manager = paths or get_paths()
     try:
-        path_manager.delete_thread_dir(thread_id)
+        path_manager.delete_thread_dir(thread_id, user_id=user_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except FileNotFoundError:
@@ -198,7 +199,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     from app.gateway.deps import get_thread_store
 
     # Clean local filesystem
-    response = _delete_thread_data(thread_id)
+    response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
@@ -404,164 +405,6 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
 
 
 # ---------------------------------------------------------------------------
-# Event-store-backed message loader
-# ---------------------------------------------------------------------------
-
-_LEGACY_CMD_INNER_CONTENT_RE = re.compile(
-    r"ToolMessage\(content=(?P<q>['\"])(?P<inner>.*?)(?P=q)",
-    re.DOTALL,
-)
-
-
-def _sanitize_legacy_command_repr(content_field: Any) -> Any:
-    """Recover the inner ToolMessage text from a legacy ``str(Command(...))`` repr.
-
-    Runs captured before the ``on_tool_end`` fix in ``journal.py`` stored
-    ``str(Command(update={'messages':[ToolMessage(content='X', ...)]}))`` as the
-    tool_result content. New runs store ``'X'`` directly. For legacy rows, try
-    to extract ``'X'`` defensively; return the original string if extraction
-    fails (still no worse than the checkpoint fallback for summarized threads).
-    """
-    if not isinstance(content_field, str) or not content_field.startswith("Command(update="):
-        return content_field
-    match = _LEGACY_CMD_INNER_CONTENT_RE.search(content_field)
-    return match.group("inner") if match else content_field
-
-
-async def _get_event_store_messages(request: Request, thread_id: str) -> list[dict] | None:
-    """Load the full message stream for ``thread_id`` from the event store.
-
-    The event store is append-only and unaffected by summarization — the
-    checkpoint's ``channel_values["messages"]`` is rewritten in-place when the
-    SummarizationMiddleware runs, which drops all pre-summarize messages. The
-    event store retains the full transcript, so callers in Gateway mode should
-    prefer it for rendering the conversation history.
-
-    In addition to the core message content, this helper attaches two extra
-    fields to every returned dict:
-
-    - ``run_id``: the ``run_id`` of the event that produced this message.
-      Always present.
-    - ``feedback``: thumbs-up/down data. Present only on the **final
-      ``ai_message`` of each run** (matching the per-run feedback semantics
-      of ``POST /api/threads/{id}/runs/{run_id}/feedback``). The frontend uses
-      the presence of this field to decide whether to render the feedback
-      button, which sidesteps the positional-index mapping bug that an
-      out-of-band ``/messages`` fetch exhibited.
-
-    Behaviour contract:
-
-    - **Full pagination.** ``RunEventStore.list_messages`` returns the newest
-      ``limit`` records when no cursor is given, so a fixed limit silently
-      drops older messages on long threads. We size the read from
-      ``count_messages()`` and then page forward with ``after_seq`` cursors.
-    - **Copy-on-read.** Each content dict is copied before ``id`` is patched
-      so the live store object is never mutated; ``MemoryRunEventStore``
-      returns live references.
-    - **Stable ids.** Messages with ``id=None`` (human + tool_result) receive
-      a deterministic ``uuid5(NAMESPACE_URL, f"{thread_id}:{seq}")`` so React
-      keys are stable across requests without altering stored data. AI messages
-      retain their LLM-assigned ``lc_run--*`` ids.
-    - **Legacy Command repr.** Rows captured before the ``journal.py``
-      ``on_tool_end`` fix stored ``str(Command(update={...}))`` as the tool
-      result content. ``_sanitize_legacy_command_repr`` extracts the inner
-      ToolMessage text.
-    - **User context.** ``DbRunEventStore`` is user-scoped by default via
-      ``resolve_user_id(AUTO)`` in ``runtime/user_context.py``. This helper
-      must run inside a request where ``@require_permission`` has populated
-      the user contextvar. Both callers below are decorated appropriately.
-      Do not call this helper from CLI or migration scripts without passing
-      ``user_id=None`` explicitly to the underlying store methods.
-
-    Returns ``None`` when the event store is not configured or has no message
-    events for this thread, so callers fall back to checkpoint messages.
-    """
-    try:
-        event_store = get_run_event_store(request)
-    except Exception:
-        return None
-
-    try:
-        total = await event_store.count_messages(thread_id)
-    except Exception:
-        logger.exception("count_messages failed for thread %s", sanitize_log_param(thread_id))
-        return None
-    if not total:
-        return None
-
-    # Batch by page_size to keep memory bounded for very long threads.
-    page_size = 500
-    collected: list[dict] = []
-    after_seq: int | None = None
-    while True:
-        try:
-            page = await event_store.list_messages(thread_id, limit=page_size, after_seq=after_seq)
-        except Exception:
-            logger.exception("list_messages failed for thread %s", sanitize_log_param(thread_id))
-            return None
-        if not page:
-            break
-        collected.extend(page)
-        if len(page) < page_size:
-            break
-        next_cursor = page[-1].get("seq")
-        if next_cursor is None or (after_seq is not None and next_cursor <= after_seq):
-            break
-        after_seq = next_cursor
-
-    # Build the message list; track the final ``ai_message`` index per run so
-    # feedback can be attached at the right position (matches thread_runs.py).
-    messages: list[dict] = []
-    last_ai_per_run: dict[str, int] = {}
-    for evt in collected:
-        raw = evt.get("content")
-        if not isinstance(raw, dict) or "type" not in raw:
-            continue
-        content = dict(raw)
-        if content.get("id") is None:
-            content["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{thread_id}:{evt['seq']}"))
-        if content.get("type") == "tool":
-            content["content"] = _sanitize_legacy_command_repr(content.get("content"))
-        run_id = evt.get("run_id")
-        if run_id:
-            content["run_id"] = run_id
-        if evt.get("event_type") == "ai_message" and run_id:
-            last_ai_per_run[run_id] = len(messages)
-        messages.append(content)
-
-    if not messages:
-        return None
-
-    # Attach feedback to the final ai_message of each run. If the feedback
-    # subsystem is unavailable, leave the ``feedback`` field absent entirely
-    # so the frontend hides the button rather than showing it over a broken
-    # write path.
-    feedback_available = False
-    feedback_map: dict[str, dict] = {}
-    try:
-        feedback_repo = get_feedback_repo(request)
-        user_id = await get_current_user(request)
-        feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
-        feedback_available = True
-    except Exception:
-        logger.exception("feedback lookup failed for thread %s", sanitize_log_param(thread_id))
-
-    if feedback_available:
-        for run_id, idx in last_ai_per_run.items():
-            fb = feedback_map.get(run_id)
-            messages[idx]["feedback"] = (
-                {
-                    "feedback_id": fb["feedback_id"],
-                    "rating": fb["rating"],
-                    "comment": fb.get("comment"),
-                }
-                if fb
-                else None
-            )
-
-    return messages
-
-
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_state(thread_id: str, request: Request) -> ThreadStateResponse:
@@ -601,11 +444,6 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
     tasks = [{"id": getattr(t, "id", ""), "name": getattr(t, "name", "")} for t in tasks_raw]
 
     values = serialize_channel_values(channel_values)
-
-    # Prefer event-store messages: append-only, immune to summarization.
-    es_messages = await _get_event_store_messages(request, thread_id)
-    if es_messages is not None:
-        values["messages"] = es_messages
 
     return ThreadStateResponse(
         values=values,
@@ -726,11 +564,6 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
     if body.before:
         config["configurable"]["checkpoint_id"] = body.before
 
-    # Load the full event-store message stream once; attach to the latest
-    # checkpoint entry only (matching the prior semantics). The event store
-    # is append-only and immune to summarization.
-    es_messages = await _get_event_store_messages(request, thread_id)
-
     entries: list[HistoryEntry] = []
     is_latest_checkpoint = True
     try:
@@ -754,17 +587,11 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
             if thread_data := channel_values.get("thread_data"):
                 values["thread_data"] = thread_data
 
-            # Attach messages only to the latest checkpoint. Prefer the
-            # event-store stream (complete and unaffected by summarization);
-            # fall back to checkpoint channel_values when the event store is
-            # unavailable or empty.
+            # Attach messages only to the latest checkpoint entry.
             if is_latest_checkpoint:
-                if es_messages is not None:
-                    values["messages"] = es_messages
-                else:
-                    messages = channel_values.get("messages")
-                    if messages:
-                        values["messages"] = serialize_channel_values({"messages": messages}).get("messages", [])
+                messages = channel_values.get("messages")
+                if messages:
+                    values["messages"] = serialize_channel_values({"messages": messages}).get("messages", [])
             is_latest_checkpoint = False
 
             # Derive next tasks

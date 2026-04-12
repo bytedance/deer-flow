@@ -13,6 +13,7 @@ from app.channels.base import Channel
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
@@ -344,8 +345,9 @@ class FeishuChannel(Channel):
             return f"Failed to obtain the [{type}]"
 
         paths = get_paths()
-        paths.ensure_thread_dirs(thread_id)
-        uploads_dir = paths.sandbox_uploads_dir(thread_id).resolve()
+        user_id = get_effective_user_id()
+        paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=user_id).resolve()
 
         ext = "png" if type == "image" else "bin"
         raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"

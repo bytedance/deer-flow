@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 
 
 class PathTraversalError(ValueError):
@@ -33,7 +34,7 @@ def validate_thread_id(thread_id: str) -> None:
 def get_uploads_dir(thread_id: str) -> Path:
     """Return the uploads directory path for a thread (no side effects)."""
     validate_thread_id(thread_id)
-    return get_paths().sandbox_uploads_dir(thread_id)
+    return get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
 
 
 def ensure_uploads_dir(thread_id: str) -> Path:

@@ -50,10 +50,13 @@ def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
 
 
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
+    from deerflow.runtime.user_context import get_effective_user_id
+
     paths = Paths(tmp_path)
-    thread_dir = paths.thread_dir("thread-route")
-    paths.sandbox_work_dir("thread-route").mkdir(parents=True, exist_ok=True)
-    (paths.sandbox_work_dir("thread-route") / "notes.txt").write_text("hello", encoding="utf-8")
+    user_id = get_effective_user_id()
+    thread_dir = paths.thread_dir("thread-route", user_id=user_id)
+    paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
+    (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
     app = make_authed_test_app()
     app.include_router(threads.router)

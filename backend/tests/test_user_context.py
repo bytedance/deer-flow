@@ -11,7 +11,9 @@ import pytest
 
 from deerflow.runtime.user_context import (
     CurrentUser,
+    DEFAULT_USER_ID,
     get_current_user,
+    get_effective_user_id,
     require_current_user,
     reset_current_user,
     set_current_user,
@@ -67,3 +69,42 @@ def test_protocol_rejects_no_id():
     """Objects without .id do not satisfy CurrentUser Protocol."""
     not_a_user = SimpleNamespace(email="no-id@example.com")
     assert not isinstance(not_a_user, CurrentUser)
+
+
+# ---------------------------------------------------------------------------
+# get_effective_user_id / DEFAULT_USER_ID tests
+# ---------------------------------------------------------------------------
+
+
+def test_default_user_id_is_default():
+    assert DEFAULT_USER_ID == "default"
+
+
+@pytest.mark.no_auto_user
+def test_effective_user_id_returns_default_when_no_user():
+    """No user in context -> fallback to DEFAULT_USER_ID."""
+    assert get_effective_user_id() == "default"
+
+
+@pytest.mark.no_auto_user
+def test_effective_user_id_returns_user_id_when_set():
+    user = SimpleNamespace(id="u-abc-123")
+    token = set_current_user(user)
+    try:
+        assert get_effective_user_id() == "u-abc-123"
+    finally:
+        reset_current_user(token)
+
+
+@pytest.mark.no_auto_user
+def test_effective_user_id_coerces_to_str():
+    """User.id might be a UUID object; must come back as str."""
+    import uuid
+    uid = uuid.uuid4()
+
+    user = SimpleNamespace(id=uid)
+    token = set_current_user(user)
+    try:
+        assert get_effective_user_id() == str(uid)
+    finally:
+        reset_current_user(token)
