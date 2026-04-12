@@ -1,9 +1,15 @@
+---
+title: MCP 集成
+description: Model Context Protocol（MCP） 是连接语言模型与外部工具和数据源的开放标准。DeerFlow 的 MCP 集成允许你用任何实现了 MCP 协议的工具服务器扩展 Agent——无需修改 Harness 本身。
+---
+
 import { Callout, Cards, Steps } from "nextra/components";
 
 # MCP 集成
 
 <Callout type="info" emoji="🔌">
-  Model Context Protocol（MCP）让 DeerFlow 能够连接任何外部工具服务器。连接后，MCP 工具与内置工具一样对 Lead Agent 可用。
+  Model Context Protocol（MCP）让 DeerFlow
+  能够连接任何外部工具服务器。连接后，MCP 工具与内置工具一样对 Lead Agent 可用。
 </Callout>
 
 **Model Context Protocol（MCP）** 是连接语言模型与外部工具和数据源的开放标准。DeerFlow 的 MCP 集成允许你用任何实现了 MCP 协议的工具服务器扩展 Agent——无需修改 Harness 本身。
@@ -37,6 +43,7 @@ MCP 服务器在 `extensions_config.json` 中配置，这个文件独立于 `con
 ```
 
 每个服务器条目支持：
+
 - `command`：要运行的可执行文件（如 `npx`、`uvx`、`python`）
 - `args`：命令参数数组
 - `enabled`：服务器是否激活（可切换而无需删除条目）
@@ -81,6 +88,7 @@ tool_search:
 某些 MCP 服务器需要 OAuth 认证。DeerFlow 的 `mcp/oauth.py` 处理声明了 OAuth 需求的服务器的 OAuth 流程。
 
 当连接到受 OAuth 保护的 MCP 服务器时，DeerFlow 会：
+
 1. 从服务器能力头中检测 OAuth 需求
 2. 使用 `get_initial_oauth_headers()` 构建适当的授权头
 3. 通过 `build_oauth_tool_interceptor()` 用 OAuth 拦截器包装工具调用

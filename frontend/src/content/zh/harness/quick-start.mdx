@@ -1,12 +1,18 @@
+---
+title: 快速上手
+description: 学习如何使用 create_deerflow_agent 创建并运行 DeerFlow Agent，从模型初始化到流式响应。
+---
+
 import { Callout, Cards, Steps } from "nextra/components";
 
 # 快速上手
 
 <Callout type="info" emoji="🚀">
-  本指南介绍如何以编程方式使用 DeerFlow Harness——不是通过应用界面，而是直接在 Python 中导入和调用 Harness。
+  本指南介绍如何在 Python 中通过 <code>create_deerflow_agent</code>
+  创建并运行一个 DeerFlow Agent。
 </Callout>
 
-DeerFlow Harness 是 Python SDK 和运行时基础。本快速上手指南将带你了解运行 Agent、流式传输输出和使用线程的核心 API。
+理解 DeerFlow Harness 的最快方式，是直接在代码里创建一个 Agent。本快速上手指南将带你完成模型初始化、Agent 创建，以及响应流式输出。
 
 ## 前置条件
 
@@ -19,130 +25,86 @@ cd backend
 uv sync
 ```
 
-## 配置
+你还需要准备一个来自对应 LangChain Provider 包的聊天模型实例。
 
-所有 Harness 行为由 `config.yaml` 驱动。至少需要配置一个模型：
-
-```yaml
-# config.yaml
-config_version: 6
-
-models:
-  - name: gpt-4o
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-    request_timeout: 600.0
-    max_retries: 2
-
-sandbox:
-  use: deerflow.sandbox.local:LocalSandboxProvider
-
-tools:
-  - use: deerflow.community.ddg_search.tools:web_search_tool
-  - use: deerflow.community.jina_ai.tools:web_fetch_tool
-  - use: deerflow.sandbox.tools:ls_tool
-  - use: deerflow.sandbox.tools:read_file_tool
-  - use: deerflow.sandbox.tools:write_file_tool
-  - use: deerflow.sandbox.tools:bash_tool
-```
-
-将 `config.example.yaml` 复制到 `config.yaml` 并填写你的 API Key。
-
-## 运行 Harness
-
-DeerFlow Harness 的主要入口是 `DeerFlowClient`。它管理线程状态、调用 Lead Agent，并流式传输响应。
+## 创建第一个 Agent
 
 <Steps>
 
-### 导入并配置
+### 导入工厂函数与模型类
 
 ```python
-import asyncio
-from deerflow.client import DeerFlowClient
-from deerflow.config import load_config
-
-# 从当前目录或 DEER_FLOW_CONFIG_PATH 加载 config.yaml
-load_config()
-
-client = DeerFlowClient()
+from deerflow.agents import create_deerflow_agent
+from langchain_openai import ChatOpenAI
 ```
 
-### 创建线程
+### 创建模型
 
 ```python
-thread_id = "my-thread-001"
+model = ChatOpenAI(
+    model="gpt-4o",
+    api_key="YOUR_OPENAI_API_KEY",
+)
 ```
 
-线程 ID 是任意字符串。使用相同 ID 可以继续已有对话（需要配置检查点）。
-
-### 发送消息并流式传输响应
+### 创建 Agent
 
 ```python
-async def run():
-    async for event in client.astream(
-        thread_id=thread_id,
-        message="研究前三大开源 LLM 框架并进行总结。",
-        config={
-            "configurable": {
-                "model_name": "gpt-4o",
-                "thinking_enabled": False,
-                "is_plan_mode": True,
-                "subagent_enabled": True,
-            }
-        },
-    ):
-        print(event)
+agent = create_deerflow_agent(model)
+```
 
-asyncio.run(run())
+这会返回一个已经编译好的 LangGraph Agent，并带有 DeerFlow 默认的中间件链。
+
+### 流式获取响应
+
+```python
+for event in agent.stream(
+    {"messages": [{"role": "user", "content": "解释一下 DeerFlow Harness 是什么。"}]},
+    stream_mode=["messages", "values"],
+):
+    print(event)
 ```
 
 </Steps>
 
-## 可配置选项
+## 添加工具或行为
 
-`config.configurable` 字典控制每次请求的行为：
-
-| 键 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `model_name` | `str \| None` | 配置中第一个模型 | 本次请求使用的模型 |
-| `thinking_enabled` | `bool` | `True` | 启用扩展思考模式（如果支持） |
-| `reasoning_effort` | `str \| None` | `None` | 推理努力程度（特定模型参数） |
-| `is_plan_mode` | `bool` | `False` | 启用 TodoList 中间件进行任务跟踪 |
-| `subagent_enabled` | `bool` | `False` | 允许 Agent 委派子任务 |
-| `max_concurrent_subagents` | `int` | `3` | 每轮最大并行子 Agent 调用数 |
-| `agent_name` | `str \| None` | `None` | 要加载的自定义 Agent 名称 |
-
-## 流式事件类型
-
-`client.astream()` 从 LangGraph 运行时产生事件，主要事件类型如下：
-
-| 事件类型 | 说明 |
-|---|---|
-| `messages` | 消息块（文本、思考过程、工具调用） |
-| `thread_state` | 线程状态更新（标题、产出物、待办列表） |
-
-消息块包含 Agent 生成响应时的 token 流。
-
-## 使用自定义 Agent
-
-如果已定义自定义 Agent，在 configurable 中传入其 `name`：
+你可以通过传入工具、系统提示词、运行时特性、中间件或 checkpointer 来自定义 Agent。
 
 ```python
-async for event in client.astream(
-    thread_id="thread-002",
-    message="分析上传的 CSV 并生成摘要图表。",
-    config={
-        "configurable": {
-            "agent_name": "data-analyst",
-            "subagent_enabled": True,
-        }
-    },
-):
-    ...
+from deerflow.agents import RuntimeFeatures, create_deerflow_agent
+
+agent = create_deerflow_agent(
+    model,
+    system_prompt="你是一个简洁的研究助手。",
+    features=RuntimeFeatures(subagent=True, memory=False),
+    plan_mode=True,
+    name="research-agent",
+)
 ```
 
-自定义 Agent 的配置（模型、技能、工具组）将从 `agents/data-analyst/config.yaml` 自动加载。
+常用参数：
+
+| 参数 | 说明 |
+|---|---|
+| `tools` | 提供给 Agent 的额外工具 |
+| `system_prompt` | 自定义系统提示词 |
+| `features` | 启用或替换内置运行时能力 |
+| `extra_middleware` | 将自定义中间件插入默认链路 |
+| `plan_mode` | 启用 Todo 风格的任务跟踪 |
+| `checkpointer` | 为多轮运行持久化状态 |
+| `name` | Agent 的逻辑名称 |
+
+## 什么时候使用 DeerFlowClient
+
+如果你想直接操作底层的编译后 Agent 图，使用 `create_deerflow_agent()`。
+
+如果你想使用更高层的嵌入式应用接口，则应使用 `DeerFlowClient`，例如：
+
+- 面向线程的对话封装，
+- 模型 / 技能 / 记忆管理 API，
+- 文件上传与 artifacts，
+- 与 Gateway 一致的返回格式。
 
 <Cards num={3}>
   <Cards.Card title="设计理念" href="/docs/harness/design-principles" />

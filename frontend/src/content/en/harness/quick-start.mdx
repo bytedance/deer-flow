@@ -1,14 +1,18 @@
+---
+title: Quick Start
+description: Learn how to create and run a DeerFlow agent with create_deerflow_agent, from model setup to streaming responses.
+---
+
 import { Callout, Cards, Steps } from "nextra/components";
 
 # Quick Start
 
 <Callout type="info" emoji="🚀">
-  This guide shows you how to use the DeerFlow Harness programmatically — not
-  through the App UI, but by importing and calling the harness directly in
-  Python.
+  This guide shows you how to build and run a DeerFlow agent in Python with
+  <code>create_deerflow_agent</code>.
 </Callout>
 
-The DeerFlow Harness is the Python SDK and runtime foundation. This quick start walks you through the key APIs for running an agent, streaming its output, and working with threads.
+The fastest way to understand DeerFlow Harness is to create an agent directly in code. This quick start walks through model setup, agent creation, and streaming a response.
 
 ## Prerequisites
 
@@ -21,130 +25,86 @@ cd backend
 uv sync
 ```
 
-## Configuration
+You will also need a chat model instance from the LangChain provider package you want to use.
 
-All harness behaviors are driven by `config.yaml`. At minimum, you need at least one model configured:
-
-```yaml
-# config.yaml
-config_version: 6
-
-models:
-  - name: gpt-4o
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-    request_timeout: 600.0
-    max_retries: 2
-
-sandbox:
-  use: deerflow.sandbox.local:LocalSandboxProvider
-
-tools:
-  - use: deerflow.community.ddg_search.tools:web_search_tool
-  - use: deerflow.community.jina_ai.tools:web_fetch_tool
-  - use: deerflow.sandbox.tools:ls_tool
-  - use: deerflow.sandbox.tools:read_file_tool
-  - use: deerflow.sandbox.tools:write_file_tool
-  - use: deerflow.sandbox.tools:bash_tool
-```
-
-Copy `config.example.yaml` to `config.yaml` and fill in your API key.
-
-## Running the harness
-
-The primary entry point for the DeerFlow Harness is `DeerFlowClient`. It manages thread state, invokes the Lead Agent, and streams the response.
+## Create your first agent
 
 <Steps>
 
-### Import and configure
+### Import the factory and model
 
 ```python
-import asyncio
-from deerflow.client import DeerFlowClient
-from deerflow.config import load_config
-
-# Load config.yaml from the current directory or DEER_FLOW_CONFIG_PATH
-load_config()
-
-client = DeerFlowClient()
+from deerflow.agents import create_deerflow_agent
+from langchain_openai import ChatOpenAI
 ```
 
-### Create a thread
+### Create a model
 
 ```python
-thread_id = "my-thread-001"
+model = ChatOpenAI(
+    model="gpt-4o",
+    api_key="YOUR_OPENAI_API_KEY",
+)
 ```
 
-Thread IDs are arbitrary strings. Reusing the same ID continues the existing conversation (if a checkpointer is configured).
-
-### Send a message and stream the response
+### Create an agent
 
 ```python
-async def run():
-    async for event in client.astream(
-        thread_id=thread_id,
-        message="Research the top 3 open-source LLM frameworks and summarize them.",
-        config={
-            "configurable": {
-                "model_name": "gpt-4o",
-                "thinking_enabled": False,
-                "is_plan_mode": True,
-                "subagent_enabled": True,
-            }
-        },
-    ):
-        print(event)
+agent = create_deerflow_agent(model)
+```
 
-asyncio.run(run())
+This returns a compiled LangGraph agent with DeerFlow's default middleware chain.
+
+### Stream a response
+
+```python
+for event in agent.stream(
+    {"messages": [{"role": "user", "content": "Explain what DeerFlow Harness is."}]},
+    stream_mode=["messages", "values"],
+):
+    print(event)
 ```
 
 </Steps>
 
-## Configurable options
+## Add tools or behavior
 
-The `config.configurable` dict controls per-request behavior:
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `model_name` | `str \| None` | first model in config | Model to use for this request |
-| `thinking_enabled` | `bool` | `True` | Enable extended thinking mode (if supported) |
-| `reasoning_effort` | `str \| None` | `None` | Reasoning effort level (model-specific) |
-| `is_plan_mode` | `bool` | `False` | Enable TodoList middleware for task tracking |
-| `subagent_enabled` | `bool` | `False` | Allow the agent to delegate subtasks |
-| `max_concurrent_subagents` | `int` | `3` | Maximum parallel subagent calls per turn |
-| `agent_name` | `str \| None` | `None` | Name of a custom agent to load |
-
-## Streaming event types
-
-`client.astream()` yields events from the LangGraph runtime. The key event types are:
-
-| Event type | Description |
-|---|---|
-| `messages` | Individual message chunks (text, thinking, tool calls) |
-| `thread_state` | Thread state updates (title, artifacts, todo list) |
-
-Message chunks contain the token stream as the agent generates its response.
-
-## Working with a custom agent
-
-If you have defined a custom agent, pass its `name` in the configurable:
+You can customize the agent by passing tools, a system prompt, runtime features, middleware, or a checkpointer.
 
 ```python
-async for event in client.astream(
-    thread_id="thread-002",
-    message="Analyze the attached CSV and generate a summary chart.",
-    config={
-        "configurable": {
-            "agent_name": "data-analyst",
-            "subagent_enabled": True,
-        }
-    },
-):
-    ...
+from deerflow.agents import RuntimeFeatures, create_deerflow_agent
+
+agent = create_deerflow_agent(
+    model,
+    system_prompt="You are a concise research assistant.",
+    features=RuntimeFeatures(subagent=True, memory=False),
+    plan_mode=True,
+    name="research-agent",
+)
 ```
 
-The custom agent's configuration (model, skills, tool groups) is loaded automatically from `agents/data-analyst/config.yaml`.
+Common parameters:
+
+| Parameter | Description |
+|---|---|
+| `tools` | Additional tools available to the agent |
+| `system_prompt` | Custom system prompt |
+| `features` | Enable or replace built-in runtime features |
+| `extra_middleware` | Insert custom middleware into the default chain |
+| `plan_mode` | Enable Todo-style task tracking |
+| `checkpointer` | Persist agent state across runs |
+| `name` | Logical agent name |
+
+## When to use DeerFlowClient instead
+
+`create_deerflow_agent()` is the low-level SDK factory when you want to work directly with the compiled agent graph.
+
+Use `DeerFlowClient` when you want the higher-level embedded app interface, such as:
+
+- thread-oriented chat helpers,
+- model / skills / memory management APIs,
+- file uploads and artifacts,
+- Gateway-like response formats.
 
 ## Next steps
 

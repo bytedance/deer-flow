@@ -1,3 +1,8 @@
+---
+title: Deployment Guide 
+description: "This guide covers all supported deployment methods for DeerFlow App: local development, Docker Compose, and production with Kubernetes-managed sandboxes."
+---
+
 import { Callout, Cards, Steps, Tabs } from "nextra/components";
 
 # Deployment Guide
@@ -16,14 +21,15 @@ make dev
 
 Services started:
 
-| Service | Port | Description |
-|---|---|---|
-| LangGraph | 2024 | DeerFlow Harness runtime |
-| Gateway API | 8001 | FastAPI backend |
-| Frontend | 3000 | Next.js UI |
-| nginx | 2026 | Unified reverse proxy |
+| Service     | Port | Description              |
+| ----------- | ---- | ------------------------ |
+| LangGraph   | 2024 | DeerFlow Harness runtime |
+| Gateway API | 8001 | FastAPI backend          |
+| Frontend    | 3000 | Next.js UI               |
+| nginx       | 2026 | Unified reverse proxy    |
 
 Access the app at **http://localhost:2026**.
+
   </Tabs.Tab>
   <Tabs.Tab>
 ```bash
@@ -31,6 +37,7 @@ make stop
 ```
 
 Stops all four services. Safe to run even if a service is not running.
+
   </Tabs.Tab>
   <Tabs.Tab>
 ```
@@ -41,9 +48,11 @@ logs/nginx.log       # nginx access/error logs
 ```
 
 Tail a log in real time:
+
 ```bash
 tail -f logs/langgraph.log
 ```
+
   </Tabs.Tab>
 </Tabs>
 
@@ -103,11 +112,11 @@ For production, use a named volume or a Persistent Volume Claim (PVC) instead of
 
 ### Sandbox mode selection
 
-| Sandbox | Use case |
-|---|---|
-| `LocalSandboxProvider` | Single-user, trusted local workflows |
-| `AioSandboxProvider` (Docker) | Multi-user, moderate isolation requirement |
-| `AioSandboxProvider` + K8s Provisioner | Production, strong isolation, multi-user |
+| Sandbox                                | Use case                                   |
+| -------------------------------------- | ------------------------------------------ |
+| `LocalSandboxProvider`                 | Single-user, trusted local workflows       |
+| `AioSandboxProvider` (Docker)          | Multi-user, moderate isolation requirement |
+| `AioSandboxProvider` + K8s Provisioner | Production, strong isolation, multi-user   |
 
 For any deployment with more than one concurrent user, use a container-based sandbox to prevent users from interfering with each other's execution environments.
 
@@ -154,10 +163,10 @@ When `USERDATA_PVC_NAME` is set, the provisioner automatically uses subPath (`th
 
 nginx routes all traffic. Key environment variables that control routing:
 
-| Variable | Default | Description |
-|---|---|---|
-| `LANGGRAPH_UPSTREAM` | `langgraph:2024` | LangGraph service address |
-| `LANGGRAPH_REWRITE` | `/` | URL rewrite prefix for LangGraph routes |
+| Variable             | Default          | Description                             |
+| -------------------- | ---------------- | --------------------------------------- |
+| `LANGGRAPH_UPSTREAM` | `langgraph:2024` | LangGraph service address               |
+| `LANGGRAPH_REWRITE`  | `/`              | URL rewrite prefix for LangGraph routes |
 
 These are set in the Docker Compose environment and processed by `envsubst` at container startup.
 
@@ -175,12 +184,12 @@ openssl rand -base64 32
 
 ### Resource recommendations
 
-| Service | Minimum | Recommended |
-|---|---|---|
-| LangGraph (agent runtime) | 2 vCPU, 4 GB RAM | 4 vCPU, 8 GB RAM |
-| Gateway | 0.5 vCPU, 512 MB | 1 vCPU, 1 GB |
-| Frontend | 0.5 vCPU, 512 MB | 1 vCPU, 1 GB |
-| Sandbox container (per session) | 1 vCPU, 1 GB | 2 vCPU, 2 GB |
+| Service                         | Minimum          | Recommended      |
+| ------------------------------- | ---------------- | ---------------- |
+| LangGraph (agent runtime)       | 2 vCPU, 4 GB RAM | 4 vCPU, 8 GB RAM |
+| Gateway                         | 0.5 vCPU, 512 MB | 1 vCPU, 1 GB     |
+| Frontend                        | 0.5 vCPU, 512 MB | 1 vCPU, 1 GB     |
+| Sandbox container (per session) | 1 vCPU, 1 GB     | 2 vCPU, 2 GB     |
 
 ## Deployment verification
 
@@ -201,5 +210,8 @@ A working deployment returns a `200` response from each endpoint. The `/api/mode
 
 <Cards num={2}>
   <Cards.Card title="Configuration" href="/docs/application/configuration" />
-  <Cards.Card title="Operations & Troubleshooting" href="/docs/application/operations-and-troubleshooting" />
+  <Cards.Card
+    title="Operations & Troubleshooting"
+    href="/docs/application/operations-and-troubleshooting"
+  />
 </Cards>
