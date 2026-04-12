@@ -709,6 +709,43 @@ memory:
   max_injection_tokens: 2000 # Maximum tokens for memory injection
 
 # ============================================================================
+# Incremental Context Management
+# ============================================================================
+# Cheap cleanup passes that run before full summarization.
+context_management:
+  snip:
+    enabled: true
+    strip_historical_upload_blocks: true
+  microcompact:
+    enabled: true
+    compactable_tools:
+      - bash
+      - read_file
+      - web_search
+      - web_fetch
+      - x-reader_read_url
+      - x-reader_read_batch
+    keep_recent_tool_results: 2
+    min_content_chars: 1200
+  tool_result_budget:
+    enabled: true
+    externalize_min_chars: 12000
+    preview_head_chars: 2000
+    preview_tail_chars: 1000
+    storage_subdir: .context/tool-results
+  session_state:
+    enabled: true
+    collapse_enabled: true
+    collapse_when_message_count_at_least: 12
+    keep_recent_messages: 6
+    max_tool_observations: 4
+    max_tool_observation_chars: 240
+    inject_when_message_count_at_least: 8
+    max_goal_chars: 600
+    max_response_chars: 400
+    max_items: 5
+
+# ============================================================================
 # Skill Self-Evolution Configuration
 # ============================================================================
 # Allow the agent to autonomously create and improve skills in skills/custom/.

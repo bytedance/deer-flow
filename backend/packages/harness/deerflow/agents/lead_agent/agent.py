@@ -6,8 +6,11 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.context_compaction_middleware import ContextCompactionMiddleware
+from deerflow.agents.middlewares.deliverable_guard_middleware import DeliverableGuardMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.session_state_middleware import SessionStateMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
@@ -198,7 +201,10 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
-# SummarizationMiddleware should be early to reduce context before other processing
+# ContextCompactionMiddleware should run before summarization to cheaply reduce noise
+# SessionStateMiddleware should persist task contracts before summarization can trim raw user requests
+# SummarizationMiddleware should still run early once durable session state has been captured
+# DeliverableGuardMiddleware should prevent early final answers when file-based output contracts are still unmet
 # TodoListMiddleware should be before ClarificationMiddleware to allow todo management
 # TitleMiddleware generates title after first exchange
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
@@ -218,10 +224,18 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     """
     middlewares = build_lead_runtime_middlewares(lazy_init=True)
 
+    # Low-cost message cleanup before heavier summarization.
+    middlewares.append(ContextCompactionMiddleware())
+
+    # Persist structured session state before raw history may be summarized away.
+    middlewares.append(SessionStateMiddleware())
+
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
+
+    middlewares.append(DeliverableGuardMiddleware())
 
     # Add TodoList middleware if plan mode is enabled
     is_plan_mode = config.get("configurable", {}).get("is_plan_mode", False)

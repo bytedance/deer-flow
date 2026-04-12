@@ -18,7 +18,7 @@ def _ai_with_write_todos():
 
 
 def _reminder_msg():
-    return HumanMessage(name="todo_reminder", content="reminder")
+    return HumanMessage(content="<system_reminder>\nreminder\n</system_reminder>")
 
 
 def _make_runtime():
@@ -128,7 +128,7 @@ class TestBeforeModel:
         msgs = result["messages"]
         assert len(msgs) == 1
         assert isinstance(msgs[0], HumanMessage)
-        assert msgs[0].name == "todo_reminder"
+        assert "<system_reminder>" in msgs[0].content
 
     def test_reminder_contains_formatted_todos(self):
         mw = TodoMiddleware()
@@ -153,4 +153,4 @@ class TestAbeforeModel:
         }
         result = asyncio.run(mw.abefore_model(state, _make_runtime()))
         assert result is not None
-        assert result["messages"][0].name == "todo_reminder"
+        assert "<system_reminder>" in result["messages"][0].content

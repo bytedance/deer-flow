@@ -1,6 +1,7 @@
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
+from deerflow.context.tool_output_budget import prepare_tool_output_for_context, resolve_thread_data_from_config
 from deerflow.utils.readability import ReadabilityExtractor
 
 from .infoquest_client import InfoQuestClient
@@ -52,7 +53,11 @@ def web_search_tool(query: str) -> str:
     """
 
     client = _get_infoquest_client()
-    return client.web_search(query)
+    return prepare_tool_output_for_context(
+        content=client.web_search(query),
+        tool_name="web_search",
+        thread_data=resolve_thread_data_from_config(),
+    )
 
 
 @tool("web_fetch", parse_docstring=True)
@@ -71,7 +76,11 @@ def web_fetch_tool(url: str) -> str:
     if result.startswith("Error: "):
         return result
     article = readability_extractor.extract_article(result)
-    return article.to_markdown()[:4096]
+    return prepare_tool_output_for_context(
+        content=article.to_markdown(),
+        tool_name="web_fetch",
+        thread_data=resolve_thread_data_from_config(),
+    )
 
 
 @tool("image_search", parse_docstring=True)
