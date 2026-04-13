@@ -91,11 +91,11 @@ if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
         cp "$REPO_ROOT/config.example.yaml" "$DEER_FLOW_CONFIG_PATH"
         echo -e "${GREEN}✓ Seeded config.example.yaml → $DEER_FLOW_CONFIG_PATH${NC}"
         echo -e "${YELLOW}⚠ config.yaml was seeded from the example template.${NC}"
-        echo "  Edit $DEER_FLOW_CONFIG_PATH and set your model API keys before use."
+        echo "  Run 'make setup' to generate a minimal config, or edit $DEER_FLOW_CONFIG_PATH manually before use."
     else
         echo -e "${RED}✗ No config.yaml found.${NC}"
-        echo "  Run 'make config' from the repo root to generate one,"
-        echo "  then set the required model API keys."
+        echo "  Run 'make setup' from the repo root (recommended),"
+        echo "  or 'make config' for the full template, then set the required model API keys."
         exit 1
     fi
 else

@@ -48,10 +48,7 @@ export default function ChatsPage() {
             <ScrollArea className="size-full py-4">
               <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
                 {filteredThreads?.map((thread) => (
-                  <Link
-                    key={thread.thread_id}
-                    href={pathOfThread(thread.thread_id)}
-                  >
+                  <Link key={thread.thread_id} href={pathOfThread(thread)}>
                     <div className="flex flex-col gap-2 border-b p-4">
                       <div>
                         <div>{titleOfThread(thread)}</div>

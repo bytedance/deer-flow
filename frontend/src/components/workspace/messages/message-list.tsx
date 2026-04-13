@@ -72,6 +72,7 @@ export function MessageList({
                   key={`${group.id}/${msg.id}`}
                   message={msg}
                   isLoading={thread.isLoading}
+                  threadId={threadId}
                 />
               );
             });
@@ -192,7 +193,7 @@ export function MessageList({
               results.push(
                 <div
                   key="subtask-count"
-                  className="text-muted-foreground font-norma pt-2 text-sm"
+                  className="text-muted-foreground pt-2 text-sm font-normal"
                 >
                   {t.subtasks.executing(tasks.size)}
                 </div>,
