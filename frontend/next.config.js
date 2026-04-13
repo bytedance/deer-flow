@@ -14,6 +14,17 @@ import nextra from "nextra";
 
 const withNextra = nextra({});
 
+const gatewayRoutePrefixes = [
+  "agents",
+  "assistants",
+  "channels",
+  "mcp",
+  "models",
+  "runs",
+  "skills",
+  "threads",
+];
+
 /** @type {import("next").NextConfig} */
 const config = {
   i18n: {
@@ -44,14 +55,16 @@ const config = {
     }
 
     if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
-      rewrites.push({
-        source: "/api/agents",
-        destination: `${gatewayURL}/api/agents`,
-      });
-      rewrites.push({
-        source: "/api/agents/:path*",
-        destination: `${gatewayURL}/api/agents/:path*`,
-      });
+      for (const prefix of gatewayRoutePrefixes) {
+        rewrites.push({
+          source: `/api/${prefix}`,
+          destination: `${gatewayURL}/api/${prefix}`,
+        });
+        rewrites.push({
+          source: `/api/${prefix}/:path*`,
+          destination: `${gatewayURL}/api/${prefix}/:path*`,
+        });
+      }
     }
 
     return rewrites;
