@@ -271,9 +271,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     try:
         # Update config if any config fields changed
         display_name_provided = "display_name" in request.model_fields_set
-        config_changed = display_name_provided or any(
-            v is not None for v in [request.description, request.model, request.tool_groups]
-        )
+        config_changed = display_name_provided or any(v is not None for v in [request.description, request.model, request.tool_groups])
 
         if config_changed:
             updated: dict = {
