@@ -598,8 +598,20 @@ class TestAgentsApiDisabled:
         response = disabled_agent_client.get("/api/agents/example-agent")
         assert response.status_code == 403
 
+    def test_agent_name_check_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents/check", params={"name": "example-agent"})
+        assert response.status_code == 403
+
     def test_agent_create_returns_403(self, disabled_agent_client):
         response = disabled_agent_client.post("/api/agents", json={"name": "example-agent", "soul": "blocked"})
+        assert response.status_code == 403
+
+    def test_agent_update_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.put("/api/agents/example-agent", json={"description": "blocked"})
+        assert response.status_code == 403
+
+    def test_agent_delete_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.delete("/api/agents/example-agent")
         assert response.status_code == 403
 
     def test_user_profile_routes_return_403(self, disabled_agent_client):
