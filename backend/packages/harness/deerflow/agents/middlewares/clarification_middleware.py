@@ -118,12 +118,28 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         # Extract clarification arguments
         args = request.tool_call.get("args", {})
         question = args.get("question", "")
+        questions = args.get("questions")
 
         logger.info("Intercepted clarification request")
         logger.debug("Clarification question: %s", question)
 
-        # Format the clarification message
-        formatted_message = self._format_clarification_message(args)
+        # Check if we should use form mode (multiple questions)
+        if questions and isinstance(questions, list) and len(questions) > 0:
+            # Form mode: serialize to JSON for the frontend
+            payload = {
+                "kind": "clarification",
+                "mode": "form",
+                "title": "Clarification Required",
+                "description": question,
+                "questions": questions,
+            }
+            if args.get("context"):
+                payload["description"] = f"{args.get('context')}\n\n{question}"
+                
+            formatted_message = json.dumps(payload, ensure_ascii=False)
+        else:
+            # Single mode / Legacy mode: format as markdown text
+            formatted_message = self._format_clarification_message(args)
 
         # Get the tool call ID
         tool_call_id = request.tool_call.get("id", "")

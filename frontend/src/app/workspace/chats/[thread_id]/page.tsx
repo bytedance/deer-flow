@@ -78,6 +78,28 @@ export default function ChatPage() {
     },
     [sendMessage, threadId],
   );
+
+  const handleClarificationSubmit = useCallback(
+    (response: any) => {
+      // Format the response into a text message that the backend can understand
+      let text = "";
+      if (response.mode === "single") {
+        const answer = response.answers[0]?.answer;
+        text = `[User selected: ${answer}]`;
+      } else if (response.mode === "form") {
+        text = "[User submitted form]\n" + response.answers
+          .map((a: any) => `- **${a.question}**: ${a.answer}`)
+          .join("\n");
+      }
+      
+      void sendMessage(threadId, {
+        text,
+        files: [],
+      });
+    },
+    [sendMessage, threadId],
+  );
+
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
@@ -115,6 +137,7 @@ export default function ChatPage() {
                 threadId={threadId}
                 thread={thread}
                 paddingBottom={messageListPaddingBottom}
+                onSubmitClarification={handleClarificationSubmit}
               />
             </div>
             <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">

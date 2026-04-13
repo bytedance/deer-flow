@@ -23,6 +23,11 @@ import { cn } from "@/lib/utils";
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { StreamingIndicator } from "../streaming-indicator";
 
+import {
+  InteractiveClarificationCard,
+  type ClarificationPayload,
+  type ClarificationResponse,
+} from "./interactive-clarification-card";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
@@ -37,11 +42,13 @@ export function MessageList({
   threadId,
   thread,
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
+  onSubmitClarification,
 }: {
   className?: string;
   threadId: string;
   thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
+  onSubmitClarification?: (response: ClarificationResponse) => void;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
@@ -70,10 +77,35 @@ export function MessageList({
           } else if (group.type === "assistant:clarification") {
             const message = group.messages[0];
             if (message && hasContent(message)) {
+              const content = extractContentFromMessage(message);
+              let payload: ClarificationPayload | null = null;
+              
+              try {
+                // Check if the content is a valid JSON payload
+                const parsed = JSON.parse(content);
+                if (parsed && typeof parsed === "object" && parsed.kind === "clarification" && parsed.mode) {
+                  payload = parsed as ClarificationPayload;
+                }
+              } catch (e) {
+                // Not JSON, fallback to markdown
+              }
+              
+              if (payload) {
+                return (
+                  <div key={group.id} className="w-full">
+                    <InteractiveClarificationCard
+                      payload={payload}
+                      onSubmit={(response) => onSubmitClarification?.(response)}
+                      disabled={thread.isLoading || group.id !== messages[messages.length - 1]?.id}
+                    />
+                  </div>
+                );
+              }
+              
               return (
                 <MarkdownContent
                   key={group.id}
-                  content={extractContentFromMessage(message)}
+                  content={content}
                   isLoading={thread.isLoading}
                   rehypePlugins={rehypePlugins}
                 />
