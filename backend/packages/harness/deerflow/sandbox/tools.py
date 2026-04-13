@@ -1066,18 +1066,25 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
 def get_custom_fields(runtime: Runtime | None) -> dict[str, Any]:
     """Extract custom_fields from runtime state or config.
 
-    Checks state first (set by CustomFieldsMiddleware), then falls back
-    to config.configurable (for direct access without middleware).
+    Checks state first (set by CustomFieldsMiddleware), then context
+    (for channel-provided fields), then config.configurable (for direct
+    access without middleware).
     """
     if runtime is None:
         return {}
     if runtime.state is not None:
         fields = runtime.state.get("custom_fields")
-        if fields:
+        if fields is not None:
+            return fields
+    # Check context for channel-provided custom fields
+    context = getattr(runtime, "context", None)
+    if context and isinstance(context, dict):
+        fields = context.get("custom_fields")
+        if fields is not None:
             return fields
     configurable = getattr(runtime, "config", {}).get("configurable", {})
     fields = configurable.get("custom_fields")
-    return fields or {}
+    return fields if fields is not None else {}
 
 
 def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:

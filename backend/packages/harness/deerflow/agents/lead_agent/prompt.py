@@ -771,13 +771,10 @@ def _build_custom_fields_section(custom_fields: dict[str, Any] | None) -> str:
     """Build a prompt section for caller-provided business context."""
     if not custom_fields:
         return ""
-    return (
-        "<custom_fields>\n"
-        "The caller has provided the following business context. When calling tools or MCP servers, "
-        "pass relevant values from this context as parameters when appropriate:\n"
-        f"{json.dumps(custom_fields, indent=2)}\n"
-        "</custom_fields>\n"
-    )
+    safe_json = json.dumps(custom_fields, indent=2)
+    # Escape angle brackets and ampersands to prevent tag injection in system prompt.
+    safe_json = safe_json.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"<custom_fields>\nThe caller has provided the following business context. When calling tools or MCP servers, pass relevant values from this context as parameters when appropriate:\n{safe_json}\n</custom_fields>\n"
 
 
 def apply_prompt_template(

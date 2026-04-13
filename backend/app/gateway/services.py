@@ -50,9 +50,12 @@ def validate_custom_fields(fields: dict[str, Any] | None) -> dict[str, Any] | No
         serialized = json.dumps(fields)
     except (TypeError, ValueError) as e:
         raise ValueError(f"custom_fields must be JSON-serializable: {e}") from e
-    if len(serialized) > 4096:
-        raise ValueError(f"custom_fields serialized size ({len(serialized)} bytes) exceeds 4KB limit")
+    byte_size = len(serialized.encode("utf-8"))
+    if byte_size > 4096:
+        raise ValueError(f"custom_fields serialized size ({byte_size} bytes) exceeds 4KB limit")
     for key in fields:
+        if not isinstance(key, str):
+            raise ValueError(f"custom_fields key must be a string, got {type(key).__name__}")
         if not _CUSTOM_FIELDS_KEY_PATTERN.match(key):
             raise ValueError(f"custom_fields key '{key}' must match ^[a-zA-Z_][a-zA-Z0-9_]*$")
     return fields
@@ -367,7 +370,6 @@ async def start_run(
     # Inject custom_fields (per-run business attributes) into configurable.
     custom_fields = getattr(body, "custom_fields", None)
     if custom_fields:
-        logger.info("custom_fields received for thread %s: %s", thread_id, custom_fields)
         config.setdefault("configurable", {})["custom_fields"] = custom_fields
 
     stream_modes = normalize_stream_modes(body.stream_mode)
