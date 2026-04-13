@@ -348,6 +348,68 @@ class TestProvisionerProxy:
         assert r.status_code == 502
 
 
+# ── Multi-value response header preservation (regression test) ───────────────
+
+
+class TestMultiValueHeaders:
+    """Regression test: dict-coerced response headers used to drop duplicate
+    ``Set-Cookie`` entries because ``httpx.Headers.items()`` collapses them
+    into a single comma-joined value, and then ``dict[k]=v`` overwrites
+    duplicates. Cookie expiry dates contain commas, so a session cookie and
+    an auth cookie returned by the frontend would silently get merged into
+    one corrupted header. The proxy must use ``multi_items()`` and bypass
+    ``StreamingResponse(headers=...)`` to preserve them verbatim.
+    """
+
+    def test_set_cookie_duplicates_preserved(self, proxy_module):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers=[
+                    ("set-cookie", "session=abc; Path=/; HttpOnly"),
+                    ("set-cookie", "auth=xyz; Path=/; HttpOnly; Expires=Wed, 21 Oct 2026 07:28:00 GMT"),
+                    ("content-type", "text/html"),
+                ],
+                content=b"hi",
+            )
+
+        app = _make_app(proxy_module, httpx.MockTransport(handler))
+        with TestClient(app) as client:
+            r = client.get("/some-page")
+
+        assert r.status_code == 200
+        # httpx (the client used by Starlette TestClient) exposes duplicate
+        # headers via .headers.get_list() — both cookies must survive the
+        # proxy round-trip unchanged.
+        cookies = r.headers.get_list("set-cookie")
+        assert len(cookies) == 2
+        assert "session=abc" in cookies[0]
+        assert "auth=xyz" in cookies[1]
+        # The Expires comma must be preserved, not turned into a delimiter.
+        assert "Wed, 21 Oct 2026 07:28:00 GMT" in cookies[1]
+
+    def test_hop_by_hop_headers_still_stripped(self, proxy_module):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers=[
+                    ("connection", "close"),
+                    ("transfer-encoding", "chunked"),
+                    ("x-custom", "keep-me"),
+                ],
+                content=b"ok",
+            )
+
+        app = _make_app(proxy_module, httpx.MockTransport(handler))
+        with TestClient(app) as client:
+            r = client.get("/foo")
+
+        assert r.status_code == 200
+        # Hop-by-hop headers are stripped, regular ones are forwarded.
+        assert "connection" not in {k.lower() for k in r.headers.keys()}
+        assert r.headers.get("x-custom") == "keep-me"
+
+
 # ── Backwards-compat: ensure we don't accidentally hide existing routers ─────
 
 

@@ -179,8 +179,24 @@ def _build_forward_headers(
     return forwarded
 
 
-def _filter_response_headers(headers: httpx.Headers) -> dict[str, str]:
-    return {key: value for key, value in headers.items() if key.lower() not in _HOP_BY_HOP_HEADERS}
+def _filter_response_raw_headers(headers: httpx.Headers) -> list[tuple[bytes, bytes]]:
+    """Build raw (bytes, bytes) header tuples for a Starlette response.
+
+    We must use ``httpx.Headers.multi_items()`` and set Starlette's
+    ``raw_headers`` directly because:
+
+    1. ``httpx.Headers.items()`` collapses duplicate-name headers into a
+       single comma-joined value, which is correct for most headers but
+       *wrong* for ``Set-Cookie`` (RFC 6265 forbids comma-joining since
+       cookie expiry dates contain commas).
+    2. ``StreamingResponse(headers=mapping)`` only accepts a ``Mapping``
+       and goes through ``.items()``, which would silently drop duplicate
+       keys even if we passed a list.
+
+    Setting ``raw_headers`` after constructing the response bypasses both
+    issues and preserves every individual header entry as-is.
+    """
+    return [(key.encode("latin-1"), value.encode("latin-1")) for key, value in headers.multi_items() if key.lower() not in _HOP_BY_HOP_HEADERS]
 
 
 # ── Core HTTP proxy ──────────────────────────────────────────────────────────
@@ -246,7 +262,7 @@ async def _proxy_http(
         logger.exception("Proxy error for upstream %s", upstream_base)
         raise HTTPException(status_code=502, detail="Bad gateway") from exc
 
-    response_headers = _filter_response_headers(upstream_response.headers)
+    raw_response_headers = _filter_response_raw_headers(upstream_response.headers)
     media_type = upstream_response.headers.get("content-type")
 
     async def body_iter():
@@ -269,12 +285,16 @@ async def _proxy_http(
             if owns_client:
                 await client.aclose()
 
-    return StreamingResponse(
+    response = StreamingResponse(
         body_iter(),
         status_code=upstream_response.status_code,
-        headers=response_headers,
         media_type=media_type,
     )
+    # Override raw_headers AFTER construction so duplicate-name headers like
+    # ``Set-Cookie`` are preserved verbatim. Starlette's ``init_headers``
+    # collapses duplicates via ``Mapping.items()``.
+    response.raw_headers = raw_response_headers
+    return response
 
 
 # ── HTTP proxy routes ────────────────────────────────────────────────────────
@@ -412,8 +432,22 @@ async def frontend_ws_proxy(websocket: WebSocket, path: str) -> None:
         except Exception:
             logger.exception("Upstream→client WebSocket forwarding error")
 
+    # Use ``FIRST_COMPLETED`` so that when *either* side disconnects we
+    # immediately cancel the *other* direction. Plain ``asyncio.gather``
+    # would block forever on the still-listening half and leak the
+    # websocket connection until the read timeout fires.
+    client_task = asyncio.create_task(client_to_upstream())
+    upstream_task = asyncio.create_task(upstream_to_client())
     try:
-        await asyncio.gather(client_to_upstream(), upstream_to_client())
+        _done, pending = await asyncio.wait(
+            {client_task, upstream_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        # Drain the cancelled tasks so their ``finally`` blocks run and any
+        # exceptions surface in logs (but don't propagate out of cleanup).
+        await asyncio.gather(*pending, return_exceptions=True)
     finally:
         try:
             await upstream.close()
