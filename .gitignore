@@ -59,5 +59,8 @@ config.yaml.bak
 .worktrees
 
 
+# desktop artifacts
 dist
 node_modules
+release/
+bundle-resources/
