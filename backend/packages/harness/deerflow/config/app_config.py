@@ -127,9 +127,9 @@ class AppConfig(BaseModel):
         if "memory" in config_data:
             load_memory_config_from_dict(config_data["memory"])
 
-        # Load agents API config if present
-        if "agents_api" in config_data:
-            load_agents_api_config_from_dict(config_data["agents_api"])
+        # Always refresh agents API config so removed config sections reset
+        # singleton-backed state to its default/disabled values on reload.
+        load_agents_api_config_from_dict(config_data.get("agents_api") or {})
 
         # Load subagents config if present
         if "subagents" in config_data:
