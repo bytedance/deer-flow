@@ -20,6 +20,11 @@ class SubagentOverrideConfig(BaseModel):
         ge=1,
         description="Maximum turns for this subagent (None = use global or builtin default)",
     )
+    model: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Model name for this subagent (None = inherit from parent agent)",
+    )
 
 
 class SubagentsAppConfig(BaseModel):
@@ -54,6 +59,20 @@ class SubagentsAppConfig(BaseModel):
             return override.timeout_seconds
         return self.timeout_seconds
 
+    def get_model_for(self, agent_name: str) -> str | None:
+        """Get the model override for a specific agent.
+
+        Args:
+            agent_name: The name of the subagent.
+
+        Returns:
+            Model name if overridden, None otherwise (subagent will inherit parent model).
+        """
+        override = self.agents.get(agent_name)
+        if override is not None and override.model is not None:
+            return override.model
+        return None
+
     def get_max_turns_for(self, agent_name: str, builtin_default: int) -> int:
         """Get the effective max_turns for a specific agent."""
         override = self.agents.get(agent_name)
@@ -84,6 +103,8 @@ def load_subagents_config_from_dict(config_dict: dict) -> None:
             parts.append(f"timeout={override.timeout_seconds}s")
         if override.max_turns is not None:
             parts.append(f"max_turns={override.max_turns}")
+        if override.model is not None:
+            parts.append(f"model={override.model}")
         if parts:
             overrides_summary[name] = ", ".join(parts)
 

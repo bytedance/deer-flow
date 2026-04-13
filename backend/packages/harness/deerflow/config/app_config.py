@@ -30,6 +30,13 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class CircuitBreakerConfig(BaseModel):
+    """Configuration for the LLM Circuit Breaker."""
+
+    failure_threshold: int = Field(default=5, description="Number of consecutive failures before tripping the circuit")
+    recovery_timeout_sec: int = Field(default=60, description="Time in seconds before attempting to recover the circuit")
+
+
 def _default_config_candidates() -> tuple[Path, ...]:
     """Return deterministic config.yaml locations without relying on cwd."""
     backend_dir = Path(__file__).resolve().parents[4]
@@ -55,6 +62,7 @@ class AppConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
+    circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
@@ -128,6 +136,10 @@ class AppConfig(BaseModel):
         # Load guardrails config if present
         if "guardrails" in config_data:
             load_guardrails_config_from_dict(config_data["guardrails"])
+
+        # Load circuit_breaker config if present
+        if "circuit_breaker" in config_data:
+            config_data["circuit_breaker"] = config_data["circuit_breaker"]
 
         # Load checkpointer config if present
         if "checkpointer" in config_data:
