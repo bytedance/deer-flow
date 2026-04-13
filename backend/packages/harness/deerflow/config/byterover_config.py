@@ -5,9 +5,27 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 
+_MODULE_DIR = Path(__file__).resolve().parent
+_REPO_MARKER_FILES = ("config.yaml", "config.example.yaml")
+
+
+def _is_repo_root(candidate: Path) -> bool:
+    """Return whether the candidate directory looks like the DeerFlow repository root."""
+    return (candidate / "backend").is_dir() and any(
+        (candidate / marker).exists() for marker in _REPO_MARKER_FILES
+    )
+
+
 def _repo_root() -> Path:
-    """Resolve the repository root from the DeerFlow backend package layout."""
-    return Path(__file__).resolve().parents[5]
+    """Resolve the DeerFlow repository root from the installed package location."""
+    for candidate in (_MODULE_DIR, *_MODULE_DIR.parents):
+        if _is_repo_root(candidate):
+            return candidate
+
+    raise RuntimeError(
+        "Could not resolve the DeerFlow repository root from the ByteRover package path. "
+        "Set byterover.cwd explicitly in config.yaml."
+    )
 
 
 class ByteRoverConfig(BaseModel):
@@ -23,13 +41,17 @@ class ByteRoverConfig(BaseModel):
         description="Timeout in seconds for brv query",
     )
     curate_timeout: int = Field(
-        default=10,
+        default=180,
         ge=1,
         description="Timeout in seconds for brv curate --detach",
     )
     cwd: str | None = Field(
         default=None,
-        description="Working directory for brv commands (None = repository root)",
+        description=(
+            "Working directory for brv commands "
+            "(None = DeerFlow repository root resolved from the package location; "
+            "set explicitly if running outside a DeerFlow checkout)"
+        ),
     )
 
     @property

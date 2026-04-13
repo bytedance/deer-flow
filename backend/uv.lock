@@ -410,6 +410,18 @@ wheels = [
 ]
 
 [[package]]
+name = "brv-bridge"
+version = "0.1.0"
+source = { editable = "../../../brv-bridge-python/brv-bridge" }
+
+[package.metadata]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23,<1" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "certifi"
 version = "2026.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -719,6 +731,7 @@ source = { editable = "packages/harness" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "agent-sandbox" },
+    { name = "brv-bridge" },
     { name = "ddgs" },
     { name = "dotenv" },
     { name = "duckdb" },
@@ -760,6 +773,7 @@ pymupdf = [
 requires-dist = [
     { name = "agent-client-protocol", specifier = ">=0.4.0" },
     { name = "agent-sandbox", specifier = ">=0.0.19" },
+    { name = "brv-bridge", editable = "../../../brv-bridge-python/brv-bridge" },
     { name = "ddgs", specifier = ">=9.10.0" },
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "duckdb", specifier = ">=1.4.4" },

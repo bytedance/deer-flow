@@ -33,6 +33,7 @@ dependencies = [
     "langchain-google-genai>=4.2.1",
     "langgraph-checkpoint-sqlite>=3.0.3",
     "langgraph-sdk>=0.1.51",
+    "brv-bridge",
 ]
 
 [project.optional-dependencies]
@@ -45,3 +46,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["deerflow"]
+
+[tool.uv.sources]
+brv-bridge = { path = "../../../../../brv-bridge-python/brv-bridge", editable = true }
