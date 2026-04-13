@@ -12,9 +12,7 @@ from deerflow.agents.middlewares.llm_error_handling_middleware import (
     LLMErrorHandlingMiddleware,
 )
 
-SLEEP_PATCH_TARGET = (
-    "deerflow.agents.middlewares.llm_error_handling_middleware.asyncio.sleep"
-)
+SLEEP_PATCH_TARGET = "deerflow.agents.middlewares.llm_error_handling_middleware.asyncio.sleep"
 
 
 class FakeError(Exception):
@@ -31,11 +29,7 @@ class FakeError(Exception):
         self.status_code = status_code
         self.code = code
         self.body = body
-        self.response = (
-            SimpleNamespace(status_code=status_code, headers=headers or {})
-            if status_code is not None or headers
-            else None
-        )
+        self.response = SimpleNamespace(status_code=status_code, headers=headers or {}) if status_code is not None or headers else None
 
 
 def _build_middleware(**attrs: int) -> LLMErrorHandlingMiddleware:
@@ -67,9 +61,7 @@ def test_async_model_call_retries_busy_provider_then_succeeds(
         nonlocal attempts
         attempts += 1
         if attempts < 3:
-            raise FakeError(
-                "当前服务集群负载较高，请稍后重试，感谢您的耐心等待。 (2064)"
-            )
+            raise FakeError("当前服务集群负载较高，请稍后重试，感谢您的耐心等待。 (2064)")
         return AIMessage(content="ok")
 
     monkeypatch.setattr(SLEEP_PATCH_TARGET, fake_sleep)
@@ -126,9 +118,7 @@ def test_async_model_call_retries_incomplete_chunked_read_then_succeeds(
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise ReadError(
-                "peer closed connection without sending complete message body (incomplete chunked read)"
-            )
+            raise ReadError("peer closed connection without sending complete message body (incomplete chunked read)")
         return AIMessage(content="ok")
 
     monkeypatch.setattr(SLEEP_PATCH_TARGET, fake_sleep)
