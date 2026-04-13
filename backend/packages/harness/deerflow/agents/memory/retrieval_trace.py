@@ -27,8 +27,6 @@ class RetrievalDecisionReason(StrEnum):
     SELECTED = "selected"
     BUDGET_EXCEEDED = "budget_exceeded"
     SKIPPED_AFTER_BUDGET_EXCEEDED = "skipped_after_budget_exceeded"
-    EMPTY_CONTENT = "empty_content"
-    INVALID_TYPE = "invalid_type"
 
 
 @dataclass(slots=True)

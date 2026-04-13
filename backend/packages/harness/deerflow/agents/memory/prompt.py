@@ -222,6 +222,15 @@ def _build_content_preview(content: Any, max_chars: int = 80) -> str:
     return normalized[:max_chars]
 
 
+def _format_fact_line(fact: dict[str, Any], content: str, confidence: float) -> str:
+    """Format a single fact as a human-readable injection line."""
+    category = str(fact.get("category", "context")).strip() or "context"
+    source_error = fact.get("sourceError")
+    if category == "correction" and isinstance(source_error, str) and source_error.strip():
+        return f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
+    return f"- [{category} | {confidence:.2f}] {content}"
+
+
 def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int = 2000) -> InjectionResult:
     """Build formatted memory injection text plus optional retrieval trace.
 
@@ -286,9 +295,7 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
 
-    if trace is not None and not sections:
-        trace.context_tokens = 0
-    elif trace is not None:
+    if trace is not None and sections:
         trace.context_tokens = _count_tokens("\n\n".join(sections))
 
     # Format facts (sorted by confidence; include as many as token budget allows)
@@ -311,74 +318,40 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
                 reverse=True,
             )
         else:
-            # Slow path: tracing enabled – extract full per-fact metadata
-            # and record CandidateFact / early-rejection SelectionResults.
+            # Slow path: tracing enabled – extract per-fact metadata
+            # and record CandidateFact entries for valid candidates.
+            # Invalid facts (non-dict, non-string content, empty) are
+            # silently skipped, matching the fast-path behaviour.
             for index, fact in enumerate(facts_data):
+                if not isinstance(fact, dict):
+                    continue
+                content_value = fact.get("content")
+                if not isinstance(content_value, str):
+                    continue
+                content = content_value.strip()
+                if not content:
+                    continue
+
                 fact_id = _coerce_fact_id(fact, index)
-                category = str(fact.get("category", "context")).strip() if isinstance(fact, dict) else "context"
-                confidence = _coerce_confidence(fact.get("confidence"), default=0.0) if isinstance(fact, dict) else 0.0
-                layer_value = fact.get("layer") if isinstance(fact, dict) else None
+                category = str(fact.get("category", "context")).strip() or "context"
+                confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
+                layer_value = fact.get("layer")
                 layer = (str(layer_value).strip() or None) if isinstance(layer_value, str) else None
-                created_at = fact.get("createdAt") if isinstance(fact, dict) and isinstance(fact.get("createdAt"), str) else None
-                content_value = fact.get("content") if isinstance(fact, dict) else None
+                created_at = fact.get("createdAt") if isinstance(fact.get("createdAt"), str) else None
 
                 trace.candidates.append(
                     CandidateFact(
                         fact_id=fact_id,
                         content_preview=_build_content_preview(content_value),
-                        category=category or "context",
+                        category=category,
                         confidence=confidence,
                         layer=layer,
                         created_at=created_at,
                     )
                 )
-
-                if not isinstance(fact, dict):
-                    trace.selections.append(
-                        SelectionResult(
-                            fact_id=fact_id,
-                            included=False,
-                            reason=RetrievalDecisionReason.INVALID_TYPE,
-                            rank_position=-1,
-                            token_cost=0,
-                            score_components={},
-                        )
-                    )
-                    continue
-
-                if not isinstance(content_value, str):
-                    trace.selections.append(
-                        SelectionResult(
-                            fact_id=fact_id,
-                            included=False,
-                            reason=RetrievalDecisionReason.INVALID_TYPE,
-                            rank_position=-1,
-                            token_cost=0,
-                            score_components={},
-                        )
-                    )
-                    continue
-
-                content = content_value.strip()
-                if not content:
-                    trace.selections.append(
-                        SelectionResult(
-                            fact_id=fact_id,
-                            included=False,
-                            reason=RetrievalDecisionReason.EMPTY_CONTENT,
-                            rank_position=-1,
-                            token_cost=0,
-                            score_components={},
-                        )
-                    )
-                    continue
-
                 ranked_facts.append((fact_id, fact, content, confidence))
 
-            ranked_facts.sort(
-                key=lambda item: item[3],
-                reverse=True,
-            )
+            ranked_facts.sort(key=lambda item: item[3], reverse=True)
 
         # Compute token count for existing sections once, then account
         # incrementally for each fact line to avoid full-string re-tokenization.
@@ -391,12 +364,7 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
 
         fact_lines: list[str] = []
         for rank_position, (fact_id, fact, content, confidence) in enumerate(ranked_facts):
-            category = str(fact.get("category", "context")).strip() or "context"
-            source_error = fact.get("sourceError")
-            if category == "correction" and isinstance(source_error, str) and source_error.strip():
-                line = f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
-            else:
-                line = f"- [{category} | {confidence:.2f}] {content}"
+            line = _format_fact_line(fact, content, confidence)
 
             # Each additional line is preceded by a newline (except the first).
             line_text = ("\n" + line) if fact_lines else line
@@ -432,20 +400,14 @@ def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int =
                         ranked_facts[rank_position + 1 :],
                         start=rank_position + 1,
                     ):
-                        remainder_category = str(remainder_fact.get("category", "context")).strip() or "context"
-                        remainder_source_error = remainder_fact.get("sourceError")
-                        if remainder_category == "correction" and isinstance(remainder_source_error, str) and remainder_source_error.strip():
-                            remainder_line = f"- [{remainder_category} | {remainder_confidence:.2f}] {remainder_content} (avoid: {remainder_source_error.strip()})"
-                        else:
-                            remainder_line = f"- [{remainder_category} | {remainder_confidence:.2f}] {remainder_content}"
-                        remainder_line_text = "\n" + remainder_line
+                        remainder_line = _format_fact_line(remainder_fact, remainder_content, remainder_confidence)
                         trace.selections.append(
                             SelectionResult(
                                 fact_id=remainder_id,
                                 included=False,
                                 reason=RetrievalDecisionReason.SKIPPED_AFTER_BUDGET_EXCEEDED,
                                 rank_position=remainder_rank,
-                                token_cost=_count_tokens(remainder_line_text),
+                                token_cost=_count_tokens("\n" + remainder_line),
                                 score_components={"confidence": remainder_confidence},
                             )
                         )

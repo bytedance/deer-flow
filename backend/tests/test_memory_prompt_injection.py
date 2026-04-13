@@ -178,7 +178,6 @@ def test_build_memory_injection_result_returns_trace_when_enabled(monkeypatch) -
         "facts": [
             {"id": "fact_a", "content": "High confidence fact", "category": "knowledge", "confidence": 0.95},
             {"id": "fact_b", "content": "Second fact is too long for the tiny budget", "category": "context", "confidence": 0.9},
-            {"id": "fact_c", "content": "", "category": "context", "confidence": 0.1},
         ],
     }
 
@@ -186,11 +185,10 @@ def test_build_memory_injection_result_returns_trace_when_enabled(monkeypatch) -
 
     assert result.trace is not None
     assert result.trace.user_context_included is True
-    assert result.trace.total_candidates == 3
+    assert result.trace.total_candidates == 2
     assert result.trace.selected_count == 1
-    assert result.trace.dropped_count == 2
+    assert result.trace.dropped_count == 1
     assert any(selection.fact_id == "fact_b" and selection.reason.value == "budget_exceeded" for selection in result.trace.selections)
-    assert any(selection.fact_id == "fact_c" and selection.reason.value == "empty_content" for selection in result.trace.selections)
     assert result.trace.tokens_used <= 110
 
 
