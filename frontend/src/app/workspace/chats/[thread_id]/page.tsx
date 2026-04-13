@@ -9,6 +9,7 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
+import { shouldShowNewThreadLayout } from "@/components/workspace/chats/thread-chat-state";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -32,8 +33,14 @@ import { cn } from "@/lib/utils";
 export default function ChatPage() {
   const { t } = useI18n();
   const [showFollowups, setShowFollowups] = useState(false);
-  const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
-    useThreadChat();
+  const {
+    threadId,
+    setThreadId,
+    isNewThread,
+    setIsNewThread,
+    isMock,
+    setPersistedThreadId,
+  } = useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
   const [mounted, setMounted] = useState(false);
   useSpecificChatMode();
@@ -50,6 +57,7 @@ export default function ChatPage() {
     isMock,
     onStart: (createdThreadId) => {
       setThreadId(createdThreadId);
+      setPersistedThreadId(createdThreadId);
       setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
@@ -86,6 +94,10 @@ export default function ChatPage() {
     ? MESSAGE_LIST_DEFAULT_PADDING_BOTTOM +
       MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM
     : undefined;
+  const showNewThreadLayout = shouldShowNewThreadLayout({
+    isNewThread,
+    messageCount: thread.messages.length,
+  });
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -94,7 +106,7 @@ export default function ChatPage() {
           <header
             className={cn(
               "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
-              isNewThread
+              showNewThreadLayout
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
@@ -111,7 +123,7 @@ export default function ChatPage() {
           <main className="flex min-h-0 max-w-full grow flex-col">
             <div className="flex size-full justify-center">
               <MessageList
-                className={cn("size-full", !isNewThread && "pt-10")}
+                className={cn("size-full", !showNewThreadLayout && "pt-10")}
                 threadId={threadId}
                 thread={thread}
                 paddingBottom={messageListPaddingBottom}
@@ -121,8 +133,8 @@ export default function ChatPage() {
               <div
                 className={cn(
                   "relative w-full",
-                  isNewThread && "-translate-y-[calc(50vh-96px)]",
-                  isNewThread
+                  showNewThreadLayout && "-translate-y-[calc(50vh-96px)]",
+                  showNewThreadLayout
                     ? "max-w-(--container-width-sm)"
                     : "max-w-(--container-width-md)",
                 )}
@@ -141,9 +153,9 @@ export default function ChatPage() {
                 {mounted ? (
                   <InputBox
                     className={cn("bg-background/5 w-full -translate-y-4")}
-                    isNewThread={isNewThread}
+                    isNewThread={showNewThreadLayout}
                     threadId={threadId}
-                    autoFocus={isNewThread}
+                    autoFocus={showNewThreadLayout}
                     status={
                       thread.error
                         ? "error"
@@ -153,7 +165,7 @@ export default function ChatPage() {
                     }
                     context={settings.context}
                     extraHeader={
-                      isNewThread && <Welcome mode={settings.context.mode} />
+                      showNewThreadLayout && <Welcome mode={settings.context.mode} />
                     }
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||

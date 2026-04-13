@@ -403,7 +403,7 @@ export const zhCN: Translations = {
       languageDescription: "在不同语言之间切换。",
     },
     models: {
-      title: "模型与 API Key",
+      title: "模型",
       description: "管理桌面端默认模型和 LLM Provider 配置。",
       defaultModel: "默认模型",
       defaultModelDescription: "选择桌面应用默认使用的模型。",

@@ -1,7 +1,8 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { KeyRoundIcon, PlusIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -30,6 +31,8 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/core/i18n/hooks";
 
+import { reduceDeleteDialogState } from "./model-settings-delete-dialog-state";
+import { didEffectiveModelsChange } from "./model-settings-model-refresh";
 import { SettingsSection } from "./settings-section";
 
 type SecretStatuses = Record<string, boolean>;
@@ -73,7 +76,18 @@ type DesktopSettings = {
   providers: DesktopProviderSetting[];
 };
 
+type DesktopConfig = DesktopSettings & {
+  secretStatuses: SecretStatuses;
+  effectiveModels: string[];
+};
+
 type DesktopBridge = {
+  getConfig?: () => Promise<DesktopConfig>;
+  saveProvider?: (input: {
+    provider: DesktopProviderSetting;
+    apiKey?: string | null;
+  }) => Promise<DesktopConfig>;
+  deleteProvider?: (providerId: string) => Promise<DesktopConfig>;
   getDesktopSettings?: () => Promise<DesktopSettings>;
   updateDesktopSettings?: (settings: Partial<DesktopSettings>) => Promise<void>;
   getSecretStatuses?: () => Promise<SecretStatuses>;
@@ -89,9 +103,17 @@ declare global {
 
 export function ModelSettingsPage() {
   const { t } = useI18n();
+  const queryClient = useQueryClient();
   const [secretStatuses, setSecretStatuses] = useState<SecretStatuses>({});
   const [providers, setProviders] = useState<DesktopProviderSetting[]>([]);
-  const [providerToDelete, setProviderToDelete] = useState<DesktopProviderSetting | null>(null);
+  const [effectiveModels, setEffectiveModels] = useState<string[]>([]);
+  const [deleteDialogState, setDeleteDialogState] = useState<{
+    open: boolean;
+    provider: DesktopProviderSetting | null;
+  }>({
+    open: false,
+    provider: null,
+  });
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [newProviderType, setNewProviderType] = useState("");
   const [newApiKey, setNewApiKey] = useState("");
@@ -104,39 +126,55 @@ export function ModelSettingsPage() {
   const selectedPreset = newProviderType ? PROVIDER_PRESETS[newProviderType] : null;
   const existingProviderTypes = new Set(providers.map((p) => p.providerType));
 
+  const applyConfig = useCallback((value?: DesktopConfig | null) => {
+    if (!value) return;
+    const nextEffectiveModels = value.effectiveModels ?? [];
+    setProviders((value.providers ?? []).filter((p) => p.providerType));
+    setSecretStatuses(value.secretStatuses ?? {});
+    if (didEffectiveModelsChange(effectiveModels, nextEffectiveModels)) {
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
+    }
+    setEffectiveModels(nextEffectiveModels);
+  }, [effectiveModels, queryClient]);
+
+  const loadConfig = useCallback(async () => {
+    const value = await bridge?.getConfig?.();
+    applyConfig(value);
+  }, [applyConfig, bridge]);
+
   useEffect(() => {
-    void bridge?.getDesktopSettings?.().then((value) => {
-      if (!value) return;
-      setProviders((value.providers ?? []).filter((p) => p.providerType));
-    });
-    void bridge?.getSecretStatuses?.().then((value) => setSecretStatuses(value ?? {}));
-  }, [bridge]);
+    void loadConfig();
 
-  async function refreshSecretStatuses(nextProviders: DesktopProviderSetting[]) {
-    const statuses = await bridge?.getSecretStatuses?.();
-    setSecretStatuses(
-      statuses ??
-        Object.fromEntries(nextProviders.map((provider) => [provider.apiKeyEnv, false])),
-    );
-  }
+    function handleWindowFocus() {
+      void loadConfig();
+    }
 
-  async function persistProviders(nextProviders: DesktopProviderSetting[]) {
-    setProviders(nextProviders);
-    await bridge?.updateDesktopSettings?.({ providers: nextProviders });
-    await refreshSecretStatuses(nextProviders);
-  }
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void loadConfig();
+      }
+    }
 
-  async function deleteSecret(provider: DesktopProviderSetting) {
-    await bridge?.deleteSecret?.(provider.apiKeyEnv);
-    setSecretStatuses((current) => ({ ...current, [provider.apiKeyEnv]: false }));
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [loadConfig]);
+
+  async function saveProvider(provider: DesktopProviderSetting, apiKey?: string | null) {
+    const nextConfig = await bridge?.saveProvider?.({ provider, apiKey });
+    applyConfig(nextConfig);
   }
 
   async function removeProvider(providerId: string) {
-    const targetProvider = providers.find((provider) => provider.id === providerId);
-    if (!targetProvider) return;
-    await deleteSecret(targetProvider);
-    await persistProviders(providers.filter((provider) => provider.id !== providerId));
-    setProviderToDelete(null);
+    const nextConfig = await bridge?.deleteProvider?.(providerId);
+    applyConfig(nextConfig);
+    setDeleteDialogState((current) =>
+      reduceDeleteDialogState(current, { type: "clear" }),
+    );
   }
 
   function resetAddDialog() {
@@ -181,14 +219,7 @@ export function ModelSettingsPage() {
       defaultModel: newModelName || preset.defaultModel,
     };
 
-    const nextProviders = [...providers, newProvider];
-    await persistProviders(nextProviders);
-
-    if (newApiKey.trim()) {
-      await bridge?.saveSecret?.(apiKeyEnv, newApiKey.trim());
-      setSecretStatuses((current) => ({ ...current, [apiKeyEnv]: true }));
-    }
-
+    await saveProvider(newProvider, newApiKey.trim() || undefined);
     resetAddDialog();
   }
 
@@ -231,7 +262,7 @@ export function ModelSettingsPage() {
                     checked={configured}
                     onCheckedChange={(checked) => {
                       if (!checked) {
-                        void deleteSecret(provider);
+                        void saveProvider(provider, "");
                       }
                     }}
                   />
@@ -239,7 +270,14 @@ export function ModelSettingsPage() {
                     size="icon"
                     variant="ghost"
                     className="text-muted-foreground hover:text-destructive"
-                    onClick={() => setProviderToDelete(provider)}
+                    onClick={() =>
+                      setDeleteDialogState((current) =>
+                        reduceDeleteDialogState(current, {
+                          type: "open",
+                          provider,
+                        }),
+                      )
+                    }
                     aria-label={t.common.delete}
                   >
                     <Trash2Icon className="size-4" />
@@ -253,12 +291,12 @@ export function ModelSettingsPage() {
 
       <Dialog open={addDialogOpen} onOpenChange={(open) => { if (!open) resetAddDialog(); }}>
         <DialogContent className="rounded-2xl">
-          <DialogHeader className="text-left">
+          <DialogHeader className="text-left mb-2">
             <DialogTitle>{t.settings.models.addProviderDialogTitle}</DialogTitle>
             <DialogDescription>{t.settings.models.addProviderDialogDescription}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="space-y-2">
+            <div className="space-y-2 flex flex-col">
               <label className="text-sm font-medium">{t.settings.models.providerType}</label>
               <Select value={newProviderType} onValueChange={handleProviderTypeChange}>
                 <SelectTrigger>
@@ -279,7 +317,7 @@ export function ModelSettingsPage() {
             </div>
 
             {isOpenAICompatible && (
-              <div className="space-y-2">
+              <div className="space-y-2 flex flex-col">
                 <label className="text-sm font-medium">{t.settings.models.providerName}</label>
                 <Input
                   value={newProviderName}
@@ -290,7 +328,7 @@ export function ModelSettingsPage() {
             )}
 
             {isOpenAICompatible && (
-              <div className="space-y-2">
+              <div className="space-y-2 flex flex-col">
                 <label className="text-sm font-medium">{t.settings.models.baseUrl}</label>
                 <Input
                   value={newBaseUrl}
@@ -301,7 +339,7 @@ export function ModelSettingsPage() {
             )}
 
             {newProviderType && (
-              <div className="space-y-2">
+              <div className="space-y-2 flex flex-col">
                 <label className="text-sm font-medium">{t.settings.models.apiKeyPlaceholder}</label>
                 <Input
                   type="password"
@@ -313,11 +351,11 @@ export function ModelSettingsPage() {
             )}
 
             {newProviderType && (
-              <div className="space-y-2">
+              <div className="space-y-2 flex flex-col">
                 <label className="text-sm font-medium">{t.settings.models.modelName}</label>
                 <Input
                   value={newModelName}
-                  placeholder={selectedPreset?.defaultModel || t.settings.models.modelNamePlaceholder}
+                  placeholder={selectedPreset?.defaultModel ?? t.settings.models.modelNamePlaceholder}
                   onChange={(e) => setNewModelName(e.target.value)}
                 />
               </div>
@@ -339,11 +377,13 @@ export function ModelSettingsPage() {
       </Dialog>
 
       <Dialog
-        open={providerToDelete !== null}
+        open={deleteDialogState.open}
         onOpenChange={(open) => {
-          if (!open) {
-            setProviderToDelete(null);
-          }
+          setDeleteDialogState((current) =>
+            open
+              ? current
+              : reduceDeleteDialogState(current, { type: "close" }),
+          );
         }}
       >
         <DialogContent className="rounded-2xl" showCloseButton={false}>
@@ -353,20 +393,28 @@ export function ModelSettingsPage() {
               {t.settings.models.deleteProviderConfirmDescription}
             </DialogDescription>
           </DialogHeader>
-          {providerToDelete ? (
+          {deleteDialogState.provider ? (
             <div className="bg-muted/60 rounded-xl border px-4 py-3 text-sm">
-              <div className="font-medium text-foreground">{providerToDelete.label}</div>
-              <div className="text-muted-foreground mt-1">{providerToDelete.apiKeyEnv}</div>
+              <div className="font-medium text-foreground">{deleteDialogState.provider.label}</div>
+              <div className="text-muted-foreground mt-1">{deleteDialogState.provider.apiKeyEnv}</div>
             </div>
           ) : null}
           <DialogFooter>
-            <Button variant="outline" className="rounded-full px-5" onClick={() => setProviderToDelete(null)}>
+            <Button
+              variant="outline"
+              className="rounded-full px-5"
+              onClick={() =>
+                setDeleteDialogState((current) =>
+                  reduceDeleteDialogState(current, { type: "close" }),
+                )
+              }
+            >
               {t.common.cancel}
             </Button>
             <Button
               variant="destructive"
               className="rounded-full px-5"
-              onClick={() => providerToDelete && void removeProvider(providerToDelete.id)}
+              onClick={() => deleteDialogState.provider && void removeProvider(deleteDialogState.provider.id)}
             >
               {t.common.delete}
             </Button>

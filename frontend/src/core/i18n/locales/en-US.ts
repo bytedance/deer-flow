@@ -421,7 +421,7 @@ export const enUS: Translations = {
       languageDescription: "Switch between languages.",
     },
     models: {
-      title: "Models & API Keys",
+      title: "Models",
       description: "Manage the desktop default model and LLM provider settings.",
       defaultModel: "Default model",
       defaultModelDescription: "Choose the default model used by the desktop app.",

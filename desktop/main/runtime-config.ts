@@ -76,7 +76,10 @@ function replaceModelsSection(configContent: string, modelsYaml: string) {
   let endIndex = lines.length;
   for (let index = startIndex + 1; index < lines.length; index += 1) {
     const trimmed = lines[index]?.trim() ?? "";
-    if (!trimmed || trimmed.startsWith("#")) {
+    if (!trimmed) {
+      continue;
+    }
+    if (trimmed.startsWith("#")) {
       continue;
     }
     if (TOP_LEVEL_KEY_PATTERN.test(lines[index] ?? "")) {
@@ -110,4 +113,18 @@ export function buildRuntimeConfigContent(
 
   const nextContent = replaceModelsSection(repoConfigContent, modelsYaml);
   return nextContent.endsWith("\n") ? nextContent : `${nextContent}\n`;
+}
+
+export function getExpectedConfiguredModelNames(
+  providers: DesktopProviderSetting[],
+  presets: Record<string, ProviderPreset>,
+  secrets: ProviderSecretMap = {},
+) {
+  return resolveModelEntries(
+    providers.map((provider) => ({
+      ...provider,
+      secret: secrets[provider.apiKeyEnv],
+    })),
+    presets,
+  ).map((entry) => String(entry.name));
 }
