@@ -7,6 +7,9 @@ build:
 dev:
 	pnpm dev
 
+test:
+	pnpm test
+
 lint:
 	pnpm lint
 
