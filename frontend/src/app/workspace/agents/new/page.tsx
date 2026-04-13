@@ -44,7 +44,7 @@ import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 type Step = "name" | "chat";
-type SetupAgentStatus = "idle" | "requested" | "completed";
+type SetupAgentStatus = "idle" | "requested" | "completed" | "load_failed";
 
 const NAME_RE = /^[A-Za-z0-9-]+$/;
 const SAVE_HINT_STORAGE_KEY = "deerflow.agent-create.save-hint-seen";
@@ -121,6 +121,7 @@ export default function NewAgentPage() {
           return;
         }
 
+        setSetupAgentStatus("load_failed");
         toast.error(t.agents.agentCreatedPendingRefresh);
       });
     },
@@ -204,6 +205,9 @@ export default function NewAgentPage() {
     threadId,
   ]);
 
+  const isSavingAgent =
+    setupAgentStatus === "requested" || setupAgentStatus === "completed";
+
   const handleNameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" && !isIMEComposing(e)) {
       e.preventDefault();
@@ -214,23 +218,18 @@ export default function NewAgentPage() {
   const handleChatSubmit = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || thread.isLoading) return;
+      if (!trimmed || thread.isLoading || isSavingAgent) return;
       await sendMessage(
         threadId,
         { text: trimmed, files: [] },
         { agent_name: agentName },
       );
     },
-    [agentName, sendMessage, thread.isLoading, threadId],
+    [agentName, isSavingAgent, sendMessage, thread.isLoading, threadId],
   );
 
   const handleSaveAgent = useCallback(async () => {
-    if (
-      !agentName ||
-      agent ||
-      thread.isLoading ||
-      setupAgentStatus !== "idle"
-    ) {
+    if (!agentName || agent || thread.isLoading || isSavingAgent) {
       return;
     }
 
@@ -251,8 +250,8 @@ export default function NewAgentPage() {
   }, [
     agent,
     agentName,
+    isSavingAgent,
     sendMessage,
-    setupAgentStatus,
     t.agents.saveCommandMessage,
     t.agents.saveRequested,
     thread.isLoading,
@@ -282,14 +281,10 @@ export default function NewAgentPage() {
           <DropdownMenuContent align="end">
             <DropdownMenuItem
               onSelect={() => void handleSaveAgent()}
-              disabled={
-                !!agent || thread.isLoading || setupAgentStatus !== "idle"
-              }
+              disabled={!!agent || thread.isLoading || isSavingAgent}
             >
               <SaveIcon className="h-4 w-4" />
-              {setupAgentStatus === "requested"
-                ? t.agents.saving
-                : t.agents.save}
+              {isSavingAgent ? t.agents.saving : t.agents.save}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -399,18 +394,46 @@ export default function NewAgentPage() {
                     </div>
                   </div>
                 ) : (
-                  <PromptInput
-                    onSubmit={({ text }) => void handleChatSubmit(text)}
-                  >
-                    <PromptInputTextarea
-                      autoFocus
-                      placeholder={t.agents.createPageSubtitle}
-                      disabled={thread.isLoading}
-                    />
-                    <PromptInputFooter className="justify-end">
-                      <PromptInputSubmit disabled={thread.isLoading} />
-                    </PromptInputFooter>
-                  </PromptInput>
+                  <>
+                    {isSavingAgent ? (
+                      <Alert role="status" aria-live="polite" className="mb-3">
+                        <SaveIcon className="h-4 w-4" />
+                        <AlertDescription className="gap-0.5">
+                          <span className="text-foreground font-medium">
+                            {t.agents.saving}
+                          </span>
+                          <span>{t.agents.saveRequested}</span>
+                        </AlertDescription>
+                      </Alert>
+                    ) : setupAgentStatus === "load_failed" ? (
+                      <Alert
+                        variant="destructive"
+                        role="status"
+                        aria-live="polite"
+                        className="mb-3"
+                      >
+                        <InfoIcon className="h-4 w-4" />
+                        <AlertDescription>
+                          {t.agents.agentCreatedPendingRefresh}
+                        </AlertDescription>
+                      </Alert>
+                    ) : null}
+
+                    <PromptInput
+                      onSubmit={({ text }) => void handleChatSubmit(text)}
+                    >
+                      <PromptInputTextarea
+                        autoFocus
+                        placeholder={t.agents.createPageSubtitle}
+                        disabled={thread.isLoading || isSavingAgent}
+                      />
+                      <PromptInputFooter className="justify-end">
+                        <PromptInputSubmit
+                          disabled={thread.isLoading || isSavingAgent}
+                        />
+                      </PromptInputFooter>
+                    </PromptInput>
+                  </>
                 )}
               </div>
             </div>
