@@ -21,6 +21,7 @@ class AgentResponse(BaseModel):
     """Response model for a custom agent."""
 
     name: str = Field(..., description="Agent name (hyphen-case)")
+    display_name: str | None = Field(default=None, description="Optional human-friendly agent display name")
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -37,6 +38,7 @@ class AgentCreateRequest(BaseModel):
     """Request body for creating a custom agent."""
 
     name: str = Field(..., description="Agent name (must match ^[A-Za-z0-9-]+$, stored as lowercase)")
+    display_name: str | None = Field(default=None, description="Optional human-friendly agent display name")
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -46,6 +48,7 @@ class AgentCreateRequest(BaseModel):
 class AgentUpdateRequest(BaseModel):
     """Request body for updating a custom agent."""
 
+    display_name: str | None = Field(default=None, description="Updated display name")
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
@@ -81,6 +84,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
 
     return AgentResponse(
         name=agent_cfg.name,
+        display_name=agent_cfg.display_name,
         description=agent_cfg.description,
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
@@ -194,6 +198,8 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
 
         # Write config.yaml
         config_data: dict = {"name": normalized_name}
+        if request.display_name is not None:
+            config_data["display_name"] = request.display_name
         if request.description:
             config_data["description"] = request.description
         if request.model is not None:
@@ -255,11 +261,12 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
     try:
         # Update config if any config fields changed
-        config_changed = any(v is not None for v in [request.description, request.model, request.tool_groups])
+        config_changed = any(v is not None for v in [request.display_name, request.description, request.model, request.tool_groups])
 
         if config_changed:
             updated: dict = {
                 "name": agent_cfg.name,
+                "display_name": request.display_name if request.display_name is not None else agent_cfg.display_name,
                 "description": request.description if request.description is not None else agent_cfg.description,
             }
             new_model = request.model if request.model is not None else agent_cfg.model
