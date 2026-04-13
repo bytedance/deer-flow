@@ -7,11 +7,15 @@ import { deleteSecret, getSecretStatuses, saveSecret } from "./secrets.js";
 
 export function registerDesktopIpc(options: {
   paths: DesktopPaths;
+  mode: "shared" | "bundled";
   getSettings: () => Promise<DesktopSettings>;
   setSettings: (settings: DesktopSettings) => Promise<void>;
   runtime: RuntimeProcessController;
 }) {
-  ipcMain.handle("deer-desktop:get-app-paths", async () => options.paths);
+  ipcMain.handle("deer-desktop:get-app-paths", async () => ({
+    ...options.paths,
+    mode: options.mode,
+  }));
   ipcMain.handle("deer-desktop:get-desktop-settings", async () => options.getSettings());
   ipcMain.handle("deer-desktop:update-desktop-settings", async (_event, partial: Partial<DesktopSettings>) => {
     const current = await options.getSettings();
