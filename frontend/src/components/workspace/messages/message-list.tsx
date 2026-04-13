@@ -79,29 +79,37 @@ export function MessageList({
             if (message && hasContent(message)) {
               const content = extractContentFromMessage(message);
               let payload: ClarificationPayload | null = null;
-              
+
               try {
                 // Check if the content is a valid JSON payload
-                const parsed = JSON.parse(content);
-                if (parsed && typeof parsed === "object" && parsed.kind === "clarification" && parsed.mode) {
-                  payload = parsed as ClarificationPayload;
+                const parsed = JSON.parse(content) as Record<string, unknown>;
+                if (
+                  parsed &&
+                  typeof parsed === "object" &&
+                  parsed.kind === "clarification" &&
+                  parsed.mode
+                ) {
+                  payload = parsed as unknown as ClarificationPayload;
                 }
-              } catch (e) {
+              } catch {
                 // Not JSON, fallback to markdown
               }
-              
+
               if (payload) {
                 return (
                   <div key={group.id} className="w-full">
                     <InteractiveClarificationCard
                       payload={payload}
                       onSubmit={(response) => onSubmitClarification?.(response)}
-                      disabled={thread.isLoading || group.id !== messages[messages.length - 1]?.id}
+                      disabled={
+                        thread.isLoading ||
+                        group.id !== messages[messages.length - 1]?.id
+                      }
                     />
                   </div>
                 );
               }
-              
+
               return (
                 <MarkdownContent
                   key={group.id}

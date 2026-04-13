@@ -80,18 +80,25 @@ export default function ChatPage() {
   );
 
   const handleClarificationSubmit = useCallback(
-    (response: any) => {
+    (response: unknown) => {
       // Format the response into a text message that the backend can understand
+      const typedResponse = response as {
+        mode?: string;
+        answers?: Array<{ question?: string; answer?: string }>;
+      };
+
       let text = "";
-      if (response.mode === "single") {
-        const answer = response.answers[0]?.answer;
+      if (typedResponse.mode === "single") {
+        const answer = typedResponse.answers?.[0]?.answer;
         text = `[User selected: ${answer}]`;
-      } else if (response.mode === "form") {
-        text = "[User submitted form]\n" + response.answers
-          .map((a: any) => `- **${a.question}**: ${a.answer}`)
-          .join("\n");
+      } else if (typedResponse.mode === "form") {
+        text =
+          "[User submitted form]\n" +
+          (typedResponse.answers ?? [])
+            .map((a) => `- **${a.question}**: ${a.answer}`)
+            .join("\n");
       }
-      
+
       void sendMessage(threadId, {
         text,
         files: [],
