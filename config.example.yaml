@@ -575,9 +575,14 @@ sandbox:
 #     general-purpose:
 #       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
 #       max_turns: 160
+#       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 #       max_turns: 80
+#
+#   # Model override: by default, subagents inherit the lead agent's model.
+#   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
+#   # The model name must match a name defined in the `models:` section above.
 
 # ============================================================================
 # ACP Agents Configuration
@@ -878,3 +883,20 @@ checkpointer:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# Circuit Breaker Configuration
+# ============================================================================
+# Circuit breaker for LLM calls prevents repeated requests to a failing provider.
+# When the failure threshold is reached, subsequent calls fast-fail until recovery.
+#
+# This is useful for:
+# - Avoiding rate-limit bans during provider outages
+# - Reducing resource exhaustion from retry loops
+# - Gracefully degrading when LLM services are unavailable
+
+# circuit_breaker:
+#   # Number of consecutive failures before opening the circuit (default: 5)
+#   failure_threshold: 5
+#   # Time in seconds before attempting to recover (default: 60)
+#   recovery_timeout_sec: 60

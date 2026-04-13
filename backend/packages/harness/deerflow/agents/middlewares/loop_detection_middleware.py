@@ -17,6 +17,7 @@ import json
 import logging
 import threading
 from collections import OrderedDict, defaultdict
+from copy import deepcopy
 from typing import override
 
 from langchain.agents import AgentState
@@ -323,6 +324,26 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # Fallback: coerce unexpected types to str to avoid TypeError
         return str(content) + f"\n\n{text}"
 
+    @staticmethod
+    def _build_hard_stop_update(last_msg, content: str | list) -> dict:
+        """Clear tool-call metadata so forced-stop messages serialize as plain assistant text."""
+        update = {
+            "tool_calls": [],
+            "content": content,
+        }
+
+        additional_kwargs = dict(getattr(last_msg, "additional_kwargs", {}) or {})
+        for key in ("tool_calls", "function_call"):
+            additional_kwargs.pop(key, None)
+        update["additional_kwargs"] = additional_kwargs
+
+        response_metadata = deepcopy(getattr(last_msg, "response_metadata", {}) or {})
+        if response_metadata.get("finish_reason") == "tool_calls":
+            response_metadata["finish_reason"] = "stop"
+        update["response_metadata"] = response_metadata
+
+        return update
+
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
         warning, hard_stop = self._track_and_check(state, runtime)
 
@@ -330,12 +351,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # Strip tool_calls from the last AIMessage to force text output
             messages = state.get("messages", [])
             last_msg = messages[-1]
-            stripped_msg = last_msg.model_copy(
-                update={
-                    "tool_calls": [],
-                    "content": self._append_text(last_msg.content, warning),
-                }
-            )
+            content = self._append_text(last_msg.content, warning or _HARD_STOP_MSG)
+            stripped_msg = last_msg.model_copy(update=self._build_hard_stop_update(last_msg, content))
             return {"messages": [stripped_msg]}
 
         if warning:
