@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 def _default_repo_root() -> Path:
     """Resolve the repo root without relying on the current working directory."""
-    return Path(__file__).resolve().parents[5]
+    return Path(__file__).parent.parents[4]
 
 
 class SkillsConfig(BaseModel):
@@ -33,7 +33,7 @@ class SkillsConfig(BaseModel):
             if not path.is_absolute():
                 # If relative, resolve from the repo root for deterministic behavior.
                 path = _default_repo_root() / path
-            return path.resolve()
+            return path
         else:
             # Default: ../skills relative to backend directory
             from deerflow.skills.loader import get_skills_root_path
