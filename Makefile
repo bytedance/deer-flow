@@ -162,16 +162,16 @@ start-daemon-pro:
 
 desktop-build:
 	@cd desktop && node scripts/ensure-electron.mjs
-	@cd desktop && npm run build
+	@cd desktop && pnpm run build
 
 desktop-package:
 	@cd desktop && node scripts/ensure-electron.mjs
-	@cd desktop && npm run dist
+	@cd desktop && pnpm run dist
 
 desktop-dev:
 	@DEER_FLOW_CONFIG_PATH=$(CURDIR)/config.desktop.yaml $(MAKE) dev-daemon-pro
 	@cd desktop && node scripts/ensure-electron.mjs
-	@cd desktop && npm run dev
+	@cd desktop && pnpm run dev
 
 desktop-shared:
 	@$(MAKE) desktop-dev

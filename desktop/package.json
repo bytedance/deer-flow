@@ -8,10 +8,10 @@
   "main": "dist/main/app.js",
   "scripts": {
     "build": "tsc -p tsconfig.json && cp preload/index.cjs dist/preload/index.cjs",
-    "dev": "npm run build && electron .",
+    "dev": "pnpm run build && electron .",
     "prepare-bundle": "node scripts/prepare-bundle.mjs",
-    "package": "npm run prepare-bundle && npm run build && electron-builder --dir",
-    "dist": "npm run prepare-bundle && npm run build && electron-builder"
+    "package": "pnpm run prepare-bundle && pnpm run build && electron-builder --dir",
+    "dist": "pnpm run prepare-bundle && pnpm run build && electron-builder"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",

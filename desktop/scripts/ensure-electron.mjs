@@ -94,7 +94,7 @@ function formatReason(reason) {
 }
 
 export function getElectronRepairCommand({ reason }) {
-  if (reason === "binary-missing") {
+  if (reason === "version-missing" || reason === "binary-missing") {
     return {
       cmd: process.execPath,
       args: ["node_modules/electron/install.js"],
@@ -102,7 +102,7 @@ export function getElectronRepairCommand({ reason }) {
   }
 
   return {
-    cmd: "npm",
+    cmd: "pnpm",
     args: ["install"],
   };
 }
@@ -137,7 +137,7 @@ export async function ensureElectronInstall({
   const rechecked = await getElectronInstallStatus({ desktopDir });
   if (rechecked.needsInstall) {
     throw new Error(
-      `[desktop] Electron is still unavailable after npm install (${rechecked.reason} at ${rechecked.expectedBinaryPath})`,
+      `[desktop] Electron is still unavailable after pnpm install (${rechecked.reason} at ${rechecked.expectedBinaryPath})`,
     );
   }
 
