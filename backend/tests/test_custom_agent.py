@@ -428,6 +428,27 @@ class TestAgentsAPI:
         assert data["description"] == "Reviews code"
         assert data["soul"] == "You are a code reviewer."
 
+    def test_create_agent_trims_display_name_and_omits_blank(self, agent_client, tmp_path):
+        response = agent_client.post(
+            "/api/agents",
+            json={"name": "trim-agent", "display_name": "  测试助手  ", "soul": "Hello"},
+        )
+        assert response.status_code == 201
+        assert response.json()["display_name"] == "测试助手"
+
+        config = yaml.safe_load((tmp_path / "agents" / "trim-agent" / "config.yaml").read_text(encoding="utf-8"))
+        assert config["display_name"] == "测试助手"
+
+        response = agent_client.post(
+            "/api/agents",
+            json={"name": "blank-agent", "display_name": "   ", "soul": "Hello"},
+        )
+        assert response.status_code == 201
+        assert response.json()["display_name"] is None
+
+        blank_config = yaml.safe_load((tmp_path / "agents" / "blank-agent" / "config.yaml").read_text(encoding="utf-8"))
+        assert "display_name" not in blank_config
+
     def test_create_agent_invalid_name(self, agent_client):
         payload = {"name": "Code Reviewer!", "soul": "test"}
         response = agent_client.post("/api/agents", json=payload)
@@ -497,6 +518,28 @@ class TestAgentsAPI:
         response = agent_client.put("/api/agents/slug-agent", json={"display_name": "分发Case诊断"})
         assert response.status_code == 200
         assert response.json()["display_name"] == "分发Case诊断"
+
+    def test_update_agent_display_name_trims_and_can_clear(self, agent_client, tmp_path):
+        agent_client.post(
+            "/api/agents",
+            json={"name": "clearable-agent", "display_name": " 初始名称 ", "description": "desc", "soul": "p"},
+        )
+
+        response = agent_client.put("/api/agents/clearable-agent", json={"display_name": "  更新名称  "})
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "更新名称"
+
+        config_path = tmp_path / "agents" / "clearable-agent" / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["display_name"] == "更新名称"
+
+        response = agent_client.put("/api/agents/clearable-agent", json={"display_name": "   "})
+        assert response.status_code == 200
+        assert response.json()["display_name"] is None
+
+        cleared_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "display_name" not in cleared_config
+        assert cleared_config["description"] == "desc"
 
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})

@@ -41,6 +41,7 @@ export function AgentCard({ agent }: AgentCardProps) {
     trimmedDisplayName && trimmedDisplayName.length > 0
       ? trimmedDisplayName
       : agent.name;
+  const shouldShowSlug = displayName !== agent.name;
 
   function handleChat() {
     router.push(`/workspace/agents/${agent.name}/chats/new`);
@@ -69,7 +70,7 @@ export function AgentCard({ agent }: AgentCardProps) {
                 <CardTitle className="truncate text-base">
                   {displayName}
                 </CardTitle>
-                {agent.display_name && (
+                {shouldShowSlug && (
                   <div className="text-muted-foreground truncate text-xs">
                     {agent.name}
                   </div>

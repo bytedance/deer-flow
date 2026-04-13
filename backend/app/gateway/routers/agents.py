@@ -76,6 +76,14 @@ def _normalize_agent_name(name: str) -> str:
     return name.lower()
 
 
+def _normalize_display_name(display_name: str | None) -> str | None:
+    """Trim display names and collapse empty values to None."""
+    if display_name is None:
+        return None
+    normalized = display_name.strip()
+    return normalized or None
+
+
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
@@ -198,8 +206,9 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
 
         # Write config.yaml
         config_data: dict = {"name": normalized_name}
-        if request.display_name is not None:
-            config_data["display_name"] = request.display_name
+        normalized_display_name = _normalize_display_name(request.display_name)
+        if normalized_display_name is not None:
+            config_data["display_name"] = normalized_display_name
         if request.description:
             config_data["description"] = request.description
         if request.model is not None:
@@ -261,14 +270,22 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
     try:
         # Update config if any config fields changed
-        config_changed = any(v is not None for v in [request.display_name, request.description, request.model, request.tool_groups])
+        display_name_provided = "display_name" in request.model_fields_set
+        config_changed = display_name_provided or any(
+            v is not None for v in [request.description, request.model, request.tool_groups]
+        )
 
         if config_changed:
             updated: dict = {
                 "name": agent_cfg.name,
-                "display_name": request.display_name if request.display_name is not None else agent_cfg.display_name,
                 "description": request.description if request.description is not None else agent_cfg.description,
             }
+            new_display_name = agent_cfg.display_name
+            if display_name_provided:
+                new_display_name = _normalize_display_name(request.display_name)
+            if new_display_name is not None:
+                updated["display_name"] = new_display_name
+
             new_model = request.model if request.model is not None else agent_cfg.model
             if new_model is not None:
                 updated["model"] = new_model
