@@ -15,6 +15,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
+# Pre-mock exa_py so that deerflow.community.exa.tools is importable in unit
+# tests without the optional exa-py package being installed in the test
+# environment.  Individual test fixtures that exercise Exa behaviour replace
+# deerflow.community.exa.tools.Exa with a more specific mock via patch().
+if "exa_py" not in sys.modules:
+    _exa_mock = MagicMock()
+    _exa_mock.Exa = MagicMock
+    sys.modules["exa_py"] = _exa_mock
+
 # Break the circular import chain that exists in production code:
 #   deerflow.subagents.__init__
 #     -> .executor (SubagentExecutor, SubagentResult)
