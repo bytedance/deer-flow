@@ -4,6 +4,8 @@ import re
 import shlex
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+from typing import Any
 
 from langchain.tools import tool
 
@@ -1060,6 +1062,22 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
     if not isinstance(sandbox_id, str):
         return False
     return sandbox_id == "local" or sandbox_id.startswith("local:")
+
+def get_custom_fields(runtime: Runtime | None) -> dict[str, Any]:
+    """Extract custom_fields from runtime state or config.
+
+    Checks state first (set by CustomFieldsMiddleware), then falls back
+    to config.configurable (for direct access without middleware).
+    """
+    if runtime is None:
+        return {}
+    if runtime.state is not None:
+        fields = runtime.state.get("custom_fields")
+        if fields:
+            return fields
+    configurable = getattr(runtime, "config", {}).get("configurable", {})
+    fields = configurable.get("custom_fields")
+    return fields or {}
 
 
 def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:

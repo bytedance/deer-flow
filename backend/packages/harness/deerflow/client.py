@@ -212,6 +212,9 @@ class DeerFlowClient:
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
             "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
         }
+        custom_fields = overrides.get("custom_fields")
+        if custom_fields:
+            configurable["custom_fields"] = custom_fields
         return RunnableConfig(
             configurable=configurable,
             recursion_limit=overrides.get("recursion_limit", 100),
@@ -227,6 +230,7 @@ class DeerFlowClient:
             cfg.get("subagent_enabled"),
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
+            frozenset(cfg.get("custom_fields", {}).items()) if cfg.get("custom_fields") else None,
         )
 
         if self._agent is not None and self._agent_config_key == key:
