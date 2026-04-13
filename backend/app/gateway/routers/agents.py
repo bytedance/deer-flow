@@ -42,7 +42,7 @@ class AgentCreateRequest(BaseModel):
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
-    soul: str = Field(default="", description="SOUL.md content — agent personality and behavioral guardrails")
+    soul: str = Field(default="", description="SOUL.md content 鈥?agent personality and behavioral guardrails")
 
 
 class AgentUpdateRequest(BaseModel):
@@ -271,9 +271,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     try:
         # Update config if any config fields changed
         display_name_provided = "display_name" in request.model_fields_set
-        config_changed = display_name_provided or any(
-            v is not None for v in [request.description, request.model, request.tool_groups]
-        )
+        config_changed = display_name_provided or any(v is not None for v in [request.description, request.model, request.tool_groups])
 
         if config_changed:
             updated: dict = {
@@ -324,7 +322,7 @@ class UserProfileResponse(BaseModel):
 class UserProfileUpdateRequest(BaseModel):
     """Request body for setting the global user profile."""
 
-    content: str = Field(default="", description="USER.md content — describes the user's background and preferences")
+    content: str = Field(default="", description="USER.md content 鈥?describes the user's background and preferences")
 
 
 @router.get(
