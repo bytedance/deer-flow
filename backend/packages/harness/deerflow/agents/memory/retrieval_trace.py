@@ -101,7 +101,12 @@ def build_empty_retrieval_trace(max_tokens: int) -> RetrievalTrace:
     )
 
 
-def _resolve_trace_path(agent_name: str | None = None) -> Path:
+def resolve_trace_path(agent_name: str | None = None) -> Path:
+    """Resolve the path for the retrieval trace JSONL file.
+
+    Uses ``RetrievalTraceConfig.storage_path`` when configured, otherwise
+    derives the path from the active memory file location.
+    """
     config = get_memory_config().retrieval_trace
     if config.storage_path:
         custom_path = Path(config.storage_path)
@@ -142,7 +147,7 @@ def emit_retrieval_trace(
     trace.agent_name = agent_name
     payload = _serialize_trace(trace)
     payload_line = json.dumps(payload, ensure_ascii=False) + "\n"
-    path = _resolve_trace_path(agent_name)
+    path = resolve_trace_path(agent_name)
 
     try:
         with _trace_write_lock:
