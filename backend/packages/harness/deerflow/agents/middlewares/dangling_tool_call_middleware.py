@@ -13,6 +13,7 @@ at the correct positions (immediately after each dangling AIMessage), not append
 to the end of the message list as before_model + add_messages reducer would do.
 """
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import override
@@ -33,6 +34,44 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
     offending AIMessage so the LLM receives a well-formed conversation.
     """
 
+    @staticmethod
+    def _message_tool_calls(msg) -> list[dict]:
+        """Return normalized tool calls from structured fields or raw provider payloads."""
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if tool_calls:
+            return list(tool_calls)
+
+        raw_tool_calls = (getattr(msg, "additional_kwargs", None) or {}).get("tool_calls") or []
+        normalized: list[dict] = []
+        for raw_tc in raw_tool_calls:
+            if not isinstance(raw_tc, dict):
+                continue
+
+            function = raw_tc.get("function")
+            name = raw_tc.get("name")
+            if not name and isinstance(function, dict):
+                name = function.get("name")
+
+            args = raw_tc.get("args", {})
+            if not args and isinstance(function, dict):
+                raw_args = function.get("arguments")
+                if isinstance(raw_args, str):
+                    try:
+                        parsed_args = json.loads(raw_args)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        parsed_args = {}
+                    args = parsed_args if isinstance(parsed_args, dict) else {}
+
+            normalized.append(
+                {
+                    "id": raw_tc.get("id"),
+                    "name": name or "unknown",
+                    "args": args if isinstance(args, dict) else {},
+                }
+            )
+
+        return normalized
+
     def _build_patched_messages(self, messages: list) -> list | None:
         """Return a new message list with patches inserted at the correct positions.
 
@@ -51,7 +90,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         for msg in messages:
             if getattr(msg, "type", None) != "ai":
                 continue
-            for tc in getattr(msg, "tool_calls", None) or []:
+            for tc in self._message_tool_calls(msg):
                 tc_id = tc.get("id")
                 if tc_id and tc_id not in existing_tool_msg_ids:
                     needs_patch = True
@@ -70,7 +109,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             patched.append(msg)
             if getattr(msg, "type", None) != "ai":
                 continue
-            for tc in getattr(msg, "tool_calls", None) or []:
+            for tc in self._message_tool_calls(msg):
                 tc_id = tc.get("id")
                 if tc_id and tc_id not in existing_tool_msg_ids and tc_id not in patched_ids:
                     patched.append(
