@@ -469,3 +469,103 @@ class TestDuplicateXValueAggregation:
         assert "test-dup" in html
         # Verify via option JSON that data is summed
         assert "error" not in html.lower()
+
+
+# ---------------------------------------------------------------------------
+# value_sql KPI override tests
+# ---------------------------------------------------------------------------
+
+
+class TestKpiValueSql:
+    """KPI values can be overridden via value_sql in template definitions."""
+
+    def test_value_sql_overrides_default(self, con_with_data, sample_csv):
+        """A KPI with value_sql should override the _compute_kpis default."""
+        template = {
+            "name": "sql-override",
+            "title": "SQL Override Test",
+            "theme": "light",
+            "sections": [
+                {
+                    "type": "kpi_row",
+                    "kpis": [
+                        {
+                            "label": "Custom Avg",
+                            "field": "kpi_avg",
+                            "format": "number",
+                            "value_sql": "SELECT 42.0",
+                        },
+                    ],
+                },
+            ],
+        }
+        html = generate_report(template, con_with_data, "light", {})
+        # The overridden value should appear, not the original AVG(revenue)=160.0
+        assert "42.0" in html
+
+    def test_value_sql_fills_none_field(self, con_with_data, sample_csv):
+        """A KPI whose field is normally None (e.g. kpi_satisfaction) can get a value via value_sql."""
+        template = {
+            "name": "sql-fill",
+            "title": "SQL Fill Test",
+            "theme": "light",
+            "sections": [
+                {
+                    "type": "kpi_row",
+                    "kpis": [
+                        {
+                            "label": "Total Rows",
+                            "field": "kpi_satisfaction",
+                            "format": "number",
+                            "value_sql": "SELECT COUNT(*) FROM data",
+                        },
+                    ],
+                },
+            ],
+        }
+        html = generate_report(template, con_with_data, "light", {})
+        # 5 rows in sample_csv
+        assert "5" in html
+
+    def test_value_sql_error_falls_back_to_none(self, con_with_data, sample_csv):
+        """If value_sql fails (bad column), the KPI should show N/A."""
+        template = {
+            "name": "sql-error",
+            "title": "SQL Error Test",
+            "theme": "light",
+            "sections": [
+                {
+                    "type": "kpi_row",
+                    "kpis": [
+                        {
+                            "label": "Bad KPI",
+                            "field": "kpi_wow",
+                            "format": "percent",
+                            "value_sql": "SELECT AVG(nonexistent_column) FROM data",
+                        },
+                    ],
+                },
+            ],
+        }
+        html = generate_report(template, con_with_data, "light", {})
+        assert "N/A" in html
+
+    def test_no_value_sql_preserves_default(self, con_with_data, sample_csv):
+        """KPIs without value_sql should keep their _compute_kpis values."""
+        template = {
+            "name": "no-sql",
+            "title": "No SQL Test",
+            "theme": "light",
+            "sections": [
+                {
+                    "type": "kpi_row",
+                    "kpis": [
+                        {"label": "Revenue", "field": "kpi_revenue", "format": "currency"},
+                        {"label": "Orders", "field": "kpi_orders", "format": "number"},
+                    ],
+                },
+            ],
+        }
+        html = generate_report(template, con_with_data, "light", {})
+        assert "$800.00" in html
+        assert "5" in html

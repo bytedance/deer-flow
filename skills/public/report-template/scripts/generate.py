@@ -518,7 +518,18 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
                 "kpis": [
                     {"label": "This Week Revenue", "field": "kpi_revenue", "format": "currency"},
                     {"label": "Orders", "field": "kpi_orders", "format": "number"},
-                    {"label": "WoW Change", "field": "kpi_wow", "format": "percent"},
+                    {
+                        "label": "WoW Change",
+                        "field": "kpi_wow",
+                        "format": "percent",
+                        "value_sql": (
+                            "SELECT CASE WHEN prev=0 THEN NULL "
+                            "ELSE ROUND((curr-prev)/ABS(prev)*100, 1) END FROM ("
+                            "SELECT SUM(CASE WHEN order_date >= CURRENT_DATE - INTERVAL '7 DAY' THEN revenue ELSE 0 END) as curr, "
+                            "SUM(CASE WHEN order_date < CURRENT_DATE - INTERVAL '7 DAY' AND order_date >= CURRENT_DATE - INTERVAL '14 DAY' THEN revenue ELSE 0 END) as prev "
+                            "FROM data)"
+                        ),
+                    },
                 ],
             },
             {
@@ -557,7 +568,13 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
                     {"label": "Revenue", "field": "kpi_revenue", "format": "currency", "target": 100000},
                     {"label": "Orders", "field": "kpi_orders", "format": "number", "target": 500},
                     {"label": "Avg Order", "field": "kpi_avg", "format": "currency", "target": 200},
-                    {"label": "Satisfaction", "field": "kpi_satisfaction", "format": "percent", "target": 90},
+                    {
+                        "label": "Satisfaction",
+                        "field": "kpi_satisfaction",
+                        "format": "percent",
+                        "target": 90,
+                        "value_sql": "SELECT ROUND(AVG(satisfaction), 1) FROM data",
+                    },
                 ],
             },
             {
@@ -599,6 +616,21 @@ def generate_report(
 
     # Pre-compute KPI values from data
     data_results = _compute_kpis(con)
+
+    # Override KPI values from template-specified SQL
+    for section in sections:
+        if section.get("type") != "kpi_row":
+            continue
+        for kpi in section.get("kpis", []):
+            sql = kpi.get("value_sql", "")
+            field = kpi.get("field", "")
+            if not sql or not field:
+                continue
+            try:
+                row = con.execute(sql).fetchone()
+                data_results[field] = row[0] if row else None
+            except Exception:
+                data_results[field] = None
 
     # Render sections
     section_parts: list[str] = []
