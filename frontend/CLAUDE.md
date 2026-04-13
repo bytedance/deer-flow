@@ -81,7 +81,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ## Environment
 
-Backend API URLs are optional; an nginx proxy is used by default:
+Backend API URLs are optional; the FastAPI Gateway reverse-proxies all API
+traffic by default (no nginx sidecar — see
+`backend/app/gateway/routers/proxy.py`):
 
 ```
 NEXT_PUBLIC_BACKEND_BASE_URL=http://localhost:8001

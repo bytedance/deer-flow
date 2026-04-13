@@ -27,9 +27,13 @@ const config = {
       "DEER_FLOW_INTERNAL_LANGGRAPH_BASE_URL",
       "http://127.0.0.1:2024",
     );
+    // The gateway acts as the unified entry point in supervised modes (port
+    // 2026). When the frontend is run standalone (rare), set
+    // DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://127.0.0.1:8001 to talk to a
+    // gateway started via `make gateway` from the backend directory.
     const gatewayURL = getInternalServiceURL(
       "DEER_FLOW_INTERNAL_GATEWAY_BASE_URL",
-      "http://127.0.0.1:8001",
+      "http://127.0.0.1:2026",
     );
 
     if (!process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {

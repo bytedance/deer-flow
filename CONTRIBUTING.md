@@ -8,7 +8,7 @@ We offer two development environments. **Docker is recommended** for the most co
 
 ### Option 1: Docker Development (Recommended)
 
-Docker provides a consistent, isolated environment with all dependencies pre-configured. No need to install Node.js, Python, or nginx on your local machine.
+Docker provides a consistent, isolated environment with all dependencies pre-configured. No need to install Node.js or Python on your local machine.
 
 #### Prerequisites
 
@@ -129,16 +129,15 @@ If `docker ps` still reports a permission error after `usermod`, fully log out a
 Host Machine
   ↓
 Docker Compose (deer-flow-dev)
-  ├→ nginx (port 2026) ← Reverse proxy
-  ├→ web (port 3000) ← Frontend with hot-reload
-  ├→ api (port 8001) ← Gateway API with hot-reload
-   ├→ langgraph (port 2024) ← LangGraph server with hot-reload
-   └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
+  ├→ gateway (host port 2026 → container 8001) ← Gateway API + reverse proxy (replaces nginx)
+  ├→ frontend (port 3000) ← Frontend with hot-reload (internal only)
+  ├→ langgraph (port 2024) ← LangGraph server with hot-reload (internal only)
+  └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
 ```
 
 **Benefits of Docker Development**:
 - ✅ Consistent environment across different machines
-- ✅ No need to install Node.js, Python, or nginx locally
+- ✅ No need to install Node.js or Python locally
 - ✅ Isolated dependencies and services
 - ✅ Easy cleanup and reset
 - ✅ Hot-reload for all services
@@ -160,7 +159,6 @@ Required tools:
 - Node.js 22+
 - pnpm
 - uv (Python package manager)
-- nginx
 
 #### Setup Steps
 
@@ -171,14 +169,14 @@ Required tools:
    make install
    ```
 
-3. **Run development server** (starts all services with nginx):
+3. **Run development server** (starts LangGraph + Frontend + Gateway):
    ```bash
    make dev
    ```
 
 4. **Access the application**:
    - Web Interface: http://localhost:2026
-   - All API requests are automatically proxied through nginx
+   - All API requests are served by — and proxied through — the gateway
 
 #### Manual Service Control
 
@@ -190,7 +188,8 @@ If you need to start services individually:
    cd backend
    make dev
 
-   # Terminal 2: Start Gateway API (port 8001)
+   # Terminal 2: Start Gateway API (port 8001 by default; bypasses the
+   # supervised mode that binds it to 2026)
    cd backend
    make gateway
 
@@ -199,25 +198,26 @@ If you need to start services individually:
    pnpm dev
    ```
 
-2. **Start nginx**:
-   ```bash
-   make nginx
-   # or directly: nginx -c $(pwd)/docker/nginx/nginx.local.conf -g 'daemon off;'
-   ```
+2. **Access the application**:
+   - Frontend (direct):     http://localhost:3000
+   - Gateway API (direct):  http://localhost:8001/api/...
+   - LangGraph (direct):    http://localhost:2024
 
-3. **Access the application**:
-   - Web Interface: http://localhost:2026
+   In this mode there is no unified entry point on 2026 because each service
+   is reachable on its own port. Use `make dev` from the repo root to get the
+   gateway-as-proxy entry point on http://localhost:2026.
 
-#### Nginx Configuration
+#### Gateway Reverse-Proxy Configuration
 
-The nginx configuration provides:
+The gateway's `proxy` router (`backend/app/gateway/routers/proxy.py`) provides:
 - Unified entry point on port 2026
 - Routes `/api/langgraph/*` to LangGraph Server (2024)
-- Routes other `/api/*` endpoints to Gateway API (8001)
+- Serves other `/api/*` endpoints natively via FastAPI routers
 - Routes non-API requests to Frontend (3000)
-- Centralized CORS handling
-- SSE/streaming support for real-time agent responses
-- Optimized timeouts for long-running operations
+- Centralized CORS handling via `fastapi.middleware.cors.CORSMiddleware`
+- SSE/streaming support via `httpx.AsyncClient.stream()` + `StreamingResponse`
+- 600s timeouts for long-running operations
+- WebSocket forwarding for Next.js HMR
 
 ## Project Structure
 
@@ -229,10 +229,7 @@ deer-flow/
 ├── scripts/
 │   └── docker.sh           # Docker management script
 ├── docker/
-│   ├── docker-compose-dev.yaml  # Docker Compose configuration
-│   └── nginx/
-│       ├── nginx.conf      # Nginx config for Docker
-│       └── nginx.local.conf # Nginx config for local dev
+│   └── docker-compose-dev.yaml  # Docker Compose configuration
 ├── backend/                 # Backend application
 │   ├── src/
 │   │   ├── gateway/        # Gateway API (port 8001)
@@ -254,10 +251,10 @@ deer-flow/
 ```
 Browser
   ↓
-Nginx (port 2026) ← Unified entry point
-  ├→ Frontend (port 3000) ← / (non-API requests)
-  ├→ Gateway API (port 8001) ← /api/models, /api/mcp, /api/skills, /api/threads/*/artifacts
-  └→ LangGraph Server (port 2024) ← /api/langgraph/* (agent interactions)
+Gateway API (port 2026) ← Unified entry point + REST API + reverse proxy
+  ├→ FastAPI routers (in-process) ← /api/models, /api/mcp, /api/skills, /api/threads/*/artifacts
+  ├→ Frontend (port 3000)        ← /  (non-API requests, via httpx)
+  └→ LangGraph Server (port 2024) ← /api/langgraph/* (via httpx, with SSE streaming)
 ```
 
 ## Development Workflow

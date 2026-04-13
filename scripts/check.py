@@ -120,23 +120,6 @@ def main() -> int:
         failed = True
 
     print()
-    print("Checking nginx...")
-    if shutil.which("nginx"):
-        nginx_version_text = run_command(["nginx", "-v"])
-        if nginx_version_text and "/" in nginx_version_text:
-            nginx_version = nginx_version_text.split("/", 1)[1]
-            print(f"  OK nginx {nginx_version}")
-        else:
-            print("  INFO nginx (version unknown)")
-    else:
-        print("  FAIL nginx not found")
-        print("    macOS:   brew install nginx")
-        print("    Ubuntu:  sudo apt install nginx")
-        print("    Windows: use WSL for local mode or use Docker mode")
-        print("    Or visit: https://nginx.org/en/download.html")
-        failed = True
-
-    print()
     if not failed:
         print("==========================================")
         print("  OK All dependencies are installed!")

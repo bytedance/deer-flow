@@ -10,8 +10,9 @@
 #
 # Runtime modes:
 #   --standard  (default)  All services including LangGraph server.
-#   --gateway              No LangGraph container; nginx routes /api/langgraph/*
-#                          to the Gateway compat API instead.
+#   --gateway              No LangGraph container; the gateway's in-process
+#                          reverse proxy routes /api/langgraph/* back to the
+#                          gateway's own LangGraph Platform-compat routers.
 #
 # Sandbox mode (local / aio / provisioner) is auto-detected from config.yaml.
 #
@@ -234,12 +235,12 @@ echo -e "${BLUE}Runtime mode: $RUNTIME_MODE${NC}"
 
 case "$RUNTIME_MODE" in
     gateway)
-        export LANGGRAPH_UPSTREAM=gateway:8001
-        export LANGGRAPH_REWRITE=/api/
-        services="frontend gateway nginx"
+        export DEERFLOW_PROXY_LANGGRAPH_UPSTREAM=http://gateway:8001
+        export DEERFLOW_PROXY_LANGGRAPH_REWRITE=/api/
+        services="frontend gateway"
         ;;
     standard)
-        services="frontend gateway langgraph nginx"
+        services="frontend gateway langgraph"
         ;;
 esac
 

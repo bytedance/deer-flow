@@ -169,14 +169,14 @@ start() {
     sandbox_mode="$(detect_sandbox_mode)"
 
     if $gateway_mode; then
-        services="frontend gateway nginx"
+        services="frontend gateway"
         if [ "$sandbox_mode" = "provisioner" ]; then
-            services="frontend gateway provisioner nginx"
+            services="frontend gateway provisioner"
         fi
     else
-        services="frontend gateway langgraph nginx"
+        services="frontend gateway langgraph"
         if [ "$sandbox_mode" = "provisioner" ]; then
-            services="frontend gateway langgraph provisioner nginx"
+            services="frontend gateway langgraph provisioner"
         fi
     fi
 
@@ -232,10 +232,12 @@ start() {
         fi
     fi
 
-    # Set nginx routing for gateway mode (envsubst in nginx container)
+    # Configure the in-process reverse proxy for gateway mode: route
+    # /api/langgraph/* back to the gateway's own LangGraph Platform-compat
+    # routers instead of an external langgraph container.
     if $gateway_mode; then
-        export LANGGRAPH_UPSTREAM=gateway:8001
-        export LANGGRAPH_REWRITE=/api/
+        export DEERFLOW_PROXY_LANGGRAPH_UPSTREAM=http://gateway:8001
+        export DEERFLOW_PROXY_LANGGRAPH_REWRITE=/api/
     fi
 
     echo "Building and starting containers..."
@@ -272,9 +274,9 @@ logs() {
             service="gateway"
             echo -e "${BLUE}Viewing gateway logs...${NC}"
             ;;
-        --nginx)
-            service="nginx"
-            echo -e "${BLUE}Viewing nginx logs...${NC}"
+        --langgraph)
+            service="langgraph"
+            echo -e "${BLUE}Viewing langgraph logs...${NC}"
             ;;
         --provisioner)
             service="provisioner"
@@ -285,7 +287,7 @@ logs() {
             ;;
         *)
             echo -e "${YELLOW}Unknown option: $1${NC}"
-            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--provisioner]"
+            echo "Usage: $0 logs [--frontend|--gateway|--langgraph|--provisioner]"
             exit 1
             ;;
     esac
@@ -335,9 +337,9 @@ help() {
     echo "  start --gateway   - Start without LangGraph container (Gateway mode, experimental)"
     echo "  restart           - Restart all running Docker services"
     echo "  logs [option] - View Docker development logs"
-    echo "                  --frontend   View frontend logs only"
-    echo "                  --gateway    View gateway logs only"
-    echo "                  --nginx      View nginx logs only"
+    echo "                  --frontend    View frontend logs only"
+    echo "                  --gateway     View gateway logs only"
+    echo "                  --langgraph   View langgraph logs only"
     echo "                  --provisioner View provisioner logs only"
     echo "  stop          - Stop Docker development services"
     echo "  help          - Show this help message"

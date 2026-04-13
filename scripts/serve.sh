@@ -84,12 +84,9 @@ stop_all() {
     pkill -f "next dev" 2>/dev/null || true
     pkill -f "next start" 2>/dev/null || true
     pkill -f "next-server" 2>/dev/null || true
-    nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
-    sleep 1
-    pkill -9 nginx 2>/dev/null || true
     # Force-kill any survivors still holding the service ports
     _kill_port 2024
-    _kill_port 8001
+    _kill_port 2026
     _kill_port 3000
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
@@ -211,6 +208,24 @@ sync_frontend_env() {
 
 sync_frontend_env
 
+# ── Reverse-proxy upstreams (handled in-process by the Gateway) ──────────────
+# In gateway mode, /api/langgraph/* dispatches back to /api/* on the gateway
+# itself (the LangGraph Platform-compat routers). Otherwise, it goes to the
+# local langgraph dev server on port 2024.
+export DEERFLOW_PROXY_FRONTEND_UPSTREAM="${DEERFLOW_PROXY_FRONTEND_UPSTREAM:-http://127.0.0.1:3000}"
+export DEERFLOW_PROXY_PROVISIONER_UPSTREAM="${DEERFLOW_PROXY_PROVISIONER_UPSTREAM:-http://127.0.0.1:8002}"
+if $GATEWAY_MODE; then
+    export DEERFLOW_PROXY_LANGGRAPH_UPSTREAM="${DEERFLOW_PROXY_LANGGRAPH_UPSTREAM:-http://127.0.0.1:2026}"
+    export DEERFLOW_PROXY_LANGGRAPH_REWRITE="${DEERFLOW_PROXY_LANGGRAPH_REWRITE:-/api/}"
+else
+    export DEERFLOW_PROXY_LANGGRAPH_UPSTREAM="${DEERFLOW_PROXY_LANGGRAPH_UPSTREAM:-http://127.0.0.1:2024}"
+    export DEERFLOW_PROXY_LANGGRAPH_REWRITE="${DEERFLOW_PROXY_LANGGRAPH_REWRITE:-/}"
+fi
+
+# Local IM channel callbacks need to reach the gateway via the proxy port.
+export DEER_FLOW_CHANNELS_GATEWAY_URL="${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://127.0.0.1:2026}"
+export DEER_FLOW_CHANNELS_LANGGRAPH_URL="${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://127.0.0.1:2024}"
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 
 echo ""
@@ -222,11 +237,10 @@ echo "  Mode: $MODE_LABEL"
 echo ""
 echo "  Services:"
 if ! $GATEWAY_MODE; then
-    echo "    LangGraph   → localhost:2024  (agent runtime)"
+    echo "    LangGraph   → localhost:2024  (agent runtime, internal)"
 fi
-echo "    Gateway     → localhost:8001  (REST API$(if $GATEWAY_MODE; then echo " + agent runtime"; fi))"
-echo "    Frontend    → localhost:3000  (Next.js)"
-echo "    Nginx       → localhost:2026  (reverse proxy)"
+echo "    Frontend    → localhost:3000  (Next.js, internal)"
+echo "    Gateway     → localhost:2026  (REST API + reverse proxy$(if $GATEWAY_MODE; then echo " + agent runtime"; fi))"
 echo ""
 
 # ── Cleanup handler ──────────────────────────────────────────────────────────
@@ -266,7 +280,6 @@ run_service() {
 # ── Start services ───────────────────────────────────────────────────────────
 
 mkdir -p logs
-mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
 
 # 1. LangGraph (skip in gateway mode)
 if ! $GATEWAY_MODE; then
@@ -285,20 +298,15 @@ else
     echo "⏩ Skipping LangGraph (Gateway mode — runtime embedded in Gateway)"
 fi
 
-# 2. Gateway API
-run_service "Gateway" \
-    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
-    8001 30
-
-# 3. Frontend
+# 2. Frontend (must come before Gateway because Gateway proxies to it)
 run_service "Frontend" \
     "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
     3000 120
 
-# 4. Nginx
-run_service "Nginx" \
-    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
-    2026 10
+# 3. Gateway API + reverse proxy (replaces nginx)
+run_service "Gateway" \
+    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 2026 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    2026 30
 
 # ── Ready ────────────────────────────────────────────────────────────────────
 
@@ -310,15 +318,16 @@ echo ""
 echo "  🌐 http://localhost:2026"
 echo ""
 if $GATEWAY_MODE; then
-    echo "  Routing: Frontend → Nginx → Gateway (embedded runtime)"
-    echo "  API:     /api/langgraph-compat/*  →  Gateway agent runtime"
+    echo "  Routing: Browser → Gateway (REST + reverse proxy + embedded runtime) → Frontend"
+    echo "  API:     /api/langgraph/*  →  Gateway compat router (in-process)"
 else
-    echo "  Routing: Frontend → Nginx → LangGraph + Gateway"
-    echo "  API:     /api/langgraph/*  →  LangGraph server (2024)"
+    echo "  Routing: Browser → Gateway (REST + reverse proxy) → Frontend / LangGraph"
+    echo "  API:     /api/langgraph/*  →  LangGraph server (2024) via httpx"
 fi
-echo "           /api/*              →  Gateway REST API (8001)"
+echo "           /api/*              →  Gateway REST API (in-process)"
+echo "           /                   →  Frontend Next.js (3000) via httpx"
 echo ""
-echo "  📋 Logs: logs/{langgraph,gateway,frontend,nginx}.log"
+echo "  📋 Logs: logs/{langgraph,gateway,frontend}.log"
 echo ""
 
 if $DAEMON_MODE; then

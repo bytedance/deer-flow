@@ -7,37 +7,39 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 ## Architecture
 
 ```
-                        ┌──────────────────────────────────────┐
-                        │          Nginx (Port 2026)           │
-                        │      Unified reverse proxy           │
-                        └───────┬──────────────────┬───────────┘
-                                │                  │
-              /api/langgraph/*  │                  │  /api/* (other)
-                                ▼                  ▼
-               ┌────────────────────┐  ┌────────────────────────┐
-               │ LangGraph Server   │  │   Gateway API (8001)   │
-               │    (Port 2024)     │  │   FastAPI REST         │
-               │                    │  │                        │
-               │ ┌────────────────┐ │  │ Models, MCP, Skills,   │
-               │ │  Lead Agent    │ │  │ Memory, Uploads,       │
-               │ │  ┌──────────┐  │ │  │ Artifacts              │
-               │ │  │Middleware│  │ │  └────────────────────────┘
-               │ │  │  Chain   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │  Tools   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │Subagents │  │ │
-               │ │  └──────────┘  │ │
-               │ └────────────────┘ │
-               └────────────────────┘
+                ┌──────────────────────────────────────────────┐
+                │       Gateway API + Reverse Proxy            │
+                │              (Port 2026)                     │
+                │    Single FastAPI process — replaces nginx   │
+                └─┬────────────────┬─────────────────┬─────────┘
+                  │ httpx          │ FastAPI         │ httpx
+                  │ proxy          │ routers         │ proxy
+                  ▼                ▼                 ▼
+       ┌────────────────────┐  ┌────────────────┐  ┌──────────────┐
+       │ LangGraph Server   │  │ /api/* native  │  │ Frontend     │
+       │    (Port 2024)     │  │ Models, MCP,   │  │  (Port 3000) │
+       │                    │  │ Skills, Memory,│  │  Next.js     │
+       │ ┌────────────────┐ │  │ Uploads,       │  └──────────────┘
+       │ │  Lead Agent    │ │  │ Artifacts      │
+       │ │  ┌──────────┐  │ │  └────────────────┘
+       │ │  │Middleware│  │ │
+       │ │  │  Chain   │  │ │
+       │ │  └──────────┘  │ │
+       │ │  ┌──────────┐  │ │
+       │ │  │  Tools   │  │ │
+       │ │  └──────────┘  │ │
+       │ │  ┌──────────┐  │ │
+       │ │  │Subagents │  │ │
+       │ │  └──────────┘  │ │
+       │ └────────────────┘ │
+       └────────────────────┘
 ```
 
-**Request Routing** (via Nginx):
-- `/api/langgraph/*` → LangGraph Server - agent interactions, threads, streaming
-- `/api/*` (other) → Gateway API - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
-- `/` (non-API) → Frontend - Next.js web interface
+**Request Routing** (handled in-process by `app/gateway/routers/proxy.py`):
+- `/api/langgraph/*` → LangGraph Server (httpx reverse proxy) — agent interactions, threads, streaming
+- `/api/*` (other) → Gateway API native FastAPI routers — models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
+- `/api/sandboxes` → Sandbox provisioner (httpx reverse proxy, optional)
+- `/` (non-API) → Frontend (httpx reverse proxy with WebSocket HMR support) — Next.js web interface
 
 ---
 
@@ -193,7 +195,7 @@ export OPENAI_API_KEY="your-api-key-here"
 **Full Application** (from project root):
 
 ```bash
-make dev  # Starts LangGraph + Gateway + Frontend + Nginx
+make dev  # Starts LangGraph + Frontend + Gateway (gateway also reverse-proxies LangGraph and the frontend)
 ```
 
 Access at: http://localhost:2026

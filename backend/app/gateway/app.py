@@ -1,8 +1,11 @@
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.config import get_gateway_config
 from app.gateway.deps import langgraph_runtime
@@ -14,6 +17,7 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    proxy,
     runs,
     skills,
     suggestions,
@@ -48,6 +52,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
+    # Shared httpx client for the reverse-proxy router (replaces the nginx
+    # sidecar). Configured with the same generous timeouts nginx used so SSE
+    # streams and large uploads work without buffering.
+    app.state.proxy_client = httpx.AsyncClient(timeout=proxy.PROXY_TIMEOUT, follow_redirects=False)
+
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app):
         logger.info("LangGraph runtime initialised")
@@ -70,6 +79,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await stop_channel_service()
         except Exception:
             logger.exception("Failed to stop channel service")
+
+    try:
+        await app.state.proxy_client.aclose()
+    except Exception:
+        logger.exception("Failed to close proxy client")
 
     logger.info("Shutting down API Gateway")
 
@@ -99,8 +113,11 @@ API Gateway for DeerFlow - A LangGraph-based AI agent backend with sandbox execu
 
 ### Architecture
 
-LangGraph requests are handled by nginx reverse proxy.
-This gateway provides custom endpoints for models, MCP configuration, skills, and artifacts.
+The gateway is the single public entry point for DeerFlow. It serves the
+custom REST endpoints (models, MCP configuration, skills, artifacts, ...)
+and reverse-proxies every other path to the appropriate upstream
+(LangGraph server, sandbox provisioner, Next.js frontend) — no nginx
+sidecar required.
         """,
         version="0.1.0",
         lifespan=lifespan,
@@ -163,7 +180,19 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         ],
     )
 
-    # CORS is handled by nginx - no need for FastAPI middleware
+    # CORS is handled centrally by the gateway (formerly handled by the nginx
+    # sidecar). Defaults to a permissive ``*`` origin policy with credentials
+    # disabled — set ``DEERFLOW_CORS_ORIGINS`` to a comma-separated list to
+    # restrict it for hardened deployments.
+    cors_origins = [origin.strip() for origin in os.getenv("DEERFLOW_CORS_ORIGINS", "*").split(",") if origin.strip()]
+    allow_credentials = "*" not in cors_origins
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins or ["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+        allow_headers=["*"],
+        allow_credentials=allow_credentials,
+    )
 
     # Include routers
     # Models API is mounted at /api/models
@@ -213,6 +242,15 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
             Service health status information.
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
+
+    # Reverse-proxy router (LangGraph + provisioner + frontend catch-all).
+    # MUST be included LAST: the catch-all ``/{path:path}`` route would
+    # otherwise shadow every other handler. FastAPI matches routes in
+    # registration order, so by the time we get here, all explicit handlers
+    # (including the ``/health`` route declared above and FastAPI's built-in
+    # ``/docs``, ``/redoc``, and ``/openapi.json`` registered by
+    # ``FastAPI.__init__``) take precedence.
+    app.include_router(proxy.router)
 
     return app
 

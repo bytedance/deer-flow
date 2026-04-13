@@ -50,19 +50,6 @@ else
 fi
 
 echo ""
-echo "Checking nginx..."
-if command -v nginx >/dev/null 2>&1; then
-    NGINX_VERSION=$(nginx -v 2>&1 | awk -F'/' '{print $2}')
-    echo "  ✓ nginx $NGINX_VERSION"
-else
-    echo "  ✗ nginx not found"
-    echo "    macOS:   brew install nginx"
-    echo "    Ubuntu:  sudo apt install nginx"
-    echo "    Or visit: https://nginx.org/en/download.html"
-    FAILED=1
-fi
-
-echo ""
 if [ "$FAILED" -eq 0 ]; then
     echo "=========================================="
     echo "  ✓ All dependencies are installed!"

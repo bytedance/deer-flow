@@ -11,12 +11,13 @@ This document provides a comprehensive overview of the DeerFlow backend architec
                                   │
                                   ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                          Nginx (Port 2026)                               │
-│                    Unified Reverse Proxy Entry Point                      │
+│                  Gateway API + Reverse Proxy (Port 2026)                 │
+│   Single FastAPI process — replaces the legacy nginx sidecar             │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  /api/langgraph/*  →  LangGraph Server (2024)                      │  │
-│  │  /api/*            →  Gateway API (8001)                           │  │
-│  │  /*                →  Frontend (3000)                               │  │
+│  │  /api/langgraph/*  →  LangGraph Server (2024) via httpx (proxy)    │  │
+│  │  /api/sandboxes    →  Provisioner    (8002) via httpx (optional)   │  │
+│  │  /api/*            →  Native FastAPI routers (in-process)          │  │
+│  │  /*                →  Frontend       (3000) via httpx (+WS HMR)    │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────┬────────────────────────────────────────┘
                                   │
@@ -24,8 +25,8 @@ This document provides a comprehensive overview of the DeerFlow backend architec
           │                       │                       │
           ▼                       ▼                       ▼
 ┌─────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
-│   LangGraph Server  │ │    Gateway API      │ │     Frontend        │
-│     (Port 2024)     │ │    (Port 8001)      │ │    (Port 3000)      │
+│   LangGraph Server  │ │ Gateway native API  │ │     Frontend        │
+│     (Port 2024)     │ │  (in-process)       │ │    (Port 3000)      │
 │                     │ │                     │ │                     │
 │  - Agent Runtime    │ │  - Models API       │ │  - Next.js App      │
 │  - Thread Mgmt      │ │  - MCP Config       │ │  - React UI         │
@@ -349,12 +350,12 @@ SKILL.md Format:
 │                    User sends message to agent                           │
 └─────────────────────────────────────────────────────────────────────────┘
 
-1. Client → Nginx
+1. Client → Gateway (Port 2026)
    POST /api/langgraph/threads/{thread_id}/runs
    {"input": {"messages": [{"role": "user", "content": "Hello"}]}}
 
-2. Nginx → LangGraph Server (2024)
-   Proxied to LangGraph server
+2. Gateway proxy router → LangGraph Server (2024)
+   Streamed via httpx (SSE-compatible, no body buffering)
 
 3. LangGraph Server
    a. Load/create thread state

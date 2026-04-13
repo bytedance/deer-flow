@@ -47,7 +47,7 @@ Consider the setup successful when all of the following are true:
   - Tell the user the recommended next command is `make docker-start`.
 - If Docker is not available:
   - Run `make check`.
-  - If `make check` reports missing system dependencies such as `node`, `pnpm`, `uv`, or `nginx`, stop and report the missing tools instead of attempting privileged installs.
+  - If `make check` reports missing system dependencies such as `node`, `pnpm`, or `uv`, stop and report the missing tools instead of attempting privileged installs.
   - If prerequisites are satisfied, run `make install`.
   - Tell the user the recommended next command is `make dev`.
 - Inspect `config.yaml` only for missing model entries or referenced environment variable placeholders. Do not read `.env`, `frontend/.env`, or other secret-bearing files.

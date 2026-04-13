@@ -8,9 +8,8 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 
 **Architecture**:
 - **LangGraph Server** (port 2024): Agent runtime and workflow execution
-- **Gateway API** (port 8001): REST API for models, MCP, skills, memory, artifacts, uploads, and local thread cleanup
-- **Frontend** (port 3000): Next.js web interface
-- **Nginx** (port 2026): Unified reverse proxy entry point
+- **Gateway API + Reverse Proxy** (port 2026 in supervised modes, 8001 in `make gateway`): REST API for models, MCP, skills, memory, artifacts, uploads, and local thread cleanup. Also reverse-proxies `/api/langgraph/*` to the LangGraph Server, `/api/sandboxes` to the provisioner, and `/*` to the frontend — replaces the legacy nginx sidecar (see `app/gateway/routers/proxy.py`).
+- **Frontend** (port 3000): Next.js web interface (internal — accessed through the gateway proxy)
 - **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
 
 **Runtime Modes**:
@@ -83,7 +82,7 @@ When making code changes, you MUST update the relevant documentation:
 ```bash
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
-make dev        # Start all services (LangGraph + Gateway + Frontend + Nginx), with config.yaml preflight
+make dev        # Start all services (LangGraph + Frontend + Gateway), with config.yaml preflight
 make dev-pro    # Gateway mode (experimental): skip LangGraph, agent runtime embedded in Gateway
 make start-pro  # Production + Gateway mode (experimental)
 make stop       # Stop all services
@@ -223,7 +222,7 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
 
-Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
+Routing handled in-process by the gateway's `proxy` router: `/api/langgraph/*` is reverse-proxied via httpx to the LangGraph Server (or routed to the gateway's own LangGraph Platform-compat handlers in gateway mode), `/api/sandboxes` is reverse-proxied to the provisioner, all other `/api/*` is served by the FastAPI routers above, and every other path falls through to the Next.js frontend.
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
@@ -474,9 +473,9 @@ This starts all services and makes the application available at `http://localhos
 
 Gateway mode embeds the agent runtime in Gateway, no LangGraph server.
 
-**Nginx routing**:
+**Gateway proxy routing** (configured via `DEERFLOW_PROXY_LANGGRAPH_UPSTREAM` / `DEERFLOW_PROXY_LANGGRAPH_REWRITE`):
 - Standard mode: `/api/langgraph/*` → LangGraph Server (2024)
-- Gateway mode: `/api/langgraph/*` → Gateway embedded runtime (8001) (via envsubst)
+- Gateway mode: `/api/langgraph/*` → Gateway's own LangGraph Platform-compat routers (in-process, via path rewrite)
 - `/api/*` (other) → Gateway API (8001)
 - `/` (non-API) → Frontend (3000)
 
@@ -492,17 +491,17 @@ make dev
 make gateway
 ```
 
-Direct access (without nginx):
+Direct access (`make gateway` / `make dev` from `backend/`):
 - LangGraph: `http://localhost:2024`
-- Gateway: `http://localhost:8001`
+- Gateway: `http://localhost:8001` (Gateway runs on the legacy 8001 port when started directly via `backend/Makefile`; supervised modes bind it to 2026 instead)
 
 ### Frontend Configuration
 
 The frontend uses environment variables to connect to backend services:
-- `NEXT_PUBLIC_LANGGRAPH_BASE_URL` - Defaults to `/api/langgraph` (through nginx)
-- `NEXT_PUBLIC_BACKEND_BASE_URL` - Defaults to empty string (through nginx)
+- `NEXT_PUBLIC_LANGGRAPH_BASE_URL` - Defaults to `/api/langgraph` (gateway proxies to LangGraph Server)
+- `NEXT_PUBLIC_BACKEND_BASE_URL` - Defaults to empty string (gateway serves API routes natively)
 
-When using `make dev` from root, the frontend automatically connects through nginx.
+When using `make dev` from root, the browser hits the gateway at `http://localhost:2026`, which serves the API routes in-process and reverse-proxies everything else (frontend, LangGraph) via httpx.
 
 ## Key Features
 

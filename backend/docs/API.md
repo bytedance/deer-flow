@@ -9,7 +9,7 @@ DeerFlow backend exposes two sets of APIs:
 1. **LangGraph API** - Agent interactions, threads, and streaming (`/api/langgraph/*`)
 2. **Gateway API** - Models, MCP, skills, uploads, and artifacts (`/api/*`)
 
-All APIs are accessed through the Nginx reverse proxy at port 2026.
+All APIs are accessed through the Gateway's in-process reverse proxy at port 2026 (see `app/gateway/routers/proxy.py`). LangGraph requests are forwarded to the LangGraph server via httpx; everything else is served by FastAPI routers in the same process.
 
 ## LangGraph API
 

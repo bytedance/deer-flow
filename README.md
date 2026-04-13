@@ -259,7 +259,7 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 1. **Check prerequisites**:
    ```bash
-   make check  # Verifies Node.js 22+, pnpm, uv, nginx
+   make check  # Verifies Node.js 22+, pnpm, uv
    ```
 
 2. **Install dependencies**:
@@ -316,7 +316,7 @@ In standard mode, DeerFlow runs a dedicated [LangGraph Platform](https://langcha
 |---|---|---|
 | **Architecture** | Gateway (REST API) + LangGraph (agent runtime) | Gateway embeds agent runtime |
 | **Concurrency** | `--n-jobs-per-worker` per worker (requires license) | `--workers` × async tasks (no per-worker cap) |
-| **Containers / Processes** | 4 (frontend, gateway, langgraph, nginx) | 3 (frontend, gateway, nginx) |
+| **Containers / Processes** | 3 (frontend, gateway, langgraph) | 2 (frontend, gateway) |
 | **Resource usage** | Higher (two Python runtimes) | Lower (single Python runtime) |
 | **LangGraph Platform license** | Required for production images | Not required |
 | **Cold start** | Slower (two services to initialize) | Faster |

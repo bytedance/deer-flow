@@ -2,10 +2,12 @@
 # Usage: docker-compose -f docker-compose-dev.yaml up --build
 #
 # Services:
-#   - nginx: Reverse proxy (port 2026)
-#   - frontend: Frontend Next.js dev server (port 3000)
-#   - gateway: Backend Gateway API (port 8001)
-#   - langgraph: LangGraph server (port 2024)
+#   - gateway: Backend Gateway API + reverse proxy (port 2026, internal 8001)
+#              Replaces the legacy nginx sidecar — proxies /api/langgraph/*,
+#              /api/sandboxes, and /* (frontend, with WebSocket HMR) via httpx
+#              in the same process.
+#   - frontend: Frontend Next.js dev server (port 3000, internal only)
+#   - langgraph: LangGraph server (port 2024, internal only)
 #   - provisioner (optional): Sandbox provisioner (creates Pods in host Kubernetes)
 #
 # Prerequisites:
@@ -60,36 +62,6 @@ services:
       retries: 6
       start_period: 15s
 
-  # ── Reverse Proxy ──────────────────────────────────────────────────────
-  # Routes API traffic to gateway/langgraph and (optionally) provisioner.
-  # LANGGRAPH_UPSTREAM and LANGGRAPH_REWRITE control gateway vs standard
-  # routing (processed by envsubst at container start).
-  nginx:
-    image: nginx:alpine
-    container_name: deer-flow-nginx
-    ports:
-      - "2026:2026"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
-    environment:
-      - LANGGRAPH_UPSTREAM=${LANGGRAPH_UPSTREAM:-langgraph:2024}
-      - LANGGRAPH_REWRITE=${LANGGRAPH_REWRITE:-/}
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        envsubst '$$LANGGRAPH_UPSTREAM $$LANGGRAPH_REWRITE' \
-          < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
-        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
-        exec nginx -g 'daemon off;'
-    depends_on:
-      - frontend
-      - gateway
-    networks:
-      - deer-flow-dev
-    restart: unless-stopped
-
   # Frontend - Next.js Development Server
   frontend:
     build:
@@ -121,7 +93,7 @@ services:
       - deer-flow-dev
     restart: unless-stopped
 
-  # Backend - Gateway API
+  # Backend - Gateway API + Reverse Proxy
   gateway:
     build:
       context: ../
@@ -134,6 +106,10 @@ services:
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
     container_name: deer-flow-gateway
     command: sh -c "{ cd backend && (uv sync || (echo '[startup] uv sync failed; recreating .venv and retrying once' && uv venv --allow-existing .venv && uv sync)) && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env'; } > /app/logs/gateway.log 2>&1"
+    ports:
+      - "${PORT:-2026}:8001"
+    depends_on:
+      - frontend
     volumes:
       - ../backend/:/app/backend/
       # Preserve the .venv built during Docker image build — mounting the full backend/
@@ -168,6 +144,11 @@ services:
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://langgraph:2024}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
+      # Reverse-proxy upstreams (handled in-process, replaces nginx)
+      - DEERFLOW_PROXY_LANGGRAPH_UPSTREAM=${DEERFLOW_PROXY_LANGGRAPH_UPSTREAM:-http://langgraph:2024}
+      - DEERFLOW_PROXY_LANGGRAPH_REWRITE=${DEERFLOW_PROXY_LANGGRAPH_REWRITE:-/}
+      - DEERFLOW_PROXY_FRONTEND_UPSTREAM=${DEERFLOW_PROXY_FRONTEND_UPSTREAM:-http://frontend:3000}
+      - DEERFLOW_PROXY_PROVISIONER_UPSTREAM=${DEERFLOW_PROXY_PROVISIONER_UPSTREAM:-http://provisioner:8002}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
