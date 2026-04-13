@@ -6,6 +6,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 
 def configure_stdio() -> None:
@@ -30,13 +31,16 @@ def run_command(command: list[str]) -> str | None:
 
 def find_pnpm_command() -> list[str] | None:
     """Return a pnpm-compatible command that exists on this machine."""
-    candidates = [["pnpm"], ["pnpm.cmd"]]
-    if shutil.which("corepack"):
-        candidates.append(["corepack", "pnpm"])
+    pnpm_path = shutil.which("pnpm")
+    if pnpm_path:
+        return [str(Path(pnpm_path))]
 
-    for command in candidates:
-        if shutil.which(command[0]):
-            return command
+    pnpm_cmd_path = shutil.which("pnpm.cmd")
+    if pnpm_cmd_path:
+        return [str(Path(pnpm_cmd_path))]
+
+    if shutil.which("corepack"):
+        return ["corepack", "pnpm"]
     return None
 
 
