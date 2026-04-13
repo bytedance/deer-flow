@@ -14,7 +14,11 @@ export function AgentWelcome({
   agent: Agent | null | undefined;
   agentName: string;
 }) {
-  const displayName = agent?.display_name?.trim() || agent?.name || agentName;
+  const trimmedDisplayName = agent?.display_name?.trim();
+  const displayName =
+    trimmedDisplayName && trimmedDisplayName.length > 0
+      ? trimmedDisplayName
+      : (agent?.name ?? agentName);
   const description = agent?.description;
 
   return (

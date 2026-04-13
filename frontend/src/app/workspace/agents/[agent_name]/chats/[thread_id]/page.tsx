@@ -40,7 +40,11 @@ export default function AgentChatPage() {
   }>();
 
   const { agent } = useAgent(agent_name);
-  const displayName = agent?.display_name?.trim() || agent?.name || agent_name;
+  const trimmedDisplayName = agent?.display_name?.trim();
+  const displayName =
+    trimmedDisplayName && trimmedDisplayName.length > 0
+      ? trimmedDisplayName
+      : (agent?.name ?? agent_name);
 
   const { threadId, setThreadId, isNewThread, setIsNewThread } =
     useThreadChat();
@@ -109,9 +113,7 @@ export default function AgentChatPage() {
             {/* Agent badge */}
             <div className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
               <BotIcon className="text-primary h-3.5 w-3.5" />
-              <span className="text-xs font-medium">
-                {displayName}
-              </span>
+              <span className="text-xs font-medium">{displayName}</span>
             </div>
 
             <div className="flex w-full items-center text-sm font-medium">
