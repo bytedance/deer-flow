@@ -37,7 +37,7 @@ def _write_agent(base_dir: Path, name: str, config: dict, soul: str = "You are h
 
 
 # ===========================================================================
-# 1. Paths class – agent path methods
+# 1. Paths class 鈥?agent path methods
 # ===========================================================================
 
 
@@ -66,7 +66,7 @@ class TestPaths:
 
 
 # ===========================================================================
-# 2. AgentConfig – Pydantic parsing
+# 2. AgentConfig 鈥?Pydantic parsing
 # ===========================================================================
 
 
@@ -86,23 +86,23 @@ class TestAgentConfig:
 
         cfg = AgentConfig(
             name="code-reviewer",
-            display_name="代码审查",
+            display_name="浠ｇ爜瀹℃煡",
             description="Specialized for code review",
             model="deepseek-v3",
             tool_groups=["file:read", "bash"],
         )
         assert cfg.name == "code-reviewer"
-        assert cfg.display_name == "代码审查"
+        assert cfg.display_name == "浠ｇ爜瀹℃煡"
         assert cfg.model == "deepseek-v3"
         assert cfg.tool_groups == ["file:read", "bash"]
 
     def test_config_from_dict(self):
         from deerflow.config.agents_config import AgentConfig
 
-        data = {"name": "test-agent", "display_name": "测试助手", "description": "A test", "model": "gpt-4"}
+        data = {"name": "test-agent", "display_name": "娴嬭瘯鍔╂墜", "description": "A test", "model": "gpt-4"}
         cfg = AgentConfig(**data)
         assert cfg.name == "test-agent"
-        assert cfg.display_name == "测试助手"
+        assert cfg.display_name == "娴嬭瘯鍔╂墜"
         assert cfg.model == "gpt-4"
         assert cfg.tool_groups is None
 
@@ -116,7 +116,7 @@ class TestLoadAgentConfig:
     def test_load_valid_config(self, tmp_path):
         config_dict = {
             "name": "code-reviewer",
-            "display_name": "代码审查",
+            "display_name": "浠ｇ爜瀹℃煡",
             "description": "Code review agent",
             "model": "deepseek-v3",
         }
@@ -128,7 +128,7 @@ class TestLoadAgentConfig:
             cfg = load_agent_config("code-reviewer")
 
         assert cfg.name == "code-reviewer"
-        assert cfg.display_name == "代码审查"
+        assert cfg.display_name == "浠ｇ爜瀹℃煡"
         assert cfg.description == "Code review agent"
         assert cfg.model == "deepseek-v3"
 
@@ -379,7 +379,7 @@ class TestMemoryFilePath:
 
 
 # ===========================================================================
-# 8. Gateway API – Agents endpoints
+# 8. Gateway API 鈥?Agents endpoints
 # ===========================================================================
 
 
@@ -416,7 +416,7 @@ class TestAgentsAPI:
     def test_create_agent(self, agent_client):
         payload = {
             "name": "code-reviewer",
-            "display_name": "代码审查",
+            "display_name": "浠ｇ爜瀹℃煡",
             "description": "Reviews code",
             "soul": "You are a code reviewer.",
         }
@@ -424,20 +424,20 @@ class TestAgentsAPI:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "code-reviewer"
-        assert data["display_name"] == "代码审查"
+        assert data["display_name"] == "浠ｇ爜瀹℃煡"
         assert data["description"] == "Reviews code"
         assert data["soul"] == "You are a code reviewer."
 
     def test_create_agent_trims_display_name_and_omits_blank(self, agent_client, tmp_path):
         response = agent_client.post(
             "/api/agents",
-            json={"name": "trim-agent", "display_name": "  测试助手  ", "soul": "Hello"},
+            json={"name": "trim-agent", "display_name": "  娴嬭瘯鍔╂墜  ", "soul": "Hello"},
         )
         assert response.status_code == 201
-        assert response.json()["display_name"] == "测试助手"
+        assert response.json()["display_name"] == "娴嬭瘯鍔╂墜"
 
         config = yaml.safe_load((tmp_path / "agents" / "trim-agent" / "config.yaml").read_text(encoding="utf-8"))
-        assert config["display_name"] == "测试助手"
+        assert config["display_name"] == "娴嬭瘯鍔╂墜"
 
         response = agent_client.post(
             "/api/agents",
@@ -484,14 +484,14 @@ class TestAgentsAPI:
     def test_get_agent(self, agent_client):
         agent_client.post(
             "/api/agents",
-            json={"name": "test-agent", "display_name": "测试助手", "soul": "Hello world"},
+            json={"name": "test-agent", "display_name": "娴嬭瘯鍔╂墜", "soul": "Hello world"},
         )
 
         response = agent_client.get("/api/agents/test-agent")
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "test-agent"
-        assert data["display_name"] == "测试助手"
+        assert data["display_name"] == "娴嬭瘯鍔╂墜"
         assert data["soul"] == "Hello world"
 
     def test_get_missing_agent_404(self, agent_client):
@@ -515,23 +515,23 @@ class TestAgentsAPI:
     def test_update_agent_display_name(self, agent_client):
         agent_client.post("/api/agents", json={"name": "slug-agent", "soul": "p"})
 
-        response = agent_client.put("/api/agents/slug-agent", json={"display_name": "分发Case诊断"})
+        response = agent_client.put("/api/agents/slug-agent", json={"display_name": "鍒嗗彂Case璇婃柇"})
         assert response.status_code == 200
-        assert response.json()["display_name"] == "分发Case诊断"
+        assert response.json()["display_name"] == "鍒嗗彂Case璇婃柇"
 
     def test_update_agent_display_name_trims_and_can_clear(self, agent_client, tmp_path):
         agent_client.post(
             "/api/agents",
-            json={"name": "clearable-agent", "display_name": " 初始名称 ", "description": "desc", "soul": "p"},
+            json={"name": "clearable-agent", "display_name": " 鍒濆鍚嶇О ", "description": "desc", "soul": "p"},
         )
 
-        response = agent_client.put("/api/agents/clearable-agent", json={"display_name": "  更新名称  "})
+        response = agent_client.put("/api/agents/clearable-agent", json={"display_name": "  鏇存柊鍚嶇О  "})
         assert response.status_code == 200
-        assert response.json()["display_name"] == "更新名称"
+        assert response.json()["display_name"] == "鏇存柊鍚嶇О"
 
         config_path = tmp_path / "agents" / "clearable-agent" / "config.yaml"
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert config["display_name"] == "更新名称"
+        assert config["display_name"] == "鏇存柊鍚嶇О"
 
         response = agent_client.put("/api/agents/clearable-agent", json={"display_name": "   "})
         assert response.status_code == 200
@@ -592,7 +592,7 @@ class TestAgentsAPI:
 
 
 # ===========================================================================
-# 9. Gateway API – User Profile endpoints
+# 9. Gateway API 鈥?User Profile endpoints
 # ===========================================================================
 
 
