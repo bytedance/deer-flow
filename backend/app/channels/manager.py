@@ -8,6 +8,7 @@ import mimetypes
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -34,9 +35,11 @@ STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
+    "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
     "telegram": {"supports_streaming": False},
+    "wechat": {"supports_streaming": False},
     "wecom": {"supports_streaming": True},
 }
 
@@ -78,7 +81,24 @@ async def _read_wecom_inbound_file(file_info: dict[str, Any], client: httpx.Asyn
     return decrypt_file(data, aeskey)
 
 
+async def _read_wechat_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
+    raw_path = file_info.get("path")
+    if isinstance(raw_path, str) and raw_path.strip():
+        try:
+            return await asyncio.to_thread(Path(raw_path).read_bytes)
+        except OSError:
+            logger.exception("[Manager] failed to read WeChat inbound file from local path: %s", raw_path)
+            return None
+
+    full_url = file_info.get("full_url")
+    if isinstance(full_url, str) and full_url.strip():
+        return await _read_http_inbound_file({"url": full_url}, client)
+
+    return None
+
+
 register_inbound_file_reader("wecom", _read_wecom_inbound_file)
+register_inbound_file_reader("wechat", _read_wechat_inbound_file)
 
 
 class InvalidChannelSessionConfigError(ValueError):
