@@ -8,6 +8,7 @@ import mimetypes
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -34,10 +35,12 @@ STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
+    "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
     "jira": {"supports_streaming": False},
     "slack": {"supports_streaming": False},
     "telegram": {"supports_streaming": False},
+    "wechat": {"supports_streaming": False},
     "wecom": {"supports_streaming": True},
 }
 
@@ -79,7 +82,24 @@ async def _read_wecom_inbound_file(file_info: dict[str, Any], client: httpx.Asyn
     return decrypt_file(data, aeskey)
 
 
+async def _read_wechat_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
+    raw_path = file_info.get("path")
+    if isinstance(raw_path, str) and raw_path.strip():
+        try:
+            return await asyncio.to_thread(Path(raw_path).read_bytes)
+        except OSError:
+            logger.exception("[Manager] failed to read WeChat inbound file from local path: %s", raw_path)
+            return None
+
+    full_url = file_info.get("full_url")
+    if isinstance(full_url, str) and full_url.strip():
+        return await _read_http_inbound_file({"url": full_url}, client)
+
+    return None
+
+
 register_inbound_file_reader("wecom", _read_wecom_inbound_file)
+register_inbound_file_reader("wechat", _read_wechat_inbound_file)
 
 
 class InvalidChannelSessionConfigError(ValueError):
@@ -676,6 +696,18 @@ class ChannelManager:
             thread_id = await self._create_thread(client, msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+
+        # If the inbound message contains file attachments, let the channel
+        # materialize (download) them and update msg.text to include sandbox file paths.
+        # This enables downstream models to access user-uploaded files by path.
+        # Channels that do not support file download will simply return the original message.
+        if msg.files:
+            from .service import get_channel_service
+
+            service = get_channel_service()
+            channel = service.get_channel(msg.channel_name) if service else None
+            logger.info("[Manager] preparing receive file context for %d attachments", len(msg.files))
+            msg = await channel.receive_file(msg, thread_id) if channel else msg
         if extra_context:
             run_context.update(extra_context)
 

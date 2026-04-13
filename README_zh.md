@@ -40,6 +40,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
   - [快速开始](#快速开始)
     - [配置](#配置)
     - [运行应用](#运行应用)
+      - [部署建议与资源规划](#部署建议与资源规划)
       - [方式一：Docker（推荐）](#方式一docker推荐)
       - [方式二：本地开发](#方式二本地开发)
     - [进阶配置](#进阶配置)
@@ -149,6 +150,20 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
    ```
 
 ### 运行应用
+
+#### 部署建议与资源规划
+
+可以先按下面的资源档位来选择 DeerFlow 的运行方式：
+
+| 部署场景 | 起步配置 | 推荐配置 | 说明 |
+|---------|-----------|------------|-------|
+| 本地体验 / `make dev` | 4 vCPU、8 GB 内存、20 GB SSD 可用空间 | 8 vCPU、16 GB 内存 | 适合单个开发者或单个轻量会话，且模型走外部 API。`2 核 / 4 GB` 通常跑不稳。 |
+| Docker 开发 / `make docker-start` | 4 vCPU、8 GB 内存、25 GB SSD 可用空间 | 8 vCPU、16 GB 内存 | 镜像构建、源码挂载和 sandbox 容器都会比纯本地模式更吃资源。 |
+| 长期运行服务 / `make up` | 8 vCPU、16 GB 内存、40 GB SSD 可用空间 | 16 vCPU、32 GB 内存 | 更适合共享环境、多 agent 任务、报告生成或更重的 sandbox 负载。 |
+
+- 上面的配置只覆盖 DeerFlow 本身；如果你还要本机部署本地大模型，请单独为模型服务预留资源。
+- 持续运行的服务更推荐使用 Linux + Docker。macOS 和 Windows 更适合作为开发机或体验环境。
+- 如果 CPU 或内存长期打满，先降低并发会话或重任务数量，再考虑升级到更高一档配置。
 
 #### 方式一：Docker（推荐）
 

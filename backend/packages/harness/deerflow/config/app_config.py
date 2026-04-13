@@ -15,6 +15,7 @@ from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
@@ -27,6 +28,13 @@ from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_searc
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+class CircuitBreakerConfig(BaseModel):
+    """Configuration for the LLM Circuit Breaker."""
+
+    failure_threshold: int = Field(default=5, description="Number of consecutive failures before tripping the circuit")
+    recovery_timeout_sec: int = Field(default=60, description="Time in seconds before attempting to recover the circuit")
 
 
 def _default_config_candidates() -> tuple[Path, ...]:
@@ -46,6 +54,7 @@ class AppConfig(BaseModel):
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
+    skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
@@ -53,6 +62,7 @@ class AppConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
+    circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
@@ -126,6 +136,10 @@ class AppConfig(BaseModel):
         # Load guardrails config if present
         if "guardrails" in config_data:
             load_guardrails_config_from_dict(config_data["guardrails"])
+
+        # Load circuit_breaker config if present
+        if "circuit_breaker" in config_data:
+            config_data["circuit_breaker"] = config_data["circuit_breaker"]
 
         # Load checkpointer config if present
         if "checkpointer" in config_data:

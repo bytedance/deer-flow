@@ -27,6 +27,10 @@ class ModelConfig(BaseModel):
         default_factory=lambda: None,
         description="Extra settings to be passed to the model when thinking is enabled",
     )
+    when_thinking_disabled: dict | None = Field(
+        default_factory=lambda: None,
+        description="Extra settings to be passed to the model when thinking is disabled",
+    )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
     thinking: dict | None = Field(
         default_factory=lambda: None,
