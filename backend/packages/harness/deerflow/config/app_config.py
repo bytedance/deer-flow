@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.acp_config import load_acp_config_from_dict
+from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
@@ -60,6 +61,7 @@ class AppConfig(BaseModel):
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
+    agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
@@ -124,6 +126,10 @@ class AppConfig(BaseModel):
         # Load memory config if present
         if "memory" in config_data:
             load_memory_config_from_dict(config_data["memory"])
+
+        # Always refresh agents API config so removed config sections reset
+        # singleton-backed state to its default/disabled values on reload.
+        load_agents_api_config_from_dict(config_data.get("agents_api") or {})
 
         # Load subagents config if present
         if "subagents" in config_data:
