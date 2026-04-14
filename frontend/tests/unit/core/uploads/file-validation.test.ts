@@ -1,20 +1,18 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { expect, test } from "vitest";
 
 import {
   MACOS_APP_BUNDLE_UPLOAD_MESSAGE,
   isLikelyMacOSAppBundle,
   splitUnsupportedUploadFiles,
-} from "./file-validation.ts";
+} from "@/core/uploads/file-validation";
 
 test("identifies Finder-style .app bundle uploads as unsupported", () => {
-  assert.equal(
+  expect(
     isLikelyMacOSAppBundle({
       name: "Vibe Island.app",
       type: "application/octet-stream",
     }),
-    true,
-  );
+  ).toBe(true);
 });
 
 test("keeps normal files and reports rejected app bundles", () => {
@@ -27,11 +25,11 @@ test("keeps normal files and reports rejected app bundles", () => {
 
   const result = splitUnsupportedUploadFiles(files);
 
-  assert.equal(result.accepted.length, 1);
-  assert.equal(result.accepted[0]?.name, "notes.txt");
-  assert.equal(result.rejected.length, 1);
-  assert.equal(result.rejected[0]?.name, "Vibe Island.app");
-  assert.equal(result.message, MACOS_APP_BUNDLE_UPLOAD_MESSAGE);
+  expect(result.accepted.length).toBe(1);
+  expect(result.accepted[0]?.name).toBe("notes.txt");
+  expect(result.rejected.length).toBe(1);
+  expect(result.rejected[0]?.name).toBe("Vibe Island.app");
+  expect(result.message).toBe(MACOS_APP_BUNDLE_UPLOAD_MESSAGE);
 });
 
 test("treats empty MIME .app uploads as unsupported", () => {
@@ -39,9 +37,9 @@ test("treats empty MIME .app uploads as unsupported", () => {
     new File(["demo"], "Another.app", { type: "" }),
   ]);
 
-  assert.equal(result.accepted.length, 0);
-  assert.equal(result.rejected.length, 1);
-  assert.equal(result.message, MACOS_APP_BUNDLE_UPLOAD_MESSAGE);
+  expect(result.accepted.length).toBe(0);
+  expect(result.rejected.length).toBe(1);
+  expect(result.message).toBe(MACOS_APP_BUNDLE_UPLOAD_MESSAGE);
 });
 
 test("returns no message when every file is supported", () => {
@@ -49,7 +47,7 @@ test("returns no message when every file is supported", () => {
     new File(["notes"], "notes.txt", { type: "text/plain" }),
   ]);
 
-  assert.equal(result.accepted.length, 1);
-  assert.equal(result.rejected.length, 0);
-  assert.equal(result.message, undefined);
+  expect(result.accepted.length).toBe(1);
+  expect(result.rejected.length).toBe(0);
+  expect(result.message).toBeUndefined();
 });

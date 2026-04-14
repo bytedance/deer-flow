@@ -8,7 +8,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from deerflow.config.paths import get_paths
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
     PathTraversalError,
     delete_file_safe,
@@ -53,6 +53,10 @@ def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
     os.chmod(file_path, writable_mode, **chmod_kwargs)
 
 
+def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
+    return bool(getattr(sandbox_provider, "uses_thread_data_mounts", False))
+
+
 @router.post("", response_model=UploadResponse)
 async def upload_files(
     thread_id: str,
@@ -70,8 +74,11 @@ async def upload_files(
     uploaded_files = []
 
     sandbox_provider = get_sandbox_provider()
-    sandbox_id = sandbox_provider.acquire(thread_id)
-    sandbox = sandbox_provider.get(sandbox_id)
+    sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
+    sandbox = None
+    if sync_to_sandbox:
+        sandbox_id = sandbox_provider.acquire(thread_id)
+        sandbox = sandbox_provider.get(sandbox_id)
 
     for file in files:
         if not file.filename:
@@ -90,7 +97,7 @@ async def upload_files(
 
             virtual_path = upload_virtual_path(safe_filename)
 
-            if sandbox_id != "local":
+            if sync_to_sandbox and sandbox is not None:
                 _make_file_sandbox_writable(file_path)
                 sandbox.update_file(virtual_path, content)
 
@@ -110,7 +117,7 @@ async def upload_files(
                 if md_path:
                     md_virtual_path = upload_virtual_path(md_path.name)
 
-                    if sandbox_id != "local":
+                    if sync_to_sandbox and sandbox is not None:
                         _make_file_sandbox_writable(md_path)
                         sandbox.update_file(md_virtual_path, md_path.read_bytes())
 

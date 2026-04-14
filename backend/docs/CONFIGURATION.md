@@ -192,8 +192,8 @@ tools:
 ```
 
 **Built-in Tools**:
-- `web_search` - Search the web (Tavily)
-- `web_fetch` - Fetch web pages (Jina AI)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Exa, InfoQuest, Firecrawl)
+- `web_fetch` - Fetch web pages (Jina AI, Exa, InfoQuest, Firecrawl)
 - `ls` - List directory contents
 - `read_file` - Read file contents
 - `write_file` - Write file contents
