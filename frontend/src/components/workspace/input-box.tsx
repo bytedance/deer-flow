@@ -271,9 +271,10 @@ export function InputBox({
             selectedModel?.supports_thinking ?? false,
           ),
         });
-        setTimeout(() => {
-          void onSubmit?.(message);
-        }, 0);
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
+        await onSubmit?.(message);
         return;
       }
 
