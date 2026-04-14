@@ -77,7 +77,7 @@ class Paths:
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
-        self._base_dir = Path(base_dir).resolve() if base_dir is not None else None
+        self._base_dir = Path(base_dir) if base_dir is not None else None
 
     @property
     def host_base_dir(self) -> Path:
@@ -107,7 +107,7 @@ class Paths:
             return self._base_dir
 
         if env_home := os.getenv("DEER_FLOW_HOME"):
-            return Path(env_home).resolve()
+            return Path(os.path.normpath(env_home.strip()))
 
         return _default_local_base_dir()
 
@@ -270,8 +270,8 @@ class Paths:
             raise ValueError(f"Path must start with /{prefix}")
 
         relative = stripped[len(prefix) :].lstrip("/")
-        base = self.sandbox_user_data_dir(thread_id).resolve()
-        actual = (base / relative).resolve()
+        base = Path(os.path.normpath(self.sandbox_user_data_dir(thread_id)))
+        actual = Path(os.path.normpath(base / relative))
 
         try:
             actual.relative_to(base)
@@ -303,4 +303,4 @@ def resolve_path(path: str) -> Path:
     p = Path(path)
     if not p.is_absolute():
         p = get_paths().base_dir / path
-    return p.resolve()
+    return Path(os.path.normpath(p))

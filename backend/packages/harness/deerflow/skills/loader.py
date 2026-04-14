@@ -15,8 +15,8 @@ def get_skills_root_path() -> Path:
     Returns:
         Path to the skills directory (deer-flow/skills)
     """
-    # loader.py lives at packages/harness/deerflow/skills/loader.py — 5 parents up reaches backend/
-    backend_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
+    # loader.py: packages/harness/deerflow/skills/loader.py — parents[4] is backend/ (no resolve: see skills_config)
+    backend_dir = Path(__file__).parents[4]
     # skills directory is sibling to backend directory
     skills_dir = backend_dir.parent / "skills"
     return skills_dir

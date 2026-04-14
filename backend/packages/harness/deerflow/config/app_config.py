@@ -41,7 +41,7 @@ class CircuitBreakerConfig(BaseModel):
 def _default_config_candidates() -> tuple[Path, ...]:
     """Return deterministic config.yaml locations without relying on cwd."""
     backend_dir = Path(__file__).parent.parents[3]
-    repo_root = Path(__file__).parent.parents[4]
+    repo_root = backend_dir.parent
     return (backend_dir / "config.yaml", repo_root / "config.yaml")
 
 

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -33,12 +34,14 @@ class SkillsConfig(BaseModel):
             if not path.is_absolute():
                 # If relative, resolve from the repo root for deterministic behavior.
                 path = _default_repo_root() / path
-            return path
+            # normpath via abspath: collapses .. / separators without Path.resolve()
+            # (resolve() can consult getcwd on some platforms; abspath does not when path is absolute).
+            return Path(os.path.abspath(str(path)))
         else:
             # Default: ../skills relative to backend directory
             from deerflow.skills.loader import get_skills_root_path
 
-            return get_skills_root_path()
+            return Path(os.path.abspath(str(get_skills_root_path())))
 
     def get_skill_container_path(self, skill_name: str, category: str = "public") -> str:
         """

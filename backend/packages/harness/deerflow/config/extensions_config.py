@@ -101,7 +101,7 @@ class ExtensionsConfig(BaseModel):
             return path
         else:
             backend_dir = Path(__file__).parent.parents[3]
-            repo_root = Path(__file__).parent.parents[4]
+            repo_root = backend_dir.parent
             for path in (
                 backend_dir / "extensions_config.json",
                 repo_root / "extensions_config.json",
