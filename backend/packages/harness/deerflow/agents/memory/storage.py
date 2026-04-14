@@ -4,6 +4,7 @@ import abc
 import json
 import logging
 import threading
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -144,7 +145,7 @@ class FileMemoryStorage(MemoryStorage):
             file_path.parent.mkdir(parents=True, exist_ok=True)
             memory_data["lastUpdated"] = utc_now_iso_z()
 
-            temp_path = file_path.with_suffix(".tmp")
+            temp_path = file_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(memory_data, f, indent=2, ensure_ascii=False)
 
