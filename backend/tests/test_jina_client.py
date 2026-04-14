@@ -175,3 +175,30 @@ async def test_web_fetch_tool_returns_markdown_on_success(monkeypatch):
     result = await web_fetch_tool.ainvoke("https://example.com")
     assert "Hello world" in result
     assert not result.startswith("Error:")
+
+
+@pytest.mark.anyio
+async def test_web_fetch_tool_offloads_extraction_to_thread(monkeypatch):
+    """Test that readability extraction is offloaded via asyncio.to_thread to avoid blocking the event loop."""
+    import asyncio
+
+    async def mock_crawl(self, url, **kwargs):
+        return "<html><body><p>threaded</p></body></html>"
+
+    mock_config = MagicMock()
+    mock_config.get_tool_config.return_value = None
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: mock_config)
+    monkeypatch.setattr(JinaClient, "crawl", mock_crawl)
+
+    to_thread_called = False
+    original_to_thread = asyncio.to_thread
+
+    async def tracking_to_thread(func, *args, **kwargs):
+        nonlocal to_thread_called
+        to_thread_called = True
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.asyncio.to_thread", tracking_to_thread)
+    result = await web_fetch_tool.ainvoke("https://example.com")
+    assert to_thread_called, "extract_article must be called via asyncio.to_thread to avoid blocking the event loop"
+    assert "threaded" in result
