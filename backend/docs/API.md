@@ -228,7 +228,8 @@ GET /api/models/{model_name}
 
 #### Get MCP Config
 
-Get current MCP server configurations.
+Get current MCP server configurations together with runtime hot-reload status
+for the current process.
 
 ```http
 GET /api/mcp/config
@@ -237,7 +238,7 @@ GET /api/mcp/config
 **Response:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -246,14 +247,43 @@ GET /api/mcp/config
       "env": {
         "GITHUB_TOKEN": "***"
       },
-      "description": "GitHub operations"
+      "description": "GitHub operations",
+      "runtime_tool_count": 1,
+      "pending_reload_tool_count": 1,
+      "tools": {
+        "search_repositories": {
+          "enabled": false,
+          "discovered": true,
+          "description": "Search repositories",
+          "active_in_runtime": true,
+          "pending_reload_action": "disable"
+        }
+      }
     },
     "filesystem": {
       "enabled": false,
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem"],
-      "description": "File system access"
+      "description": "File system access",
+      "runtime_tool_count": 0,
+      "pending_reload_tool_count": 0,
+      "tools": {}
+    }
+  },
+  "runtime": {
+    "status": "pending_reload",
+    "reload_mode": "next_tool_load",
+    "restart_required": false,
+    "will_apply_on_next_load": true,
+    "cache_initialized": true,
+    "cache_stale": true,
+    "config_last_modified_at": "2026-04-14T09:15:00Z",
+    "runtime_config_last_loaded_at": "2026-04-14T09:10:00Z",
+    "active_server_count": 1,
+    "active_tool_count": 1,
+    "active_tools_by_server": {
+      "github": ["search_repositories"]
     }
   }
 }
@@ -271,7 +301,7 @@ Content-Type: application/json
 **Request Body:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -280,7 +310,12 @@ Content-Type: application/json
       "env": {
         "GITHUB_TOKEN": "$GITHUB_TOKEN"
       },
-      "description": "GitHub operations"
+      "description": "GitHub operations",
+      "tools": {
+        "search_repositories": {
+          "enabled": false
+        }
+      }
     }
   }
 }
@@ -289,10 +324,43 @@ Content-Type: application/json
 **Response:**
 ```json
 {
-  "success": true,
-  "message": "MCP configuration updated"
+  "mcp_servers": {
+    "...": "same shape as GET /api/mcp/config"
+  },
+  "runtime": {
+    "...": "same shape as GET /api/mcp/config"
+  }
 }
 ```
+
+**Hot-reload boundaries:**
+
+- The Gateway persists `extensions_config.json`; it does not push tools directly
+  into the LangGraph runtime.
+- MCP config changes are applied automatically on the **next MCP tool load** in
+  each process that uses `get_cached_mcp_tools()`.
+- In-flight requests are **not** expected to swap tool lists mid-turn.
+- `runtime.*`, `active_in_runtime`, and `pending_reload_action` describe the
+  **current process** answering this API request. In split deployments, the
+  Gateway and LangGraph Server may report different runtime states until each
+  process loads MCP tools again.
+- No full application restart is required for normal MCP config edits.
+
+**Reviewer validation path:**
+
+1. Call `GET /api/mcp/config` and note a discovered MCP tool that is currently
+   active in runtime.
+2. Call `PUT /api/mcp/config` to disable that tool, or use the Settings UI.
+3. Call `GET /api/mcp/config` again. Expect:
+   - `runtime.status` becomes `pending_reload` if this process already had a
+     loaded MCP cache.
+   - The tool shows `enabled: false`, `active_in_runtime: true`,
+     `pending_reload_action: "disable"`.
+4. Trigger a new agent turn that loads MCP tools in the target runtime.
+5. Call `GET /api/mcp/config` once more from that same process. Expect:
+   - `runtime.status` becomes `in_sync`.
+   - The tool is no longer active in runtime, and
+     `pending_reload_action` returns to `"none"`.
 
 ### Skills
 

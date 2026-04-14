@@ -442,6 +442,33 @@ SKILL.md Format:
 4. Next agent run uses new tools
 ```
 
+**Runtime semantics:**
+
+- The Gateway and LangGraph runtime are separate processes. Saving MCP config
+  updates the shared `extensions_config.json` file, not an in-memory global.
+- Each process detects changes lazily via config file `mtime` when
+  `get_cached_mcp_tools()` is called.
+- The hot-reload contract is therefore **next MCP tool load**, not "swap tool
+  schemas in the middle of an already running turn".
+- The MCP configuration API now exposes runtime feedback fields so the UI can
+  show:
+  - whether this process has initialized its MCP cache,
+  - whether the cache is stale relative to the latest saved config,
+  - which tools are still active in runtime,
+  - which tools will be enabled or disabled on the next load.
+- This runtime feedback is intentionally process-local. In split deployments,
+  Gateway and LangGraph Server may temporarily observe different runtime states
+  until both have loaded MCP tools again.
+
+**Failure and rollback expectations:**
+
+- If writing `extensions_config.json` fails, the API returns an error and the
+  previous config file remains authoritative.
+- If a later MCP load fails in a target process, that process keeps reporting
+  stale or not-initialized runtime feedback until a subsequent load succeeds.
+- Disabled tools are filtered at tool-registration time, so once a runtime has
+  reloaded successfully they no longer appear in the model-visible schema.
+
 ## Security Considerations
 
 ### Sandbox Isolation

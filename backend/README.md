@@ -117,7 +117,7 @@ FastAPI application providing REST endpoints for frontend integration:
 | Route | Purpose |
 |-------|---------|
 | `GET /api/models` | List available LLM models |
-| `GET/PUT /api/mcp/config` | Manage MCP server configurations |
+| `GET/PUT /api/mcp/config` | Manage MCP server configurations and inspect process-local hot-reload runtime status |
 | `GET/PUT /api/skills` | List and manage skills |
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |
