@@ -6,7 +6,12 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    get_extensions_config,
+    reload_extensions_config,
+)
+from deerflow.mcp.tools import discover_mcp_tools_by_server
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
@@ -43,6 +48,30 @@ class McpServerConfigResponse(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    tools: dict[str, "McpToolConfigResponse"] = Field(
+        default_factory=dict,
+        description="Tool-level enablement states under this MCP server",
+    )
+
+
+class McpToolConfigResponse(BaseModel):
+    """Response model for a tool exposed by an MCP server."""
+
+    enabled: bool = Field(default=True, description="Whether this MCP tool is enabled")
+    discovered: bool = Field(
+        default=False,
+        description="Whether this tool was discovered from the live MCP server",
+    )
+    description: str = Field(
+        default="",
+        description="Best-effort description discovered from the MCP tool metadata",
+    )
+
+
+class McpToolConfigUpdateRequest(BaseModel):
+    """Request model for updating a single MCP tool's state."""
+
+    enabled: bool = Field(default=True, description="Whether this MCP tool is enabled")
 
 
 class McpConfigResponse(BaseModel):
@@ -57,10 +86,61 @@ class McpConfigResponse(BaseModel):
 class McpConfigUpdateRequest(BaseModel):
     """Request model for updating MCP configuration."""
 
-    mcp_servers: dict[str, McpServerConfigResponse] = Field(
+    mcp_servers: dict[str, "McpServerConfigUpdateRequest"] = Field(
         ...,
         description="Map of MCP server name to configuration",
     )
+
+
+class McpServerConfigUpdateRequest(BaseModel):
+    """Request model for a single MCP server configuration update."""
+
+    enabled: bool = Field(default=True, description="Whether this MCP server is enabled")
+    type: str = Field(default="stdio", description="Transport type: 'stdio', 'sse', or 'http'")
+    command: str | None = Field(default=None, description="Command to execute to start the MCP server (for stdio type)")
+    args: list[str] = Field(default_factory=list, description="Arguments to pass to the command (for stdio type)")
+    env: dict[str, str] = Field(default_factory=dict, description="Environment variables for the MCP server")
+    url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
+    headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
+    oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
+    description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    tools: dict[str, McpToolConfigUpdateRequest] = Field(
+        default_factory=dict,
+        description="Tool-level enablement states under this MCP server",
+    )
+
+
+McpServerConfigResponse.model_rebuild()
+McpConfigUpdateRequest.model_rebuild()
+
+
+async def _build_mcp_config_response(config: ExtensionsConfig) -> McpConfigResponse:
+    discovered_tools = await discover_mcp_tools_by_server(config)
+    servers: dict[str, McpServerConfigResponse] = {}
+
+    for server_name, server in config.mcp_servers.items():
+        configured_tools = {
+            tool_name: McpToolConfigResponse(
+                enabled=tool_config.enabled,
+                discovered=False,
+                description="",
+            )
+            for tool_name, tool_config in server.tools.items()
+        }
+
+        for tool_name, description in discovered_tools.get(server_name, {}).items():
+            configured_tools[tool_name] = McpToolConfigResponse(
+                enabled=config.is_mcp_tool_enabled(server_name, tool_name),
+                discovered=True,
+                description=description,
+            )
+
+        servers[server_name] = McpServerConfigResponse(
+            **server.model_dump(exclude={"tools"}),
+            tools=dict(sorted(configured_tools.items())),
+        )
+
+    return McpConfigResponse(mcp_servers=servers)
 
 
 @router.get(
@@ -91,8 +171,7 @@ async def get_mcp_configuration() -> McpConfigResponse:
         ```
     """
     config = get_extensions_config()
-
-    return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in config.mcp_servers.items()})
+    return await _build_mcp_config_response(config)
 
 
 @router.put(
@@ -162,7 +241,7 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
 
         # Reload the configuration and update the global cache
         reloaded_config = reload_extensions_config()
-        return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in reloaded_config.mcp_servers.items()})
+        return await _build_mcp_config_response(reloaded_config)
 
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)

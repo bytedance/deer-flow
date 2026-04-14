@@ -404,6 +404,13 @@ export const zhCN: Translations = {
     tools: {
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",
+      applyChangesHint: "服务和工具开关会在下一次 MCP 工具加载时自动生效。",
+      noDescription: "暂无描述。",
+      noToolsDiscovered: "暂未发现该服务暴露的工具。",
+      enableServerToRefresh: "启用该服务后即可发现并刷新工具列表。",
+      discoveredTool: "已从实时 MCP 服务发现。",
+      configuredTool: "已手动配置，等待服务发现。",
+      toolCount: (count: number) => `${count} 个工具`,
     },
     skills: {
       title: "技能",

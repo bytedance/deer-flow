@@ -4,6 +4,9 @@ import type { MCPConfig } from "./types";
 
 export async function loadMCPConfig() {
   const response = await fetch(`${getBackendBaseURL()}/api/mcp/config`);
+  if (!response.ok) {
+    throw new Error("Failed to load MCP configuration");
+  }
   return response.json() as Promise<MCPConfig>;
 }
 
@@ -15,5 +18,8 @@ export async function updateMCPConfig(config: MCPConfig) {
     },
     body: JSON.stringify(config),
   });
+  if (!response.ok) {
+    throw new Error("Failed to update MCP configuration");
+  }
   return response.json();
 }

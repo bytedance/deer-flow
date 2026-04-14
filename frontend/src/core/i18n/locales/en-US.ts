@@ -422,6 +422,16 @@ export const enUS: Translations = {
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",
+      applyChangesHint:
+        "Server and tool changes apply automatically on the next MCP tool load.",
+      noDescription: "No description provided.",
+      noToolsDiscovered: "No tools discovered for this server yet.",
+      enableServerToRefresh:
+        "Enable this server to discover and refresh its tools.",
+      discoveredTool: "Discovered from the live MCP server.",
+      configuredTool: "Configured manually and waiting to be discovered.",
+      toolCount: (count: number) =>
+        `${count} tool${count === 1 ? "" : "s"}`,
     },
     skills: {
       title: "Agent Skills",

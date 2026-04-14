@@ -1,11 +1,19 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from deerflow.mcp.tools import _make_sync_tool_wrapper, get_mcp_tools
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, McpToolStateConfig
+from deerflow.mcp.tools import (
+    _filter_tools_for_extensions_config,
+    _make_sync_tool_wrapper,
+    discover_mcp_tools_by_server,
+    get_mcp_tools,
+    split_prefixed_mcp_tool_name,
+)
 
 
 class MockArgs(BaseModel):
@@ -83,3 +91,67 @@ def test_mcp_tool_sync_wrapper_exception_logging():
         mock_log_error.assert_called_once()
         # Verify the tool name is in the log message
         assert "error_tool" in mock_log_error.call_args[0][0]
+
+
+def test_split_prefixed_mcp_tool_name_prefers_longest_server_name():
+    assert split_prefixed_mcp_tool_name(
+        "github_enterprise_search_repositories",
+        ["github", "github_enterprise"],
+    ) == ("github_enterprise", "search_repositories")
+
+
+def test_filter_tools_for_extensions_config_skips_disabled_tools():
+    extensions = ExtensionsConfig(
+        mcp_servers={
+            "github": McpServerConfig(
+                enabled=True,
+                type="stdio",
+                command="npx",
+                tools={
+                    "search_repositories": McpToolStateConfig(enabled=False),
+                },
+            ),
+        },
+        skills={},
+    )
+    tools = [
+        SimpleNamespace(name="github_search_repositories", description="repo search"),
+        SimpleNamespace(name="github_get_issue", description="issue lookup"),
+    ]
+
+    filtered = _filter_tools_for_extensions_config(tools, extensions)
+
+    assert [tool.name for tool in filtered] == ["github_get_issue"]
+
+
+@pytest.mark.asyncio
+async def test_discover_mcp_tools_by_server_returns_raw_tool_names():
+    extensions = ExtensionsConfig(
+        mcp_servers={
+            "github": McpServerConfig(enabled=True, type="stdio", command="npx"),
+            "feishu": McpServerConfig(enabled=True, type="stdio", command="uvx"),
+        },
+        skills={},
+    )
+
+    with patch(
+        "deerflow.mcp.tools._load_mcp_tools",
+        new=AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    name="github_search_repositories",
+                    description="Search repositories",
+                ),
+                SimpleNamespace(
+                    name="feishu_import_document",
+                    description="Import a document",
+                ),
+            ],
+        ),
+    ):
+        discovered = await discover_mcp_tools_by_server(extensions)
+
+    assert discovered == {
+        "feishu": {"import_document": "Import a document"},
+        "github": {"search_repositories": "Search repositories"},
+    }

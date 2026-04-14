@@ -345,6 +345,13 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      applyChangesHint: string;
+      noDescription: string;
+      noToolsDiscovered: string;
+      enableServerToRefresh: string;
+      discoveredTool: string;
+      configuredTool: string;
+      toolCount: (count: number) => string;
     };
     skills: {
       title: string;

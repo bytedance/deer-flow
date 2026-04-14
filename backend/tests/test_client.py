@@ -2283,6 +2283,9 @@ class TestGatewayConformance:
             "url": None,
             "headers": {},
             "description": "test server",
+            "tools": {
+                "search_repositories": {"enabled": True},
+            },
         }
         ext_config = MagicMock()
         ext_config.mcp_servers = {"test": server}
@@ -2304,6 +2307,9 @@ class TestGatewayConformance:
             "url": None,
             "headers": {},
             "description": "",
+            "tools": {
+                "search_repositories": {"enabled": False},
+            },
         }
         ext_config = MagicMock()
         ext_config.mcp_servers = {"srv": server}
