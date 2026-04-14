@@ -1,0 +1,50 @@
+{
+  "name": "deer-flow-desktop",
+  "version": "0.1.0",
+  "description": "Standalone DeerFlow desktop application",
+  "private": true,
+  "author": "ByteDance",
+  "type": "module",
+  "main": "dist/main/app.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && cp preload/index.cjs dist/preload/index.cjs",
+    "dev": "pnpm run build && electron .",
+    "prepare-bundle": "node scripts/prepare-bundle.mjs",
+    "package": "pnpm run prepare-bundle && pnpm run build && electron-builder --dir",
+    "dist": "pnpm run prepare-bundle && pnpm run build && electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "electron": "^37.2.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.8.2"
+  },
+  "build": {
+    "appId": "com.bytedance.deerflow.desktop",
+    "productName": "DeerFlow Desktop",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "bundle-resources/app-bundle",
+        "to": "app-bundle"
+      }
+    ],
+    "extraMetadata": {
+      "main": "dist/main/app.js"
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
+  }
+}

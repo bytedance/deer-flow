@@ -13,6 +13,25 @@ function getInternalServiceURL(envKey, fallbackURL) {
 import nextra from "nextra";
 
 const withNextra = nextra({});
+const isDesktopBundle = process.env.DEER_FLOW_DESKTOP_BUNDLE === "1";
+
+function appendGatewayRewriteTargets(rewrites, gatewayURL) {
+  for (const route of [
+    "/api/models",
+    "/api/agents",
+    "/api/agents/:path*",
+    "/api/mcp",
+    "/api/mcp/:path*",
+    "/api/skills",
+    "/api/skills/:path*",
+    "/api/threads/:path*",
+  ]) {
+    rewrites.push({
+      source: route,
+      destination: `${gatewayURL}${route}`,
+    });
+  }
+}
 
 /** @type {import("next").NextConfig} */
 const config = {
@@ -21,6 +40,7 @@ const config = {
     defaultLocale: "en",
   },
   devIndicators: false,
+  ...(isDesktopBundle ? { output: "standalone" } : {}),
   async rewrites() {
     const rewrites = [];
     const langgraphURL = getInternalServiceURL(
@@ -31,6 +51,19 @@ const config = {
       "DEER_FLOW_INTERNAL_GATEWAY_BASE_URL",
       "http://127.0.0.1:8001",
     );
+
+    if (isDesktopBundle) {
+      rewrites.push({
+        source: "/api/langgraph",
+        destination: `${gatewayURL}/api`,
+      });
+      rewrites.push({
+        source: "/api/langgraph/:path*",
+        destination: `${gatewayURL}/api/:path*`,
+      });
+      appendGatewayRewriteTargets(rewrites, gatewayURL);
+      return rewrites;
+    }
 
     if (!process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
       rewrites.push({
@@ -44,14 +77,7 @@ const config = {
     }
 
     if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
-      rewrites.push({
-        source: "/api/agents",
-        destination: `${gatewayURL}/api/agents`,
-      });
-      rewrites.push({
-        source: "/api/agents/:path*",
-        destination: `${gatewayURL}/api/agents/:path*`,
-      });
+      appendGatewayRewriteTargets(rewrites, gatewayURL);
     }
 
     return rewrites;

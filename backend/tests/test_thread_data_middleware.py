@@ -2,6 +2,7 @@ import pytest
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+from deerflow.config.paths import Paths
 
 
 def _as_posix(path: str) -> str:
@@ -56,3 +57,13 @@ class TestThreadDataMiddleware:
 
         with pytest.raises(ValueError, match="Thread ID is required in runtime context or config.configurable"):
             middleware.before_agent(state={}, runtime=Runtime(context=None))
+
+
+def test_paths_uses_deer_flow_home_for_thread_directories(monkeypatch, tmp_path):
+    desktop_runtime = tmp_path / "runtime-home"
+    monkeypatch.setenv("DEER_FLOW_HOME", str(desktop_runtime))
+
+    paths = Paths()
+
+    assert _as_posix(str(paths.base_dir)) == _as_posix(str(desktop_runtime.resolve()))
+    assert _as_posix(str(paths.sandbox_work_dir("thread-123"))).endswith("runtime-home/threads/thread-123/user-data/workspace")

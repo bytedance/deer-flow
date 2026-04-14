@@ -2,8 +2,9 @@
 
 import {
   BellIcon,
-  InfoIcon,
   BrainIcon,
+  InfoIcon,
+  KeyRoundIcon,
   PaletteIcon,
   SparklesIcon,
   WrenchIcon,
@@ -20,14 +21,18 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { AboutSettingsPage } from "@/components/workspace/settings/about-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
+import { ModelSettingsPage } from "@/components/workspace/settings/model-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
 import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
+import { shouldShowDesktopModelSettings } from "./settings-dialog-mode";
+
 type SettingsSection =
   | "appearance"
+  | "models"
   | "memory"
   | "tools"
   | "skills"
@@ -38,19 +43,51 @@ type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
   defaultSection?: SettingsSection;
 };
 
+type DesktopPathsBridge = {
+  getAppPaths?: () => Promise<{ mode?: string }>;
+};
+
 export function SettingsDialog(props: SettingsDialogProps) {
   const { defaultSection = "appearance", ...dialogProps } = props;
   const { t } = useI18n();
+  const [hasDesktopBridge, setHasDesktopBridge] = useState(false);
+  const [desktopRuntimeMode, setDesktopRuntimeMode] = useState<string | null>(null);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(defaultSection);
+
+  const shouldShowModelsSection = shouldShowDesktopModelSettings({
+    hasDesktopBridge,
+    runtimeMode: desktopRuntimeMode,
+  });
+
+  useEffect(() => {
+    const bridge = (typeof window === "undefined" ? undefined : window.deerDesktop) as DesktopPathsBridge | undefined;
+    setHasDesktopBridge(!!bridge);
+    if (!bridge?.getAppPaths) {
+      setDesktopRuntimeMode(null);
+      return;
+    }
+    void bridge
+      .getAppPaths()
+      .then((paths) => {
+        setDesktopRuntimeMode(typeof paths?.mode === "string" ? paths.mode : null);
+      })
+      .catch(() => {
+        setDesktopRuntimeMode(null);
+      });
+  }, []);
 
   useEffect(() => {
     // When opening the dialog, ensure the active section follows the caller's intent.
     // This allows triggers like "About" to open the dialog directly on that page.
     if (dialogProps.open) {
-      setActiveSection(defaultSection);
+      setActiveSection(
+        defaultSection === "models" && !shouldShowModelsSection
+          ? "appearance"
+          : defaultSection,
+      );
     }
-  }, [defaultSection, dialogProps.open]);
+  }, [defaultSection, dialogProps.open, shouldShowModelsSection]);
 
   const sections = useMemo(
     () => [
@@ -59,6 +96,15 @@ export function SettingsDialog(props: SettingsDialogProps) {
         label: t.settings.sections.appearance,
         icon: PaletteIcon,
       },
+      ...(shouldShowModelsSection
+        ? [
+            {
+              id: "models" as const,
+              label: t.settings.sections.models,
+              icon: KeyRoundIcon,
+            },
+          ]
+        : []),
       {
         id: "notification",
         label: t.settings.sections.notification,
@@ -74,7 +120,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
+      shouldShowModelsSection,
       t.settings.sections.appearance,
+      t.settings.sections.models,
       t.settings.sections.memory,
       t.settings.sections.tools,
       t.settings.sections.skills,
@@ -125,6 +173,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
           <ScrollArea className="h-full min-h-0 rounded-lg border">
             <div className="space-y-8 p-6">
               {activeSection === "appearance" && <AppearanceSettingsPage />}
+              {shouldShowModelsSection && activeSection === "models" && (
+                <ModelSettingsPage />
+              )}
               {activeSection === "memory" && <MemorySettingsPage />}
               {activeSection === "tools" && <ToolSettingsPage />}
               {activeSection === "skills" && (

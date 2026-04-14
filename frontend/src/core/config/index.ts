@@ -1,14 +1,20 @@
 import { env } from "@/env";
 
+import { getServerBackendBaseURL } from "./server-backend-base-url";
+import { getServerBaseOrigin } from "./server-base-origin";
+
 function getBaseOrigin() {
   if (typeof window !== "undefined") {
     return window.location.origin;
   }
-  // Fallback for SSR
-  return "http://localhost:2026";
+  return getServerBaseOrigin();
 }
 
 export function getBackendBaseURL() {
+  if (typeof window === "undefined") {
+    return getServerBackendBaseURL();
+  }
+
   if (env.NEXT_PUBLIC_BACKEND_BASE_URL) {
     return new URL(env.NEXT_PUBLIC_BACKEND_BASE_URL, getBaseOrigin())
       .toString()

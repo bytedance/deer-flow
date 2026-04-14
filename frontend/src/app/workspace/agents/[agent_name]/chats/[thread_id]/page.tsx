@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
+import { shouldShowNewThreadLayout } from "@/components/workspace/chats/thread-chat-state";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -41,8 +42,13 @@ export default function AgentChatPage() {
 
   const { agent } = useAgent(agent_name);
 
-  const { threadId, setThreadId, isNewThread, setIsNewThread } =
-    useThreadChat();
+  const {
+    threadId,
+    setThreadId,
+    isNewThread,
+    setIsNewThread,
+    setPersistedThreadId,
+  } = useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
 
   const { showNotification } = useNotification();
@@ -51,6 +57,7 @@ export default function AgentChatPage() {
     context: { ...settings.context, agent_name: agent_name },
     onStart: (createdThreadId) => {
       setThreadId(createdThreadId);
+      setPersistedThreadId(createdThreadId);
       setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(
@@ -92,6 +99,10 @@ export default function AgentChatPage() {
     ? MESSAGE_LIST_DEFAULT_PADDING_BOTTOM +
       MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM
     : undefined;
+  const showNewThreadLayout = shouldShowNewThreadLayout({
+    isNewThread,
+    messageCount: thread.messages.length,
+  });
 
   return (
     <ThreadContext.Provider value={{ thread }}>
@@ -100,7 +111,7 @@ export default function AgentChatPage() {
           <header
             className={cn(
               "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-4",
-              isNewThread
+              showNewThreadLayout
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
@@ -137,7 +148,7 @@ export default function AgentChatPage() {
           <main className="flex min-h-0 max-w-full grow flex-col">
             <div className="flex size-full justify-center">
               <MessageList
-                className={cn("size-full", !isNewThread && "pt-10")}
+                className={cn("size-full", !showNewThreadLayout && "pt-10")}
                 threadId={threadId}
                 thread={thread}
                 paddingBottom={messageListPaddingBottom}
@@ -148,8 +159,8 @@ export default function AgentChatPage() {
               <div
                 className={cn(
                   "relative w-full",
-                  isNewThread && "-translate-y-[calc(50vh-96px)]",
-                  isNewThread
+                  showNewThreadLayout && "-translate-y-[calc(50vh-96px)]",
+                  showNewThreadLayout
                     ? "max-w-(--container-width-sm)"
                     : "max-w-(--container-width-md)",
                 )}
@@ -168,9 +179,9 @@ export default function AgentChatPage() {
 
                 <InputBox
                   className={cn("bg-background/5 w-full -translate-y-4")}
-                  isNewThread={isNewThread}
+                  isNewThread={showNewThreadLayout}
                   threadId={threadId}
-                  autoFocus={isNewThread}
+                  autoFocus={showNewThreadLayout}
                   status={
                     thread.error
                       ? "error"
@@ -180,7 +191,7 @@ export default function AgentChatPage() {
                   }
                   context={settings.context}
                   extraHeader={
-                    isNewThread && (
+                    showNewThreadLayout && (
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }

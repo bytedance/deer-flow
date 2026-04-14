@@ -251,6 +251,7 @@ export interface Translations {
     description: string;
     sections: {
       appearance: string;
+      models: string;
       memory: string;
       tools: string;
       skills: string;
@@ -341,6 +342,35 @@ export interface Translations {
       darkDescription: string;
       languageTitle: string;
       languageDescription: string;
+    };
+    models: {
+      title: string;
+      description: string;
+      defaultModel: string;
+      defaultModelDescription: string;
+      defaultModelPlaceholder: string;
+      configured: string;
+      notConfigured: string;
+      apiKeyPlaceholder: string;
+      baseUrl: string;
+      baseUrlPlaceholder: string;
+      providerNamePlaceholder: string;
+      providerEnvPlaceholder: string;
+      addProvider: string;
+      saveProvider: string;
+      providerListDescription: string;
+      deleteProviderConfirmTitle: string;
+      deleteProviderConfirmDescription: string;
+      providerType: string;
+      providerTypePlaceholder: string;
+      providerName: string;
+      modelName: string;
+      modelNamePlaceholder: string;
+      addProviderDialogTitle: string;
+      addProviderDialogDescription: string;
+      openaiCompatible: string;
+      emptyProviders: string;
+      emptyProvidersDescription: string;
     };
     tools: {
       title: string;

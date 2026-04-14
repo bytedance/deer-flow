@@ -57,3 +57,10 @@ config.yaml.bak
 .playwright-mcp
 .gstack/
 .worktrees
+
+
+# desktop artifacts
+dist
+node_modules
+release/
+bundle-resources/

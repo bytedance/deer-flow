@@ -16,6 +16,7 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
+import { shouldClearOptimisticMessages } from "./optimistic-message-state";
 import type { AgentThread, AgentThreadState } from "./types";
 
 export type ToolEndEvent = {
@@ -313,15 +314,17 @@ export function useThreadStream({
     setIsUploading(false);
   }, [threadId]);
 
-  // Clear optimistic when server messages arrive (count increases)
+  // Clear optimistic only after the server echoes back the human message.
   useEffect(() => {
     if (
-      optimisticMessages.length > 0 &&
-      thread.messages.length > prevMsgCountRef.current
+      shouldClearOptimisticMessages({
+        optimisticCount: optimisticMessages.length,
+        serverMessages: thread.messages,
+      })
     ) {
       setOptimisticMessages([]);
     }
-  }, [thread.messages.length, optimisticMessages.length]);
+  }, [thread.messages, optimisticMessages.length]);
 
   const sendMessage = useCallback(
     async (

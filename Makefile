@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor dev dev-pro dev-daemon dev-daemon-pro start start-pro start-daemon start-daemon-pro stop up up-pro down clean docker-init docker-start docker-start-pro docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install setup doctor dev dev-pro dev-daemon dev-daemon-pro start start-pro start-daemon start-daemon-pro desktop-dev desktop-build desktop-package desktop-shared stop up up-pro down clean docker-init docker-start docker-start-pro docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -33,6 +33,10 @@ help:
 	@echo "  make start-pro       - Start in prod + Gateway mode (experimental)"
 	@echo "  make start-daemon    - Start prod services in background (daemon mode)"
 	@echo "  make start-daemon-pro - Start prod daemon + Gateway mode (experimental)"
+	@echo "  make desktop-dev     - Start shared web/backend in daemon mode, then open the Electron desktop shell"
+	@echo "  make desktop-build   - Build the Electron desktop shell"
+	@echo "  make desktop-package - Build a packaged Electron app into desktop/release"
+	@echo "  make desktop-shared  - Alias of make desktop-dev"
 	@echo "  make stop            - Stop all running services"
 	@echo "  make clean           - Clean up processes and temporary files"
 	@echo ""
@@ -155,6 +159,22 @@ start-daemon:
 start-daemon-pro:
 	@$(PYTHON) ./scripts/check.py
 	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --gateway --daemon
+
+desktop-build:
+	@cd desktop && node scripts/ensure-electron.mjs
+	@cd desktop && pnpm run build
+
+desktop-package:
+	@cd desktop && node scripts/ensure-electron.mjs
+	@cd desktop && pnpm run dist
+
+desktop-dev:
+	@DEER_FLOW_CONFIG_PATH=$(CURDIR)/config.desktop.yaml $(MAKE) dev-daemon-pro
+	@cd desktop && node scripts/ensure-electron.mjs
+	@cd desktop && pnpm run dev
+
+desktop-shared:
+	@$(MAKE) desktop-dev
 
 # Stop all services
 stop:

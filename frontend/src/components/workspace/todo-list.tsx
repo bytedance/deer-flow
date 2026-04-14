@@ -11,6 +11,8 @@ import {
   QueueList,
 } from "../ai-elements/queue";
 
+import { shouldRenderTodoQueue } from "./todo-list-state";
+
 export function TodoList({
   className,
   todos,
@@ -35,6 +37,12 @@ export function TodoList({
       setInternalCollapsed((prev) => !prev);
     }
   };
+
+  const showQueue = shouldRenderTodoQueue({
+    hidden,
+    collapsed,
+    todos,
+  });
 
   return (
     <div
@@ -71,28 +79,30 @@ export function TodoList({
           collapsed ? "h-0 pb-3" : "h-28 pb-4",
         )}
       >
-        <QueueList className="bg-background mt-0 w-full rounded-t-xl">
-          {todos.map((todo, i) => (
-            <QueueItem key={i + (todo.content ?? "")}>
-              <div className="flex items-center gap-2">
-                <QueueItemIndicator
-                  className={
-                    todo.status === "in_progress" ? "bg-primary/70" : ""
-                  }
-                  completed={todo.status === "completed"}
-                />
-                <QueueItemContent
-                  className={
-                    todo.status === "in_progress" ? "text-primary/70" : ""
-                  }
-                  completed={todo.status === "completed"}
-                >
-                  {todo.content}
-                </QueueItemContent>
-              </div>
-            </QueueItem>
-          ))}
-        </QueueList>
+        {showQueue ? (
+          <QueueList className="bg-background mt-0 w-full rounded-t-xl">
+            {todos.map((todo, i) => (
+              <QueueItem key={i + (todo.content ?? "")}>
+                <div className="flex items-center gap-2">
+                  <QueueItemIndicator
+                    className={
+                      todo.status === "in_progress" ? "bg-primary/70" : ""
+                    }
+                    completed={todo.status === "completed"}
+                  />
+                  <QueueItemContent
+                    className={
+                      todo.status === "in_progress" ? "text-primary/70" : ""
+                    }
+                    completed={todo.status === "completed"}
+                  >
+                    {todo.content}
+                  </QueueItemContent>
+                </div>
+              </QueueItem>
+            ))}
+          </QueueList>
+        ) : null}
       </main>
     </div>
   );
