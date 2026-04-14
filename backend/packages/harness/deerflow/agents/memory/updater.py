@@ -406,7 +406,8 @@ class MemoryUpdater:
             current_memory, prompt = prepared
             model = self._get_model()
             response = await model.ainvoke(prompt)
-            return self._finalize_update(
+            return await asyncio.to_thread(
+                self._finalize_update,
                 current_memory=current_memory,
                 response_content=response.content,
                 thread_id=thread_id,
