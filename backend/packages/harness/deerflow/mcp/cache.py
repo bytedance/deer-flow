@@ -14,6 +14,7 @@ _cache_initialized = False
 _initialization_lock = asyncio.Lock()
 _config_mtime: float | None = None  # Track config file modification time
 _enabled_server_count = 0
+_active_tools_by_server: dict[str, list[str]] = {}
 
 
 def _get_config_mtime() -> float | None:
@@ -84,6 +85,7 @@ def get_mcp_cache_status() -> dict[str, Any]:
         "runtime_config_last_loaded_at": _config_mtime,
         "active_server_count": _enabled_server_count if _cache_initialized else 0,
         "active_tool_count": active_tool_count,
+        "active_tools_by_server": _active_tools_by_server if _cache_initialized else {},
     }
 
 
@@ -95,7 +97,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     Returns:
         List of LangChain tools from all enabled MCP servers.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime, _enabled_server_count
+    global _mcp_tools_cache, _cache_initialized, _config_mtime, _enabled_server_count, _active_tools_by_server
 
     async with _initialization_lock:
         if _cache_initialized:
@@ -110,6 +112,10 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         _mcp_tools_cache = await get_mcp_tools()
         _cache_initialized = True
         _enabled_server_count = len(extensions_config.get_enabled_mcp_servers())
+        _active_tools_by_server = _group_active_tools_by_server(
+            _mcp_tools_cache,
+            list(extensions_config.get_enabled_mcp_servers().keys()),
+        )
         _config_mtime = _get_config_mtime()  # Record config file mtime
         logger.info(
             "MCP tools initialized: %s tool(s) loaded across %s enabled server(s) (config mtime: %s)",
@@ -168,14 +174,39 @@ def get_cached_mcp_tools() -> list[BaseTool]:
     return _mcp_tools_cache or []
 
 
+def _group_active_tools_by_server(
+    tools: list[BaseTool] | None,
+    server_names: list[str],
+) -> dict[str, list[str]]:
+    """Group active MCP tool names by server using the persisted name prefix."""
+    from deerflow.mcp.tools import split_prefixed_mcp_tool_name
+
+    grouped = {server_name: [] for server_name in server_names}
+
+    for tool in tools or []:
+        split_name = split_prefixed_mcp_tool_name(tool.name, server_names)
+        if split_name is None:
+            continue
+
+        server_name, raw_tool_name = split_name
+        grouped.setdefault(server_name, []).append(raw_tool_name)
+
+    return {
+        server_name: sorted(tool_names)
+        for server_name, tool_names in grouped.items()
+        if tool_names
+    }
+
+
 def reset_mcp_tools_cache() -> None:
     """Reset the MCP tools cache.
 
     This is useful for testing or when you want to reload MCP tools.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime, _enabled_server_count
+    global _mcp_tools_cache, _cache_initialized, _config_mtime, _enabled_server_count, _active_tools_by_server
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_mtime = None
     _enabled_server_count = 0
+    _active_tools_by_server = {}
     logger.info("MCP tools cache reset")

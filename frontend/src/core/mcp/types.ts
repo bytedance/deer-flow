@@ -2,6 +2,8 @@ export interface MCPToolConfig extends Record<string, unknown> {
   enabled: boolean;
   discovered: boolean;
   description: string;
+  active_in_runtime: boolean;
+  pending_reload_action: "none" | "enable" | "disable";
 }
 
 export type MCPRuntimeStatus =
@@ -20,6 +22,7 @@ export interface MCPRuntimeConfig extends Record<string, unknown> {
   runtime_config_last_loaded_at: string | null;
   active_server_count: number;
   active_tool_count: number;
+  active_tools_by_server: Record<string, string[]>;
 }
 
 export interface MCPServerConfig extends Record<string, unknown> {
@@ -33,6 +36,8 @@ export interface MCPServerConfig extends Record<string, unknown> {
   headers?: Record<string, string>;
   oauth?: Record<string, unknown> | null;
   tools: Record<string, MCPToolConfig>;
+  runtime_tool_count: number;
+  pending_reload_tool_count: number;
 }
 
 export interface MCPConfig {
@@ -40,6 +45,23 @@ export interface MCPConfig {
   runtime: MCPRuntimeConfig;
 }
 
+export interface MCPToolConfigUpdate {
+  enabled: boolean;
+}
+
+export interface MCPServerConfigUpdate {
+  enabled: boolean;
+  description: string;
+  type?: string;
+  command?: string | null;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string | null;
+  headers?: Record<string, string>;
+  oauth?: Record<string, unknown> | null;
+  tools: Record<string, MCPToolConfigUpdate>;
+}
+
 export interface MCPConfigUpdate {
-  mcp_servers: Record<string, MCPServerConfig>;
+  mcp_servers: Record<string, MCPServerConfigUpdate>;
 }

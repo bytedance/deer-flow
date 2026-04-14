@@ -1,7 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { loadMCPConfig, updateMCPConfig } from "./api";
-import type { MCPConfigUpdate } from "./types";
+import type {
+  MCPConfigUpdate,
+  MCPServerConfig,
+  MCPServerConfigUpdate,
+} from "./types";
+
+function toMCPServerConfigUpdate(server: MCPServerConfig): MCPServerConfigUpdate {
+  return {
+    enabled: server.enabled,
+    description: server.description,
+    type: server.type,
+    command: server.command,
+    args: server.args,
+    env: server.env,
+    url: server.url,
+    headers: server.headers,
+    oauth: server.oauth,
+    tools: Object.fromEntries(
+      Object.entries(server.tools ?? {}).map(([toolName, tool]) => [
+        toolName,
+        { enabled: tool.enabled },
+      ]),
+    ),
+  };
+}
 
 export function useMCPConfig() {
   const { data, isLoading, error } = useQuery({
@@ -30,9 +54,14 @@ export function useEnableMCPServer() {
       }
       return updateMCPConfig({
         mcp_servers: {
-          ...config.mcp_servers,
+          ...Object.fromEntries(
+            Object.entries(config.mcp_servers).map(([name, server]) => [
+              name,
+              toMCPServerConfigUpdate(server),
+            ]),
+          ),
           [serverName]: {
-            ...config.mcp_servers[serverName],
+            ...toMCPServerConfigUpdate(config.mcp_servers[serverName]),
             enabled,
           },
         },
@@ -69,16 +98,17 @@ export function useEnableMCPTool() {
 
       const nextConfig: MCPConfigUpdate = {
         mcp_servers: {
-          ...config.mcp_servers,
+          ...Object.fromEntries(
+            Object.entries(config.mcp_servers).map(([name, serverConfig]) => [
+              name,
+              toMCPServerConfigUpdate(serverConfig),
+            ]),
+          ),
           [serverName]: {
-            ...server,
+            ...toMCPServerConfigUpdate(server),
             tools: {
-              ...(server.tools ?? {}),
+              ...toMCPServerConfigUpdate(server).tools,
               [toolName]: {
-                ...(server.tools?.[toolName] ?? {
-                  description: "",
-                  discovered: false,
-                }),
                 enabled,
               },
             },

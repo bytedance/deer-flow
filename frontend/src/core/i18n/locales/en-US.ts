@@ -448,6 +448,13 @@ export const enUS: Translations = {
         `This process's runtime cache: ${toolCount} tool${toolCount === 1 ? "" : "s"} from ${serverCount} enabled server${serverCount === 1 ? "" : "s"}.`,
       runtimeEmpty:
         "This process's runtime cache is loaded, but no MCP tools are active.",
+      serverRuntimeTools: (count: number) =>
+        `${count} active now`,
+      serverPendingChanges: (count: number) =>
+        `${count} pending change${count === 1 ? "" : "s"}`,
+      toolActiveNow: "Active now",
+      toolWillEnable: "Will enable on next load",
+      toolWillDisable: "Will disable on next load",
       noDescription: "No description provided.",
       noToolsDiscovered: "No tools discovered for this server yet.",
       enableServerToRefresh:

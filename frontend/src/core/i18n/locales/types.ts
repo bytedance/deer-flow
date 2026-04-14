@@ -363,6 +363,11 @@ export interface Translations {
       runtimeLoadedAt: (relative: string) => string;
       runtimeSummary: (toolCount: number, serverCount: number) => string;
       runtimeEmpty: string;
+      serverRuntimeTools: (count: number) => string;
+      serverPendingChanges: (count: number) => string;
+      toolActiveNow: string;
+      toolWillEnable: string;
+      toolWillDisable: string;
       noDescription: string;
       noToolsDiscovered: string;
       enableServerToRefresh: string;

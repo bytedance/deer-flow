@@ -212,8 +212,24 @@ function MCPServerList({
                   <ItemTitle className="w-full justify-between">
                     <div className="min-w-0">
                       <div>{name}</div>
-                      <div className="text-muted-foreground text-xs font-normal">
-                        {t.settings.tools.toolCount(tools.length)}
+                      <div className="mt-1 flex flex-wrap gap-2 text-xs font-normal">
+                        <Badge variant="secondary">
+                          {t.settings.tools.toolCount(tools.length)}
+                        </Badge>
+                        {config.runtime_tool_count > 0 ? (
+                          <Badge variant="outline">
+                            {t.settings.tools.serverRuntimeTools(
+                              config.runtime_tool_count,
+                            )}
+                          </Badge>
+                        ) : null}
+                        {config.pending_reload_tool_count > 0 ? (
+                          <Badge variant="outline">
+                            {t.settings.tools.serverPendingChanges(
+                              config.pending_reload_tool_count,
+                            )}
+                          </Badge>
+                        ) : null}
                       </div>
                     </div>
                   </ItemTitle>
@@ -283,6 +299,26 @@ function MCPToolRow({
               ? t.settings.tools.discoveredTool
               : t.settings.tools.configuredTool)}
         </ItemDescription>
+        {toolConfig.active_in_runtime ||
+        toolConfig.pending_reload_action !== "none" ? (
+          <div className="mt-1 flex flex-wrap gap-2">
+            {toolConfig.active_in_runtime ? (
+              <Badge variant="secondary">
+                {t.settings.tools.toolActiveNow}
+              </Badge>
+            ) : null}
+            {toolConfig.pending_reload_action === "enable" ? (
+              <Badge variant="outline">
+                {t.settings.tools.toolWillEnable}
+              </Badge>
+            ) : null}
+            {toolConfig.pending_reload_action === "disable" ? (
+              <Badge variant="outline">
+                {t.settings.tools.toolWillDisable}
+              </Badge>
+            ) : null}
+          </div>
+        ) : null}
       </ItemContent>
       <ItemActions>
         <Switch

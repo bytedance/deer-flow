@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 from enum import Enum
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
@@ -18,6 +18,7 @@ from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
 from deerflow.uploads.manager import PathTraversalError
 
@@ -2305,6 +2306,7 @@ class TestGatewayConformance:
                     "runtime_config_last_loaded_at": 100.0,
                     "active_server_count": 1,
                     "active_tool_count": 1,
+                    "active_tools_by_server": {"test": ["search_repositories"]},
                 },
             ),
         ):
@@ -2353,6 +2355,7 @@ class TestGatewayConformance:
                     "runtime_config_last_loaded_at": 100.0,
                     "active_server_count": 1,
                     "active_tool_count": 1,
+                    "active_tools_by_server": {"srv": ["search_repositories"]},
                 },
             ),
         ):
@@ -2361,6 +2364,50 @@ class TestGatewayConformance:
         parsed = McpConfigResponse(**result)
         assert "srv" in parsed.mcp_servers
         assert parsed.runtime.status == "pending_reload"
+
+    @pytest.mark.asyncio
+    async def test_build_mcp_config_response_keeps_runtime_only_tools_visible(self):
+        from app.gateway.routers.mcp import _build_mcp_config_response
+
+        config = ExtensionsConfig(
+            mcp_servers={
+                "github": McpServerConfig(
+                    enabled=False,
+                    type="stdio",
+                    command="npx",
+                ),
+            },
+            skills={},
+        )
+
+        with (
+            patch(
+                "app.gateway.routers.mcp.discover_mcp_tools_by_server",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "app.gateway.routers.mcp.get_mcp_cache_status",
+                return_value={
+                    "status": "pending_reload",
+                    "reload_mode": "next_tool_load",
+                    "restart_required": False,
+                    "will_apply_on_next_load": True,
+                    "cache_initialized": True,
+                    "cache_stale": True,
+                    "config_last_modified_at": 200.0,
+                    "runtime_config_last_loaded_at": 100.0,
+                    "active_server_count": 1,
+                    "active_tool_count": 1,
+                    "active_tools_by_server": {"github": ["search_repositories"]},
+                },
+            ),
+        ):
+            response = await _build_mcp_config_response(config)
+
+        tool = response.mcp_servers["github"].tools["search_repositories"]
+        assert tool.active_in_runtime is True
+        assert tool.pending_reload_action == "disable"
+        assert response.mcp_servers["github"].pending_reload_tool_count == 1
 
     def test_upload_files(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"

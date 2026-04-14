@@ -429,6 +429,11 @@ export const zhCN: Translations = {
         `当前进程中的运行时缓存有 ${toolCount} 个工具，来自 ${serverCount} 个已启用服务。`,
       runtimeEmpty:
         "当前进程中的运行时缓存已初始化，但没有激活任何 MCP 工具。",
+      serverRuntimeTools: (count: number) => `当前生效 ${count} 个`,
+      serverPendingChanges: (count: number) => `待生效 ${count} 项`,
+      toolActiveNow: "当前已生效",
+      toolWillEnable: "下次加载启用",
+      toolWillDisable: "下次加载停用",
       noDescription: "暂无描述。",
       noToolsDiscovered: "暂未发现该服务暴露的工具。",
       enableServerToRefresh: "启用该服务后即可发现并刷新工具列表。",

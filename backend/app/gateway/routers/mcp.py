@@ -54,6 +54,14 @@ class McpServerConfigResponse(BaseModel):
         default_factory=dict,
         description="Tool-level enablement states under this MCP server",
     )
+    runtime_tool_count: int = Field(
+        default=0,
+        description="Number of tools from this server currently active in the current process runtime cache",
+    )
+    pending_reload_tool_count: int = Field(
+        default=0,
+        description="Number of tools under this server whose saved state differs from the current process runtime cache",
+    )
 
 
 class McpToolConfigResponse(BaseModel):
@@ -67,6 +75,14 @@ class McpToolConfigResponse(BaseModel):
     description: str = Field(
         default="",
         description="Best-effort description discovered from the MCP tool metadata",
+    )
+    active_in_runtime: bool = Field(
+        default=False,
+        description="Whether this tool is currently active in the current process runtime cache",
+    )
+    pending_reload_action: Literal["none", "enable", "disable"] = Field(
+        default="none",
+        description="Whether the saved config will enable or disable this tool on the next MCP tool load",
     )
 
 
@@ -159,6 +175,10 @@ class McpRuntimeStatusResponse(BaseModel):
         default=0,
         description="Number of MCP tools currently loaded into the current process cache",
     )
+    active_tools_by_server: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Active MCP tool names grouped by server in the current process cache",
+    )
 
 
 McpServerConfigResponse.model_rebuild()
@@ -185,33 +205,69 @@ def _build_mcp_runtime_status_response() -> McpRuntimeStatusResponse:
 
 async def _build_mcp_config_response(config: ExtensionsConfig) -> McpConfigResponse:
     discovered_tools = await discover_mcp_tools_by_server(config)
+    runtime_status = _build_mcp_runtime_status_response()
+    runtime_tools_by_server = {
+        server_name: set(tool_names)
+        for server_name, tool_names in runtime_status.active_tools_by_server.items()
+    }
     servers: dict[str, McpServerConfigResponse] = {}
 
     for server_name, server in config.mcp_servers.items():
+        server_runtime_tools = runtime_tools_by_server.get(server_name, set())
         configured_tools = {
             tool_name: McpToolConfigResponse(
                 enabled=tool_config.enabled,
                 discovered=False,
                 description="",
+                active_in_runtime=tool_name in server_runtime_tools,
+                pending_reload_action="disable" if tool_name in server_runtime_tools and not tool_config.enabled else "none",
             )
             for tool_name, tool_config in server.tools.items()
         }
 
         for tool_name, description in discovered_tools.get(server_name, {}).items():
+            desired_active = server.enabled and config.is_mcp_tool_enabled(server_name, tool_name)
+            active_in_runtime = tool_name in server_runtime_tools
+            pending_reload_action: Literal["none", "enable", "disable"] = "none"
+            if active_in_runtime and not desired_active:
+                pending_reload_action = "disable"
+            elif desired_active and not active_in_runtime and runtime_status.status != "in_sync":
+                pending_reload_action = "enable"
+
             configured_tools[tool_name] = McpToolConfigResponse(
                 enabled=config.is_mcp_tool_enabled(server_name, tool_name),
                 discovered=True,
                 description=description,
+                active_in_runtime=active_in_runtime,
+                pending_reload_action=pending_reload_action,
             )
+
+        for tool_name in sorted(server_runtime_tools):
+            if tool_name in configured_tools:
+                continue
+
+            configured_tools[tool_name] = McpToolConfigResponse(
+                enabled=False,
+                discovered=False,
+                description="",
+                active_in_runtime=True,
+                pending_reload_action="disable",
+            )
+
+        pending_reload_tool_count = sum(
+            1 for tool in configured_tools.values() if tool.pending_reload_action != "none"
+        )
 
         servers[server_name] = McpServerConfigResponse(
             **server.model_dump(exclude={"tools"}),
             tools=dict(sorted(configured_tools.items())),
+            runtime_tool_count=len(server_runtime_tools),
+            pending_reload_tool_count=pending_reload_tool_count,
         )
 
     return McpConfigResponse(
         mcp_servers=servers,
-        runtime=_build_mcp_runtime_status_response(),
+        runtime=runtime_status,
     )
 
 

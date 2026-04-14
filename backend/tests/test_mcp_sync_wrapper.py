@@ -163,6 +163,7 @@ def test_get_mcp_cache_status_reports_not_initialized(monkeypatch):
     monkeypatch.setattr(mcp_cache, "_mcp_tools_cache", None)
     monkeypatch.setattr(mcp_cache, "_config_mtime", None)
     monkeypatch.setattr(mcp_cache, "_enabled_server_count", 0)
+    monkeypatch.setattr(mcp_cache, "_active_tools_by_server", {})
     monkeypatch.setattr(mcp_cache, "_get_config_mtime", lambda: 123.0)
 
     status = mcp_cache.get_mcp_cache_status()
@@ -175,6 +176,7 @@ def test_get_mcp_cache_status_reports_not_initialized(monkeypatch):
     assert status["runtime_config_last_loaded_at"] is None
     assert status["active_server_count"] == 0
     assert status["active_tool_count"] == 0
+    assert status["active_tools_by_server"] == {}
 
 
 def test_get_mcp_cache_status_reports_pending_reload(monkeypatch):
@@ -186,6 +188,11 @@ def test_get_mcp_cache_status_reports_pending_reload(monkeypatch):
     )
     monkeypatch.setattr(mcp_cache, "_config_mtime", 100.0)
     monkeypatch.setattr(mcp_cache, "_enabled_server_count", 2)
+    monkeypatch.setattr(
+        mcp_cache,
+        "_active_tools_by_server",
+        {"github": ["get_issue", "search_repositories"]},
+    )
     monkeypatch.setattr(mcp_cache, "_get_config_mtime", lambda: 200.0)
 
     status = mcp_cache.get_mcp_cache_status()
@@ -197,3 +204,22 @@ def test_get_mcp_cache_status_reports_pending_reload(monkeypatch):
     assert status["runtime_config_last_loaded_at"] == 100.0
     assert status["active_server_count"] == 2
     assert status["active_tool_count"] == 2
+    assert status["active_tools_by_server"] == {
+        "github": ["get_issue", "search_repositories"],
+    }
+
+
+def test_group_active_tools_by_server_uses_raw_tool_names():
+    grouped = mcp_cache._group_active_tools_by_server(
+        [
+            SimpleNamespace(name="github_search_repositories"),
+            SimpleNamespace(name="github_get_issue"),
+            SimpleNamespace(name="feishu_import_document"),
+        ],
+        ["github", "feishu"],
+    )
+
+    assert grouped == {
+        "feishu": ["import_document"],
+        "github": ["get_issue", "search_repositories"],
+    }
