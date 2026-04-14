@@ -405,6 +405,30 @@ export const zhCN: Translations = {
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",
       applyChangesHint: "服务和工具开关会在下一次 MCP 工具加载时自动生效。",
+      runtimeStatusTitle: "热更新状态",
+      statusSaving: "保存中",
+      statusPendingReload: "等待刷新",
+      statusInSync: "已同步",
+      statusNotInitialized: "等待首次加载",
+      savingDescription:
+        "正在保存 MCP 配置变更。最新配置会在下一次 MCP 工具加载时自动生效。",
+      pendingReloadDescription:
+        "当前进程中的运行时缓存仍在使用上一版 MCP 配置，并会在下一次 MCP 工具加载时自动刷新。",
+      inSyncDescription:
+        "当前进程中的运行时缓存已经使用最新保存的 MCP 配置。",
+      notInitializedDescription:
+        "当前进程还没有加载过 MCP 工具。首次加载 MCP 工具时就会使用最新保存的配置。",
+      saveFailedTitle: "保存 MCP 配置失败",
+      noRestartRequired: "无需重启",
+      reloadModeNextLoad: "生效方式：下一次 MCP 工具加载时自动刷新。",
+      configSavedAt: (relative: string) => `最新配置保存于 ${relative}。`,
+      configNotSavedYet: "暂未保存过扩展配置。",
+      runtimeLoadedAt: (relative: string) =>
+        `当前进程中的运行时缓存最近一次加载于 ${relative}。`,
+      runtimeSummary: (toolCount: number, serverCount: number) =>
+        `当前进程中的运行时缓存有 ${toolCount} 个工具，来自 ${serverCount} 个已启用服务。`,
+      runtimeEmpty:
+        "当前进程中的运行时缓存已初始化，但没有激活任何 MCP 工具。",
       noDescription: "暂无描述。",
       noToolsDiscovered: "暂未发现该服务暴露的工具。",
       enableServerToRefresh: "启用该服务后即可发现并刷新工具列表。",

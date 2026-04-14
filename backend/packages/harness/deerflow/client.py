@@ -38,6 +38,7 @@ from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+from deerflow.mcp.cache import get_mcp_cache_status
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.skills.installer import install_skill_from_archive
@@ -817,7 +818,10 @@ class DeerFlowClient:
             matching the Gateway API ``McpConfigResponse`` schema.
         """
         config = get_extensions_config()
-        return {"mcp_servers": {name: server.model_dump() for name, server in config.mcp_servers.items()}}
+        return {
+            "mcp_servers": {name: server.model_dump() for name, server in config.mcp_servers.items()},
+            "runtime": get_mcp_cache_status(),
+        }
 
     def update_mcp_config(self, mcp_servers: dict[str, dict]) -> dict:
         """Update MCP server configurations.
@@ -851,7 +855,10 @@ class DeerFlowClient:
         self._agent = None
         self._agent_config_key = None
         reloaded = reload_extensions_config()
-        return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
+        return {
+            "mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()},
+            "runtime": get_mcp_cache_status(),
+        }
 
     # ------------------------------------------------------------------
     # Public API — skills management

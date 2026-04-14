@@ -1,5 +1,17 @@
 export function GET() {
   return Response.json({
+    runtime: {
+      status: "pending_reload",
+      reload_mode: "next_tool_load",
+      restart_required: false,
+      will_apply_on_next_load: true,
+      cache_initialized: true,
+      cache_stale: true,
+      config_last_modified_at: "2026-04-14T09:15:00.000Z",
+      runtime_config_last_loaded_at: "2026-04-14T09:10:00.000Z",
+      active_server_count: 2,
+      active_tool_count: 3,
+    },
     mcp_servers: {
       "mcp-github-trending": {
         enabled: true,

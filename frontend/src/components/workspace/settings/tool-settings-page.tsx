@@ -1,6 +1,18 @@
 "use client";
 
 import {
+  CircleCheckIcon,
+  Loader2Icon,
+  TriangleAlertIcon,
+} from "lucide-react";
+
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import {
   Item,
   ItemActions,
   ItemContent,
@@ -16,7 +28,12 @@ import {
   useEnableMCPTool,
   useMCPConfig,
 } from "@/core/mcp/hooks";
-import type { MCPServerConfig, MCPToolConfig } from "@/core/mcp/types";
+import type {
+  MCPRuntimeConfig,
+  MCPServerConfig,
+  MCPToolConfig,
+} from "@/core/mcp/types";
+import { formatTimeAgo } from "@/core/utils/datetime";
 import { env } from "@/env";
 
 import { SettingsSection } from "./settings-section";
@@ -24,6 +41,14 @@ import { SettingsSection } from "./settings-section";
 export function ToolSettingsPage() {
   const { t } = useI18n();
   const { config, isLoading, error } = useMCPConfig();
+  const enableServerMutation = useEnableMCPServer();
+  const enableToolMutation = useEnableMCPTool();
+  const isSaving =
+    enableServerMutation.isPending || enableToolMutation.isPending;
+  const rawSaveError = enableServerMutation.error ?? enableToolMutation.error;
+  const saveError =
+    rawSaveError instanceof Error ? rawSaveError : rawSaveError ? new Error(String(rawSaveError)) : null;
+
   return (
     <SettingsSection
       title={t.settings.tools.title}
@@ -37,20 +62,139 @@ export function ToolSettingsPage() {
       ) : error ? (
         <div>Error: {error.message}</div>
       ) : (
-        config && <MCPServerList servers={config.mcp_servers} />
+        config && (
+          <div className="space-y-4">
+            <MCPRuntimeStatusAlert
+              isSaving={isSaving}
+              runtime={config.runtime}
+              saveError={saveError}
+            />
+            <MCPServerList
+              disableInteractions={
+                env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" || isSaving
+              }
+              onToggleServer={(serverName, enabled) =>
+                enableServerMutation.mutate({ serverName, enabled })
+              }
+              onToggleTool={(serverName, toolName, enabled) =>
+                enableToolMutation.mutate({ serverName, toolName, enabled })
+              }
+              servers={config.mcp_servers}
+            />
+          </div>
+        )
       )}
     </SettingsSection>
   );
 }
 
+function MCPRuntimeStatusAlert({
+  isSaving,
+  runtime,
+  saveError,
+}: {
+  isSaving: boolean;
+  runtime: MCPRuntimeConfig;
+  saveError: Error | null;
+}) {
+  const { t } = useI18n();
+
+  if (saveError) {
+    return (
+      <Alert variant="destructive">
+        <TriangleAlertIcon />
+        <AlertTitle>{t.settings.tools.saveFailedTitle}</AlertTitle>
+        <AlertDescription>{saveError.message}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  const Icon = isSaving
+    ? Loader2Icon
+    : runtime.status === "pending_reload"
+      ? TriangleAlertIcon
+      : CircleCheckIcon;
+
+  const statusLabel = isSaving
+    ? t.settings.tools.statusSaving
+    : runtime.status === "pending_reload"
+      ? t.settings.tools.statusPendingReload
+      : runtime.status === "in_sync"
+        ? t.settings.tools.statusInSync
+        : t.settings.tools.statusNotInitialized;
+
+  const statusDescription = isSaving
+    ? t.settings.tools.savingDescription
+    : runtime.status === "pending_reload"
+      ? t.settings.tools.pendingReloadDescription
+      : runtime.status === "in_sync"
+        ? t.settings.tools.inSyncDescription
+        : t.settings.tools.notInitializedDescription;
+
+  const configSavedAt = runtime.config_last_modified_at
+    ? t.settings.tools.configSavedAt(
+        formatTimeAgo(runtime.config_last_modified_at),
+      )
+    : t.settings.tools.configNotSavedYet;
+
+  const runtimeLoadedAt = runtime.runtime_config_last_loaded_at
+    ? t.settings.tools.runtimeLoadedAt(
+        formatTimeAgo(runtime.runtime_config_last_loaded_at),
+      )
+    : null;
+
+  const runtimeSummary = runtime.cache_initialized
+    ? runtime.active_tool_count > 0
+      ? t.settings.tools.runtimeSummary(
+          runtime.active_tool_count,
+          runtime.active_server_count,
+        )
+      : t.settings.tools.runtimeEmpty
+    : null;
+
+  return (
+    <Alert>
+      <Icon className={isSaving ? "animate-spin" : undefined} />
+      <AlertTitle className="flex flex-wrap items-center gap-2">
+        {t.settings.tools.runtimeStatusTitle}
+        <Badge
+          variant={
+            runtime.status === "pending_reload" && !isSaving
+              ? "outline"
+              : "secondary"
+          }
+        >
+          {statusLabel}
+        </Badge>
+        <Badge variant="outline">{t.settings.tools.noRestartRequired}</Badge>
+      </AlertTitle>
+      <AlertDescription>
+        <p>{statusDescription}</p>
+        <p>{configSavedAt}</p>
+        {runtimeLoadedAt ? <p>{runtimeLoadedAt}</p> : null}
+        {runtimeSummary ? <p>{runtimeSummary}</p> : null}
+        <p>{t.settings.tools.reloadModeNextLoad}</p>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 function MCPServerList({
+  disableInteractions,
+  onToggleServer,
+  onToggleTool,
   servers,
 }: {
+  disableInteractions: boolean;
+  onToggleServer: (serverName: string, enabled: boolean) => void;
+  onToggleTool: (
+    serverName: string,
+    toolName: string,
+    enabled: boolean,
+  ) => void;
   servers: Record<string, MCPServerConfig>;
 }) {
   const { t } = useI18n();
-  const { mutate: enableMCPServer } = useEnableMCPServer();
-  const { mutate: enableMCPTool } = useEnableMCPTool();
 
   return (
     <ItemGroup className="w-full gap-4">
@@ -80,10 +224,8 @@ function MCPServerList({
                 <ItemActions>
                   <Switch
                     checked={config.enabled}
-                    disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
-                    onCheckedChange={(checked) =>
-                      enableMCPServer({ serverName: name, enabled: checked })
-                    }
+                    disabled={disableInteractions}
+                    onCheckedChange={(checked) => onToggleServer(name, checked)}
                   />
                 </ItemActions>
               </div>
@@ -94,13 +236,9 @@ function MCPServerList({
                     <div key={toolName}>
                       {index > 0 && <ItemSeparator />}
                       <MCPToolRow
-                        disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                        disabled={disableInteractions}
                         onCheckedChange={(checked) =>
-                          enableMCPTool({
-                            serverName: name,
-                            toolName,
-                            enabled: checked,
-                          })
+                          onToggleTool(name, toolName, checked)
                         }
                         toolConfig={toolConfig}
                         toolName={toolName}

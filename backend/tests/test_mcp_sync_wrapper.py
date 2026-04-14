@@ -7,6 +7,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, McpToolStateConfig
+from deerflow.mcp import cache as mcp_cache
 from deerflow.mcp.tools import (
     _filter_tools_for_extensions_config,
     _make_sync_tool_wrapper,
@@ -155,3 +156,44 @@ async def test_discover_mcp_tools_by_server_returns_raw_tool_names():
         "feishu": {"import_document": "Import a document"},
         "github": {"search_repositories": "Search repositories"},
     }
+
+
+def test_get_mcp_cache_status_reports_not_initialized(monkeypatch):
+    monkeypatch.setattr(mcp_cache, "_cache_initialized", False)
+    monkeypatch.setattr(mcp_cache, "_mcp_tools_cache", None)
+    monkeypatch.setattr(mcp_cache, "_config_mtime", None)
+    monkeypatch.setattr(mcp_cache, "_enabled_server_count", 0)
+    monkeypatch.setattr(mcp_cache, "_get_config_mtime", lambda: 123.0)
+
+    status = mcp_cache.get_mcp_cache_status()
+
+    assert status["status"] == "not_initialized"
+    assert status["cache_initialized"] is False
+    assert status["cache_stale"] is False
+    assert status["will_apply_on_next_load"] is True
+    assert status["config_last_modified_at"] == 123.0
+    assert status["runtime_config_last_loaded_at"] is None
+    assert status["active_server_count"] == 0
+    assert status["active_tool_count"] == 0
+
+
+def test_get_mcp_cache_status_reports_pending_reload(monkeypatch):
+    monkeypatch.setattr(mcp_cache, "_cache_initialized", True)
+    monkeypatch.setattr(
+        mcp_cache,
+        "_mcp_tools_cache",
+        [SimpleNamespace(name="github_search_repositories"), SimpleNamespace(name="github_get_issue")],
+    )
+    monkeypatch.setattr(mcp_cache, "_config_mtime", 100.0)
+    monkeypatch.setattr(mcp_cache, "_enabled_server_count", 2)
+    monkeypatch.setattr(mcp_cache, "_get_config_mtime", lambda: 200.0)
+
+    status = mcp_cache.get_mcp_cache_status()
+
+    assert status["status"] == "pending_reload"
+    assert status["cache_initialized"] is True
+    assert status["cache_stale"] is True
+    assert status["will_apply_on_next_load"] is True
+    assert status["runtime_config_last_loaded_at"] == 100.0
+    assert status["active_server_count"] == 2
+    assert status["active_tool_count"] == 2

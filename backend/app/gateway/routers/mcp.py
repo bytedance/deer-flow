@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -11,6 +12,7 @@ from deerflow.config.extensions_config import (
     get_extensions_config,
     reload_extensions_config,
 )
+from deerflow.mcp.cache import get_mcp_cache_status
 from deerflow.mcp.tools import discover_mcp_tools_by_server
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,10 @@ class McpConfigResponse(BaseModel):
         default_factory=dict,
         description="Map of MCP server name to configuration",
     )
+    runtime: "McpRuntimeStatusResponse" = Field(
+        default_factory=lambda: McpRuntimeStatusResponse(),
+        description="Hot-reload and runtime cache status for MCP tools in the current process",
+    )
 
 
 class McpConfigUpdateRequest(BaseModel):
@@ -110,8 +116,71 @@ class McpServerConfigUpdateRequest(BaseModel):
     )
 
 
+class McpRuntimeStatusResponse(BaseModel):
+    """Runtime status for MCP tool hot reload visibility."""
+
+    status: Literal["not_initialized", "pending_reload", "in_sync"] = Field(
+        default="not_initialized",
+        description="Whether the current process has loaded MCP tools and if its cache is stale",
+    )
+    reload_mode: Literal["next_tool_load"] = Field(
+        default="next_tool_load",
+        description="How persisted MCP config changes are applied",
+    )
+    restart_required: bool = Field(
+        default=False,
+        description="Whether a full application restart is required to pick up saved MCP config changes",
+    )
+    will_apply_on_next_load: bool = Field(
+        default=True,
+        description="Whether the latest saved config will be picked up automatically on the next MCP tool load",
+    )
+    cache_initialized: bool = Field(
+        default=False,
+        description="Whether the current process has initialized its MCP tools cache",
+    )
+    cache_stale: bool = Field(
+        default=False,
+        description="Whether the current process cache is behind the latest config file mtime",
+    )
+    config_last_modified_at: datetime | None = Field(
+        default=None,
+        description="Timestamp of the latest saved extensions config on disk",
+    )
+    runtime_config_last_loaded_at: datetime | None = Field(
+        default=None,
+        description="Timestamp of the config file that the current process cache last loaded",
+    )
+    active_server_count: int = Field(
+        default=0,
+        description="Number of enabled MCP servers loaded into the current process cache",
+    )
+    active_tool_count: int = Field(
+        default=0,
+        description="Number of MCP tools currently loaded into the current process cache",
+    )
+
+
 McpServerConfigResponse.model_rebuild()
+McpConfigResponse.model_rebuild()
 McpConfigUpdateRequest.model_rebuild()
+
+
+def _timestamp_to_datetime(timestamp: float | None) -> datetime | None:
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=UTC)
+
+
+def _build_mcp_runtime_status_response() -> McpRuntimeStatusResponse:
+    status = get_mcp_cache_status()
+    return McpRuntimeStatusResponse(
+        **{
+            **status,
+            "config_last_modified_at": _timestamp_to_datetime(status.get("config_last_modified_at")),
+            "runtime_config_last_loaded_at": _timestamp_to_datetime(status.get("runtime_config_last_loaded_at")),
+        }
+    )
 
 
 async def _build_mcp_config_response(config: ExtensionsConfig) -> McpConfigResponse:
@@ -140,7 +209,10 @@ async def _build_mcp_config_response(config: ExtensionsConfig) -> McpConfigRespo
             tools=dict(sorted(configured_tools.items())),
         )
 
-    return McpConfigResponse(mcp_servers=servers)
+    return McpConfigResponse(
+        mcp_servers=servers,
+        runtime=_build_mcp_runtime_status_response(),
+    )
 
 
 @router.get(

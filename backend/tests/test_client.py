@@ -2290,11 +2290,29 @@ class TestGatewayConformance:
         ext_config = MagicMock()
         ext_config.mcp_servers = {"test": server}
 
-        with patch("deerflow.client.get_extensions_config", return_value=ext_config):
+        with (
+            patch("deerflow.client.get_extensions_config", return_value=ext_config),
+            patch(
+                "deerflow.client.get_mcp_cache_status",
+                return_value={
+                    "status": "in_sync",
+                    "reload_mode": "next_tool_load",
+                    "restart_required": False,
+                    "will_apply_on_next_load": False,
+                    "cache_initialized": True,
+                    "cache_stale": False,
+                    "config_last_modified_at": 100.0,
+                    "runtime_config_last_loaded_at": 100.0,
+                    "active_server_count": 1,
+                    "active_tool_count": 1,
+                },
+            ),
+        ):
             result = client.get_mcp_config()
 
         parsed = McpConfigResponse(**result)
         assert "test" in parsed.mcp_servers
+        assert parsed.runtime.status == "in_sync"
 
     def test_update_mcp_config(self, client, tmp_path):
         server = MagicMock()
@@ -2322,11 +2340,27 @@ class TestGatewayConformance:
             patch("deerflow.client.get_extensions_config", return_value=ext_config),
             patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
             patch("deerflow.client.reload_extensions_config", return_value=ext_config),
+            patch(
+                "deerflow.client.get_mcp_cache_status",
+                return_value={
+                    "status": "pending_reload",
+                    "reload_mode": "next_tool_load",
+                    "restart_required": False,
+                    "will_apply_on_next_load": True,
+                    "cache_initialized": True,
+                    "cache_stale": True,
+                    "config_last_modified_at": 200.0,
+                    "runtime_config_last_loaded_at": 100.0,
+                    "active_server_count": 1,
+                    "active_tool_count": 1,
+                },
+            ),
         ):
             result = client.update_mcp_config({"srv": server.model_dump.return_value})
 
         parsed = McpConfigResponse(**result)
         assert "srv" in parsed.mcp_servers
+        assert parsed.runtime.status == "pending_reload"
 
     def test_upload_files(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"

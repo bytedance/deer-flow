@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { loadMCPConfig, updateMCPConfig } from "./api";
-import type { MCPConfig } from "./types";
+import type { MCPConfigUpdate } from "./types";
 
 export function useMCPConfig() {
   const { data, isLoading, error } = useQuery({
@@ -28,7 +28,7 @@ export function useEnableMCPServer() {
       if (!config.mcp_servers[serverName]) {
         throw new Error(`MCP server ${serverName} not found`);
       }
-      await updateMCPConfig({
+      return updateMCPConfig({
         mcp_servers: {
           ...config.mcp_servers,
           [serverName]: {
@@ -38,8 +38,8 @@ export function useEnableMCPServer() {
         },
       });
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["mcpConfig"] });
+    onSuccess: (updatedConfig) => {
+      queryClient.setQueryData(["mcpConfig"], updatedConfig);
     },
   });
 }
@@ -67,7 +67,7 @@ export function useEnableMCPTool() {
         throw new Error(`MCP server ${serverName} not found`);
       }
 
-      const nextConfig: MCPConfig = {
+      const nextConfig: MCPConfigUpdate = {
         mcp_servers: {
           ...config.mcp_servers,
           [serverName]: {
@@ -86,10 +86,10 @@ export function useEnableMCPTool() {
         },
       };
 
-      await updateMCPConfig(nextConfig);
+      return updateMCPConfig(nextConfig);
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["mcpConfig"] });
+    onSuccess: (updatedConfig) => {
+      queryClient.setQueryData(["mcpConfig"], updatedConfig);
     },
   });
 }
