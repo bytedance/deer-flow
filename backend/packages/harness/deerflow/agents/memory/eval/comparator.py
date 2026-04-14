@@ -66,6 +66,18 @@ def _compute_metrics(result: ReplayResult) -> dict[str, float]:
     }
 
 
+def compute_summary(comparisons: list[ComparisonResult]) -> dict[str, float]:
+    """Average deltas across all comparison results."""
+    if not comparisons:
+        return {}
+    totals: dict[str, float] = {}
+    for cr in comparisons:
+        for k, v in cr.deltas.items():
+            totals[k] = totals.get(k, 0.0) + v
+    count = len(comparisons)
+    return {k: v / count for k, v in sorted(totals.items())}
+
+
 @dataclass(slots=True)
 class MetricsComparator:
     baseline_name: str
@@ -109,11 +121,4 @@ class MetricsComparator:
         return output
 
     def summarize(self, comparisons: list[ComparisonResult]) -> dict[str, float]:
-        if not comparisons:
-            return {}
-        totals: dict[str, float] = {}
-        for cr in comparisons:
-            for k, v in cr.deltas.items():
-                totals[k] = totals.get(k, 0.0) + v
-        count = len(comparisons)
-        return {k: v / count for k, v in totals.items()}
+        return compute_summary(comparisons)

@@ -128,8 +128,14 @@ class ReplayEvaluator:
             return []
         return traces[-window:]
 
-    def replay_trace(self, trace_dict: TraceDict, strategy: RankingStrategy) -> ReplayResult:
-        candidates = _build_candidates(trace_dict)
+    def replay_trace(
+        self,
+        trace_dict: TraceDict,
+        strategy: RankingStrategy,
+        *,
+        _candidates: list[CandidateFact] | None = None,
+    ) -> ReplayResult:
+        candidates = _candidates if _candidates is not None else _build_candidates(trace_dict)
         max_tokens = _get_max_tokens(trace_dict)
         ranked_facts = strategy.rank(candidates, max_tokens=max_tokens)
         tokens_used = sum(ranked_fact.token_cost for ranked_fact in ranked_facts if ranked_fact.included)
@@ -158,6 +164,6 @@ class ReplayEvaluator:
                 continue
 
             for strategy in self.strategies:
-                results[strategy.name].append(self.replay_trace(trace, strategy))
+                results[strategy.name].append(self.replay_trace(trace, strategy, _candidates=candidates))
 
         return results

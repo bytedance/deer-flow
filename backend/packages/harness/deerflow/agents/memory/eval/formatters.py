@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
+from deerflow.agents.memory.eval.comparator import compute_summary
 from deerflow.agents.memory.eval.types import ComparisonResult, OutputFormatter
 
 try:
@@ -12,15 +13,6 @@ try:
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
-
-
-def _compute_summary(results: list[ComparisonResult]) -> dict[str, float]:
-    if not results:
-        return {}
-    all_keys = set()
-    for r in results:
-        all_keys.update(r.deltas.keys())
-    return {k: sum(r.deltas.get(k, 0.0) for r in results) / len(results) for k in sorted(all_keys)}
 
 
 def _format_number(value: float) -> str:
@@ -63,7 +55,7 @@ class TerminalFormatter(OutputFormatter):
             summary.add_column("Metric Name")
             summary.add_column("Average Delta", justify="right")
             summary.add_column("Direction")
-            for metric, delta in _compute_summary(results).items():
+            for metric, delta in compute_summary(results).items():
                 summary.add_row(metric, _format_number(delta), _direction(delta))
             console.print(summary)
             return console.export_text()
@@ -93,7 +85,7 @@ class TerminalFormatter(OutputFormatter):
                 lines.append(" | ".join(row[i].ljust(widths[i]) if i == 0 else row[i].rjust(widths[i]) for i in range(len(row))))
             lines.append("")
 
-        summary = _compute_summary(results)
+        summary = compute_summary(results)
         lines.append("Average Across All Traces")
         if summary:
             headers = ["Metric Name", "Average Delta", "Direction"]
@@ -113,7 +105,7 @@ class JsonFormatter(OutputFormatter):
     def format(self, results: list[ComparisonResult]) -> str:
         payload = {
             "comparisons": [asdict(result) for result in results],
-            "summary": {"avg_deltas": _compute_summary(results)},
+            "summary": {"avg_deltas": compute_summary(results)},
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -122,7 +114,7 @@ class MarkdownFormatter(OutputFormatter):
     def format(self, results: list[ComparisonResult]) -> str:
         lines = ["# Evaluation Report", ""]
         lines.append("## Summary")
-        summary = _compute_summary(results)
+        summary = compute_summary(results)
         if summary:
             lines.extend(["| Metric | Average Delta |", "| --- | ---: |"])
             for metric, delta in summary.items():
