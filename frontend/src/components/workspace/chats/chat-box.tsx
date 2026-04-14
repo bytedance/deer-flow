@@ -10,6 +10,9 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
+import { extractUploadVirtualPaths, mergeThreadFilePaths } from "@/core/artifacts/utils";
+import { useI18n } from "@/core/i18n/hooks";
+import { useUploadedFiles } from "@/core/uploads/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -27,20 +30,29 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   children,
   threadId,
 }) => {
-  const { thread } = useThread();
+  const { thread, isMock } = useThread();
+  const { t } = useI18n();
   const pathname = usePathname();
   const threadIdRef = useRef(threadId);
   const layoutRef = useRef<GroupImperativeHandle>(null);
 
   const {
     artifacts,
+    uploads,
+    files,
     open: artifactsOpen,
     setOpen: setArtifactsOpen,
     setArtifacts,
+    setUploads,
     select: selectArtifact,
     deselect,
     selectedArtifact,
   } = useArtifacts();
+  const uploadsQuery = useUploadedFiles(threadId, !isMock);
+  const uploadPaths = useMemo(
+    () => extractUploadVirtualPaths(uploadsQuery.data?.files),
+    [uploadsQuery.data?.files],
+  );
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   useEffect(() => {
@@ -51,14 +63,20 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
 
     // Update artifacts from the current thread
     setArtifacts(thread.values.artifacts);
+    setUploads(uploadPaths);
 
-    // DO NOT automatically deselect the artifact when switching threads, because the artifacts auto discovering is not work now.
-    // if (
-    //   selectedArtifact &&
-    //   !thread.values.artifacts?.includes(selectedArtifact)
-    // ) {
-    //   deselect();
-    // }
+    const availableFiles = mergeThreadFilePaths({
+      uploads: uploadPaths,
+      artifacts: thread.values.artifacts,
+    });
+
+    if (
+      selectedArtifact &&
+      !selectedArtifact.startsWith("write-file:") &&
+      !availableFiles.includes(selectedArtifact)
+    ) {
+      deselect();
+    }
 
     if (
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
@@ -76,15 +94,23 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     selectArtifact,
     selectedArtifact,
     setArtifacts,
+    setUploads,
     thread.values.artifacts,
+    uploadPaths,
   ]);
 
   const artifactPanelOpen = useMemo(() => {
     if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true") {
-      return artifactsOpen && artifacts?.length > 0;
+      return artifactsOpen && files?.length > 0;
     }
     return artifactsOpen;
-  }, [artifactsOpen, artifacts]);
+  }, [artifactsOpen, files]);
+
+  const uploadSet = useMemo(() => new Set(uploads), [uploads]);
+  const artifactOnlyFiles = useMemo(
+    () => artifacts.filter((artifact) => !uploadSet.has(artifact)),
+    [artifacts, uploadSet],
+  );
 
   const resizableIdBase = useMemo(() => {
     return pathname.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -149,23 +175,39 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
                   <XIcon />
                 </Button>
               </div>
-              {thread.values.artifacts?.length === 0 ? (
+              {files.length === 0 ? (
                 <ConversationEmptyState
                   icon={<FilesIcon />}
-                  title="No artifact selected"
-                  description="Select an artifact to view its details"
+                  title="No file selected"
+                  description="Select a thread file to preview or download it"
                 />
               ) : (
                 <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
                   <header className="shrink-0">
-                    <h2 className="text-lg font-medium">Artifacts</h2>
+                    <h2 className="text-lg font-medium">{t.common.files}</h2>
                   </header>
-                  <main className="min-h-0 grow">
-                    <ArtifactFileList
-                      className="max-w-(--container-width-sm) p-4 pt-12"
-                      files={thread.values.artifacts ?? []}
-                      threadId={threadId}
-                    />
+                  <main className="min-h-0 grow overflow-y-auto">
+                    <div className="flex max-w-(--container-width-sm) flex-col gap-8 p-4 pt-12">
+                      {uploads.length > 0 && (
+                        <section className="flex flex-col gap-4">
+                          <h3 className="text-muted-foreground text-sm font-medium">
+                            {t.common.uploads}
+                          </h3>
+                          <ArtifactFileList files={uploads} threadId={threadId} />
+                        </section>
+                      )}
+                      {artifactOnlyFiles.length > 0 && (
+                        <section className="flex flex-col gap-4">
+                          <h3 className="text-muted-foreground text-sm font-medium">
+                            {t.common.artifacts}
+                          </h3>
+                          <ArtifactFileList
+                            files={artifactOnlyFiles}
+                            threadId={threadId}
+                          />
+                        </section>
+                      )}
+                    </div>
                   </main>
                 </div>
               )}

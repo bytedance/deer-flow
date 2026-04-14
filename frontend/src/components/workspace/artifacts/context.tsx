@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useMemo,
   useState,
   type ReactNode,
 } from "react";
@@ -12,6 +13,9 @@ import { env } from "@/env";
 export interface ArtifactsContextType {
   artifacts: string[];
   setArtifacts: (artifacts: string[]) => void;
+  uploads: string[];
+  setUploads: (uploads: string[]) => void;
+  files: string[];
 
   selectedArtifact: string | null;
   autoSelect: boolean;
@@ -33,6 +37,7 @@ interface ArtifactsProviderProps {
 
 export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   const [artifacts, setArtifacts] = useState<string[]>([]);
+  const [uploads, setUploads] = useState<string[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
   const [autoSelect, setAutoSelect] = useState(true);
   const [open, setOpen] = useState(
@@ -60,9 +65,27 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     setOpen(false);
   }, []);
 
+  const files = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: string[] = [];
+
+    for (const path of [...uploads, ...artifacts]) {
+      if (!path || seen.has(path)) {
+        continue;
+      }
+      seen.add(path);
+      merged.push(path);
+    }
+
+    return merged;
+  }, [uploads, artifacts]);
+
   const value: ArtifactsContextType = {
     artifacts,
     setArtifacts,
+    uploads,
+    setUploads,
+    files,
 
     open,
     autoOpen,

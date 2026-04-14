@@ -20,7 +20,9 @@ export interface Translations {
     search: string;
     download: string;
     thinking: string;
+    files: string;
     artifacts: string;
+    uploads: string;
     public: string;
     custom: string;
     notAvailableInDemoMode: string;
