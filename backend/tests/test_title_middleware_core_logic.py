@@ -113,6 +113,32 @@ class TestTitleMiddlewareCoreLogic:
 
         assert title == "请帮我总结这段代码"
 
+    def test_build_title_prompt_strips_inline_think_tags_from_assistant_messages(self):
+        _set_test_title_config(max_words=6)
+        middleware = TitleMiddleware()
+
+        prompt, user_msg = middleware._build_title_prompt(
+            {
+                "messages": [
+                    HumanMessage(content="帮我总结这个 PR"),
+                    AIMessage(content="<think>\n先分析 diff\n</think>\n\n这是正式回答"),
+                ]
+            }
+        )
+
+        assert user_msg == "帮我总结这个 PR"
+        assert "<think>" not in prompt
+        assert "先分析 diff" not in prompt
+        assert "这是正式回答" in prompt
+
+    def test_parse_title_strips_inline_think_tags_from_model_output(self):
+        _set_test_title_config(max_chars=20)
+        middleware = TitleMiddleware()
+
+        title = middleware._parse_title("<think>internal</think>\n最终标题")
+
+        assert title == "最终标题"
+
     def test_generate_title_fallback_for_long_message(self, monkeypatch):
         _set_test_title_config(max_chars=20)
         middleware = TitleMiddleware()
