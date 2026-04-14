@@ -80,23 +80,36 @@ export default function ChatPage() {
   );
 
   const handleClarificationSubmit = useCallback(
-    (response: unknown) => {
-      // Format the response into a text message that the backend can understand
-      const typedResponse = response as {
-        mode?: string;
-        answers?: Array<{ question?: string; answer?: string }>;
-      };
+    (response: ClarificationResponse) => {
+      const lines: string[] = [];
+      if (response.title) {
+        lines.push(`[Clarification] ${response.title}`);
+      }
 
-      let text = "";
-      if (typedResponse.mode === "single") {
-        const answer = typedResponse.answers?.[0]?.answer;
-        text = `[User selected: ${answer}]`;
-      } else if (typedResponse.mode === "form") {
-        text =
-          "[User submitted form]\n" +
-          (typedResponse.answers ?? [])
-            .map((a) => `- **${a.question}**: ${a.answer}`)
-            .join("\n");
+      if (response.mode === "single") {
+        const answer = response.answers[0];
+        const value = Array.isArray(answer.answer)
+          ? answer.answer.join(", ")
+          : answer.answer;
+        const textValue = typeof value === "string" ? value.trim() : "";
+        if (textValue) {
+          lines.push(`1. ${answer.question}: ${textValue}`);
+        }
+      } else if (response.mode === "form") {
+        response.answers.forEach((answer, index) => {
+          const value = Array.isArray(answer.answer)
+            ? answer.answer.join(", ")
+            : answer.answer;
+          const textValue = typeof value === "string" ? value.trim() : "";
+          if (textValue) {
+            lines.push(`${index + 1}. ${answer.question}: ${textValue}`);
+          }
+        });
+      }
+
+      const text = lines.join("\n");
+      if (!text) {
+        return;
       }
 
       void sendMessage(threadId, {

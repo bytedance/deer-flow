@@ -1,5 +1,5 @@
 import { CheckCircle2Icon, CircleIcon } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,15 +23,15 @@ export interface ClarificationPayload {
   mode: "single" | "form";
   title?: string;
   description?: string;
-  question?: string; // used in single mode
-  clarification_type?: string; // used in single mode
-  context?: string; // used in single mode
-  options?: string[]; // used in single mode
-  recommended_option?: string; // used in single mode
-  allow_free_text?: boolean; // used in single mode
-  interaction_mode?: "free_text" | "single_select"; // used in single mode
-  submit_label?: string; // used in form mode
-  questions?: ClarificationQuestion[]; // used in form mode
+  question?: string;
+  clarification_type?: string;
+  context?: string;
+  options?: string[];
+  recommended_option?: string;
+  allow_free_text?: boolean;
+  interaction_mode?: "free_text" | "single_select";
+  submit_label?: string;
+  questions?: ClarificationQuestion[];
 }
 
 export interface ClarificationResponse {
@@ -51,11 +51,7 @@ interface Props {
   disabled?: boolean;
 }
 
-export function InteractiveClarificationCard({
-  payload,
-  onSubmit,
-  disabled,
-}: Props) {
+export function InteractiveClarificationCard({ payload, onSubmit, disabled }: Props) {
   if (payload.mode === "form") {
     return (
       <ClarificationForm
@@ -65,6 +61,7 @@ export function InteractiveClarificationCard({
       />
     );
   }
+
   return (
     <ClarificationSingle
       payload={payload}
@@ -79,10 +76,14 @@ function ClarificationSingle({ payload, onSubmit, disabled }: Props) {
     payload.recommended_option ?? "",
   );
   const [freeText, setFreeText] = useState<string>("");
+  const isDisabled = disabled ?? false;
 
-  const isSelectMode =
-    payload.interaction_mode === "single_select" ||
-    (payload.options && payload.options.length > 0);
+  const isSelectMode = useMemo(() => {
+    if (payload.interaction_mode === "single_select") {
+      return true;
+    }
+    return (payload.options?.length ?? 0) > 0;
+  }, [payload.interaction_mode, payload.options]);
 
   const handleSubmit = useCallback(() => {
     let finalAnswer = "";
@@ -96,7 +97,9 @@ function ClarificationSingle({ payload, onSubmit, disabled }: Props) {
       finalAnswer = freeText;
     }
 
-    if (!finalAnswer.trim()) return;
+    if (!finalAnswer.trim()) {
+      return;
+    }
 
     onSubmit({
       kind: "clarification",
@@ -109,7 +112,14 @@ function ClarificationSingle({ payload, onSubmit, disabled }: Props) {
         },
       ],
     });
-  }, [isSelectMode, selectedValue, freeText, payload, onSubmit]);
+  }, [freeText, isSelectMode, onSubmit, payload.allow_free_text, payload.question, payload.title, selectedValue]);
+
+  const submitDisabled =
+    (disabled ?? false) ||
+    (!isSelectMode && !freeText.trim()) ||
+    (isSelectMode &&
+      (!selectedValue ||
+        (selectedValue === "other" && !freeText.trim())));
 
   return (
     <div className="bg-card text-card-foreground flex flex-col gap-4 rounded-xl border p-6 shadow-sm">
@@ -118,54 +128,81 @@ function ClarificationSingle({ payload, onSubmit, disabled }: Props) {
           <h3 className="text-lg font-semibold">{payload.title}</h3>
         )}
         {payload.context && (
-          <p className="text-muted-foreground text-sm">{payload.context}</p>
+          <p className="text-muted-foreground text-sm whitespace-pre-wrap">{payload.context}</p>
         )}
-        <p className="font-medium">{payload.question}</p>
+        <p className="font-medium whitespace-pre-wrap">{payload.question}</p>
       </div>
 
       <div className="flex flex-col gap-4">
         {isSelectMode ? (
           <div className="flex flex-col gap-3">
-            {payload.options?.map((option) => (
-              <div
-                key={option}
-                className={cn(
-                  "flex cursor-pointer items-center space-x-3 rounded-md border p-3 transition-colors",
-                  selectedValue === option
-                    ? "border-primary bg-primary/5"
-                    : "hover:bg-accent",
-                  disabled &&
-                    "pointer-events-none cursor-not-allowed opacity-50",
-                )}
-                onClick={() => !disabled && setSelectedValue(option)}
-              >
-                {selectedValue === option ? (
-                  <CheckCircle2Icon className="text-primary size-5" />
-                ) : (
-                  <CircleIcon className="text-muted-foreground size-5" />
-                )}
-                <div className="flex-1 text-sm font-medium">
-                  {option}
-                  {option === payload.recommended_option && (
-                    <span className="text-muted-foreground ml-2 text-xs font-normal">
-                      (Recommended)
-                    </span>
+            {payload.options?.map((option) => {
+              const isSelected = selectedValue === option;
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  disabled={isDisabled}
+                  className={cn(
+                    "flex items-center space-x-3 rounded-md border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                    isSelected
+                      ? "border-primary bg-primary/5"
+                      : "hover:bg-accent",
+                    isDisabled && "cursor-not-allowed opacity-60",
                   )}
-                </div>
-              </div>
-            ))}
+                  aria-pressed={isSelected}
+                  onClick={() => {
+                    if (isDisabled) return;
+                    setSelectedValue(option);
+                  }}
+                  onKeyDown={(event) => {
+                    if (isDisabled) return;
+                    if (event.key === " " || event.key === "Enter") {
+                      event.preventDefault();
+                      setSelectedValue(option);
+                    }
+                  }}
+                >
+                  {isSelected ? (
+                    <CheckCircle2Icon className="text-primary size-5" />
+                  ) : (
+                    <CircleIcon className="text-muted-foreground size-5" />
+                  )}
+                  <div className="flex-1 text-sm font-medium">
+                    {option}
+                    {option === payload.recommended_option && (
+                      <span className="text-muted-foreground ml-2 text-xs font-normal">
+                        (Recommended)
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
             {payload.allow_free_text && (
               <div className="flex flex-col gap-2">
-                <div
+                <button
+                  type="button"
+                  disabled={isDisabled}
                   className={cn(
-                    "flex cursor-pointer items-center space-x-3 rounded-md border p-3 transition-colors",
+                    "flex items-center space-x-3 rounded-md border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                     selectedValue === "other"
                       ? "border-primary bg-primary/5"
                       : "hover:bg-accent",
-                    disabled &&
-                      "pointer-events-none cursor-not-allowed opacity-50",
+                    isDisabled && "cursor-not-allowed opacity-60",
                   )}
-                  onClick={() => !disabled && setSelectedValue("other")}
+                  aria-pressed={selectedValue === "other"}
+                  onClick={() => {
+                    if (isDisabled) return;
+                    setSelectedValue("other");
+                  }}
+                  onKeyDown={(event) => {
+                    if (isDisabled) return;
+                    if (event.key === " " || event.key === "Enter") {
+                      event.preventDefault();
+                      setSelectedValue("other");
+                    }
+                  }}
                 >
                   {selectedValue === "other" ? (
                     <CheckCircle2Icon className="text-primary size-5" />
@@ -173,18 +210,18 @@ function ClarificationSingle({ payload, onSubmit, disabled }: Props) {
                     <CircleIcon className="text-muted-foreground size-5" />
                   )}
                   <div className="flex-1 text-sm font-medium">Other</div>
-                </div>
+                </button>
                 {selectedValue === "other" && (
                   <Input
-                    disabled={disabled}
+                    disabled={isDisabled}
                     placeholder="Please specify..."
                     value={freeText}
-                    onChange={(e) => setFreeText(e.target.value)}
+                    onChange={(event) => setFreeText(event.target.value)}
                     className="ml-8 w-auto"
                     autoFocus
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
                         handleSubmit();
                       }
                     }}
@@ -195,13 +232,13 @@ function ClarificationSingle({ payload, onSubmit, disabled }: Props) {
           </div>
         ) : (
           <Textarea
-            disabled={disabled}
+            disabled={isDisabled}
             placeholder="Type your answer here..."
             value={freeText}
-            onChange={(e) => setFreeText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
+            onChange={(event) => setFreeText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
                 handleSubmit();
               }
             }}
@@ -210,16 +247,7 @@ function ClarificationSingle({ payload, onSubmit, disabled }: Props) {
       </div>
 
       <div className="flex justify-end pt-2">
-        <Button
-          disabled={
-            disabled ??
-            (!isSelectMode && !freeText?.trim()) ??
-            (isSelectMode &&
-              (!selectedValue ||
-                (selectedValue === "other" && !freeText?.trim())))
-          }
-          onClick={handleSubmit}
-        >
+        <Button disabled={submitDisabled} onClick={handleSubmit}>
           Submit
         </Button>
       </div>
@@ -230,21 +258,23 @@ function ClarificationSingle({ payload, onSubmit, disabled }: Props) {
 function ClarificationForm({ payload, onSubmit, disabled }: Props) {
   const [answers, setAnswers] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
-    payload.questions?.forEach((q) => {
-      if (q.recommended_option) {
-        initial[q.id] = q.recommended_option;
+    payload.questions?.forEach((question) => {
+      if (question.recommended_option) {
+        initial[question.id] = question.recommended_option;
       }
     });
     return initial;
   });
+  const isDisabled = disabled ?? false;
 
   const handleSubmit = useCallback(() => {
-    if (!payload.questions) return;
+    if (!payload.questions) {
+      return;
+    }
 
-    // Check required
-    for (const q of payload.questions) {
-      if (q.required && !answers[q.id]?.trim()) {
-        return; // Alternatively, show an error state
+    for (const question of payload.questions) {
+      if (question.required && !answers[question.id]?.trim()) {
+        return;
       }
     }
 
@@ -252,17 +282,27 @@ function ClarificationForm({ payload, onSubmit, disabled }: Props) {
       kind: "clarification",
       mode: "form",
       title: payload.title,
-      answers: payload.questions.map((q) => ({
-        id: q.id,
-        question: q.question,
-        answer: answers[q.id] ?? "",
+      answers: payload.questions.map((question) => ({
+        id: question.id,
+        question: question.question,
+        answer: answers[question.id] ?? "",
       })),
     });
-  }, [payload, answers, onSubmit]);
+  }, [answers, onSubmit, payload.questions, payload.title]);
 
-  const isValid =
-    payload.questions?.every((q) => !q.required || answers[q.id]?.trim()) ??
-    true;
+  const isValid = useMemo(() => {
+    if (!payload.questions) {
+      return true;
+    }
+    return payload.questions.every((question) => {
+      if (!question.required) {
+        return true;
+      }
+      return Boolean(answers[question.id]?.trim());
+    });
+  }, [answers, payload.questions]);
+
+  const submitDisabled = (disabled ?? false) || !isValid;
 
   return (
     <div className="bg-card text-card-foreground flex flex-col gap-6 rounded-xl border p-6 shadow-sm">
@@ -271,76 +311,94 @@ function ClarificationForm({ payload, onSubmit, disabled }: Props) {
           <h3 className="text-lg font-semibold">{payload.title}</h3>
         )}
         {payload.description && (
-          <p className="text-muted-foreground text-sm">{payload.description}</p>
+          <p className="text-muted-foreground text-sm whitespace-pre-wrap">
+            {payload.description}
+          </p>
         )}
       </div>
 
       <div className="flex flex-col gap-8">
-        {payload.questions?.map((q, index) => (
-          <div key={q.id} className="flex flex-col gap-3">
-            <div className="flex flex-col gap-1">
-              {q.header && (
-                <span className="text-muted-foreground text-xs font-semibold uppercase">
-                  {q.header}
-                </span>
-              )}
-              <label className="text-base font-medium">
-                {index + 1}. {q.question}
-                {q.required && <span className="text-destructive ml-1">*</span>}
-              </label>
-            </div>
-
-            {q.type === "single_select" ? (
-              <div className="flex flex-col gap-3">
-                {q.options?.map((option) => (
-                  <div
-                    key={option}
-                    className={cn(
-                      "flex cursor-pointer items-center space-x-3 rounded-md border p-3 transition-colors",
-                      answers[q.id] === option
-                        ? "border-primary bg-primary/5"
-                        : "hover:bg-accent",
-                      disabled &&
-                        "pointer-events-none cursor-not-allowed opacity-50",
-                    )}
-                    onClick={() =>
-                      !disabled &&
-                      setAnswers((prev) => ({ ...prev, [q.id]: option }))
-                    }
-                  >
-                    {answers[q.id] === option ? (
-                      <CheckCircle2Icon className="text-primary size-5" />
-                    ) : (
-                      <CircleIcon className="text-muted-foreground size-5" />
-                    )}
-                    <div className="flex-1 text-sm font-medium">
-                      {option}
-                      {option === q.recommended_option && (
-                        <span className="text-muted-foreground ml-2 text-xs font-normal">
-                          (Recommended)
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
+        {payload.questions?.map((question, index) => {
+          return (
+            <div key={question.id} className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                {question.header && (
+                  <span className="text-muted-foreground text-xs font-semibold uppercase">
+                    {question.header}
+                  </span>
+                )}
+                <label className="text-base font-medium">
+                  {index + 1}. {question.question}
+                  {question.required && (
+                    <span className="text-destructive ml-1">*</span>
+                  )}
+                </label>
               </div>
-            ) : (
-              <Textarea
-                disabled={disabled}
-                placeholder={q.placeholder ?? "Type your answer..."}
-                value={answers[q.id] ?? ""}
-                onChange={(e) =>
-                  setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))
-                }
-                className="min-h-[80px]"
-              />
-            )}
-          </div>
-        ))}
+
+              {question.type === "single_select" ? (
+                <div className="flex flex-col gap-3">
+                  {question.options?.map((option) => {
+                    const isSelected = answers[question.id] === option;
+                    return (
+                      <button
+                        key={option}
+                        type="button"
+                        disabled={isDisabled}
+                        className={cn(
+                          "flex items-center space-x-3 rounded-md border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                          isSelected
+                            ? "border-primary bg-primary/5"
+                            : "hover:bg-accent",
+                          isDisabled && "cursor-not-allowed opacity-60",
+                        )}
+                        aria-pressed={isSelected}
+                        onClick={() => {
+                          if (isDisabled) return;
+                          setAnswers((prev) => ({ ...prev, [question.id]: option }));
+                        }}
+                        onKeyDown={(event) => {
+                          if (isDisabled) return;
+                          if (event.key === " " || event.key === "Enter") {
+                            event.preventDefault();
+                            setAnswers((prev) => ({ ...prev, [question.id]: option }));
+                          }
+                        }}
+                      >
+                        {isSelected ? (
+                          <CheckCircle2Icon className="text-primary size-5" />
+                        ) : (
+                          <CircleIcon className="text-muted-foreground size-5" />
+                        )}
+                        <div className="flex-1 text-sm font-medium">
+                          {option}
+                          {option === question.recommended_option && (
+                            <span className="text-muted-foreground ml-2 text-xs font-normal">
+                              (Recommended)
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <Textarea
+                  disabled={isDisabled}
+                  placeholder={question.placeholder ?? "Type your answer..."}
+                  value={answers[question.id] ?? ""}
+                  onChange={(event) =>
+                    setAnswers((prev) => ({ ...prev, [question.id]: event.target.value }))
+                  }
+                  className="min-h-[80px]"
+                />
+              )}
+            </div>
+          );
+        })}
       </div>
 
       <div className="flex justify-end border-t pt-4">
-        <Button disabled={disabled ?? !isValid} onClick={handleSubmit}>
+        <Button disabled={submitDisabled} onClick={handleSubmit}>
           {payload.submit_label ?? "Submit Answers"}
         </Button>
       </div>

@@ -124,22 +124,42 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         logger.debug("Clarification question: %s", question)
 
         # Check if we should use form mode (multiple questions)
-        if questions and isinstance(questions, list) and len(questions) > 0:
-            # Form mode: serialize to JSON for the frontend
-            payload = {
-                "kind": "clarification",
-                "mode": "form",
-                "title": "Clarification Required",
-                "description": question,
-                "questions": questions,
-            }
-            if args.get("context"):
-                payload["description"] = f"{args.get('context')}\n\n{question}"
-                
-            formatted_message = json.dumps(payload, ensure_ascii=False)
+        if questions:
+            if isinstance(questions, str):
+                try:
+                    questions = json.loads(questions)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "ask_clarification questions payload is not valid JSON string: %s",
+                        questions,
+                    )
+                    questions = []
+
+            if isinstance(questions, list) and len(questions) > 0:
+                # Form mode: serialize to JSON for the frontend
+                payload = {
+                    "kind": "clarification",
+                    "mode": "form",
+                    "title": args.get("title") or "Clarification Required",
+                    "description": question,
+                    "questions": questions,
+                    "submit_label": args.get("submit_label"),
+                }
+                if args.get("context"):
+                    payload["description"] = (
+                        f"{args.get('context')}
+
+{question}" if question else args.get("context")
+                    )
+
+                formatted_message = json.dumps(payload, ensure_ascii=False)
+            else:
+                # Fall back to single mode when questions failed to parse properly
+                formatted_message = self._format_clarification_message(args)
         else:
             # Single mode / Legacy mode: format as markdown text
             formatted_message = self._format_clarification_message(args)
+
 
         # Get the tool call ID
         tool_call_id = request.tool_call.get("id", "")

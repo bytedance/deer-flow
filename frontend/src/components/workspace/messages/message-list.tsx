@@ -81,15 +81,39 @@ export function MessageList({
               let payload: ClarificationPayload | null = null;
 
               try {
-                // Check if the content is a valid JSON payload
                 const parsed = JSON.parse(content) as Record<string, unknown>;
                 if (
                   parsed &&
                   typeof parsed === "object" &&
-                  parsed.kind === "clarification" &&
-                  parsed.mode
+                  parsed.kind === "clarification"
                 ) {
-                  payload = parsed as unknown as ClarificationPayload;
+                  if (parsed.mode === "single") {
+                    const hasQuestion = typeof parsed.question === "string";
+                    const hasInteractionMode =
+                      parsed.interaction_mode === "single_select" ||
+                      parsed.interaction_mode === "free_text" ||
+                      Array.isArray(parsed.options);
+
+                    if (hasQuestion && hasInteractionMode) {
+                      payload = parsed as unknown as ClarificationPayload;
+                    }
+                  } else if (parsed.mode === "form") {
+                    const questions = parsed.questions;
+                    if (Array.isArray(questions) && questions.length > 0) {
+                      const allValid = questions.every((question) => {
+                        return (
+                          question &&
+                          typeof question === "object" &&
+                          typeof question.id === "string" &&
+                          typeof question.question === "string"
+                        );
+                      });
+
+                      if (allValid) {
+                        payload = parsed as unknown as ClarificationPayload;
+                      }
+                    }
+                  }
                 }
               } catch {
                 // Not JSON, fallback to markdown
@@ -100,7 +124,7 @@ export function MessageList({
                   <div key={group.id} className="w-full">
                     <InteractiveClarificationCard
                       payload={payload}
-                      onSubmit={(response) => onSubmitClarification?.(response)}
+                      onSubmit={onSubmitClarification}
                       disabled={
                         thread.isLoading ||
                         group.id !== messages[messages.length - 1]?.id
