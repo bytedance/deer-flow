@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import threading
 from typing import Any, Literal
+from pydantic import BaseModel
 
 from app.channels.base import Channel
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
@@ -690,3 +692,214 @@ class FeishuChannel(Channel):
                 logger.warning("[Feishu] main loop not running, cannot publish inbound message")
         except Exception:
             logger.exception("[Feishu] error processing message")
+
+
+# ==================== Multi-Bot Support ====================
+
+class FeishuBotConfig(BaseModel):
+    """Configuration model for a single Feishu bot."""
+
+    app_id: str
+    app_secret: str
+    verification_token: str = ""
+    encrypt_key: str = ""
+    agent_id: str = "lead_agent"
+    enabled: bool = True
+    name: str = ""
+    description: str = ""
+    recursion_limit: int = 100
+    thinking_enabled: bool = True
+    subagent_enabled: bool = False
+    is_plan_mode: bool = False
+    domain: str = "https://open.feishu.cn"
+
+
+class FeishuBotManager:
+    """Manages multiple Feishu bots, each with its own WebSocket connection.
+    
+    Each bot runs in its own thread with its own event loop and appears as
+    a separate channel to the ChannelManager.
+    """
+
+    def __init__(self, bus: MessageBus) -> None:
+        self._bus = bus
+        self._bots: dict[str, FeishuChannel] = {}  # app_id -> FeishuChannel
+        self._configs: dict[str, FeishuBotConfig] = {}  # app_id -> FeishuBotConfig
+        self._running = False
+        self._lock = threading.Lock()
+
+    def _get_channel_name(self, app_id: str) -> str:
+        """Get the channel name for a bot (feishu_{app_id})."""
+        return f"feishu_{app_id}"
+
+    def load_bots_from_config(self, channels_config: dict[str, Any]) -> None:
+        """Load bot configurations from the channels config.
+        
+        Supports both formats:
+        - Legacy single-bot: channels.feishu
+        - New multi-bot: channels.feishu_bots (list of bot configs)
+        """
+        with self._lock:
+            # Check for multi-bot config first
+            if "feishu_bots" in channels_config:
+                bots_config = channels_config["feishu_bots"]
+                if isinstance(bots_config, list):
+                    for bot_config_dict in bots_config:
+                        if isinstance(bot_config_dict, dict):
+                            try:
+                                config = FeishuBotConfig(**bot_config_dict)
+                                self._configs[config.app_id] = config
+                                logger.info(f"Loaded bot config: {config.name or config.app_id}")
+                            except Exception as e:
+                                logger.exception(f"Failed to parse bot config: {e}")
+
+            # Fall back to single-bot config if no multi-bot config
+            if not self._configs and "feishu" in channels_config:
+                feishu_config = channels_config["feishu"]
+                if isinstance(feishu_config, dict) and feishu_config.get("enabled", False):
+                    try:
+                        config = FeishuBotConfig(
+                            app_id=feishu_config.get("app_id", ""),
+                            app_secret=feishu_config.get("app_secret", ""),
+                            verification_token=feishu_config.get("verification_token", ""),
+                            encrypt_key=feishu_config.get("encrypt_key", ""),
+                            domain=feishu_config.get("domain", "https://open.feishu.cn"),
+                            enabled=True,
+                        )
+                        if config.app_id and config.app_secret:
+                            self._configs[config.app_id] = config
+                            logger.info(f"Loaded single-bot config: {config.app_id}")
+                    except Exception as e:
+                        logger.exception(f"Failed to parse single-bot config: {e}")
+
+    async def start(self) -> None:
+        """Start all enabled bots."""
+        if self._running:
+            return
+
+        with self._lock:
+            self._running = True
+            for app_id, config in self._configs.items():
+                if config.enabled:
+                    await self._start_bot(app_id)
+
+    async def stop(self) -> None:
+        """Stop all bots."""
+        with self._lock:
+            self._running = False
+            for app_id in list(self._bots.keys()):
+                await self._stop_bot(app_id)
+
+    async def add_bot(self, config: FeishuBotConfig) -> bool:
+        """Add or update a bot configuration and start it if enabled."""
+        with self._lock:
+            self._configs[config.app_id] = config
+            
+            # Stop existing bot if running
+            if config.app_id in self._bots:
+                await self._stop_bot(config.app_id)
+            
+            # Start if enabled
+            if config.enabled and self._running:
+                return await self._start_bot(config.app_id)
+            return True
+
+    async def remove_bot(self, app_id: str) -> bool:
+        """Remove a bot configuration and stop it if running."""
+        with self._lock:
+            if app_id in self._bots:
+                await self._stop_bot(app_id)
+            if app_id in self._configs:
+                del self._configs[app_id]
+                logger.info(f"Removed bot: {app_id}")
+                return True
+            return False
+
+    async def restart_bot(self, app_id: str) -> bool:
+        """Restart a specific bot."""
+        with self._lock:
+            if app_id not in self._configs:
+                logger.warning(f"Bot not found: {app_id}")
+                return False
+            
+            if app_id in self._bots:
+                await self._stop_bot(app_id)
+            
+            if self._configs[app_id].enabled:
+                return await self._start_bot(app_id)
+            return True
+
+    def get_bot_status(self) -> dict[str, Any]:
+        """Get status of all bots."""
+        with self._lock:
+            bots_status = {}
+            for app_id, config in self._configs.items():
+                channel = self._bots.get(app_id)
+                bots_status[app_id] = {
+                    "name": config.name or app_id,
+                    "description": config.description,
+                    "enabled": config.enabled,
+                    "agent_id": config.agent_id,
+                    "running": channel is not None and channel.is_running,
+                }
+            return bots_status
+
+    def get_channel(self, channel_name: str) -> FeishuChannel | None:
+        """Get a bot channel by name."""
+        with self._lock:
+            for app_id, channel in self._bots.items():
+                if self._get_channel_name(app_id) == channel_name:
+                    return channel
+            return None
+
+    async def _start_bot(self, app_id: str) -> bool:
+        """Start a single bot (internal, assumes lock is held)."""
+        if app_id not in self._configs:
+            return False
+        
+        config = self._configs[app_id]
+        channel_name = self._get_channel_name(app_id)
+        
+        # Build bot config dict for FeishuChannel
+        bot_channel_config = {
+            "app_id": config.app_id,
+            "app_secret": config.app_secret,
+            "verification_token": config.verification_token,
+            "encrypt_key": config.encrypt_key,
+            "domain": config.domain,
+            "session": {
+                "assistant_id": config.agent_id,
+                "config": {
+                    "recursion_limit": config.recursion_limit,
+                },
+                "context": {
+                    "thinking_enabled": config.thinking_enabled,
+                    "is_plan_mode": config.is_plan_mode,
+                    "subagent_enabled": config.subagent_enabled,
+                },
+            },
+        }
+        
+        # Create and start the channel
+        try:
+            channel = FeishuChannel(bus=self._bus, config=bot_channel_config)
+            # Override the channel name to include the app_id
+            channel.name = channel_name
+            await channel.start()
+            self._bots[app_id] = channel
+            logger.info(f"Started bot: {config.name or app_id} (channel: {channel_name})")
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to start bot {app_id}: {e}")
+            return False
+
+    async def _stop_bot(self, app_id: str) -> None:
+        """Stop a single bot (internal, assumes lock is held)."""
+        if app_id in self._bots:
+            try:
+                await self._bots[app_id].stop()
+                logger.info(f"Stopped bot: {app_id}")
+            except Exception as e:
+                logger.exception(f"Error stopping bot {app_id}: {e}")
+            finally:
+                del self._bots[app_id]

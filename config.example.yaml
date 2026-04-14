@@ -763,6 +763,7 @@ checkpointer:
 # Connect DeerFlow to external messaging platforms.
 # All channels use outbound connections (WebSocket or polling) — no public IP required.
 
+# Option 1: Single Feishu bot (legacy, backward compatible)
 # channels:
 #   # LangGraph Server URL for thread/message management (default: http://localhost:2024)
 #   # For Docker deployments, use the Docker service name instead of localhost:
@@ -778,7 +779,7 @@ checkpointer:
 #   # langgraph_url: http://langgraph:2024
 #   # gateway_url: http://gateway:8001
 #   # You can also set DEER_FLOW_CHANNELS_LANGGRAPH_URL / DEER_FLOW_CHANNELS_GATEWAY_URL.
-#
+#   #
 #   # Optional: default mobile/session settings for all IM channels
 #   session:
 #     assistant_id: lead_agent  # or a custom agent name; custom agents route via lead_agent + agent_name
@@ -788,13 +789,44 @@ checkpointer:
 #       thinking_enabled: true
 #       is_plan_mode: false
 #       subagent_enabled: false
-#
+#   #
 #   feishu:
 #     enabled: false
 #     app_id: $FEISHU_APP_ID
 #     app_secret: $FEISHU_APP_SECRET
 #     # domain: https://open.feishu.cn       # China (default)
 #     # domain: https://open.larksuite.com   # International
+#
+# Option 2: Multiple Feishu bots (new, recommended)
+# channels:
+#   langgraph_url: http://localhost:2024
+#   gateway_url: http://localhost:8001
+#   #
+#   feishu_bots:
+#     - app_id: cli_your_bot_id_1
+#       app_secret: $FEISHU_BOT1_SECRET
+#       verification_token: ""        # Optional
+#       encrypt_key: ""              # Optional
+#       agent_id: lead_agent         # Agent to route messages to
+#       enabled: true
+#       name: "Global Assistant"     # Bot display name
+#       description: "Default global assistant"
+#       recursion_limit: 100
+#       thinking_enabled: true
+#       subagent_enabled: false
+#       is_plan_mode: false
+#       domain: https://open.feishu.cn
+#     #
+#     - app_id: cli_your_bot_id_2
+#       app_secret: $FEISHU_BOT2_SECRET
+#       agent_id: xiaohongshu-writer   # Custom agent
+#       enabled: true
+#       name: "Xiaohongshu Writer"
+#       description: "Specialized Xiaohongshu content creator"
+#       recursion_limit: 200
+#       thinking_enabled: true
+#       subagent_enabled: true
+#       is_plan_mode: true
 #
 #   slack:
 #     enabled: false
