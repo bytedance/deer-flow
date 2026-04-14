@@ -2,7 +2,7 @@
 
 import { BotIcon } from "lucide-react";
 
-import { type Agent } from "@/core/agents";
+import { getAgentDisplayName, type Agent } from "@/core/agents";
 import { cn } from "@/lib/utils";
 
 export function AgentWelcome({
@@ -14,11 +14,7 @@ export function AgentWelcome({
   agent: Agent | null | undefined;
   agentName: string;
 }) {
-  const trimmedDisplayName = agent?.display_name?.trim();
-  const displayName =
-    trimmedDisplayName && trimmedDisplayName.length > 0
-      ? trimmedDisplayName
-      : (agent?.name ?? agentName);
+  const displayName = getAgentDisplayName(agent, agentName);
   const description = agent?.description;
 
   return (

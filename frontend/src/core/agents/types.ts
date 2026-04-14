@@ -7,6 +7,8 @@ export interface Agent {
   soul?: string | null;
 }
 
+export const AGENT_DISPLAY_NAME_MAX_LENGTH = 100;
+
 export interface CreateAgentRequest {
   name: string;
   display_name?: string | null;

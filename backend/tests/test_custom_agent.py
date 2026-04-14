@@ -443,15 +443,15 @@ class TestAgentsAPI:
     def test_create_agent(self, agent_client):
         payload = {
             "name": "code-reviewer",
-            "display_name": "代码审查",
             "description": "Reviews code",
+            "display_name": "Code Reviewer",
             "soul": "You are a code reviewer.",
         }
         response = agent_client.post("/api/agents", json=payload)
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "code-reviewer"
-        assert data["display_name"] == "代码审查"
+        assert data["display_name"] == "Code Reviewer"
         assert data["description"] == "Reviews code"
         assert data["soul"] == "You are a code reviewer."
 
@@ -475,6 +475,24 @@ class TestAgentsAPI:
 
         blank_config = yaml.safe_load((tmp_path / "agents" / "blank-agent" / "config.yaml").read_text(encoding="utf-8"))
         assert "display_name" not in blank_config
+
+    def test_create_agent_rejects_long_display_name(self, agent_client):
+        payload = {
+            "name": "code-reviewer",
+            "display_name": "a" * 101,
+            "soul": "test",
+        }
+        response = agent_client.post("/api/agents", json=payload)
+        assert response.status_code == 422
+
+    def test_create_agent_rejects_long_display_name(self, agent_client):
+        payload = {
+            "name": "code-reviewer",
+            "display_name": "a" * 101,
+            "soul": "test",
+        }
+        response = agent_client.post("/api/agents", json=payload)
+        assert response.status_code == 422
 
     def test_create_agent_invalid_name(self, agent_client):
         payload = {"name": "Code Reviewer!", "soul": "test"}
@@ -567,6 +585,12 @@ class TestAgentsAPI:
         cleared_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert "display_name" not in cleared_config
         assert cleared_config["description"] == "desc"
+
+    def test_update_agent_rejects_long_display_name(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "update-me", "soul": "original"})
+
+        response = agent_client.put("/api/agents/update-me", json={"display_name": "a" * 101})
+        assert response.status_code == 422
 
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})

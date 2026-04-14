@@ -23,8 +23,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useDeleteAgent } from "@/core/agents";
-import type { Agent } from "@/core/agents";
+import {
+  getAgentDisplayName,
+  hasAgentDisplayName,
+  type Agent,
+  useDeleteAgent,
+} from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 
 interface AgentCardProps {
@@ -36,12 +40,8 @@ export function AgentCard({ agent }: AgentCardProps) {
   const router = useRouter();
   const deleteAgent = useDeleteAgent();
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const trimmedDisplayName = agent.display_name?.trim();
-  const displayName =
-    trimmedDisplayName && trimmedDisplayName.length > 0
-      ? trimmedDisplayName
-      : agent.name;
-  const shouldShowSlug = displayName !== agent.name;
+  const displayName = getAgentDisplayName(agent);
+  const showAgentName = hasAgentDisplayName(agent);
 
   function handleChat() {
     router.push(`/workspace/agents/${agent.name}/chats/new`);
@@ -70,9 +70,9 @@ export function AgentCard({ agent }: AgentCardProps) {
                 <CardTitle className="truncate text-base">
                   {displayName}
                 </CardTitle>
-                {shouldShowSlug && (
+                {showAgentName && (
                   <div className="text-muted-foreground truncate text-xs">
-                    {agent.name}
+                    {t.agents.agentSlugLabel}: {agent.name}
                   </div>
                 )}
                 {agent.model && (

@@ -21,7 +21,7 @@ import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
-import { useAgent } from "@/core/agents";
+import { getAgentDisplayName, useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadSettings } from "@/core/settings";
@@ -40,11 +40,7 @@ export default function AgentChatPage() {
   }>();
 
   const { agent } = useAgent(agent_name);
-  const trimmedDisplayName = agent?.display_name?.trim();
-  const displayName =
-    trimmedDisplayName && trimmedDisplayName.length > 0
-      ? trimmedDisplayName
-      : (agent?.name ?? agent_name);
+  const displayName = getAgentDisplayName(agent, agent_name);
 
   const { threadId, setThreadId, isNewThread, setIsNewThread } =
     useThreadChat();

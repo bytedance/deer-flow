@@ -16,13 +16,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+AGENT_DISPLAY_NAME_MAX_LENGTH = 100
 
 
 class AgentResponse(BaseModel):
     """Response model for a custom agent."""
 
     name: str = Field(..., description="Agent name (hyphen-case)")
-    display_name: str | None = Field(default=None, description="Optional human-friendly agent display name")
+    display_name: str | None = Field(
+        default=None,
+        description="Optional human-friendly agent display name",
+        max_length=AGENT_DISPLAY_NAME_MAX_LENGTH,
+    )
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -39,7 +44,11 @@ class AgentCreateRequest(BaseModel):
     """Request body for creating a custom agent."""
 
     name: str = Field(..., description="Agent name (must match ^[A-Za-z0-9-]+$, stored as lowercase)")
-    display_name: str | None = Field(default=None, description="Optional human-friendly agent display name")
+    display_name: str | None = Field(
+        default=None,
+        description="Optional human-friendly agent display name",
+        max_length=AGENT_DISPLAY_NAME_MAX_LENGTH,
+    )
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -49,7 +58,11 @@ class AgentCreateRequest(BaseModel):
 class AgentUpdateRequest(BaseModel):
     """Request body for updating a custom agent."""
 
-    display_name: str | None = Field(default=None, description="Updated display name")
+    display_name: str | None = Field(
+        default=None,
+        description="Updated display name",
+        max_length=AGENT_DISPLAY_NAME_MAX_LENGTH,
+    )
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
@@ -122,14 +135,9 @@ async def list_agents() -> AgentsListResponse:
     Returns:
         List of all custom agents with their metadata and soul content.
     """
-    _require_agents_api_enabled()
 
     try:
         agents = list_custom_agents()
-        return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True) for a in agents])
-    except Exception as e:
-        logger.error(f"Failed to list agents: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
 
 
 @router.get(
