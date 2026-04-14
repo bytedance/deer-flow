@@ -37,8 +37,6 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   const layoutRef = useRef<GroupImperativeHandle>(null);
 
   const {
-    artifacts,
-    uploads,
     files,
     open: artifactsOpen,
     setOpen: setArtifactsOpen,
@@ -105,12 +103,6 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     }
     return artifactsOpen;
   }, [artifactsOpen, files]);
-
-  const uploadSet = useMemo(() => new Set(uploads), [uploads]);
-  const artifactOnlyFiles = useMemo(
-    () => artifacts.filter((artifact) => !uploadSet.has(artifact)),
-    [artifacts, uploadSet],
-  );
 
   const resizableIdBase = useMemo(() => {
     return pathname.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -187,26 +179,8 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
                     <h2 className="text-lg font-medium">{t.common.files}</h2>
                   </header>
                   <main className="min-h-0 grow overflow-y-auto">
-                    <div className="flex max-w-(--container-width-sm) flex-col gap-8 p-4 pt-12">
-                      {uploads.length > 0 && (
-                        <section className="flex flex-col gap-4">
-                          <h3 className="text-muted-foreground text-sm font-medium">
-                            {t.common.uploads}
-                          </h3>
-                          <ArtifactFileList files={uploads} threadId={threadId} />
-                        </section>
-                      )}
-                      {artifactOnlyFiles.length > 0 && (
-                        <section className="flex flex-col gap-4">
-                          <h3 className="text-muted-foreground text-sm font-medium">
-                            {t.common.artifacts}
-                          </h3>
-                          <ArtifactFileList
-                            files={artifactOnlyFiles}
-                            threadId={threadId}
-                          />
-                        </section>
-                      )}
+                    <div className="max-w-(--container-width-sm) p-4 pt-12">
+                      <ArtifactFileList files={files} threadId={threadId} />
                     </div>
                   </main>
                 </div>

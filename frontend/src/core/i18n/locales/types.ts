@@ -23,6 +23,7 @@ export interface Translations {
     files: string;
     artifacts: string;
     uploads: string;
+    current: string;
     public: string;
     custom: string;
     notAvailableInDemoMode: string;

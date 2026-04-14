@@ -34,6 +34,7 @@ export const enUS: Translations = {
     files: "Files",
     artifacts: "Artifacts",
     uploads: "Uploads",
+    current: "Current",
     public: "Public",
     custom: "Custom",
     notAvailableInDemoMode: "Not available in demo mode",

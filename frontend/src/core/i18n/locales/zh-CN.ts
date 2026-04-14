@@ -34,6 +34,7 @@ export const zhCN: Translations = {
     files: "文件",
     artifacts: "文件",
     uploads: "上传文件",
+    current: "当前版本",
     public: "公共",
     custom: "自定义",
     notAvailableInDemoMode: "在演示模式下不可用",
