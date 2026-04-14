@@ -3,6 +3,7 @@ import {
   CopyIcon,
   DownloadIcon,
   EyeIcon,
+  GitCompareArrowsIcon,
   LoaderIcon,
   PackageIcon,
   SquareArrowOutUpRightIcon,
@@ -47,6 +48,7 @@ import { ArtifactLink } from "../citations/artifact-link";
 import { useThread } from "../messages/context";
 import { Tooltip } from "../tooltip";
 
+import { ArtifactFileDiff } from "./artifact-file-diff";
 import { useArtifacts } from "./context";
 
 export function ArtifactFileDetail({
@@ -94,7 +96,7 @@ export function ArtifactFileDetail({
     enabled: isCodeFile && !isWriteFile,
   });
 
-  const [viewMode, setViewMode] = useState<"code" | "preview">("code");
+  const [viewMode, setViewMode] = useState<"code" | "preview" | "diff">("code");
   const [selectedVersionId, setSelectedVersionId] = useState("current");
   const [isInstalling, setIsInstalling] = useState(false);
   const { thread, isMock } = useThread();
@@ -118,18 +120,23 @@ export function ArtifactFileDetail({
   }, [historySnapshots, selectedVersionId]);
   const isHistoricalView = selectedSnapshot !== null;
   const canRenderTextContent = isCodeFile || isHistoricalView;
+  const canShowDiff =
+    isHistoricalView && typeof selectedSnapshot?.previousContent === "string";
   const displayContent = selectedSnapshot?.content ?? content ?? "";
 
   useEffect(() => {
-    if (isSupportPreview) {
-      setViewMode("preview");
-    } else {
+    if (viewMode === "preview" && !isSupportPreview) {
       setViewMode("code");
+      return;
     }
-  }, [isSupportPreview]);
+    if (viewMode === "diff" && !canShowDiff) {
+      setViewMode(isSupportPreview ? "preview" : "code");
+    }
+  }, [canShowDiff, isSupportPreview, viewMode]);
   useEffect(() => {
     setSelectedVersionId("current");
-  }, [filepathFromProps]);
+    setViewMode(isSupportPreview ? "preview" : "code");
+  }, [filepathFromProps, isSupportPreview]);
 
   const handleInstallSkill = useCallback(async () => {
     if (isInstalling) return;
@@ -212,7 +219,7 @@ export function ArtifactFileDetail({
           </ArtifactTitle>
         </div>
         <div className="flex min-w-0 grow items-center justify-center">
-          {isSupportPreview && (
+          {(isSupportPreview || canShowDiff) && (
             <ToggleGroup
               className="mx-auto"
               type="single"
@@ -221,16 +228,23 @@ export function ArtifactFileDetail({
               value={viewMode}
               onValueChange={(value) => {
                 if (value) {
-                  setViewMode(value as "code" | "preview");
+                  setViewMode(value as "code" | "preview" | "diff");
                 }
               }}
             >
               <ToggleGroupItem value="code">
                 <Code2Icon />
               </ToggleGroupItem>
-              <ToggleGroupItem value="preview">
-                <EyeIcon />
-              </ToggleGroupItem>
+              {isSupportPreview && (
+                <ToggleGroupItem value="preview">
+                  <EyeIcon />
+                </ToggleGroupItem>
+              )}
+              {canShowDiff && (
+                <ToggleGroupItem value="diff">
+                  <GitCompareArrowsIcon />
+                </ToggleGroupItem>
+              )}
             </ToggleGroup>
           )}
         </div>
@@ -325,6 +339,15 @@ export function ArtifactFileDetail({
             className="size-full resize-none rounded-none border-none"
             value={displayContent ?? ""}
             readonly
+          />
+        )}
+        {canShowDiff && viewMode === "diff" && selectedSnapshot && (
+          <ArtifactFileDiff
+            afterContent={selectedSnapshot.content}
+            afterLabel={`${t.common.after} · ${t.common.version} ${selectedSnapshot.version}`}
+            beforeContent={selectedSnapshot.previousContent ?? ""}
+            beforeLabel={`${t.common.before} · ${t.common.version} ${selectedSnapshot.version - 1}`}
+            title={t.common.diff}
           />
         )}
         {!canRenderTextContent && (
