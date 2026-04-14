@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECK_SCRIPT_PATH = REPO_ROOT / "scripts" / "check.py"
 
@@ -25,9 +24,7 @@ def test_find_pnpm_command_prefers_resolved_executable(monkeypatch):
 
     monkeypatch.setattr(check_script.shutil, "which", fake_which)
 
-    assert check_script.find_pnpm_command() == [
-        r"C:\Users\tester\AppData\Roaming\npm\pnpm.CMD"
-    ]
+    assert check_script.find_pnpm_command() == [r"C:\Users\tester\AppData\Roaming\npm\pnpm.CMD"]
 
 
 def test_find_pnpm_command_falls_back_to_corepack(monkeypatch):
