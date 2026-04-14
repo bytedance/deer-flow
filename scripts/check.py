@@ -39,8 +39,11 @@ def find_pnpm_command() -> list[str] | None:
     if pnpm_cmd_path:
         return [str(Path(pnpm_cmd_path))]
 
-    if shutil.which("corepack"):
-        return ["corepack", "pnpm"]
+    corepack_path = shutil.which("corepack")
+    if not corepack_path:
+        corepack_path = shutil.which("corepack.cmd")
+    if corepack_path:
+        return [str(Path(corepack_path)), "pnpm"]
     return None
 
 
