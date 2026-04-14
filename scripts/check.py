@@ -95,7 +95,7 @@ def main() -> int:
     if pnpm_command:
         pnpm_version = run_command([*pnpm_command, "-v"])
         if pnpm_version:
-            if pnpm_command[0] == "corepack":
+            if Path(pnpm_command[0]).stem.lower() == "corepack":
                 print(f"  OK pnpm {pnpm_version} (via Corepack)")
             else:
                 print(f"  OK pnpm {pnpm_version}")

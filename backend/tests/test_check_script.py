@@ -35,4 +35,23 @@ def test_find_pnpm_command_falls_back_to_corepack(monkeypatch):
 
     monkeypatch.setattr(check_script.shutil, "which", fake_which)
 
-    assert check_script.find_pnpm_command() == ["corepack", "pnpm"]
+    assert check_script.find_pnpm_command() == [
+        r"C:\Program Files\nodejs\corepack.exe",
+        "pnpm",
+    ]
+
+
+def test_find_pnpm_command_falls_back_to_corepack_cmd(monkeypatch):
+    def fake_which(name: str) -> str | None:
+        if name == "corepack":
+            return None
+        if name == "corepack.cmd":
+            return r"C:\Program Files\nodejs\corepack.cmd"
+        return None
+
+    monkeypatch.setattr(check_script.shutil, "which", fake_which)
+
+    assert check_script.find_pnpm_command() == [
+        r"C:\Program Files\nodejs\corepack.cmd",
+        "pnpm",
+    ]
