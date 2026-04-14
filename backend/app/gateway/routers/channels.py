@@ -135,7 +135,7 @@ async def create_feishu_bot(req: FeishuBotConfigRequest) -> FeishuBotResponse:
             )
     except Exception as e:
         logger.exception("Failed to create/update Feishu bot: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to configure bot: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to configure bot")
 
 
 @router.delete("/feishu/bots/{app_id}", response_model=FeishuBotResponse)
