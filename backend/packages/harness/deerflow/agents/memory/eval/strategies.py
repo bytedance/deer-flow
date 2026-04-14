@@ -5,6 +5,36 @@ from datetime import UTC, datetime
 from deerflow.agents.memory.eval.types import RankedFact
 from deerflow.agents.memory.retrieval_trace import CandidateFact
 
+try:
+    import tiktoken
+
+    _TIKTOKEN_AVAILABLE = True
+except ImportError:
+    _TIKTOKEN_AVAILABLE = False
+
+
+def _estimate_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
+    """Estimate token count for *text*.
+
+    Uses tiktoken when available (accurate for CJK / mixed-script content),
+    otherwise falls back to ``len(text) // 4`` which is a reasonable
+    approximation for ASCII-heavy English but under-counts for Chinese.
+
+    Note: ``prompt.py`` already contains a near-identical ``_count_tokens``
+    helper, but it is module-private (leading underscore) and ``prompt.py``
+    is a protected file that must not be modified.  Duplicating the tiny
+    function here keeps the eval module self-contained without breaking
+    encapsulation or touching protected code.
+    """
+    if not _TIKTOKEN_AVAILABLE:
+        return len(text) // 4
+
+    try:
+        encoding = tiktoken.get_encoding(encoding_name)
+        return len(encoding.encode(text))
+    except Exception:
+        return len(text) // 4
+
 
 class ConfidenceOnlyStrategy:
     @property
@@ -17,7 +47,7 @@ class ConfidenceOnlyStrategy:
         tokens_used = 0
 
         for new_rank, (original_rank, fact) in enumerate(ranked):
-            token_cost = len(fact.content_preview) // 4
+            token_cost = _estimate_tokens(fact.content_preview)
             included = tokens_used + token_cost <= max_tokens
             if included:
                 tokens_used += token_cost
@@ -68,7 +98,7 @@ class MultiSignalStrategy:
         tokens_used = 0
 
         for new_rank, (original_rank, fact, confidence, recency, category_boost, composite) in enumerate(ranked):
-            token_cost = len(fact.content_preview) // 4
+            token_cost = _estimate_tokens(fact.content_preview)
             included = tokens_used + token_cost <= max_tokens
             if included:
                 tokens_used += token_cost

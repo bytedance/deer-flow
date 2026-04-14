@@ -44,7 +44,7 @@ def test_confidence_only_token_budget_limits() -> None:
         _make_candidate(fact_id="f3", confidence=0.7, content_preview="x" * 40),
     ]
 
-    results = strategy.rank(candidates, max_tokens=20)
+    results = strategy.rank(candidates, max_tokens=10)
 
     assert results[0].included is True
     assert results[1].included is True
