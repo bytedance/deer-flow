@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional, Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ class ChannelRestartResponse(BaseModel):
 # Feishu Bot Management Models
 class FeishuBotConfigRequest(BaseModel):
     """Request model for creating/updating a Feishu bot."""
+
     app_id: str
     app_secret: str
     verification_token: str = ""
@@ -43,6 +44,7 @@ class FeishuBotConfigRequest(BaseModel):
 
 class FeishuBotResponse(BaseModel):
     """Response model for Feishu bot operations."""
+
     success: bool
     message: str
     data: Optional[dict[str, Any]] = None
@@ -50,6 +52,7 @@ class FeishuBotResponse(BaseModel):
 
 class FeishuBotsListResponse(BaseModel):
     """Response model for listing Feishu bots."""
+
     success: bool
     bots: dict[str, dict[str, Any]]
 
@@ -86,6 +89,7 @@ async def restart_channel(name: str) -> ChannelRestartResponse:
 
 # ==================== Feishu Bot Management Endpoints ====================
 
+
 @router.get("/feishu/bots", response_model=FeishuBotsListResponse)
 async def list_feishu_bots() -> FeishuBotsListResponse:
     """List all configured Feishu bots with their status."""
@@ -97,7 +101,11 @@ async def list_feishu_bots() -> FeishuBotsListResponse:
 
     bot_manager = service.get_feishu_bot_manager()
     if bot_manager is None:
-        return FeishuBotsListResponse(success=True, bots={})
+        # Lazy initialize FeishuBotManager to support dynamic bot creation
+        from app.channels.feishu import FeishuBotManager
+        bot_manager = FeishuBotManager()
+        service.set_feishu_bot_manager(bot_manager)
+        await bot_manager.start()
 
     bots_status = bot_manager.get_bot_status()
     return FeishuBotsListResponse(success=True, bots=bots_status)
@@ -115,27 +123,29 @@ async def create_feishu_bot(req: FeishuBotConfigRequest) -> FeishuBotResponse:
 
     bot_manager = service.get_feishu_bot_manager()
     if bot_manager is None:
-        raise HTTPException(status_code=400, detail="FeishuBotManager is not available")
+        # Lazy initialize FeishuBotManager to support dynamic bot creation
+        from app.channels.feishu import FeishuBotManager
+        bot_manager = FeishuBotManager()
+        service.set_feishu_bot_manager(bot_manager)
+        await bot_manager.start()
 
     try:
         config = FeishuBotConfig(**req.model_dump())
         success = await bot_manager.add_bot(config)
-        
+
         if success:
             logger.info("Feishu bot added/updated: %s", config.app_id)
-            return FeishuBotResponse(
-                success=True,
-                message=f"Bot {config.name or config.app_id} configured successfully",
-                data=config.model_dump()
-            )
+            # Redact sensitive fields before returning
+            redacted_config = config.model_dump()
+            for sensitive_key in ["app_secret", "verification_token", "encrypt_key"]:
+                if sensitive_key in redacted_config:
+                    redacted_config[sensitive_key] = "***MASKED***"
+            return FeishuBotResponse(success=True, message=f"Bot {config.name or config.app_id} configured successfully", data=redacted_config)
         else:
-            return FeishuBotResponse(
-                success=False,
-                message=f"Failed to configure bot {config.app_id}"
-            )
+            return FeishuBotResponse(success=False, message=f"Failed to configure bot {config.app_id}")
     except Exception as e:
         logger.exception("Failed to create/update Feishu bot: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to configure bot")
+        raise HTTPException(status_code=500, detail=f"Failed to configure bot: {str(e)}")
 
 
 @router.delete("/feishu/bots/{app_id}", response_model=FeishuBotResponse)
@@ -153,18 +163,12 @@ async def delete_feishu_bot(app_id: str) -> FeishuBotResponse:
 
     try:
         success = await bot_manager.remove_bot(app_id)
-        
+
         if success:
             logger.info("Feishu bot deleted: %s", app_id)
-            return FeishuBotResponse(
-                success=True,
-                message=f"Bot {app_id} deleted successfully"
-            )
+            return FeishuBotResponse(success=True, message=f"Bot {app_id} deleted successfully")
         else:
-            return FeishuBotResponse(
-                success=False,
-                message=f"Bot {app_id} not found"
-            )
+            return FeishuBotResponse(success=False, message=f"Bot {app_id} not found")
     except Exception as e:
         logger.exception("Failed to delete Feishu bot: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to delete bot: {str(e)}")
@@ -185,18 +189,12 @@ async def restart_feishu_bot(app_id: str) -> FeishuBotResponse:
 
     try:
         success = await bot_manager.restart_bot(app_id)
-        
+
         if success:
             logger.info("Feishu bot restarted: %s", app_id)
-            return FeishuBotResponse(
-                success=True,
-                message=f"Bot {app_id} restarted successfully"
-            )
+            return FeishuBotResponse(success=True, message=f"Bot {app_id} restarted successfully")
         else:
-            return FeishuBotResponse(
-                success=False,
-                message=f"Bot {app_id} not found or failed to restart"
-            )
+            return FeishuBotResponse(success=False, message=f"Bot {app_id} not found or failed to restart")
     except Exception as e:
         logger.exception("Failed to restart Feishu bot: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to restart bot: {str(e)}")
@@ -213,7 +211,11 @@ async def get_feishu_health() -> dict[str, Any]:
 
     bot_manager = service.get_feishu_bot_manager()
     if bot_manager is None:
-        return {"status": "healthy", "feishu_bots_enabled": False}
+        # Lazy initialize FeishuBotManager to support dynamic bot creation
+        from app.channels.feishu import FeishuBotManager
+        bot_manager = FeishuBotManager()
+        service.set_feishu_bot_manager(bot_manager)
+        await bot_manager.start()
 
     bots_status = bot_manager.get_bot_status()
     total_bots = len(bots_status)
