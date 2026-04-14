@@ -52,6 +52,10 @@ export function groupMessages<T>(
   }
 
   for (const message of messages) {
+    if (isHiddenFromUIMessage(message)) {
+      continue;
+    }
+
     if (message.name === "todo_reminder") {
       continue;
     }
@@ -127,7 +131,10 @@ export function groupMessages<T>(
 
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
-    return splitInlineReasoningFromAIMessage(message)?.content ?? message.content.trim();
+    return (
+      splitInlineReasoningFromAIMessage(message)?.content ??
+      message.content.trim()
+    );
   }
   if (Array.isArray(message.content)) {
     return message.content
@@ -167,7 +174,10 @@ function splitInlineReasoningFromAIMessage(message: Message) {
 
 export function extractContentFromMessage(message: Message) {
   if (typeof message.content === "string") {
-    return splitInlineReasoningFromAIMessage(message)?.content ?? message.content.trim();
+    return (
+      splitInlineReasoningFromAIMessage(message)?.content ??
+      message.content.trim()
+    );
   }
   if (Array.isArray(message.content)) {
     return message.content
@@ -233,8 +243,11 @@ export function extractURLFromImageURLContent(
 export function hasContent(message: Message) {
   if (typeof message.content === "string") {
     return (
-      splitInlineReasoningFromAIMessage(message)?.content ?? message.content.trim()
-    ).length > 0;
+      (
+        splitInlineReasoningFromAIMessage(message)?.content ??
+        message.content.trim()
+      ).length > 0
+    );
   }
   if (Array.isArray(message.content)) {
     return message.content.length > 0;
@@ -312,6 +325,10 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
     }
   }
   return undefined;
+}
+
+export function isHiddenFromUIMessage(message: Message) {
+  return message.additional_kwargs?.hide_from_ui === true;
 }
 
 /**

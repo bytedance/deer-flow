@@ -2,10 +2,32 @@ import logging
 
 from langchain.chat_models import BaseChatModel
 
-from deerflow.config import get_app_config, get_tracing_config, is_tracing_enabled
+from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
+from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
+
+
+def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
+    """Recursively merge two dictionaries without mutating the inputs."""
+    merged = dict(base or {})
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
+    """Build the disable payload for vLLM/Qwen chat template kwargs."""
+    disable_kwargs: dict[str, bool] = {}
+    if "thinking" in chat_template_kwargs:
+        disable_kwargs["thinking"] = False
+    if "enable_thinking" in chat_template_kwargs:
+        disable_kwargs["enable_thinking"] = False
+    return disable_kwargs
 
 
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, **kwargs) -> BaseChatModel:
@@ -34,6 +56,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "supports_thinking",
             "supports_reasoning_effort",
             "when_thinking_enabled",
+            "when_thinking_disabled",
             "thinking",
             "supports_vision",
         },
@@ -50,16 +73,29 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
         if effective_wte:
             model_settings_from_config.update(effective_wte)
-    if not thinking_enabled and has_thinking_settings:
-        if effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
+    if not thinking_enabled:
+        if model_config.when_thinking_disabled is not None:
+            # User-provided disable settings take full precedence
+            model_settings_from_config.update(model_config.when_thinking_disabled)
+        elif has_thinking_settings and effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
             # OpenAI-compatible gateway: thinking is nested under extra_body
-            kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
-            kwargs.update({"reasoning_effort": "minimal"})
-        elif effective_wte.get("thinking", {}).get("type"):
+            model_settings_from_config["extra_body"] = _deep_merge_dicts(
+                model_settings_from_config.get("extra_body"),
+                {"thinking": {"type": "disabled"}},
+            )
+            model_settings_from_config["reasoning_effort"] = "minimal"
+        elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
+            # vLLM uses chat template kwargs to switch thinking on/off.
+            model_settings_from_config["extra_body"] = _deep_merge_dicts(
+                model_settings_from_config.get("extra_body"),
+                {"chat_template_kwargs": disable_chat_template_kwargs},
+            )
+        elif has_thinking_settings and effective_wte.get("thinking", {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
-            kwargs.update({"thinking": {"type": "disabled"}})
-    if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:
-        del kwargs["reasoning_effort"]
+            model_settings_from_config["thinking"] = {"type": "disabled"}
+    if not model_config.supports_reasoning_effort:
+        kwargs.pop("reasoning_effort", None)
+        model_settings_from_config.pop("reasoning_effort", None)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     from deerflow.models.openai_codex_provider import CodexChatModel
@@ -77,19 +113,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"
 
-    model_instance = model_class(**kwargs, **model_settings_from_config)
+    model_instance = model_class(**{**model_settings_from_config, **kwargs})
 
-    if is_tracing_enabled():
-        try:
-            from langchain_core.tracers.langchain import LangChainTracer
-
-            tracing_config = get_tracing_config()
-            tracer = LangChainTracer(
-                project_name=tracing_config.project,
-            )
-            existing_callbacks = model_instance.callbacks or []
-            model_instance.callbacks = [*existing_callbacks, tracer]
-            logger.debug(f"LangSmith tracing attached to model '{name}' (project='{tracing_config.project}')")
-        except Exception as e:
-            logger.warning(f"Failed to attach LangSmith tracing to model '{name}': {e}")
+    callbacks = build_tracing_callbacks()
+    if callbacks:
+        existing_callbacks = model_instance.callbacks or []
+        model_instance.callbacks = [*existing_callbacks, *callbacks]
+        logger.debug(f"Tracing attached to model '{name}' with providers={len(callbacks)}")
     return model_instance

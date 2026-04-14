@@ -4,7 +4,7 @@ import abc
 import json
 import logging
 import threading
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,11 +15,16 @@ from deerflow.config.paths import get_paths
 logger = logging.getLogger(__name__)
 
 
+def utc_now_iso_z() -> str:
+    """Current UTC time as ISO-8601 with ``Z`` suffix (matches prior naive-UTC output)."""
+    return datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
+
+
 def create_empty_memory() -> dict[str, Any]:
     """Create an empty memory structure."""
     return {
         "version": "1.0",
-        "lastUpdated": datetime.utcnow().isoformat() + "Z",
+        "lastUpdated": utc_now_iso_z(),
         "user": {
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
@@ -71,9 +76,7 @@ class FileMemoryStorage(MemoryStorage):
         if not agent_name:
             raise ValueError("Agent name must be a non-empty string.")
         if not AGENT_NAME_PATTERN.match(agent_name):
-            raise ValueError(
-                f"Invalid agent name {agent_name!r}: names must match {AGENT_NAME_PATTERN.pattern}"
-            )
+            raise ValueError(f"Invalid agent name {agent_name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
 
     def _get_memory_file_path(self, agent_name: str | None = None) -> Path:
         """Get the path to the memory file."""
@@ -139,7 +142,7 @@ class FileMemoryStorage(MemoryStorage):
 
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
+            memory_data["lastUpdated"] = utc_now_iso_z()
 
             temp_path = file_path.with_suffix(".tmp")
             with open(temp_path, "w", encoding="utf-8") as f:
@@ -180,18 +183,15 @@ def get_memory_storage() -> MemoryStorage:
         try:
             module_path, class_name = storage_class_path.rsplit(".", 1)
             import importlib
+
             module = importlib.import_module(module_path)
             storage_class = getattr(module, class_name)
 
             # Validate that the configured storage is a MemoryStorage implementation
             if not isinstance(storage_class, type):
-                raise TypeError(
-                    f"Configured memory storage '{storage_class_path}' is not a class: {storage_class!r}"
-                )
+                raise TypeError(f"Configured memory storage '{storage_class_path}' is not a class: {storage_class!r}")
             if not issubclass(storage_class, MemoryStorage):
-                raise TypeError(
-                    f"Configured memory storage '{storage_class_path}' is not a subclass of MemoryStorage"
-                )
+                raise TypeError(f"Configured memory storage '{storage_class_path}' is not a subclass of MemoryStorage")
 
             _storage_instance = storage_class()
         except Exception as e:

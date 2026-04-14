@@ -1,16 +1,57 @@
 #!/usr/bin/env bash
 #
-# deploy.sh - Build and start (or stop) DeerFlow production services
+# deploy.sh - Build, start, or stop DeerFlow production services
 #
-# Usage:
-#   deploy.sh [up]   — build images and start containers (default)
-#   deploy.sh down   — stop and remove containers
+# Commands:
+#   deploy.sh [--MODE]           — build + start (default: --standard)
+#   deploy.sh build              — build all images (mode-agnostic)
+#   deploy.sh start [--MODE]     — start from pre-built images (default: --standard)
+#   deploy.sh down               — stop and remove containers
+#
+# Runtime modes:
+#   --standard  (default)  All services including LangGraph server.
+#   --gateway              No LangGraph container; nginx routes /api/langgraph/*
+#                          to the Gateway compat API instead.
+#
+# Sandbox mode (local / aio / provisioner) is auto-detected from config.yaml.
+#
+# Examples:
+#   deploy.sh                    # build + start in standard mode
+#   deploy.sh --gateway          # build + start in gateway mode
+#   deploy.sh build              # build all images
+#   deploy.sh start --gateway    # start pre-built images in gateway mode
+#   deploy.sh down               # stop and remove containers
 #
 # Must be run from the repo root directory.
 
 set -e
 
-CMD="${1:-up}"
+RUNTIME_MODE="standard"
+
+case "${1:-}" in
+    build|start|down)
+        CMD="$1"
+        if [ -n "${2:-}" ]; then
+            case "$2" in
+                --standard) RUNTIME_MODE="standard" ;;
+                --gateway)  RUNTIME_MODE="gateway" ;;
+                *) echo "Unknown mode: $2"; echo "Usage: deploy.sh [build|start|down] [--standard|--gateway]"; exit 1 ;;
+            esac
+        fi
+        ;;
+    --standard|--gateway)
+        CMD=""
+        RUNTIME_MODE="${1#--}"
+        ;;
+    "")
+        CMD=""
+        ;;
+    *)
+        echo "Unknown argument: $1"
+        echo "Usage: deploy.sh [build|start|down] [--standard|--gateway]"
+        exit 1
+        ;;
+esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -50,11 +91,11 @@ if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
         cp "$REPO_ROOT/config.example.yaml" "$DEER_FLOW_CONFIG_PATH"
         echo -e "${GREEN}✓ Seeded config.example.yaml → $DEER_FLOW_CONFIG_PATH${NC}"
         echo -e "${YELLOW}⚠ config.yaml was seeded from the example template.${NC}"
-        echo "  Edit $DEER_FLOW_CONFIG_PATH and set your model API keys before use."
+        echo "  Run 'make setup' to generate a minimal config, or edit $DEER_FLOW_CONFIG_PATH manually before use."
     else
         echo -e "${RED}✗ No config.yaml found.${NC}"
-        echo "  Run 'make config' from the repo root to generate one,"
-        echo "  then set the required model API keys."
+        echo "  Run 'make setup' from the repo root (recommended),"
+        echo "  or 'make config' for the full template, then set the required model API keys."
         exit 1
     fi
 else
@@ -150,6 +191,32 @@ if [ "$CMD" = "down" ]; then
     exit 0
 fi
 
+# ── build ────────────────────────────────────────────────────────────────────
+# Build produces mode-agnostic images. No --gateway or sandbox detection needed.
+
+if [ "$CMD" = "build" ]; then
+    echo "=========================================="
+    echo "  DeerFlow — Building Images"
+    echo "=========================================="
+    echo ""
+
+    # Docker socket is needed for compose to parse volume specs
+    if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
+        export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
+    fi
+
+    "${COMPOSE_CMD[@]}" build
+
+    echo ""
+    echo "=========================================="
+    echo "  ✓ Images built successfully"
+    echo "=========================================="
+    echo ""
+    echo "  Next: deploy.sh start [--gateway]"
+    echo ""
+    exit 0
+fi
+
 # ── Banner ────────────────────────────────────────────────────────────────────
 
 echo "=========================================="
@@ -157,19 +224,28 @@ echo "  DeerFlow Production Deployment"
 echo "=========================================="
 echo ""
 
-# ── Step 1: Detect sandbox mode ──────────────────────────────────────────────
+# ── Detect runtime configuration ────────────────────────────────────────────
+# Only needed for start / up — determines which containers to launch.
 
 sandbox_mode="$(detect_sandbox_mode)"
 echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
-if [ "$sandbox_mode" = "provisioner" ]; then
-    services=""
-    extra_args="--profile provisioner"
-else
-    services="frontend gateway langgraph nginx"
-    extra_args=""
-fi
+echo -e "${BLUE}Runtime mode: $RUNTIME_MODE${NC}"
 
+case "$RUNTIME_MODE" in
+    gateway)
+        export LANGGRAPH_UPSTREAM=gateway:8001
+        export LANGGRAPH_REWRITE=/api/
+        services="frontend gateway nginx"
+        ;;
+    standard)
+        services="frontend gateway langgraph nginx"
+        ;;
+esac
+
+if [ "$sandbox_mode" = "provisioner" ]; then
+    services="$services provisioner"
+fi
 
 # ── DEER_FLOW_DOCKER_SOCKET ───────────────────────────────────────────────────
 
@@ -189,22 +265,34 @@ fi
 
 echo ""
 
-# ── Step 2: Build and start ───────────────────────────────────────────────────
+# ── Start / Up ───────────────────────────────────────────────────────────────
 
-echo "Building images and starting containers..."
-echo ""
-
-# shellcheck disable=SC2086
-"${COMPOSE_CMD[@]}" $extra_args up --build -d --remove-orphans $services
+if [ "$CMD" = "start" ]; then
+    echo "Starting containers (no rebuild)..."
+    echo ""
+    # shellcheck disable=SC2086
+    "${COMPOSE_CMD[@]}" up -d --remove-orphans $services
+else
+    # Default: build + start
+    echo "Building images and starting containers..."
+    echo ""
+    # shellcheck disable=SC2086
+    "${COMPOSE_CMD[@]}" up --build -d --remove-orphans $services
+fi
 
 echo ""
 echo "=========================================="
-echo "  DeerFlow is running!"
+echo "  DeerFlow is running! ($RUNTIME_MODE mode)"
 echo "=========================================="
 echo ""
 echo "  🌐 Application: http://localhost:${PORT:-2026}"
 echo "  📡 API Gateway: http://localhost:${PORT:-2026}/api/*"
-echo "  🤖 LangGraph:   http://localhost:${PORT:-2026}/api/langgraph/*"
+if [ "$RUNTIME_MODE" = "gateway" ]; then
+    echo "  🤖 Runtime:     Gateway embedded"
+    echo "  API:            /api/langgraph/* → Gateway (compat)"
+else
+    echo "  🤖 LangGraph:   http://localhost:${PORT:-2026}/api/langgraph/*"
+fi
 echo ""
 echo "  Manage:"
 echo "    make down        — stop and remove containers"

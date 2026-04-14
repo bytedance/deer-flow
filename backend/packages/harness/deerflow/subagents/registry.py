@@ -3,6 +3,7 @@
 import logging
 from dataclasses import replace
 
+from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
 from deerflow.subagents.config import SubagentConfig
 
@@ -22,14 +23,42 @@ def get_subagent_config(name: str) -> SubagentConfig | None:
     if config is None:
         return None
 
-    # Apply timeout override from config.yaml (lazy import to avoid circular deps)
+    # Apply runtime overrides (timeout, max_turns, model) from config.yaml
+    # Lazy import to avoid circular deps.
     from deerflow.config.subagents_config import get_subagents_app_config
 
     app_config = get_subagents_app_config()
     effective_timeout = app_config.get_timeout_for(name)
+    effective_max_turns = app_config.get_max_turns_for(name, config.max_turns)
+
+    overrides = {}
     if effective_timeout != config.timeout_seconds:
-        logger.debug(f"Subagent '{name}': timeout overridden by config.yaml ({config.timeout_seconds}s -> {effective_timeout}s)")
-        config = replace(config, timeout_seconds=effective_timeout)
+        logger.debug(
+            "Subagent '%s': timeout overridden by config.yaml (%ss -> %ss)",
+            name,
+            config.timeout_seconds,
+            effective_timeout,
+        )
+        overrides["timeout_seconds"] = effective_timeout
+    if effective_max_turns != config.max_turns:
+        logger.debug(
+            "Subagent '%s': max_turns overridden by config.yaml (%s -> %s)",
+            name,
+            config.max_turns,
+            effective_max_turns,
+        )
+        overrides["max_turns"] = effective_max_turns
+    effective_model = app_config.get_model_for(name)
+    if effective_model is not None and effective_model != config.model:
+        logger.debug(
+            "Subagent '%s': model overridden by config.yaml (%s -> %s)",
+            name,
+            config.model,
+            effective_model,
+        )
+        overrides["model"] = effective_model
+    if overrides:
+        config = replace(config, **overrides)
 
     return config
 
@@ -50,3 +79,21 @@ def get_subagent_names() -> list[str]:
         List of subagent names.
     """
     return list(BUILTIN_SUBAGENTS.keys())
+
+
+def get_available_subagent_names() -> list[str]:
+    """Get subagent names that should be exposed to the active runtime.
+
+    Returns:
+        List of subagent names visible to the current sandbox configuration.
+    """
+    names = list(BUILTIN_SUBAGENTS.keys())
+    try:
+        host_bash_allowed = is_host_bash_allowed()
+    except Exception:
+        logger.debug("Could not determine host bash availability; exposing all built-in subagents")
+        return names
+
+    if not host_bash_allowed:
+        names = [name for name in names if name != "bash"]
+    return names

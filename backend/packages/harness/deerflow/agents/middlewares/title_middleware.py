@@ -1,6 +1,7 @@
 """Middleware for automatic thread title generation."""
 
 import logging
+import re
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -77,7 +78,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
 
         user_msg = self._normalize_content(user_msg_content)
-        assistant_msg = self._normalize_content(assistant_msg_content)
+        assistant_msg = self._strip_think_tags(self._normalize_content(assistant_msg_content))
 
         prompt = config.prompt_template.format(
             max_words=config.max_words,
@@ -86,10 +87,15 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         )
         return prompt, user_msg
 
+    def _strip_think_tags(self, text: str) -> str:
+        """Remove <think>...</think> blocks emitted by reasoning models (e.g. minimax, DeepSeek-R1)."""
+        return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+
     def _parse_title(self, content: object) -> str:
         """Normalize model output into a clean title string."""
         config = get_title_config()
         title_content = self._normalize_content(content)
+        title_content = self._strip_think_tags(title_content)
         title = title_content.strip().strip('"').strip("'")
         return title[: config.max_chars] if len(title) > config.max_chars else title
 
@@ -101,44 +107,33 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return user_msg if user_msg else "New Conversation"
 
     def _generate_title_result(self, state: TitleMiddlewareState) -> dict | None:
-        """Synchronously generate a title. Returns state update or None."""
+        """Generate a local fallback title without blocking on an LLM call."""
         if not self._should_generate_title(state):
             return None
 
-        prompt, user_msg = self._build_title_prompt(state)
-        config = get_title_config()
-        model = create_chat_model(name=config.model_name, thinking_enabled=False)
-
-        try:
-            response = model.invoke(prompt)
-            title = self._parse_title(response.content)
-            if not title:
-                title = self._fallback_title(user_msg)
-        except Exception:
-            logger.exception("Failed to generate title (sync)")
-            title = self._fallback_title(user_msg)
-
-        return {"title": title}
+        _, user_msg = self._build_title_prompt(state)
+        return {"title": self._fallback_title(user_msg)}
 
     async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
-        """Asynchronously generate a title. Returns state update or None."""
+        """Generate a title asynchronously and fall back locally on failure."""
         if not self._should_generate_title(state):
             return None
 
-        prompt, user_msg = self._build_title_prompt(state)
         config = get_title_config()
-        model = create_chat_model(name=config.model_name, thinking_enabled=False)
+        prompt, user_msg = self._build_title_prompt(state)
 
         try:
+            if config.model_name:
+                model = create_chat_model(name=config.model_name, thinking_enabled=False)
+            else:
+                model = create_chat_model(thinking_enabled=False)
             response = await model.ainvoke(prompt)
             title = self._parse_title(response.content)
-            if not title:
-                title = self._fallback_title(user_msg)
+            if title:
+                return {"title": title}
         except Exception:
-            logger.exception("Failed to generate title (async)")
-            title = self._fallback_title(user_msg)
-
-        return {"title": title}
+            logger.debug("Failed to generate async title; falling back to local title", exc_info=True)
+        return {"title": self._fallback_title(user_msg)}
 
     @override
     def after_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:

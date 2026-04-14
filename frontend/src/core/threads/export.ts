@@ -105,9 +105,7 @@ export function formatThreadAsJSON(
 }
 
 function sanitizeFilename(name: string): string {
-  return (
-    name.replace(/[^\p{L}\p{N}_\- ]/gu, "").trim() || "conversation"
-  );
+  return name.replace(/[^\p{L}\p{N}_\- ]/gu, "").trim() || "conversation";
 }
 
 export function downloadAsFile(

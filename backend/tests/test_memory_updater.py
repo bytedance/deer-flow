@@ -1,7 +1,15 @@
 from unittest.mock import MagicMock, patch
 
 from deerflow.agents.memory.prompt import format_conversation_for_update
-from deerflow.agents.memory.updater import MemoryUpdater, _extract_text
+from deerflow.agents.memory.updater import (
+    MemoryUpdater,
+    _extract_text,
+    clear_memory_data,
+    create_memory_fact,
+    delete_memory_fact,
+    import_memory_data,
+    update_memory_fact,
+)
 from deerflow.config.memory_config import MemoryConfig
 
 
@@ -138,8 +146,283 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
     assert result["facts"][1]["source"] == "thread-9"
 
 
+def test_apply_updates_preserves_source_error() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "newFacts": [
+            {
+                "content": "Use make dev for local development.",
+                "category": "correction",
+                "confidence": 0.95,
+                "sourceError": "The agent previously suggested npm start.",
+            }
+        ]
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-correction")
+
+    assert result["facts"][0]["sourceError"] == "The agent previously suggested npm start."
+    assert result["facts"][0]["category"] == "correction"
+
+
+def test_apply_updates_ignores_empty_source_error() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "newFacts": [
+            {
+                "content": "Use make dev for local development.",
+                "category": "correction",
+                "confidence": 0.95,
+                "sourceError": "   ",
+            }
+        ]
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-correction")
+
+    assert "sourceError" not in result["facts"][0]
+
+
+def test_clear_memory_data_resets_all_sections() -> None:
+    with patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True):
+        result = clear_memory_data()
+
+    assert result["version"] == "1.0"
+    assert result["facts"] == []
+    assert result["user"]["workContext"]["summary"] == ""
+    assert result["history"]["recentMonths"]["summary"] == ""
+
+
+def test_delete_memory_fact_removes_only_matching_fact() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_keep",
+                "content": "User likes Python",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "thread-a",
+            },
+            {
+                "id": "fact_delete",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "thread-b",
+            },
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=current_memory),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = delete_memory_fact("fact_delete")
+
+    assert [fact["id"] for fact in result["facts"]] == ["fact_keep"]
+
+
+def test_create_memory_fact_appends_manual_fact() -> None:
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = create_memory_fact(
+            content="  User prefers concise code reviews.  ",
+            category="preference",
+            confidence=0.88,
+        )
+
+    assert len(result["facts"]) == 1
+    assert result["facts"][0]["content"] == "User prefers concise code reviews."
+    assert result["facts"][0]["category"] == "preference"
+    assert result["facts"][0]["confidence"] == 0.88
+    assert result["facts"][0]["source"] == "manual"
+
+
+def test_create_memory_fact_rejects_empty_content() -> None:
+    try:
+        create_memory_fact(content="   ")
+    except ValueError as exc:
+        assert exc.args == ("content",)
+    else:
+        raise AssertionError("Expected ValueError for empty fact content")
+
+
+def test_create_memory_fact_rejects_invalid_confidence() -> None:
+    for confidence in (-0.1, 1.1, float("nan"), float("inf"), float("-inf")):
+        try:
+            create_memory_fact(content="User likes tests", confidence=confidence)
+        except ValueError as exc:
+            assert exc.args == ("confidence",)
+        else:
+            raise AssertionError("Expected ValueError for invalid fact confidence")
+
+
+def test_delete_memory_fact_raises_for_unknown_id() -> None:
+    with patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()):
+        try:
+            delete_memory_fact("fact_missing")
+        except KeyError as exc:
+            assert exc.args == ("fact_missing",)
+        else:
+            raise AssertionError("Expected KeyError for missing fact id")
+
+
+def test_import_memory_data_saves_and_returns_imported_memory() -> None:
+    imported_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_import",
+                "content": "User works on DeerFlow.",
+                "category": "context",
+                "confidence": 0.87,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+    mock_storage = MagicMock()
+    mock_storage.save.return_value = True
+    mock_storage.load.return_value = imported_memory
+
+    with patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage):
+        result = import_memory_data(imported_memory)
+
+    mock_storage.save.assert_called_once_with(imported_memory, None)
+    mock_storage.load.assert_called_once_with(None)
+    assert result == imported_memory
+
+
+def test_update_memory_fact_updates_only_matching_fact() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_keep",
+                "content": "User likes Python",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "thread-a",
+            },
+            {
+                "id": "fact_edit",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            },
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=current_memory),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = update_memory_fact(
+            fact_id="fact_edit",
+            content="User prefers spaces",
+            category="workflow",
+            confidence=0.91,
+        )
+
+    assert result["facts"][0]["content"] == "User likes Python"
+    assert result["facts"][1]["content"] == "User prefers spaces"
+    assert result["facts"][1]["category"] == "workflow"
+    assert result["facts"][1]["confidence"] == 0.91
+    assert result["facts"][1]["createdAt"] == "2026-03-18T00:00:00Z"
+    assert result["facts"][1]["source"] == "manual"
+
+
+def test_update_memory_fact_preserves_omitted_fields() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_edit",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            },
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=current_memory),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = update_memory_fact(
+            fact_id="fact_edit",
+            content="User prefers spaces",
+        )
+
+    assert result["facts"][0]["content"] == "User prefers spaces"
+    assert result["facts"][0]["category"] == "preference"
+    assert result["facts"][0]["confidence"] == 0.8
+
+
+def test_update_memory_fact_raises_for_unknown_id() -> None:
+    with patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()):
+        try:
+            update_memory_fact(
+                fact_id="fact_missing",
+                content="User prefers concise code reviews.",
+                category="preference",
+                confidence=0.88,
+            )
+        except KeyError as exc:
+            assert exc.args == ("fact_missing",)
+        else:
+            raise AssertionError("Expected KeyError for missing fact id")
+
+
+def test_update_memory_fact_rejects_invalid_confidence() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_edit",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            },
+        ]
+    )
+
+    for confidence in (-0.1, 1.1, float("nan"), float("inf"), float("-inf")):
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_data",
+            return_value=current_memory,
+        ):
+            try:
+                update_memory_fact(
+                    fact_id="fact_edit",
+                    content="User prefers spaces",
+                    confidence=confidence,
+                )
+            except ValueError as exc:
+                assert exc.args == ("confidence",)
+            else:
+                raise AssertionError("Expected ValueError for invalid fact confidence")
+
+
 # ---------------------------------------------------------------------------
-# _extract_text — LLM response content normalization
+# _extract_text - LLM response content normalization
 # ---------------------------------------------------------------------------
 
 
@@ -199,7 +482,7 @@ class TestExtractText:
 
 
 # ---------------------------------------------------------------------------
-# format_conversation_for_update — handles mixed list content
+# format_conversation_for_update - handles mixed list content
 # ---------------------------------------------------------------------------
 
 
@@ -229,7 +512,7 @@ class TestFormatConversationForUpdate:
 
 
 # ---------------------------------------------------------------------------
-# update_memory — structured LLM response handling
+# update_memory - structured LLM response handling
 # ---------------------------------------------------------------------------
 
 
@@ -286,3 +569,206 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg])
 
         assert result is True
+
+    def test_correction_hint_injected_when_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "No, that's wrong."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Understood"
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], correction_detected=True)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Explicit correction signals were detected" in prompt
+
+    def test_correction_hint_empty_when_not_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Let's talk about memory."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Sure"
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], correction_detected=False)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Explicit correction signals were detected" not in prompt
+
+
+class TestFactDeduplicationCaseInsensitive:
+    """Tests that fact deduplication is case-insensitive."""
+
+    def test_duplicate_fact_different_case_not_stored(self):
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            facts=[
+                {
+                    "id": "fact_1",
+                    "content": "User prefers Python",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "source": "thread-a",
+                },
+            ]
+        )
+        # Same fact with different casing should be treated as duplicate
+        update_data = {
+            "factsToRemove": [],
+            "newFacts": [
+                {"content": "user prefers python", "category": "preference", "confidence": 0.95},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+        ):
+            result = updater._apply_updates(current_memory, update_data, thread_id="thread-b")
+
+        # Should still have only 1 fact (duplicate rejected)
+        assert len(result["facts"]) == 1
+        assert result["facts"][0]["content"] == "User prefers Python"
+
+    def test_unique_fact_different_case_and_content_stored(self):
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            facts=[
+                {
+                    "id": "fact_1",
+                    "content": "User prefers Python",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "source": "thread-a",
+                },
+            ]
+        )
+        update_data = {
+            "factsToRemove": [],
+            "newFacts": [
+                {"content": "User prefers Go", "category": "preference", "confidence": 0.85},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+        ):
+            result = updater._apply_updates(current_memory, update_data, thread_id="thread-b")
+
+        assert len(result["facts"]) == 2
+
+
+class TestReinforcementHint:
+    """Tests that reinforcement_detected injects the correct hint into the prompt."""
+
+    @staticmethod
+    def _make_mock_model(json_response: str):
+        model = MagicMock()
+        response = MagicMock()
+        response.content = f"```json\n{json_response}\n```"
+        model.invoke.return_value = response
+        return model
+
+    def test_reinforcement_hint_injected_when_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Yes, exactly! That's what I needed."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Great to hear!"
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], reinforcement_detected=True)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Positive reinforcement signals were detected" in prompt
+
+    def test_reinforcement_hint_absent_when_not_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Tell me more."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Sure."
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], reinforcement_detected=False)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Positive reinforcement signals were detected" not in prompt
+
+    def test_both_hints_present_when_both_detected(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "No wait, that's wrong. Actually yes, exactly right."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Got it."
+            ai_msg.tool_calls = []
+
+            result = updater.update_memory([msg, ai_msg], correction_detected=True, reinforcement_detected=True)
+
+        assert result is True
+        prompt = model.invoke.call_args[0][0]
+        assert "Explicit correction signals were detected" in prompt
+        assert "Positive reinforcement signals were detected" in prompt

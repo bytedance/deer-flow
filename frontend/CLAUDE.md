@@ -10,17 +10,18 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 ## Commands
 
-| Command | Purpose |
-|---------|---------|
-| `pnpm dev` | Dev server with Turbopack (http://localhost:3000) |
-| `pnpm build` | Production build |
-| `pnpm check` | Lint + type check (run before committing) |
-| `pnpm lint` | ESLint only |
-| `pnpm lint:fix` | ESLint with auto-fix |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`) |
-| `pnpm start` | Start production server |
+| Command          | Purpose                                           |
+| ---------------- | ------------------------------------------------- |
+| `pnpm dev`       | Dev server with Turbopack (http://localhost:3000) |
+| `pnpm build`     | Production build                                  |
+| `pnpm check`     | Lint + type check (run before committing)         |
+| `pnpm lint`      | ESLint only                                       |
+| `pnpm lint:fix`  | ESLint with auto-fix                              |
+| `pnpm test`      | Run unit tests with Vitest                        |
+| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)            |
+| `pnpm start`     | Start production server                           |
 
-No test framework is configured.
+Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Vitest; import source modules via the `@/` path alias.
 
 ## Architecture
 
@@ -81,6 +82,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 ## Environment
 
 Backend API URLs are optional; an nginx proxy is used by default:
+
 ```
 NEXT_PUBLIC_BACKEND_BASE_URL=http://localhost:8001
 NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:2024

@@ -20,6 +20,7 @@ class FakeSubagentStatus(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
 
 
@@ -64,8 +65,12 @@ def _make_result(
     )
 
 
-def _run_task_tool(**kwargs):
-    return asyncio.run(task_tool_module.task_tool.coroutine(**kwargs))
+def _run_task_tool(**kwargs) -> str:
+    """Execute the task tool across LangChain sync/async wrapper variants."""
+    coroutine = getattr(task_tool_module.task_tool, "coroutine", None)
+    if coroutine is not None:
+        return asyncio.run(coroutine(**kwargs))
+    return task_tool_module.task_tool.func(**kwargs)
 
 
 async def _no_sleep(_: float) -> None:
@@ -79,6 +84,7 @@ class _DummyScheduledTask:
 
 def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: None)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["general-purpose"])
 
     result = _run_task_tool(
         runtime=None,
@@ -88,7 +94,22 @@ def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
         tool_call_id="tc-1",
     )
 
-    assert result.startswith("Error: Unknown subagent type")
+    assert result == "Error: Unknown subagent type 'general-purpose'. Available: general-purpose"
+
+
+def test_task_tool_rejects_bash_subagent_when_host_bash_disabled(monkeypatch):
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
+
+    result = _run_task_tool(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="run commands",
+        subagent_type="bash",
+        tool_call_id="tc-bash",
+    )
+
+    assert result.startswith("Error: Bash subagent is disabled")
 
 
 def test_task_tool_emits_running_and_completed_events(monkeypatch):
@@ -537,3 +558,102 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
     asyncio.run(scheduled_cleanup_coros.pop())
 
     assert cleanup_calls == []
+
+
+def test_cancellation_calls_request_cancel(monkeypatch):
+    """Verify CancelledError path calls request_cancel_background_task(task_id)."""
+    config = _make_subagent_config()
+    events = []
+    cancel_requests = []
+    scheduled_cleanup_coros = []
+
+    async def cancel_on_first_sleep(_: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_first_sleep)
+    monkeypatch.setattr(
+        task_tool_module.asyncio,
+        "create_task",
+        lambda coro: (coro.close(), scheduled_cleanup_coros.append(None))[-1] or _DummyScheduledTask(),
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        task_tool_module,
+        "request_cancel_background_task",
+        lambda task_id: cancel_requests.append(task_id),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: None,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run_task_tool(
+            runtime=_make_runtime(),
+            description="执行任务",
+            prompt="cancel me",
+            subagent_type="general-purpose",
+            tool_call_id="tc-cancel-request",
+        )
+
+    assert cancel_requests == ["tc-cancel-request"]
+
+
+def test_task_tool_returns_cancelled_message(monkeypatch):
+    """Verify polling a CANCELLED result emits task_cancelled event and returns message."""
+    config = _make_subagent_config()
+    events = []
+    cleanup_calls = []
+
+    # First poll: RUNNING, second poll: CANCELLED
+    responses = iter(
+        [
+            _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
+            _make_result(FakeSubagentStatus.CANCELLED, error="Cancelled by user"),
+        ]
+    )
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: cleanup_calls.append(task_id),
+    )
+
+    output = _run_task_tool(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="some task",
+        subagent_type="general-purpose",
+        tool_call_id="tc-poll-cancelled",
+    )
+
+    assert output == "Task cancelled by user."
+    assert any(e.get("type") == "task_cancelled" for e in events)
+    assert cleanup_calls == ["tc-poll-cancelled"]

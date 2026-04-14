@@ -27,6 +27,7 @@ from typing import Any
 import anthropic
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
+from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +57,8 @@ class ClaudeChatModel(ChatAnthropic):
     prompt_cache_size: int = 3
     auto_thinking_budget: bool = True
     retry_max_attempts: int = MAX_RETRIES
-    _is_oauth: bool = False
-    _oauth_access_token: str = ""
+    _is_oauth: bool = PrivateAttr(default=False)
+    _oauth_access_token: str = PrivateAttr(default="")
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -162,10 +163,7 @@ class ClaudeChatModel(ChatAnthropic):
         system = payload.get("system")
         if isinstance(system, list):
             # Remove any existing billing blocks, then insert a single one at index 0.
-            filtered = [
-                b for b in system
-                if not (isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", ""))
-            ]
+            filtered = [b for b in system if not (isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", ""))]
             payload["system"] = [billing_block] + filtered
         elif isinstance(system, str):
             if OAUTH_BILLING_HEADER in system:
@@ -183,11 +181,13 @@ class ClaudeChatModel(ChatAnthropic):
             hostname = socket.gethostname()
             device_id = hashlib.sha256(f"deerflow-{hostname}".encode()).hexdigest()
             session_id = str(uuid.uuid4())
-            payload["metadata"]["user_id"] = json.dumps({
-                "device_id": device_id,
-                "account_uuid": "deerflow",
-                "session_id": session_id,
-            })
+            payload["metadata"]["user_id"] = json.dumps(
+                {
+                    "device_id": device_id,
+                    "account_uuid": "deerflow",
+                    "session_id": session_id,
+                }
+            )
 
     def _apply_prompt_caching(self, payload: dict) -> None:
         """Apply ephemeral cache_control to system and recent messages."""
@@ -244,6 +244,39 @@ class ClaudeChatModel(ChatAnthropic):
 
         max_tokens = payload.get("max_tokens", 8192)
         thinking["budget_tokens"] = int(max_tokens * THINKING_BUDGET_RATIO)
+
+    @staticmethod
+    def _strip_cache_control(payload: dict) -> None:
+        """Remove cache_control markers before OAuth requests reach Anthropic."""
+        for section in ("system", "messages"):
+            items = payload.get(section)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item.pop("cache_control", None)
+                content = item.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            block.pop("cache_control", None)
+
+        tools = payload.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                if isinstance(tool, dict):
+                    tool.pop("cache_control", None)
+
+    def _create(self, payload: dict) -> Any:
+        if self._is_oauth:
+            self._strip_cache_control(payload)
+        return super()._create(payload)
+
+    async def _acreate(self, payload: dict) -> Any:
+        if self._is_oauth:
+            self._strip_cache_control(payload)
+        return await super()._acreate(payload)
 
     def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None, **kwargs: Any) -> Any:
         """Override with OAuth patching and retry logic."""
