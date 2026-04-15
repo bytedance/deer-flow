@@ -19,7 +19,9 @@ def validate_agent_name(name: str | None) -> str | None:
     """Validate a custom agent name before using it in filesystem paths."""
     if name is None:
         return None
-    if not AGENT_NAME_PATTERN.match(name):
+    if not isinstance(name, str):
+        raise ValueError("Invalid agent name. Expected a string or None.")
+    if not AGENT_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
     return name
 
