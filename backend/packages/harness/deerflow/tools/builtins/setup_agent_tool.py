@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
+from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
@@ -25,8 +26,10 @@ def setup_agent(
     """
 
     agent_name: str | None = runtime.context.get("agent_name") if runtime.context else None
+    agent_dir = None
 
     try:
+        agent_name = validate_agent_name(agent_name)
         paths = get_paths()
         agent_dir = paths.agent_dir(agent_name) if agent_name else paths.base_dir
         agent_dir.mkdir(parents=True, exist_ok=True)
@@ -55,7 +58,7 @@ def setup_agent(
     except Exception as e:
         import shutil
 
-        if agent_name and agent_dir.exists():
+        if agent_name and agent_dir is not None and agent_dir.exists():
             # Cleanup the custom agent directory only if it was created but an error occurred during setup
             shutil.rmtree(agent_dir)
         logger.error(f"[agent_creator] Failed to create agent '{agent_name}': {e}", exc_info=True)

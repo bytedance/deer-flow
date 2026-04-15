@@ -113,6 +113,26 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
     assert result["model"] is not None
 
 
+def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+
+    with pytest.raises(ValueError, match="Invalid agent name"):
+        lead_agent_module.make_lead_agent(
+            {
+                "configurable": {
+                    "model_name": "safe-model",
+                    "thinking_enabled": False,
+                    "is_plan_mode": False,
+                    "subagent_enabled": False,
+                    "is_bootstrap": True,
+                    "agent_name": "../../../tmp/evil",
+                }
+            }
+        )
+
+
 def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     app_config = _make_app_config(
         [
