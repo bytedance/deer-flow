@@ -139,27 +139,31 @@ async def _load_mcp_tools(
         )
         return []
 
-    # Inject initial OAuth headers for server connections (tool discovery/session init)
-    initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
-    for server_name, auth_header in initial_oauth_headers.items():
-        if server_name not in servers_config:
-            continue
-        if servers_config[server_name].get("transport") in ("sse", "http"):
-            existing_headers = dict(servers_config[server_name].get("headers", {}))
-            existing_headers["Authorization"] = auth_header
-            servers_config[server_name]["headers"] = existing_headers
+    try:
+        # Inject initial OAuth headers for server connections (tool discovery/session init)
+        initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
+        for server_name, auth_header in initial_oauth_headers.items():
+            if server_name not in servers_config:
+                continue
+            if servers_config[server_name].get("transport") in ("sse", "http"):
+                existing_headers = dict(servers_config[server_name].get("headers", {}))
+                existing_headers["Authorization"] = auth_header
+                servers_config[server_name]["headers"] = existing_headers
 
-    tool_interceptors = []
-    oauth_interceptor = build_oauth_tool_interceptor(extensions_config)
-    if oauth_interceptor is not None:
-        tool_interceptors.append(oauth_interceptor)
+        tool_interceptors = []
+        oauth_interceptor = build_oauth_tool_interceptor(extensions_config)
+        if oauth_interceptor is not None:
+            tool_interceptors.append(oauth_interceptor)
 
-    client = MultiServerMCPClient(
-        servers_config,
-        tool_interceptors=tool_interceptors,
-        tool_name_prefix=True,
-    )
-    tools = await client.get_tools()
+        client = MultiServerMCPClient(
+            servers_config,
+            tool_interceptors=tool_interceptors,
+            tool_name_prefix=True,
+        )
+        tools = await client.get_tools()
+    except Exception as e:
+        logger.error("Failed to load tools from MCP servers: %s", e, exc_info=True)
+        return []
 
     if apply_tool_filters:
         tools = _filter_tools_for_extensions_config(tools, extensions_config)
@@ -177,7 +181,13 @@ async def get_mcp_tools() -> list[BaseTool]:
     # to always read the latest configuration from disk. This ensures that changes
     # made through the Gateway API (which runs in a separate process) are immediately
     # reflected when initializing MCP tools.
-    extensions_config = ExtensionsConfig.from_file()
+    return await get_mcp_tools_for_config(ExtensionsConfig.from_file())
+
+
+async def get_mcp_tools_for_config(
+    extensions_config: ExtensionsConfig,
+) -> list[BaseTool]:
+    """Get all tools for a specific extensions config snapshot."""
 
     try:
         logger.info(

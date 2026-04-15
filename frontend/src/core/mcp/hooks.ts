@@ -96,6 +96,8 @@ export function useEnableMCPTool() {
         throw new Error(`MCP server ${serverName} not found`);
       }
 
+      const nextServerConfig = toMCPServerConfigUpdate(server);
+
       const nextConfig: MCPConfigUpdate = {
         mcp_servers: {
           ...Object.fromEntries(
@@ -105,9 +107,9 @@ export function useEnableMCPTool() {
             ]),
           ),
           [serverName]: {
-            ...toMCPServerConfigUpdate(server),
+            ...nextServerConfig,
             tools: {
-              ...toMCPServerConfigUpdate(server).tools,
+              ...nextServerConfig.tools,
               [toolName]: {
                 enabled,
               },

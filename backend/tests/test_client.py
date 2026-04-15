@@ -2409,6 +2409,93 @@ class TestGatewayConformance:
         assert tool.pending_reload_action == "disable"
         assert response.mcp_servers["github"].pending_reload_tool_count == 1
 
+    @pytest.mark.asyncio
+    async def test_build_mcp_config_response_handles_discovery_failure(self):
+        from app.gateway.routers.mcp import _build_mcp_config_response
+
+        config = ExtensionsConfig(
+            mcp_servers={
+                "github": McpServerConfig(
+                    enabled=True,
+                    type="stdio",
+                    command="npx",
+                ),
+            },
+            skills={},
+        )
+
+        with (
+            patch(
+                "app.gateway.routers.mcp.discover_mcp_tools_by_server",
+                new=AsyncMock(side_effect=RuntimeError("offline")),
+            ),
+            patch(
+                "app.gateway.routers.mcp.get_mcp_cache_status",
+                return_value={
+                    "status": "not_initialized",
+                    "reload_mode": "next_tool_load",
+                    "restart_required": False,
+                    "will_apply_on_next_load": True,
+                    "cache_initialized": False,
+                    "cache_stale": False,
+                    "config_last_modified_at": 200.0,
+                    "runtime_config_last_loaded_at": None,
+                    "active_server_count": 0,
+                    "active_tool_count": 0,
+                    "active_tools_by_server": {},
+                },
+            ),
+        ):
+            response = await _build_mcp_config_response(config)
+
+        assert response.mcp_servers["github"].tools == {}
+
+    @pytest.mark.asyncio
+    async def test_build_mcp_config_response_marks_configured_runtime_tool_for_disable_when_server_disabled(self):
+        from app.gateway.routers.mcp import _build_mcp_config_response
+
+        config = ExtensionsConfig(
+            mcp_servers={
+                "github": McpServerConfig(
+                    enabled=False,
+                    type="stdio",
+                    command="npx",
+                    tools={
+                        "search_repositories": {"enabled": True},
+                    },
+                ),
+            },
+            skills={},
+        )
+
+        with (
+            patch(
+                "app.gateway.routers.mcp.discover_mcp_tools_by_server",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "app.gateway.routers.mcp.get_mcp_cache_status",
+                return_value={
+                    "status": "pending_reload",
+                    "reload_mode": "next_tool_load",
+                    "restart_required": False,
+                    "will_apply_on_next_load": True,
+                    "cache_initialized": True,
+                    "cache_stale": True,
+                    "config_last_modified_at": 200.0,
+                    "runtime_config_last_loaded_at": 100.0,
+                    "active_server_count": 1,
+                    "active_tool_count": 1,
+                    "active_tools_by_server": {"github": ["search_repositories"]},
+                },
+            ),
+        ):
+            response = await _build_mcp_config_response(config)
+
+        tool = response.mcp_servers["github"].tools["search_repositories"]
+        assert tool.active_in_runtime is True
+        assert tool.pending_reload_action == "disable"
+
     def test_upload_files(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()

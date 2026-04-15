@@ -204,7 +204,12 @@ def _build_mcp_runtime_status_response() -> McpRuntimeStatusResponse:
 
 
 async def _build_mcp_config_response(config: ExtensionsConfig) -> McpConfigResponse:
-    discovered_tools = await discover_mcp_tools_by_server(config)
+    try:
+        discovered_tools = await discover_mcp_tools_by_server(config)
+    except Exception:
+        logger.exception("Failed to discover MCP tools by server; falling back to empty discovery results.")
+        discovered_tools = {}
+
     runtime_status = _build_mcp_runtime_status_response()
     runtime_tools_by_server = {
         server_name: set(tool_names)
@@ -220,7 +225,11 @@ async def _build_mcp_config_response(config: ExtensionsConfig) -> McpConfigRespo
                 discovered=False,
                 description="",
                 active_in_runtime=tool_name in server_runtime_tools,
-                pending_reload_action="disable" if tool_name in server_runtime_tools and not tool_config.enabled else "none",
+                pending_reload_action=(
+                    "disable"
+                    if tool_name in server_runtime_tools and not (server.enabled and tool_config.enabled)
+                    else "none"
+                ),
             )
             for tool_name, tool_config in server.tools.items()
         }

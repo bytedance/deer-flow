@@ -12,6 +12,7 @@ from deerflow.mcp.tools import (
     _filter_tools_for_extensions_config,
     _make_sync_tool_wrapper,
     discover_mcp_tools_by_server,
+    get_mcp_tools_for_config,
     get_mcp_tools,
     split_prefixed_mcp_tool_name,
 )
@@ -156,6 +157,28 @@ async def test_discover_mcp_tools_by_server_returns_raw_tool_names():
         "feishu": {"import_document": "Import a document"},
         "github": {"search_repositories": "Search repositories"},
     }
+
+
+@pytest.mark.asyncio
+async def test_get_mcp_tools_for_config_returns_empty_on_client_error():
+    extensions = ExtensionsConfig(
+        mcp_servers={
+            "github": McpServerConfig(enabled=True, type="stdio", command="npx"),
+        },
+        skills={},
+    )
+
+    with (
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new=AsyncMock(return_value={})),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch(
+            "langchain_mcp_adapters.client.MultiServerMCPClient",
+            side_effect=RuntimeError("server offline"),
+        ),
+    ):
+        tools = await get_mcp_tools_for_config(extensions)
+
+    assert tools == []
 
 
 def test_get_mcp_cache_status_reports_not_initialized(monkeypatch):

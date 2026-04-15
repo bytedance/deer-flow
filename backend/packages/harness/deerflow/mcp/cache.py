@@ -105,11 +105,11 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             return _mcp_tools_cache or []
 
         from deerflow.config.extensions_config import ExtensionsConfig
-        from deerflow.mcp.tools import get_mcp_tools
+        from deerflow.mcp.tools import get_mcp_tools_for_config
 
         logger.info("Initializing MCP tools...")
         extensions_config = ExtensionsConfig.from_file()
-        _mcp_tools_cache = await get_mcp_tools()
+        _mcp_tools_cache = await get_mcp_tools_for_config(extensions_config)
         _cache_initialized = True
         _enabled_server_count = len(extensions_config.get_enabled_mcp_servers())
         _active_tools_by_server = _group_active_tools_by_server(
