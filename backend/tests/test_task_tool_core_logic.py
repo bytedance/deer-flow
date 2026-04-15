@@ -165,7 +165,9 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert captured["executor_kwargs"]["thread_id"] == "thread-1"
     assert captured["executor_kwargs"]["parent_model"] == "ark-model"
     assert captured["executor_kwargs"]["config"].max_turns == 7
-    assert "Skills Appendix" in captured["executor_kwargs"]["config"].system_prompt
+    # Skills are no longer appended to system_prompt; they are loaded per-session
+    # by SubagentExecutor and injected as conversation items (Codex pattern).
+    assert captured["executor_kwargs"]["config"].system_prompt == "Base system prompt"
 
     get_available_tools.assert_called_once_with(model_name="ark-model", subagent_enabled=False)
 

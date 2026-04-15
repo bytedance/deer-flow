@@ -84,7 +84,11 @@ export function AgentCard({ agent }: AgentCardProps) {
           <CardContent className="pt-0 pb-3">
             <div className="flex flex-wrap gap-1">
               {agent.tool_groups?.map((group) => (
-                <Badge key={`tg:${group}`} variant="outline" className="text-xs">
+                <Badge
+                  key={`tg:${group}`}
+                  variant="outline"
+                  className="text-xs"
+                >
                   {group}
                 </Badge>
               ))}
