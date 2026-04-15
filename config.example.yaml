@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 7
+config_version: 8
 
 # ============================================================================
 # Logging
@@ -633,6 +633,14 @@ skills:
 # - Omitted or null: load all globally enabled skills (default)
 # - []: disable all skills for this agent
 # - ["skill-name"]: load only specific skills
+
+# ============================================================================
+# Skill Management API
+# ============================================================================
+# Controls whether the HTTP gateway exposes skill install/custom-skill management.
+# Keep this disabled unless the gateway is behind a trusted authenticated admin boundary.
+skills_api:
+  enabled: false
 
 # ============================================================================
 # Title Generation Configuration

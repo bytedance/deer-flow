@@ -17,6 +17,7 @@ from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
+from deerflow.config.skills_api_config import SkillsApiConfig, load_skills_api_config_from_dict
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
@@ -55,6 +56,7 @@ class AppConfig(BaseModel):
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
+    skills_api: SkillsApiConfig = Field(default_factory=SkillsApiConfig, description="HTTP skill-management API configuration")
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
@@ -130,6 +132,10 @@ class AppConfig(BaseModel):
         # Always refresh agents API config so removed config sections reset
         # singleton-backed state to its default/disabled values on reload.
         load_agents_api_config_from_dict(config_data.get("agents_api") or {})
+
+        # Always refresh skills API config so removed config sections reset
+        # singleton-backed state to its default/disabled values on reload.
+        load_skills_api_config_from_dict(config_data.get("skills_api") or {})
 
         # Load subagents config if present
         if "subagents" in config_data:

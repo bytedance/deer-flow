@@ -3,10 +3,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import skills as skills_router
+from deerflow.config.skills_api_config import SkillsApiConfig, get_skills_api_config, set_skills_api_config
 from deerflow.skills.manager import get_skill_history_file
 from deerflow.skills.types import Skill
 
@@ -35,7 +37,17 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
     )
 
 
-def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
+@pytest.fixture()
+def skills_api_enabled():
+    previous_config = SkillsApiConfig(**get_skills_api_config().model_dump())
+    set_skills_api_config(SkillsApiConfig(enabled=True))
+    try:
+        yield
+    finally:
+        set_skills_api_config(previous_config)
+
+
+def test_custom_skills_router_lifecycle(monkeypatch, tmp_path, skills_api_enabled):
     skills_root = tmp_path / "skills"
     custom_dir = skills_root / "custom" / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
@@ -83,7 +95,7 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         assert refresh_calls == ["refresh", "refresh"]
 
 
-def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
+def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path, skills_api_enabled):
     skills_root = tmp_path / "skills"
     custom_dir = skills_root / "custom" / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
@@ -126,7 +138,7 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
         assert history_response.json()["history"][-1]["scanner"]["decision"] == "block"
 
 
-def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, tmp_path):
+def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, tmp_path, skills_api_enabled):
     skills_root = tmp_path / "skills"
     custom_dir = skills_root / "custom" / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
@@ -165,7 +177,7 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         assert refresh_calls == ["refresh", "refresh"]
 
 
-def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path):
+def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path, skills_api_enabled):
     skills_root = tmp_path / "skills"
     custom_dir = skills_root / "custom" / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
@@ -199,7 +211,7 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
     assert refresh_calls == ["refresh"]
 
 
-def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp_path):
+def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp_path, skills_api_enabled):
     skills_root = tmp_path / "skills"
     custom_dir = skills_root / "custom" / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
@@ -233,7 +245,7 @@ def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp
     assert refresh_calls == []
 
 
-def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path):
+def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path, skills_api_enabled):
     config_path = tmp_path / "extensions_config.json"
     enabled_state = {"value": True}
     refresh_calls = []
@@ -264,3 +276,78 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     assert response.json()["enabled"] is False
     assert refresh_calls == ["refresh"]
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"mcpServers": {}, "skills": {"demo-skill": {"enabled": False}}}
+
+
+def test_skill_management_routes_return_403_when_disabled(monkeypatch):
+    previous_config = SkillsApiConfig(**get_skills_api_config().model_dump())
+    set_skills_api_config(SkillsApiConfig(enabled=False))
+    try:
+        monkeypatch.setattr(
+            "app.gateway.routers.skills.load_skills",
+            lambda **_: [
+                Skill(
+                    name="custom-skill",
+                    description="Custom",
+                    license=None,
+                    skill_dir=Path("/tmp/custom-skill"),
+                    skill_file=Path("/tmp/custom-skill/SKILL.md"),
+                    relative_path=Path("custom-skill"),
+                    category="custom",
+                    enabled=True,
+                )
+            ],
+        )
+
+        app = FastAPI()
+        app.include_router(skills_router.router)
+
+        with TestClient(app) as client:
+            responses = [
+                client.post("/api/skills/install", json={"thread_id": "t", "path": "/mnt/user-data/uploads/demo.skill"}),
+                client.get("/api/skills/custom"),
+                client.get("/api/skills/custom/demo-skill"),
+                client.put("/api/skills/custom/demo-skill", json={"content": _skill_content("demo-skill")}),
+                client.delete("/api/skills/custom/demo-skill"),
+                client.get("/api/skills/custom/demo-skill/history"),
+                client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1}),
+                client.get("/api/skills/custom-skill"),
+                client.put("/api/skills/demo-skill", json={"enabled": False}),
+            ]
+
+        assert all(response.status_code == 403 for response in responses)
+        assert "skills_api.enabled=true" in responses[0].json()["detail"]
+    finally:
+        set_skills_api_config(previous_config)
+
+
+def test_skill_list_hides_custom_skills_when_management_api_disabled(monkeypatch):
+    previous_config = SkillsApiConfig(**get_skills_api_config().model_dump())
+    set_skills_api_config(SkillsApiConfig(enabled=False))
+    try:
+        monkeypatch.setattr(
+            "app.gateway.routers.skills.load_skills",
+            lambda **_: [
+                _make_skill("public-skill", enabled=True),
+                Skill(
+                    name="custom-skill",
+                    description="Custom",
+                    license=None,
+                    skill_dir=Path("/tmp/custom-skill"),
+                    skill_file=Path("/tmp/custom-skill/SKILL.md"),
+                    relative_path=Path("custom-skill"),
+                    category="custom",
+                    enabled=True,
+                ),
+            ],
+        )
+
+        app = FastAPI()
+        app.include_router(skills_router.router)
+
+        with TestClient(app) as client:
+            response = client.get("/api/skills")
+
+        assert response.status_code == 200
+        assert [skill["name"] for skill in response.json()["skills"]] == ["public-skill"]
+    finally:
+        set_skills_api_config(previous_config)

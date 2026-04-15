@@ -278,6 +278,14 @@ skills:
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
 
+**Skill Management API**:
+HTTP routes that install, edit, delete, roll back, or enable/disable skills are disabled by default. Enable them only when the gateway is behind a trusted authenticated admin boundary:
+
+```yaml
+skills_api:
+  enabled: false
+```
+
 **Per-Agent Skill Filtering**:
 Custom agents can restrict which skills they load by defining a `skills` field in their `config.yaml` (located at `workspace/agents/<agent_name>/config.yaml`):
 - **Omitted or `null`**: Loads all globally enabled skills (default fallback).

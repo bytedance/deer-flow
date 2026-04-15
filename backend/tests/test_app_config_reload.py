@@ -8,6 +8,7 @@ import yaml
 
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.app_config import get_app_config, reset_app_config
+from deerflow.config.skills_api_config import get_skills_api_config
 
 
 def _write_config(path: Path, *, model_name: str, supports_thinking: bool) -> None:
@@ -35,6 +36,7 @@ def _write_config_with_agents_api(
     model_name: str,
     supports_thinking: bool,
     agents_api: dict | None = None,
+    skills_api: dict | None = None,
 ) -> None:
     config = {
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
@@ -49,6 +51,8 @@ def _write_config_with_agents_api(
     }
     if agents_api is not None:
         config["agents_api"] = agents_api
+    if skills_api is not None:
+        config["skills_api"] = skills_api
 
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
@@ -137,5 +141,40 @@ def test_get_app_config_resets_agents_api_config_when_section_removed(tmp_path, 
         reloaded = get_app_config()
         assert reloaded is not initial
         assert get_agents_api_config().enabled is False
+    finally:
+        reset_app_config()
+
+
+def test_get_app_config_resets_skills_api_config_when_section_removed(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config_with_agents_api(
+        config_path,
+        model_name="first-model",
+        supports_thinking=False,
+        skills_api={"enabled": True},
+    )
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+
+    try:
+        initial = get_app_config()
+        assert initial.models[0].name == "first-model"
+        assert get_skills_api_config().enabled is True
+
+        _write_config_with_agents_api(
+            config_path,
+            model_name="first-model",
+            supports_thinking=False,
+        )
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        reloaded = get_app_config()
+        assert reloaded is not initial
+        assert get_skills_api_config().enabled is False
     finally:
         reset_app_config()
