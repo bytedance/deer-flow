@@ -17,6 +17,7 @@ Covered behavior:
 - `before_model` and `abefore_model` expose the same behavior sync/async.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -61,7 +62,19 @@ class TestGetLastAssistantMessage:
 
 
 class TestHasViewImageTool:
-    def test_returns_false_when_no_tool_calls_attr(self):
+    def test_returns_false_when_tool_calls_attr_missing(self):
+        """Exercise the `not hasattr(message, "tool_calls")` guard.
+
+        AIMessage always has a `tool_calls` attribute, so we use a plain
+        object that truly lacks the attribute to cover this branch.
+        """
+        mw = ViewImageMiddleware()
+        msg = SimpleNamespace(content="just text")  # no tool_calls attribute
+        assert not hasattr(msg, "tool_calls")  # precondition
+        assert mw._has_view_image_tool(msg) is False
+
+    def test_returns_false_when_ai_message_has_no_tool_calls(self):
+        """AIMessage without tool_calls kwarg defaults to an empty list."""
         mw = ViewImageMiddleware()
         msg = AIMessage(content="just text")
         assert mw._has_view_image_tool(msg) is False
@@ -267,6 +280,34 @@ class TestShouldInjectImageMessage:
             "viewed_images": {
                 "/img.png": {"base64": "AAA", "mime_type": "image/png"},
             },
+        }
+        assert mw._should_inject_image_message(state) is False
+
+    def test_false_when_already_injected_with_list_content(self):
+        """Deduplication must recognize the real injected payload shape.
+
+        The middleware's own `_inject_image_message` creates a HumanMessage
+        whose `.content` is a *list* of dicts (text + image_url blocks), not a
+        plain string. This test reuses `_create_image_details_message` output
+        to reproduce the realistic shape and confirms `_should_inject_image_message`
+        still detects the marker via `str(msg.content)`.
+        """
+        mw = ViewImageMiddleware()
+        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
+        viewed_images = {"/img.png": {"base64": "AAA", "mime_type": "image/png"}}
+        # Build content the same way the middleware would.
+        real_injected_content = mw._create_image_details_message({"viewed_images": viewed_images})
+        # Sanity: this is a list of blocks, not a plain string.
+        assert isinstance(real_injected_content, list)
+        already_injected = HumanMessage(content=real_injected_content)
+
+        state = {
+            "messages": [
+                assistant,
+                ToolMessage(content="ok", tool_call_id="c1"),
+                already_injected,
+            ],
+            "viewed_images": viewed_images,
         }
         assert mw._should_inject_image_message(state) is False
 
