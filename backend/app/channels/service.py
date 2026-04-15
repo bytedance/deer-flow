@@ -52,6 +52,34 @@ class ChannelService:
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
         default_session = config.pop("session", None)
         channel_sessions = {name: channel_config.get("session") for name, channel_config in config.items() if isinstance(channel_config, dict)}
+        
+        # Process feishu_bots config and add sessions for each bot
+        if "feishu_bots" in config and isinstance(config["feishu_bots"], list):
+            try:
+                from app.channels.feishu import FeishuBotConfig
+
+                for bot_config_dict in config["feishu_bots"]:
+                    if isinstance(bot_config_dict, dict):
+                        try:
+                            bot_config = FeishuBotConfig(**bot_config_dict)
+                            channel_name = f"feishu_{bot_config.app_id}"
+                            channel_sessions[channel_name] = {
+                                "assistant_id": bot_config.agent_id,
+                                "config": {
+                                    "recursion_limit": bot_config.recursion_limit,
+                                },
+                                "context": {
+                                    "thinking_enabled": bot_config.thinking_enabled,
+                                    "is_plan_mode": bot_config.is_plan_mode,
+                                    "subagent_enabled": bot_config.subagent_enabled,
+                                },
+                            }
+                            logger.info(f"Added session for Feishu bot: {channel_name} (agent: {bot_config.agent_id})")
+                        except Exception as e:
+                            logger.exception(f"Failed to process Feishu bot config: {e}")
+            except Exception as e:
+                logger.exception(f"Failed to import FeishuBotConfig: {e}")
+        
         self.manager = ChannelManager(
             bus=self.bus,
             store=self.store,
