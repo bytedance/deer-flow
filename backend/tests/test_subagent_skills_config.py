@@ -20,7 +20,6 @@ from deerflow.config.subagents_config import (
 )
 from deerflow.subagents.config import SubagentConfig
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -43,14 +42,18 @@ class TestSubagentConfigSkills:
 
     def test_skills_whitelist(self):
         config = SubagentConfig(
-            name="test", description="test", system_prompt="test",
+            name="test",
+            description="test",
+            system_prompt="test",
             skills=["data-analysis", "visualization"],
         )
         assert config.skills == ["data-analysis", "visualization"]
 
     def test_skills_empty_list_means_no_skills(self):
         config = SubagentConfig(
-            name="test", description="test", system_prompt="test",
+            name="test",
+            description="test",
+            system_prompt="test",
             skills=[],
         )
         assert config.skills == []
@@ -76,7 +79,9 @@ class TestSubagentOverrideConfigSkills:
 
     def test_skills_coexists_with_other_fields(self):
         override = SubagentOverrideConfig(
-            timeout_seconds=300, model="gpt-5", skills=["my-skill"],
+            timeout_seconds=300,
+            model="gpt-5",
+            skills=["my-skill"],
         )
         assert override.timeout_seconds == 300
         assert override.model == "gpt-5"
@@ -122,20 +127,26 @@ class TestCustomSubagentConfig:
 
     def test_skills_empty_list_no_skills(self):
         config = CustomSubagentConfig(
-            description="test", system_prompt="test", skills=[],
+            description="test",
+            system_prompt="test",
+            skills=[],
         )
         assert config.skills == []
 
     def test_rejects_zero_max_turns(self):
         with pytest.raises(ValueError):
             CustomSubagentConfig(
-                description="test", system_prompt="test", max_turns=0,
+                description="test",
+                system_prompt="test",
+                max_turns=0,
             )
 
     def test_rejects_zero_timeout(self):
         with pytest.raises(ValueError):
             CustomSubagentConfig(
-                description="test", system_prompt="test", timeout_seconds=0,
+                description="test",
+                system_prompt="test",
+                timeout_seconds=0,
             )
 
 
@@ -166,11 +177,13 @@ class TestSubagentsAppConfigCustomAgents:
         config = SubagentsAppConfig(
             custom_agents={
                 "analysis": CustomSubagentConfig(
-                    description="Analysis", system_prompt="analyze",
+                    description="Analysis",
+                    system_prompt="analyze",
                     skills=["data-analysis"],
                 ),
                 "researcher": CustomSubagentConfig(
-                    description="Research", system_prompt="research",
+                    description="Research",
+                    system_prompt="research",
                     skills=["web-search"],
                 ),
             }
@@ -227,39 +240,45 @@ class TestLoadSubagentsConfigWithSkills:
         _reset_subagents_config()
 
     def test_load_with_skills_override(self):
-        load_subagents_config_from_dict({
-            "timeout_seconds": 900,
-            "agents": {
-                "general-purpose": {"skills": ["web-search", "data-analysis"]},
-            },
-        })
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {
+                    "general-purpose": {"skills": ["web-search", "data-analysis"]},
+                },
+            }
+        )
         cfg = get_subagents_app_config()
         assert cfg.get_skills_for("general-purpose") == ["web-search", "data-analysis"]
 
     def test_load_with_empty_skills(self):
-        load_subagents_config_from_dict({
-            "timeout_seconds": 900,
-            "agents": {
-                "bash": {"skills": []},
-            },
-        })
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {
+                    "bash": {"skills": []},
+                },
+            }
+        )
         cfg = get_subagents_app_config()
         assert cfg.get_skills_for("bash") == []
 
     def test_load_with_custom_agents(self):
-        load_subagents_config_from_dict({
-            "timeout_seconds": 900,
-            "custom_agents": {
-                "analysis": {
-                    "description": "Data analysis specialist",
-                    "system_prompt": "You are a data analysis subagent.",
-                    "skills": ["data-analysis", "visualization"],
-                    "tools": ["bash", "read_file"],
-                    "max_turns": 80,
-                    "timeout_seconds": 600,
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "custom_agents": {
+                    "analysis": {
+                        "description": "Data analysis specialist",
+                        "system_prompt": "You are a data analysis subagent.",
+                        "skills": ["data-analysis", "visualization"],
+                        "tools": ["bash", "read_file"],
+                        "max_turns": 80,
+                        "timeout_seconds": 600,
+                    },
                 },
-            },
-        })
+            }
+        )
         cfg = get_subagents_app_config()
         assert "analysis" in cfg.custom_agents
         custom = cfg.custom_agents["analysis"]
@@ -269,19 +288,21 @@ class TestLoadSubagentsConfigWithSkills:
         assert custom.timeout_seconds == 600
 
     def test_load_with_both_overrides_and_custom(self):
-        load_subagents_config_from_dict({
-            "timeout_seconds": 900,
-            "agents": {
-                "general-purpose": {"skills": ["web-search"]},
-            },
-            "custom_agents": {
-                "analysis": {
-                    "description": "Analysis",
-                    "system_prompt": "Analyze.",
-                    "skills": ["data-analysis"],
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {
+                    "general-purpose": {"skills": ["web-search"]},
                 },
-            },
-        })
+                "custom_agents": {
+                    "analysis": {
+                        "description": "Analysis",
+                        "system_prompt": "Analyze.",
+                        "skills": ["data-analysis"],
+                    },
+                },
+            }
+        )
         cfg = get_subagents_app_config()
         assert cfg.get_skills_for("general-purpose") == ["web-search"]
         assert cfg.custom_agents["analysis"].skills == ["data-analysis"]
@@ -299,18 +320,20 @@ class TestRegistryCustomAgentLookup:
     def test_custom_agent_found(self):
         from deerflow.subagents.registry import get_subagent_config
 
-        load_subagents_config_from_dict({
-            "custom_agents": {
-                "analysis": {
-                    "description": "Data analysis specialist",
-                    "system_prompt": "You are a data analysis subagent.",
-                    "skills": ["data-analysis"],
-                    "tools": ["bash", "read_file"],
-                    "max_turns": 80,
-                    "timeout_seconds": 600,
+        load_subagents_config_from_dict(
+            {
+                "custom_agents": {
+                    "analysis": {
+                        "description": "Data analysis specialist",
+                        "system_prompt": "You are a data analysis subagent.",
+                        "skills": ["data-analysis"],
+                        "tools": ["bash", "read_file"],
+                        "max_turns": 80,
+                        "timeout_seconds": 600,
+                    },
                 },
-            },
-        })
+            }
+        )
         config = get_subagent_config("analysis")
         assert config is not None
         assert config.name == "analysis"
@@ -331,14 +354,16 @@ class TestRegistryCustomAgentLookup:
         from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
         from deerflow.subagents.registry import get_subagent_config
 
-        load_subagents_config_from_dict({
-            "custom_agents": {
-                "general-purpose": {
-                    "description": "Custom override attempt",
-                    "system_prompt": "Should not be used",
+        load_subagents_config_from_dict(
+            {
+                "custom_agents": {
+                    "general-purpose": {
+                        "description": "Custom override attempt",
+                        "system_prompt": "Should not be used",
+                    },
                 },
-            },
-        })
+            }
+        )
         config = get_subagent_config("general-purpose")
         # Should get the builtin description, not the custom one
         assert config.description == BUILTIN_SUBAGENTS["general-purpose"].description
@@ -347,18 +372,20 @@ class TestRegistryCustomAgentLookup:
         """Per-agent overrides also apply to custom agents."""
         from deerflow.subagents.registry import get_subagent_config
 
-        load_subagents_config_from_dict({
-            "custom_agents": {
-                "analysis": {
-                    "description": "Analysis",
-                    "system_prompt": "Analyze.",
-                    "timeout_seconds": 600,
+        load_subagents_config_from_dict(
+            {
+                "custom_agents": {
+                    "analysis": {
+                        "description": "Analysis",
+                        "system_prompt": "Analyze.",
+                        "timeout_seconds": 600,
+                    },
                 },
-            },
-            "agents": {
-                "analysis": {"timeout_seconds": 300, "skills": ["overridden-skill"]},
-            },
-        })
+                "agents": {
+                    "analysis": {"timeout_seconds": 300, "skills": ["overridden-skill"]},
+                },
+            }
+        )
         config = get_subagent_config("analysis")
         assert config is not None
         assert config.timeout_seconds == 300  # Override applied
@@ -377,22 +404,26 @@ class TestRegistrySkillsOverride:
     def test_skills_override_applied_to_builtin(self):
         from deerflow.subagents.registry import get_subagent_config
 
-        load_subagents_config_from_dict({
-            "agents": {
-                "general-purpose": {"skills": ["web-search", "data-analysis"]},
-            },
-        })
+        load_subagents_config_from_dict(
+            {
+                "agents": {
+                    "general-purpose": {"skills": ["web-search", "data-analysis"]},
+                },
+            }
+        )
         config = get_subagent_config("general-purpose")
         assert config.skills == ["web-search", "data-analysis"]
 
     def test_empty_skills_override(self):
         from deerflow.subagents.registry import get_subagent_config
 
-        load_subagents_config_from_dict({
-            "agents": {
-                "bash": {"skills": []},
-            },
-        })
+        load_subagents_config_from_dict(
+            {
+                "agents": {
+                    "bash": {"skills": []},
+                },
+            }
+        )
         config = get_subagent_config("bash")
         assert config.skills == []
 
@@ -407,11 +438,13 @@ class TestRegistrySkillsOverride:
         from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
         from deerflow.subagents.registry import get_subagent_config
 
-        load_subagents_config_from_dict({
-            "agents": {
-                "general-purpose": {"skills": ["web-search"]},
-            },
-        })
+        load_subagents_config_from_dict(
+            {
+                "agents": {
+                    "general-purpose": {"skills": ["web-search"]},
+                },
+            }
+        )
         _ = get_subagent_config("general-purpose")
         assert BUILTIN_SUBAGENTS["general-purpose"].skills is None
 
@@ -436,18 +469,20 @@ class TestRegistryAvailableNames:
     def test_includes_custom_names(self):
         from deerflow.subagents.registry import get_subagent_names
 
-        load_subagents_config_from_dict({
-            "custom_agents": {
-                "analysis": {
-                    "description": "Analysis",
-                    "system_prompt": "Analyze.",
+        load_subagents_config_from_dict(
+            {
+                "custom_agents": {
+                    "analysis": {
+                        "description": "Analysis",
+                        "system_prompt": "Analyze.",
+                    },
+                    "researcher": {
+                        "description": "Research",
+                        "system_prompt": "Research.",
+                    },
                 },
-                "researcher": {
-                    "description": "Research",
-                    "system_prompt": "Research.",
-                },
-            },
-        })
+            }
+        )
         names = get_subagent_names()
         assert "general-purpose" in names
         assert "bash" in names
@@ -457,14 +492,16 @@ class TestRegistryAvailableNames:
     def test_no_duplicates_when_custom_name_matches_builtin(self):
         from deerflow.subagents.registry import get_subagent_names
 
-        load_subagents_config_from_dict({
-            "custom_agents": {
-                "general-purpose": {
-                    "description": "Duplicate name",
-                    "system_prompt": "test",
+        load_subagents_config_from_dict(
+            {
+                "custom_agents": {
+                    "general-purpose": {
+                        "description": "Duplicate name",
+                        "system_prompt": "test",
+                    },
                 },
-            },
-        })
+            }
+        )
         names = get_subagent_names()
         assert names.count("general-purpose") == 1
 
@@ -481,15 +518,17 @@ class TestRegistryListSubagentsWithCustom:
     def test_list_includes_custom_agents(self):
         from deerflow.subagents.registry import list_subagents
 
-        load_subagents_config_from_dict({
-            "custom_agents": {
-                "analysis": {
-                    "description": "Analysis",
-                    "system_prompt": "Analyze.",
-                    "skills": ["data-analysis"],
+        load_subagents_config_from_dict(
+            {
+                "custom_agents": {
+                    "analysis": {
+                        "description": "Analysis",
+                        "system_prompt": "Analyze.",
+                        "skills": ["data-analysis"],
+                    },
                 },
-            },
-        })
+            }
+        )
         configs = list_subagents()
         names = {c.name for c in configs}
         assert "general-purpose" in names
@@ -499,15 +538,17 @@ class TestRegistryListSubagentsWithCustom:
     def test_list_custom_agent_has_correct_skills(self):
         from deerflow.subagents.registry import list_subagents
 
-        load_subagents_config_from_dict({
-            "custom_agents": {
-                "analysis": {
-                    "description": "Analysis",
-                    "system_prompt": "Analyze.",
-                    "skills": ["data-analysis", "visualization"],
+        load_subagents_config_from_dict(
+            {
+                "custom_agents": {
+                    "analysis": {
+                        "description": "Analysis",
+                        "system_prompt": "Analyze.",
+                        "skills": ["data-analysis", "visualization"],
+                    },
                 },
-            },
-        })
+            }
+        )
         by_name = {c.name: c for c in list_subagents()}
         assert by_name["analysis"].skills == ["data-analysis", "visualization"]
 
@@ -523,7 +564,9 @@ class TestSkillsFilterPassthrough:
     def test_none_skills_passes_none_to_prompt(self):
         """When config.skills is None, available_skills=None should be passed (inherit all)."""
         config = SubagentConfig(
-            name="test", description="test", system_prompt="test",
+            name="test",
+            description="test",
+            system_prompt="test",
             skills=None,
         )
         # Verify: set(None) would raise, so the code must check for None first
@@ -533,7 +576,9 @@ class TestSkillsFilterPassthrough:
     def test_empty_skills_passes_empty_set(self):
         """When config.skills is [], available_skills=set() should be passed (no skills)."""
         config = SubagentConfig(
-            name="test", description="test", system_prompt="test",
+            name="test",
+            description="test",
+            system_prompt="test",
             skills=[],
         )
         available = set(config.skills) if config.skills is not None else None
@@ -542,7 +587,9 @@ class TestSkillsFilterPassthrough:
     def test_skills_whitelist_passes_correct_set(self):
         """When config.skills has values, those should be passed as available_skills."""
         config = SubagentConfig(
-            name="test", description="test", system_prompt="test",
+            name="test",
+            description="test",
+            system_prompt="test",
             skills=["data-analysis", "web-search"],
         )
         available = set(config.skills) if config.skills is not None else None
