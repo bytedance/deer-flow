@@ -21,7 +21,6 @@ from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -277,13 +276,18 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return {"messages": [stripped_msg]}
 
         if warning:
-            # Inject as HumanMessage instead of SystemMessage to avoid
-            # Anthropic's "multiple non-consecutive system messages" error.
-            # Anthropic models require system messages only at the start of
-            # the conversation; injecting one mid-conversation crashes
-            # langchain_anthropic's _format_messages(). HumanMessage works
-            # with all providers. See #1299.
-            return {"messages": [HumanMessage(content=warning)]}
+            # Convert the looping AI tool-call message into a plain assistant
+            # message immediately, otherwise the interrupted tool call can be
+            # persisted without a matching ToolMessage and poison the thread.
+            messages = state.get("messages", [])
+            last_msg = messages[-1]
+            warned_msg = last_msg.model_copy(
+                update={
+                    "tool_calls": [],
+                    "content": self._append_text(last_msg.content, warning),
+                }
+            )
+            return {"messages": [warned_msg]}
 
         return None
 
