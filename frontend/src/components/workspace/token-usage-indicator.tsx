@@ -38,7 +38,7 @@ export function TokenUsageIndicator({
         <button
           type="button"
           className={cn(
-            "text-muted-foreground flex cursor-default items-center gap-1.5 rounded-full border bg-background/70 px-2 py-1 text-xs",
+            "text-muted-foreground bg-background/70 flex cursor-default items-center gap-1.5 rounded-full border px-2 py-1 text-xs",
             !usage && "opacity-60",
             className,
           )}
@@ -77,7 +77,7 @@ export function TokenUsageIndicator({
               </div>
             </>
           ) : (
-            <div className="max-w-56 text-muted-foreground">
+            <div className="text-muted-foreground max-w-56">
               {t.tokenUsage.unavailable}
             </div>
           )}

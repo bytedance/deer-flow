@@ -582,6 +582,10 @@ class DeerFlowClient:
             Dict with "models" key containing list of model info dicts,
             matching the Gateway API ``ModelsListResponse`` schema.
         """
+        token_usage_enabled = getattr(getattr(self._app_config, "token_usage", None), "enabled", False)
+        if not isinstance(token_usage_enabled, bool):
+            token_usage_enabled = False
+
         return {
             "models": [
                 {
@@ -593,7 +597,8 @@ class DeerFlowClient:
                     "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
                 }
                 for model in self._app_config.models
-            ]
+            ],
+            "token_usage": {"enabled": token_usage_enabled},
         }
 
     def list_skills(self, enabled_only: bool = False) -> dict:

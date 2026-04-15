@@ -240,7 +240,7 @@ function MessageTokenUsage({ usage }: { usage: TokenUsage | null }) {
   const { t } = useI18n();
 
   return (
-    <div className="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 pt-2 text-[11px]">
+    <div className="text-muted-foreground border-border/60 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 border-t pt-2 text-[11px]">
       <span className="inline-flex items-center gap-1 font-medium">
         <CoinsIcon className="size-3" />
         {t.tokenUsage.label}
