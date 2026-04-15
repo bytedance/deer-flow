@@ -68,6 +68,15 @@ done
 
 # ── Stop helper ──────────────────────────────────────────────────────────────
 
+_kill_port() {
+    local port=$1
+    local pid
+    pid=$(lsof -ti :"$port" 2>/dev/null) || true
+    if [ -n "$pid" ]; then
+        kill -9 $pid 2>/dev/null || true
+    fi
+}
+
 stop_all() {
     echo "Stopping all services..."
     pkill -f "langgraph dev" 2>/dev/null || true
@@ -78,6 +87,10 @@ stop_all() {
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
     pkill -9 nginx 2>/dev/null || true
+    # Force-kill any survivors still holding the service ports
+    _kill_port 2024
+    _kill_port 8001
+    _kill_port 3000
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -155,7 +168,7 @@ if ! { \
         [ -f config.yaml ]; \
     }; then
     echo "✗ No DeerFlow config file found."
-    echo "  Run 'make config' to generate config.yaml."
+    echo "  Run 'make setup' (recommended) or 'make config' to generate config.yaml."
     exit 1
 fi
 

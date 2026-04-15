@@ -298,19 +298,19 @@ Nginx (port 2026) ← Unified entry point
 ```bash
 # Backend tests
 cd backend
-uv run pytest
+make test
 
-# Frontend checks
+# Frontend tests
 cd frontend
-pnpm check
+make test
 ```
 
 ### PR Regression Checks
 
-Every pull request runs the backend regression workflow at [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml), including:
+Every pull request triggers the following CI workflows:
 
-- `tests/test_provisioner_kubeconfig.py`
-- `tests/test_docker_sandbox_mode_detection.py`
+- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
+- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
 
 ## Code Style
 

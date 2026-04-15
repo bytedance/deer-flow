@@ -1,6 +1,7 @@
 """Middleware for automatic thread title generation."""
 
 import logging
+import re
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -77,7 +78,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
 
         user_msg = self._normalize_content(user_msg_content)
-        assistant_msg = self._normalize_content(assistant_msg_content)
+        assistant_msg = self._strip_think_tags(self._normalize_content(assistant_msg_content))
 
         prompt = config.prompt_template.format(
             max_words=config.max_words,
@@ -86,10 +87,15 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         )
         return prompt, user_msg
 
+    def _strip_think_tags(self, text: str) -> str:
+        """Remove <think>...</think> blocks emitted by reasoning models (e.g. minimax, DeepSeek-R1)."""
+        return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+
     def _parse_title(self, content: object) -> str:
         """Normalize model output into a clean title string."""
         config = get_title_config()
         title_content = self._normalize_content(content)
+        title_content = self._strip_think_tags(title_content)
         title = title_content.strip().strip('"').strip("'")
         return title[: config.max_chars] if len(title) > config.max_chars else title
 
