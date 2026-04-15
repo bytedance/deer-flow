@@ -119,6 +119,16 @@ class AioSandboxProvider(SandboxProvider):
         if self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT) > 0:
             self._start_idle_checker()
 
+    @property
+    def uses_thread_data_mounts(self) -> bool:
+        """Whether thread workspace/uploads/outputs are visible via mounts.
+
+        Local container backends bind-mount the thread data directories, so files
+        written by the gateway are already visible when the sandbox starts.
+        Remote backends may require explicit file sync.
+        """
+        return isinstance(self._backend, LocalContainerBackend)
+
     # ── Factory methods ──────────────────────────────────────────────────
 
     def _create_backend(self) -> SandboxBackend:

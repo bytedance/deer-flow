@@ -3,14 +3,14 @@
 Covers two functions introduced to prevent ephemeral file-upload context from
 persisting in long-term memory:
 
-  - _filter_messages_for_memory  (memory_middleware)
+  - filter_messages_for_memory  (message_processing)
   - _strip_upload_mentions_from_memory  (updater)
 """
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.updater import _strip_upload_mentions_from_memory
-from deerflow.agents.middlewares.memory_middleware import _filter_messages_for_memory, detect_correction, detect_reinforcement
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,7 +31,7 @@ def _ai(text: str, tool_calls=None) -> AIMessage:
 
 
 # ===========================================================================
-# _filter_messages_for_memory
+# filter_messages_for_memory
 # ===========================================================================
 
 
@@ -45,7 +45,7 @@ class TestFilterMessagesForMemory:
             _human(_UPLOAD_BLOCK),
             _ai("I have read the file. It says: Hello."),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         assert result == []
 
     def test_upload_with_real_question_preserves_question(self):
@@ -56,7 +56,7 @@ class TestFilterMessagesForMemory:
             _human(combined),
             _ai("The file contains: Hello DeerFlow."),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
 
         assert len(result) == 2
         human_result = result[0]
@@ -71,7 +71,7 @@ class TestFilterMessagesForMemory:
             _human("What is the capital of France?"),
             _ai("The capital of France is Paris."),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         assert len(result) == 2
         assert result[0].content == "What is the capital of France?"
         assert result[1].content == "The capital of France is Paris."
@@ -84,7 +84,7 @@ class TestFilterMessagesForMemory:
             ToolMessage(content="Search results", tool_call_id="1"),
             _ai("Here are the results."),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         human_msgs = [m for m in result if m.type == "human"]
         ai_msgs = [m for m in result if m.type == "ai"]
         assert len(human_msgs) == 1
@@ -101,7 +101,7 @@ class TestFilterMessagesForMemory:
             _human("What is 2 + 2?"),
             _ai("4"),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         human_contents = [m.content for m in result if m.type == "human"]
         ai_contents = [m.content for m in result if m.type == "ai"]
 
@@ -121,14 +121,14 @@ class TestFilterMessagesForMemory:
             ]
         )
         msgs = [msg, _ai("Done.")]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         assert result == []
 
     def test_file_path_not_in_filtered_content(self):
         """After filtering, no upload file path should appear in any message."""
         combined = _UPLOAD_BLOCK + "\n\nSummarise the file please."
         msgs = [_human(combined), _ai("It says hello.")]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         all_content = " ".join(m.content for m in result if isinstance(m.content, str))
         assert "/mnt/user-data/uploads/" not in all_content
         assert "<uploaded_files>" not in all_content
