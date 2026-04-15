@@ -531,6 +531,7 @@ class ChannelManager:
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
+        logger.info("[Manager] initialized with channel_sessions keys: %s", list(self._channel_sessions.keys()))
         self._client = None  # lazy init — langgraph_sdk async client
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
@@ -538,7 +539,13 @@ class ChannelManager:
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
-        return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
+        if channel_name in CHANNEL_CAPABILITIES:
+            return CHANNEL_CAPABILITIES[channel_name].get("supports_streaming", False)
+        # Check for multi-bot channel names like feishu_xxx, wecom_xxx
+        for base_name, caps in CHANNEL_CAPABILITIES.items():
+            if channel_name.startswith(f"{base_name}_"):
+                return caps.get("supports_streaming", False)
+        return False
 
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
         channel_layer = _as_dict(self._channel_sessions.get(msg.channel_name))
@@ -547,11 +554,14 @@ class ChannelManager:
         return channel_layer, user_layer
 
     def _resolve_run_params(self, msg: InboundMessage, thread_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        logger.info("[Manager] _resolve_run_params: channel_name=%s", msg.channel_name)
         channel_layer, user_layer = self._resolve_session_layer(msg)
+        logger.info("[Manager] _resolve_run_params: channel_layer=%s, user_layer=%s", channel_layer, user_layer)
 
         assistant_id = user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
         if not isinstance(assistant_id, str) or not assistant_id.strip():
             assistant_id = self._assistant_id
+        logger.info("[Manager] _resolve_run_params: resolved assistant_id=%s", assistant_id)
 
         run_config = _merge_dicts(
             DEFAULT_RUN_CONFIG,

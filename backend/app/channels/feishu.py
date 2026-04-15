@@ -146,6 +146,7 @@ class FeishuChannel(Channel):
         thread and patching the SDK's module-level reference before calling
         ``start()``.
         """
+        logger.info("[Feishu] Starting WS client for app_id: %s, channel name: %s", app_id, self.name)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -165,10 +166,11 @@ class FeishuChannel(Channel):
                 log_level=lark.LogLevel.INFO,
                 domain=domain,
             )
+            logger.info("[Feishu] WS client created for app_id: %s, starting...", app_id)
             ws_client.start()
         except Exception:
             if self._running:
-                logger.exception("Feishu WebSocket error")
+                logger.exception("[Feishu] Feishu WebSocket error for app_id: %s", app_id)
 
     async def stop(self) -> None:
         self._running = False
@@ -685,7 +687,7 @@ class FeishuChannel(Channel):
 
             # Schedule on the async event loop
             if self._main_loop and self._main_loop.is_running():
-                logger.info("[Feishu] publishing inbound message to bus (type=%s, msg_id=%s)", msg_type.value, msg_id)
+                logger.info("[Feishu] publishing inbound message to bus (type=%s, msg_id=%s, channel_name=%s)", msg_type.value, msg_id, inbound.channel_name)
                 fut = asyncio.run_coroutine_threadsafe(self._prepare_inbound(msg_id, inbound), self._main_loop)
                 fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "prepare_inbound", mid))
             else:
@@ -695,6 +697,7 @@ class FeishuChannel(Channel):
 
 
 # ==================== Multi-Bot Support ====================
+
 
 class FeishuBotConfig(BaseModel):
     """Configuration model for a single Feishu bot."""
@@ -716,7 +719,7 @@ class FeishuBotConfig(BaseModel):
 
 class FeishuBotManager:
     """Manages multiple Feishu bots, each with its own WebSocket connection.
-    
+
     Each bot runs in its own thread with its own event loop and appears as
     a separate channel to the ChannelManager.
     """
@@ -734,7 +737,7 @@ class FeishuBotManager:
 
     def load_bots_from_config(self, channels_config: dict[str, Any]) -> None:
         """Load bot configurations from the channels config.
-        
+
         Supports both formats:
         - Legacy single-bot: channels.feishu
         - New multi-bot: channels.feishu_bots (list of bot configs)
@@ -777,11 +780,16 @@ class FeishuBotManager:
         if self._running:
             return
 
+        logger.info(f"[FeishuBotManager] Starting bots, configs: {list(self._configs.keys())}")
+        
         with self._lock:
             self._running = True
             for app_id, config in self._configs.items():
+                logger.info(f"[FeishuBotManager] Checking bot: app_id={app_id}, enabled={config.enabled}")
                 if config.enabled:
+                    logger.info(f"[FeishuBotManager] Starting bot: {config.name or app_id}")
                     await self._start_bot(app_id)
+        logger.info(f"[FeishuBotManager] Finished starting bots, running bots: {list(self._bots.keys())}")
 
     async def stop(self) -> None:
         """Stop all bots."""
@@ -794,11 +802,11 @@ class FeishuBotManager:
         """Add or update a bot configuration and start it if enabled."""
         with self._lock:
             self._configs[config.app_id] = config
-            
+
             # Stop existing bot if running
             if config.app_id in self._bots:
                 await self._stop_bot(config.app_id)
-            
+
             # Start if enabled
             if config.enabled and self._running:
                 return await self._start_bot(config.app_id)
@@ -821,10 +829,10 @@ class FeishuBotManager:
             if app_id not in self._configs:
                 logger.warning(f"Bot not found: {app_id}")
                 return False
-            
+
             if app_id in self._bots:
                 await self._stop_bot(app_id)
-            
+
             if self._configs[app_id].enabled:
                 return await self._start_bot(app_id)
             return True
@@ -854,12 +862,15 @@ class FeishuBotManager:
 
     async def _start_bot(self, app_id: str) -> bool:
         """Start a single bot (internal, assumes lock is held)."""
+        logger.info(f"[FeishuBotManager._start_bot] Starting bot app_id={app_id}")
         if app_id not in self._configs:
+            logger.warning(f"[FeishuBotManager._start_bot] App ID {app_id} not found in configs")
             return False
-        
+
         config = self._configs[app_id]
         channel_name = self._get_channel_name(app_id)
-        
+        logger.info(f"[FeishuBotManager._start_bot] Bot config: name={config.name}, agent_id={config.agent_id}, channel_name={channel_name}")
+
         # Build bot config dict for FeishuChannel
         bot_channel_config = {
             "app_id": config.app_id,
@@ -879,12 +890,14 @@ class FeishuBotManager:
                 },
             },
         }
-        
+
         # Create and start the channel
         try:
+            logger.info(f"[FeishuBotManager._start_bot] Creating FeishuChannel for app_id={app_id}")
             channel = FeishuChannel(bus=self._bus, config=bot_channel_config)
             # Override the channel name to include the app_id
             channel.name = channel_name
+            logger.info(f"[FeishuBotManager._start_bot] Starting FeishuChannel for app_id={app_id}")
             await channel.start()
             self._bots[app_id] = channel
             logger.info(f"Started bot: {config.name or app_id} (channel: {channel_name})")
