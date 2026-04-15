@@ -133,7 +133,7 @@ function MessageContent_({
         <MessageImage {...props} threadId={threadId} maxWidth="90%" />
       ),
       a: ({ href, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) => {
-        if (href && href.startsWith("/mnt/")) {
+        if (href?.startsWith("/mnt/")) {
           const url = resolveArtifactURL(href, threadId);
           return (
             <a
