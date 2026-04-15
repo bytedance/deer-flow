@@ -1,6 +1,11 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { FileIcon, Loader2Icon } from "lucide-react";
-import { memo, useMemo, type AnchorHTMLAttributes, type ImgHTMLAttributes } from "react";
+import {
+  memo,
+  useMemo,
+  type AnchorHTMLAttributes,
+  type ImgHTMLAttributes,
+} from "react";
 import rehypeKatex from "rehype-katex";
 
 import { Loader } from "@/components/ai-elements/loader";
@@ -130,7 +135,14 @@ function MessageContent_({
       a: ({ href, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) => {
         if (href && href.startsWith("/mnt/")) {
           const url = resolveArtifactURL(href, threadId);
-          return <a {...props} href={url} target="_blank" rel="noopener noreferrer" />;
+          return (
+            <a
+              {...props}
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+            />
+          );
         }
         return <a {...props} href={href} />;
       },
