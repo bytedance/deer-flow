@@ -52,6 +52,14 @@ const config = {
         source: "/api/agents/:path*",
         destination: `${gatewayURL}/api/agents/:path*`,
       });
+      rewrites.push({
+        source: "/api/skills",
+        destination: `${gatewayURL}/api/skills`,
+      });
+      rewrites.push({
+        source: "/api/skills/:path*",
+        destination: `${gatewayURL}/api/skills/:path*`,
+      });
     }
 
     return rewrites;
