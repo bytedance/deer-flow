@@ -1,247 +1,905 @@
-"""ChannelService — manages the lifecycle of all IM channels."""
+"""Feishu/Lark channel — connects to Feishu via WebSocket (no public IP needed)."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
-from typing import Any, TYPE_CHECKING
-if TYPE_CHECKING:
-    from app.channels.feishu import FeishuBotManager
+import re
+import threading
+from typing import Any, Literal
+from pydantic import BaseModel
 
 from app.channels.base import Channel
-from app.channels.manager import DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
-from app.channels.message_bus import MessageBus
-from app.channels.store import ChannelStore
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
 
-# Channel name → import path for lazy loading
-_CHANNEL_REGISTRY: dict[str, str] = {
-    "discord": "app.channels.discord:DiscordChannel",
-    "feishu": "app.channels.feishu:FeishuChannel",
-    "slack": "app.channels.slack:SlackChannel",
-    "telegram": "app.channels.telegram:TelegramChannel",
-    "wechat": "app.channels.wechat:WechatChannel",
-    "wecom": "app.channels.wecom:WeComChannel",
-}
 
-_CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
-_CHANNELS_GATEWAY_URL_ENV = "DEER_FLOW_CHANNELS_GATEWAY_URL"
+def _is_feishu_command(text: str) -> bool:
+    if not text.startswith("/"):
+        return False
+    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
 
 
-def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, default: str) -> str:
-    value = config.pop(config_key, None)
-    if isinstance(value, str) and value.strip():
-        return value
-    env_value = os.getenv(env_key, "").strip()
-    if env_value:
-        return env_value
-    return default
+class FeishuChannel(Channel):
+    """Feishu/Lark IM channel using the ``lark-oapi`` WebSocket client.
 
+    Configuration keys (in ``config.yaml`` under ``channels.feishu``):
+        - ``app_id``: Feishu app ID.
+        - ``app_secret``: Feishu app secret.
+        - ``verification_token``: (optional) Event verification token.
 
-class ChannelService:
-    """Manages the lifecycle of all configured IM channels.
+    The channel uses WebSocket long-connection mode so no public IP is required.
 
-    Reads configuration from ``config.yaml`` under the ``channels`` key,
-    instantiates enabled channels, and starts the ChannelManager dispatcher.
+    Message flow:
+        1. User sends a message → bot adds "OK" emoji reaction
+        2. Bot replies in thread: "Working on it......"
+        3. Agent processes the message and returns a result
+        4. Bot replies in thread with the result
+        5. Bot adds "DONE" emoji reaction to the original message
     """
 
-    def __init__(self, channels_config: dict[str, Any] | None = None) -> None:
-        self.bus = MessageBus()
-        self.store = ChannelStore()
-        config = dict(channels_config or {})
-        langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
-        gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
-        default_session = config.pop("session", None)
-        channel_sessions = {name: channel_config.get("session") for name, channel_config in config.items() if isinstance(channel_config, dict)}
-        self.manager = ChannelManager(
-            bus=self.bus,
-            store=self.store,
-            langgraph_url=langgraph_url,
-            gateway_url=gateway_url,
-            default_session=default_session if isinstance(default_session, dict) else None,
-            channel_sessions=channel_sessions,
-        )
-        self._channels: dict[str, Any] = {}  # name -> Channel instance
-        self._config = config
-        self._running = False
-        self._feishu_bot_manager: FeishuBotManager | None = None  # Lazy initialized
-
-    @classmethod
-    def from_app_config(cls) -> ChannelService:
-        """Create a ChannelService from the application config."""
-        from deerflow.config.app_config import get_app_config
-
-        config = get_app_config()
-        channels_config = {}
-        # extra fields are allowed by AppConfig (extra="allow")
-        extra = config.model_extra or {}
-        if "channels" in extra:
-            channels_config = extra["channels"]
-        return cls(channels_config=channels_config)
+    def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
+        super().__init__(name="feishu", bus=bus, config=config)
+        self._thread: threading.Thread | None = None
+        self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._api_client = None
+        self._CreateMessageReactionRequest = None
+        self._CreateMessageReactionRequestBody = None
+        self._Emoji = None
+        self._PatchMessageRequest = None
+        self._PatchMessageRequestBody = None
+        self._background_tasks: set[asyncio.Task] = set()
+        self._running_card_ids: dict[str, str] = {}
+        self._running_card_tasks: dict[str, asyncio.Task] = {}
+        self._CreateFileRequest = None
+        self._CreateFileRequestBody = None
+        self._CreateImageRequest = None
+        self._CreateImageRequestBody = None
+        self._GetMessageResourceRequest = None
+        self._thread_lock = threading.Lock()
 
     async def start(self) -> None:
-        """Start the manager and all enabled channels."""
         if self._running:
             return
 
-        await self.manager.start()
+        try:
+            import lark_oapi as lark
+            from lark_oapi.api.im.v1 import (
+                CreateFileRequest,
+                CreateFileRequestBody,
+                CreateImageRequest,
+                CreateImageRequestBody,
+                CreateMessageReactionRequest,
+                CreateMessageReactionRequestBody,
+                CreateMessageRequest,
+                CreateMessageRequestBody,
+                Emoji,
+                GetMessageResourceRequest,
+                PatchMessageRequest,
+                PatchMessageRequestBody,
+                ReplyMessageRequest,
+                ReplyMessageRequestBody,
+            )
+        except ImportError:
+            logger.error("lark-oapi is not installed. Install it with: uv add lark-oapi")
+            return
 
-        # Start FeishuBotManager if feishu_bots are configured
-        if "feishu_bots" in self._config or "feishu" in self._config:
-            try:
-                from app.channels.feishu import FeishuBotManager
+        self._lark = lark
+        self._CreateMessageRequest = CreateMessageRequest
+        self._CreateMessageRequestBody = CreateMessageRequestBody
+        self._ReplyMessageRequest = ReplyMessageRequest
+        self._ReplyMessageRequestBody = ReplyMessageRequestBody
+        self._CreateMessageReactionRequest = CreateMessageReactionRequest
+        self._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+        self._Emoji = Emoji
+        self._PatchMessageRequest = PatchMessageRequest
+        self._PatchMessageRequestBody = PatchMessageRequestBody
+        self._CreateFileRequest = CreateFileRequest
+        self._CreateFileRequestBody = CreateFileRequestBody
+        self._CreateImageRequest = CreateImageRequest
+        self._CreateImageRequestBody = CreateImageRequestBody
+        self._GetMessageResourceRequest = GetMessageResourceRequest
 
-                self._feishu_bot_manager = FeishuBotManager(bus=self.bus)
-                self._feishu_bot_manager.load_bots_from_config(self._config)
-                # Only keep manager if there are actually bots loaded
-                if not self._feishu_bot_manager.get_bot_status():
-                    logger.info("No Feishu bots configured, skipping FeishuBotManager")
-                    self._feishu_bot_manager = None
-                else:
-                    await self._feishu_bot_manager.start()
-            except Exception as e:
-                logger.exception("Failed to start FeishuBotManager: %s", e)
-                self._feishu_bot_manager = None
+        app_id = self.config.get("app_id", "")
+        app_secret = self.config.get("app_secret", "")
+        domain = self.config.get("domain", "https://open.feishu.cn")
 
-        # Start other channels (except feishu if we're using multi-bot)
-        for name, channel_config in self._config.items():
-            if not isinstance(channel_config, dict):
-                continue
-            if not channel_config.get("enabled", False):
-                logger.info("Channel %s is disabled, skipping", name)
-                continue
-            # Skip single feishu channel if we're using feishu_bots
-            if name == "feishu" and self._feishu_bot_manager is not None:
-                logger.info("Skipping single feishu channel (using feishu_bots instead)")
-                continue
+        if not app_id or not app_secret:
+            logger.error("Feishu channel requires app_id and app_secret")
+            return
 
-            await self._start_channel(name, channel_config)
+        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
+        logger.info("[Feishu] using domain: %s", domain)
+        self._main_loop = asyncio.get_event_loop()
 
         self._running = True
-        logger.info("ChannelService started with channels: %s", list(self._channels.keys()))
+        self.bus.subscribe_outbound(self._on_outbound)
+
+        # Both ws.Client construction and start() must happen in a dedicated
+        # thread with its own event loop.  lark-oapi caches the running loop
+        # at construction time and later calls loop.run_until_complete(),
+        # which conflicts with an already-running uvloop.
+        self._thread = threading.Thread(
+            target=self._run_ws,
+            args=(app_id, app_secret, domain),
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info("Feishu channel started")
+
+    def _run_ws(self, app_id: str, app_secret: str, domain: str) -> None:
+        """Construct and run the lark WS client in a thread with a fresh event loop.
+
+        The lark-oapi SDK captures a module-level event loop at import time
+        (``lark_oapi.ws.client.loop``).  When uvicorn uses uvloop, that
+        captured loop is the *main* thread's uvloop — which is already
+        running, so ``loop.run_until_complete()`` inside ``Client.start()``
+        raises ``RuntimeError``.
+
+        We work around this by creating a plain asyncio event loop for this
+        thread and patching the SDK's module-level reference before calling
+        ``start()``.
+        """
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            import lark_oapi as lark
+            import lark_oapi.ws.client as _ws_client_mod
+
+            # Replace the SDK's module-level loop so Client.start() uses
+            # this thread's (non-running) event loop instead of the main
+            # thread's uvloop.
+            _ws_client_mod.loop = loop
+
+            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+            ws_client = lark.ws.Client(
+                app_id=app_id,
+                app_secret=app_secret,
+                event_handler=event_handler,
+                log_level=lark.LogLevel.INFO,
+                domain=domain,
+            )
+            ws_client.start()
+        except Exception:
+            if self._running:
+                logger.exception("Feishu WebSocket error")
 
     async def stop(self) -> None:
-        """Stop all channels and the manager."""
-        for name, channel in list(self._channels.items()):
-            try:
-                await channel.stop()
-                logger.info("Channel %s stopped", name)
-            except Exception:
-                logger.exception("Error stopping channel %s", name)
-        self._channels.clear()
-
-        # Stop FeishuBotManager
-        if self._feishu_bot_manager is not None:
-            try:
-                await self._feishu_bot_manager.stop()
-                logger.info("FeishuBotManager stopped")
-            except Exception as e:
-                logger.exception("Error stopping FeishuBotManager: %s", e)
-            self._feishu_bot_manager = None
-
-        await self.manager.stop()
         self._running = False
-        logger.info("ChannelService stopped")
+        self.bus.unsubscribe_outbound(self._on_outbound)
+        for task in list(self._background_tasks):
+            task.cancel()
+        self._background_tasks.clear()
+        for task in list(self._running_card_tasks.values()):
+            task.cancel()
+        self._running_card_tasks.clear()
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+        logger.info("Feishu channel stopped")
 
-    async def restart_channel(self, name: str) -> bool:
-        """Restart a specific channel. Returns True if successful."""
-        if name in self._channels:
+    async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
+        if not self._api_client:
+            logger.warning("[Feishu] send called but no api_client available")
+            return
+
+        logger.info(
+            "[Feishu] sending reply: chat_id=%s, thread_ts=%s, text_len=%d",
+            msg.chat_id,
+            msg.thread_ts,
+            len(msg.text),
+        )
+
+        last_exc: Exception | None = None
+        for attempt in range(_max_retries):
             try:
-                await self._channels[name].stop()
-            except Exception:
-                logger.exception("Error stopping channel %s for restart", name)
-            del self._channels[name]
+                await self._send_card_message(msg)
+                return  # success
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _max_retries - 1:
+                    delay = 2**attempt  # 1s, 2s
+                    logger.warning(
+                        "[Feishu] send failed (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1,
+                        _max_retries,
+                        delay,
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
 
-        config = self._config.get(name)
-        if not config or not isinstance(config, dict):
-            logger.warning("No config for channel %s", name)
+        logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
+        if last_exc is None:
+            raise RuntimeError("Feishu send failed without an exception from any attempt")
+        raise last_exc
+
+    async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if not self._api_client:
             return False
 
-        return await self._start_channel(name, config)
-
-    async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
-        """Instantiate and start a single channel."""
-        import_path = _CHANNEL_REGISTRY.get(name)
-        if not import_path:
-            logger.warning("Unknown channel type: %s", name)
+        # Check size limits (image: 10MB, file: 30MB)
+        if attachment.is_image and attachment.size > 10 * 1024 * 1024:
+            logger.warning("[Feishu] image too large (%d bytes), skipping: %s", attachment.size, attachment.filename)
+            return False
+        if not attachment.is_image and attachment.size > 30 * 1024 * 1024:
+            logger.warning("[Feishu] file too large (%d bytes), skipping: %s", attachment.size, attachment.filename)
             return False
 
         try:
-            from deerflow.reflection import resolve_class
+            if attachment.is_image:
+                file_key = await self._upload_image(attachment.actual_path)
+                msg_type = "image"
+                content = json.dumps({"image_key": file_key})
+            else:
+                file_key = await self._upload_file(attachment.actual_path, attachment.filename)
+                msg_type = "file"
+                content = json.dumps({"file_key": file_key})
 
-            channel_cls = resolve_class(import_path, base_class=None)
-        except Exception:
-            logger.exception("Failed to import channel class for %s", name)
-            return False
+            if msg.thread_ts:
+                request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type(msg_type).content(content).reply_in_thread(True).build()).build()
+                await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+            else:
+                request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type(msg_type).content(content).build()).build()
+                await asyncio.to_thread(self._api_client.im.v1.message.create, request)
 
-        try:
-            channel = channel_cls(bus=self.bus, config=config)
-            await channel.start()
-            self._channels[name] = channel
-            logger.info("Channel %s started", name)
+            logger.info("[Feishu] file sent: %s (type=%s)", attachment.filename, msg_type)
             return True
         except Exception:
-            logger.exception("Failed to start channel %s", name)
+            logger.exception("[Feishu] failed to upload/send file: %s", attachment.filename)
             return False
 
-    def get_channel(self, name: str) -> Channel | None:
-        """Return a running channel instance by name when available."""
-        # Check regular channels first
-        if name in self._channels:
-            return self._channels.get(name)
-        # Check FeishuBotManager channels
-        if self._feishu_bot_manager is not None:
-            return self._feishu_bot_manager.get_channel(name)
-        return None
+    async def _upload_image(self, path) -> str:
+        """Upload an image to Feishu and return the image_key."""
+        with open(str(path), "rb") as f:
+            request = self._CreateImageRequest.builder().request_body(self._CreateImageRequestBody.builder().image_type("message").image(f).build()).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.image.create, request)
+        if not response.success():
+            raise RuntimeError(f"Feishu image upload failed: code={response.code}, msg={response.msg}")
+        return response.data.image_key
 
-    def get_feishu_bot_manager(self) -> FeishuBotManager | None:
-        """Return the FeishuBotManager instance if available."""
-        return self._feishu_bot_manager
+    async def _upload_file(self, path, filename: str) -> str:
+        """Upload a file to Feishu and return the file_key."""
+        suffix = path.suffix.lower() if hasattr(path, "suffix") else ""
+        if suffix in (".xls", ".xlsx", ".csv"):
+            file_type = "xls"
+        elif suffix in (".ppt", ".pptx"):
+            file_type = "ppt"
+        elif suffix == ".pdf":
+            file_type = "pdf"
+        elif suffix in (".doc", ".docx"):
+            file_type = "doc"
+        else:
+            file_type = "stream"
 
-    def get_status(self) -> dict[str, Any]:
-        """Return status information for all channels."""
-        channels_status = {}
-        for name in _CHANNEL_REGISTRY:
-            config = self._config.get(name, {})
-            enabled = isinstance(config, dict) and config.get("enabled", False)
-            running = name in self._channels and self._channels[name].is_running
-            channels_status[name] = {
-                "enabled": enabled,
-                "running": running,
-            }
-        # Add Feishu bots status if available
-        if self._feishu_bot_manager is not None:
-            channels_status["feishu_bots"] = self._feishu_bot_manager.get_bot_status()
-        return {
-            "service_running": self._running,
-            "channels": channels_status,
+        with open(str(path), "rb") as f:
+            request = self._CreateFileRequest.builder().request_body(self._CreateFileRequestBody.builder().file_type(file_type).file_name(filename).file(f).build()).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.file.create, request)
+        if not response.success():
+            raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
+        return response.data.file_key
+
+    async def receive_file(self, msg: InboundMessage, thread_id: str) -> InboundMessage:
+        """Download a Feishu file into the thread uploads directory.
+
+        Returns the sandbox virtual path when the image is persisted successfully.
+        """
+        if not msg.thread_ts:
+            logger.warning("[Feishu] received file message without thread_ts, cannot associate with conversation: %s", msg)
+            return msg
+        files = msg.files
+        if not files:
+            logger.warning("[Feishu] received message with no files: %s", msg)
+            return msg
+        text = msg.text
+        for file in files:
+            if file.get("image_key"):
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id)
+                text = text.replace("[image]", virtual_path, 1)
+            elif file.get("file_key"):
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id)
+                text = text.replace("[file]", virtual_path, 1)
+        msg.text = text
+        return msg
+
+    async def _receive_single_file(self, message_id: str, file_key: str, type: Literal["image", "file"], thread_id: str) -> str:
+        request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(type).build()
+
+        def inner():
+            return self._api_client.im.v1.message_resource.get(request)
+
+        try:
+            response = await asyncio.to_thread(inner)
+        except Exception:
+            logger.exception("[Feishu] resource get request failed for resource_key=%s type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+
+        if not response.success():
+            logger.warning(
+                "[Feishu] resource get failed: resource_key=%s, type=%s, code=%s, msg=%s, log_id=%s ",
+                file_key,
+                type,
+                response.code,
+                response.msg,
+                response.get_log_id(),
+            )
+            return f"Failed to obtain the [{type}]"
+
+        image_stream = getattr(response, "file", None)
+        if image_stream is None:
+            logger.warning("[Feishu] resource get returned no file stream: resource_key=%s, type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+
+        try:
+            content: bytes = await asyncio.to_thread(image_stream.read)
+        except Exception:
+            logger.exception("[Feishu] failed to read resource stream: resource_key=%s, type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+
+        if not content:
+            logger.warning("[Feishu] empty resource content: resource_key=%s, type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+
+        paths = get_paths()
+        paths.ensure_thread_dirs(thread_id)
+        uploads_dir = paths.sandbox_uploads_dir(thread_id).resolve()
+
+        ext = "png" if type == "image" else "bin"
+        raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"
+
+        # Sanitize filename: preserve extension, replace path chars in name part
+        if "." in raw_filename:
+            name_part, ext = raw_filename.rsplit(".", 1)
+            name_part = re.sub(r"[./\\]", "_", name_part)
+            filename = f"{name_part}.{ext}"
+        else:
+            filename = re.sub(r"[./\\]", "_", raw_filename)
+        resolved_target = uploads_dir / filename
+
+        def down_load():
+            # use thread_lock to avoid filename conflicts when writing
+            with self._thread_lock:
+                resolved_target.write_bytes(content)
+
+        try:
+            await asyncio.to_thread(down_load)
+        except Exception:
+            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", resolved_target, type)
+            return f"Failed to obtain the [{type}]"
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
+
+        try:
+            sandbox_provider = get_sandbox_provider()
+            sandbox_id = sandbox_provider.acquire(thread_id)
+            if sandbox_id != "local":
+                sandbox = sandbox_provider.get(sandbox_id)
+                if sandbox is None:
+                    logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
+                    return f"Failed to obtain the [{type}]"
+                sandbox.update_file(virtual_path, content)
+        except Exception:
+            logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
+            return f"Failed to obtain the [{type}]"
+
+        logger.info("[Feishu] downloaded resource mapped: file_key=%s -> %s", file_key, virtual_path)
+        return virtual_path
+
+    # -- message formatting ------------------------------------------------
+
+    @staticmethod
+    def _build_card_content(text: str) -> str:
+        """Build a Feishu interactive card with markdown content.
+
+        Feishu's interactive card format natively renders markdown, including
+        headers, bold/italic, code blocks, lists, and links.
+        """
+        card = {
+            "config": {"wide_screen_mode": True, "update_multi": True},
+            "elements": [{"tag": "markdown", "content": text}],
         }
+        return json.dumps(card)
+
+    # -- reaction helpers --------------------------------------------------
+
+    async def _add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> None:
+        """Add an emoji reaction to a message."""
+        if not self._api_client or not self._CreateMessageReactionRequest:
+            return
+        try:
+            request = self._CreateMessageReactionRequest.builder().message_id(message_id).request_body(self._CreateMessageReactionRequestBody.builder().reaction_type(self._Emoji.builder().emoji_type(emoji_type).build()).build()).build()
+            await asyncio.to_thread(self._api_client.im.v1.message_reaction.create, request)
+            logger.info("[Feishu] reaction '%s' added to message %s", emoji_type, message_id)
+        except Exception:
+            logger.exception("[Feishu] failed to add reaction '%s' to message %s", emoji_type, message_id)
+
+    async def _reply_card(self, message_id: str, text: str) -> str | None:
+        """Reply with an interactive card and return the created card message ID."""
+        if not self._api_client:
+            return None
+
+        content = self._build_card_content(text)
+        request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).reply_in_thread(True).build()).build()
+        response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+        response_data = getattr(response, "data", None)
+        return getattr(response_data, "message_id", None)
+
+    async def _create_card(self, chat_id: str, text: str) -> None:
+        """Create a new card message in the target chat."""
+        if not self._api_client:
+            return
+
+        content = self._build_card_content(text)
+        request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(chat_id).msg_type("interactive").content(content).build()).build()
+        await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+
+    async def _update_card(self, message_id: str, text: str) -> None:
+        """Patch an existing card message in place."""
+        if not self._api_client or not self._PatchMessageRequest:
+            return
+
+        content = self._build_card_content(text)
+        request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
+        await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+
+    def _track_background_task(self, task: asyncio.Task, *, name: str, msg_id: str) -> None:
+        """Keep a strong reference to fire-and-forget tasks and surface errors."""
+        self._background_tasks.add(task)
+        task.add_done_callback(lambda done_task, task_name=name, mid=msg_id: self._finalize_background_task(done_task, task_name, mid))
+
+    def _finalize_background_task(self, task: asyncio.Task, name: str, msg_id: str) -> None:
+        self._background_tasks.discard(task)
+        self._log_task_error(task, name, msg_id)
+
+    async def _create_running_card(self, source_message_id: str, text: str) -> str | None:
+        """Create the running card and cache its message ID when available."""
+        running_card_id = await self._reply_card(source_message_id, text)
+        if running_card_id:
+            self._running_card_ids[source_message_id] = running_card_id
+            logger.info("[Feishu] running card created: source=%s card=%s", source_message_id, running_card_id)
+        else:
+            logger.warning("[Feishu] running card creation returned no message_id for source=%s, subsequent updates will fall back to new replies", source_message_id)
+        return running_card_id
+
+    def _ensure_running_card_started(self, source_message_id: str, text: str = "Working on it...") -> asyncio.Task | None:
+        """Start running-card creation once per source message."""
+        running_card_id = self._running_card_ids.get(source_message_id)
+        if running_card_id:
+            return None
+
+        running_card_task = self._running_card_tasks.get(source_message_id)
+        if running_card_task:
+            return running_card_task
+
+        running_card_task = asyncio.create_task(self._create_running_card(source_message_id, text))
+        self._running_card_tasks[source_message_id] = running_card_task
+        running_card_task.add_done_callback(lambda done_task, mid=source_message_id: self._finalize_running_card_task(mid, done_task))
+        return running_card_task
+
+    def _finalize_running_card_task(self, source_message_id: str, task: asyncio.Task) -> None:
+        if self._running_card_tasks.get(source_message_id) is task:
+            self._running_card_tasks.pop(source_message_id, None)
+        self._log_task_error(task, "create_running_card", source_message_id)
+
+    async def _ensure_running_card(self, source_message_id: str, text: str = "Working on it...") -> str | None:
+        """Ensure the in-thread running card exists and track its message ID."""
+        running_card_id = self._running_card_ids.get(source_message_id)
+        if running_card_id:
+            return running_card_id
+
+        running_card_task = self._ensure_running_card_started(source_message_id, text)
+        if running_card_task is None:
+            return self._running_card_ids.get(source_message_id)
+        return await running_card_task
+
+    async def _send_running_reply(self, message_id: str) -> None:
+        """Reply to a message in-thread with a running card."""
+        try:
+            await self._ensure_running_card(message_id)
+        except Exception:
+            logger.exception("[Feishu] failed to send running reply for message %s", message_id)
+
+    async def _send_card_message(self, msg: OutboundMessage) -> None:
+        """Send or update the Feishu card tied to the current request."""
+        source_message_id = msg.thread_ts
+        if source_message_id:
+            running_card_id = self._running_card_ids.get(source_message_id)
+            awaited_running_card_task = False
+
+            if not running_card_id:
+                running_card_task = self._running_card_tasks.get(source_message_id)
+                if running_card_task:
+                    awaited_running_card_task = True
+                    running_card_id = await running_card_task
+
+            if running_card_id:
+                try:
+                    await self._update_card(running_card_id, msg.text)
+                except Exception:
+                    if not msg.is_final:
+                        raise
+                    logger.exception(
+                        "[Feishu] failed to patch running card %s, falling back to final reply",
+                        running_card_id,
+                    )
+                    await self._reply_card(source_message_id, msg.text)
+                else:
+                    logger.info("[Feishu] running card updated: source=%s card=%s", source_message_id, running_card_id)
+            elif msg.is_final:
+                await self._reply_card(source_message_id, msg.text)
+            elif awaited_running_card_task:
+                logger.warning(
+                    "[Feishu] running card task finished without message_id for source=%s, skipping duplicate non-final creation",
+                    source_message_id,
+                )
+            else:
+                await self._ensure_running_card(source_message_id, msg.text)
+
+            if msg.is_final:
+                self._running_card_ids.pop(source_message_id, None)
+                await self._add_reaction(source_message_id, "DONE")
+            return
+
+        await self._create_card(msg.chat_id, msg.text)
+
+    # -- internal ----------------------------------------------------------
+
+    @staticmethod
+    def _log_future_error(fut, name: str, msg_id: str) -> None:
+        """Callback for run_coroutine_threadsafe futures to surface errors."""
+        try:
+            exc = fut.exception()
+            if exc:
+                logger.error("[Feishu] %s failed for msg_id=%s: %s", name, msg_id, exc)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _log_task_error(task: asyncio.Task, name: str, msg_id: str) -> None:
+        """Callback for background asyncio tasks to surface errors."""
+        try:
+            exc = task.exception()
+            if exc:
+                logger.error("[Feishu] %s failed for msg_id=%s: %s", name, msg_id, exc)
+        except asyncio.CancelledError:
+            logger.info("[Feishu] %s cancelled for msg_id=%s", name, msg_id)
+        except Exception:
+            pass
+
+    async def _prepare_inbound(self, msg_id: str, inbound) -> None:
+        """Kick off Feishu side effects without delaying inbound dispatch."""
+        reaction_task = asyncio.create_task(self._add_reaction(msg_id, "OK"))
+        self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
+        self._ensure_running_card_started(msg_id)
+        await self.bus.publish_inbound(inbound)
+
+    def _on_message(self, event) -> None:
+        """Called by lark-oapi when a message is received (runs in lark thread)."""
+        try:
+            logger.info("[Feishu] raw event received: type=%s", type(event).__name__)
+            message = event.event.message
+            chat_id = message.chat_id
+            msg_id = message.message_id
+            sender_id = event.event.sender.sender_id.open_id
+
+            # root_id is set when the message is a reply within a Feishu thread.
+            # Use it as topic_id so all replies share the same DeerFlow thread.
+            root_id = getattr(message, "root_id", None) or None
+
+            # Parse message content
+            content = json.loads(message.content)
+
+            # files_list store the any-file-key in feishu messages, which can be used to download the file content later
+            # In Feishu channel, image_keys are independent of file_keys.
+            # The file_key includes files, videos, and audio, but does not include stickers.
+            files_list = []
+
+            if "text" in content:
+                # Handle plain text messages
+                text = content["text"]
+            elif "file_key" in content:
+                file_key = content.get("file_key")
+                if isinstance(file_key, str) and file_key:
+                    files_list.append({"file_key": file_key})
+                    text = "[file]"
+                else:
+                    text = ""
+            elif "image_key" in content:
+                image_key = content.get("image_key")
+                if isinstance(image_key, str) and image_key:
+                    files_list.append({"image_key": image_key})
+                    text = "[image]"
+                else:
+                    text = ""
+            elif "content" in content and isinstance(content["content"], list):
+                # Handle rich-text messages with a top-level "content" list (e.g., topic groups/posts)
+                text_paragraphs: list[str] = []
+                for paragraph in content["content"]:
+                    if isinstance(paragraph, list):
+                        paragraph_text_parts: list[str] = []
+                        for element in paragraph:
+                            if isinstance(element, dict):
+                                # Include both normal text and @ mentions
+                                if element.get("tag") in ("text", "at"):
+                                    text_value = element.get("text", "")
+                                    if text_value:
+                                        paragraph_text_parts.append(text_value)
+                                elif element.get("tag") == "img":
+                                    image_key = element.get("image_key")
+                                    if isinstance(image_key, str) and image_key:
+                                        files_list.append({"image_key": image_key})
+                                        paragraph_text_parts.append("[image]")
+                                elif element.get("tag") in ("file", "media"):
+                                    file_key = element.get("file_key")
+                                    if isinstance(file_key, str) and file_key:
+                                        files_list.append({"file_key": file_key})
+                                        paragraph_text_parts.append("[file]")
+                        if paragraph_text_parts:
+                            # Join text segments within a paragraph with spaces to avoid "helloworld"
+                            text_paragraphs.append(" ".join(paragraph_text_parts))
+
+                # Join paragraphs with blank lines to preserve paragraph boundaries
+                text = "\n\n".join(text_paragraphs)
+            else:
+                text = ""
+            text = text.strip()
+
+            logger.info(
+                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
+                chat_id,
+                msg_id,
+                root_id,
+                sender_id,
+                text[:100] if text else "",
+            )
+
+            if not (text or files_list):
+                logger.info("[Feishu] empty text, ignoring message")
+                return
+
+            # Only treat known slash commands as commands; absolute paths and
+            # other slash-prefixed text should be handled as normal chat.
+            if _is_feishu_command(text):
+                msg_type = InboundMessageType.COMMAND
+            else:
+                msg_type = InboundMessageType.CHAT
+
+            # topic_id: use root_id for replies (same topic), msg_id for new messages (new topic)
+            topic_id = root_id or msg_id
+
+            inbound = self._make_inbound(
+                chat_id=chat_id,
+                user_id=sender_id,
+                text=text,
+                msg_type=msg_type,
+                thread_ts=msg_id,
+                files=files_list,
+                metadata={"message_id": msg_id, "root_id": root_id},
+            )
+            inbound.topic_id = topic_id
+
+            # Schedule on the async event loop
+            if self._main_loop and self._main_loop.is_running():
+                logger.info("[Feishu] publishing inbound message to bus (type=%s, msg_id=%s)", msg_type.value, msg_id)
+                fut = asyncio.run_coroutine_threadsafe(self._prepare_inbound(msg_id, inbound), self._main_loop)
+                fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "prepare_inbound", mid))
+            else:
+                logger.warning("[Feishu] main loop not running, cannot publish inbound message")
+        except Exception:
+            logger.exception("[Feishu] error processing message")
 
 
-# -- singleton access -------------------------------------------------------
+# ==================== Multi-Bot Support ====================
 
-_channel_service: ChannelService | None = None
+class FeishuBotConfig(BaseModel):
+    """Configuration model for a single Feishu bot."""
+
+    app_id: str
+    app_secret: str
+    verification_token: str = ""
+    encrypt_key: str = ""
+    agent_id: str = "lead_agent"
+    enabled: bool = True
+    name: str = ""
+    description: str = ""
+    recursion_limit: int = 100
+    thinking_enabled: bool = True
+    subagent_enabled: bool = False
+    is_plan_mode: bool = False
+    domain: str = "https://open.feishu.cn"
 
 
-def get_channel_service() -> ChannelService | None:
-    """Get the singleton ChannelService instance (if started)."""
-    return _channel_service
+class FeishuBotManager:
+    """Manages multiple Feishu bots, each with its own WebSocket connection.
+    
+    Each bot runs in its own thread with its own event loop and appears as
+    a separate channel to the ChannelManager.
+    """
 
+    def __init__(self, bus: MessageBus) -> None:
+        self._bus = bus
+        self._bots: dict[str, FeishuChannel] = {}  # app_id -> FeishuChannel
+        self._configs: dict[str, FeishuBotConfig] = {}  # app_id -> FeishuBotConfig
+        self._running = False
+        self._lock = threading.Lock()
 
-async def start_channel_service() -> ChannelService:
-    """Create and start the global ChannelService from app config."""
-    global _channel_service
-    if _channel_service is not None:
-        return _channel_service
-    _channel_service = ChannelService.from_app_config()
-    await _channel_service.start()
-    return _channel_service
+    def _get_channel_name(self, app_id: str) -> str:
+        """Get the channel name for a bot (feishu_{app_id})."""
+        return f"feishu_{app_id}"
 
+    def load_bots_from_config(self, channels_config: dict[str, Any]) -> None:
+        """Load bot configurations from the channels config.
+        
+        Supports both formats:
+        - Legacy single-bot: channels.feishu
+        - New multi-bot: channels.feishu_bots (list of bot configs)
+        """
+        with self._lock:
+            # Check for multi-bot config first
+            if "feishu_bots" in channels_config:
+                bots_config = channels_config["feishu_bots"]
+                if isinstance(bots_config, list):
+                    for bot_config_dict in bots_config:
+                        if isinstance(bot_config_dict, dict):
+                            try:
+                                config = FeishuBotConfig(**bot_config_dict)
+                                self._configs[config.app_id] = config
+                                logger.info(f"Loaded bot config: {config.name or config.app_id}")
+                            except Exception as e:
+                                logger.exception(f"Failed to parse bot config: {e}")
 
-async def stop_channel_service() -> None:
-    """Stop the global ChannelService."""
-    global _channel_service
-    if _channel_service is not None:
-        await _channel_service.stop()
-        _channel_service = None
+            # Fall back to single-bot config if no multi-bot config
+            if not self._configs and "feishu" in channels_config:
+                feishu_config = channels_config["feishu"]
+                if isinstance(feishu_config, dict) and feishu_config.get("enabled", False):
+                    try:
+                        config = FeishuBotConfig(
+                            app_id=feishu_config.get("app_id", ""),
+                            app_secret=feishu_config.get("app_secret", ""),
+                            verification_token=feishu_config.get("verification_token", ""),
+                            encrypt_key=feishu_config.get("encrypt_key", ""),
+                            domain=feishu_config.get("domain", "https://open.feishu.cn"),
+                            enabled=True,
+                        )
+                        if config.app_id and config.app_secret:
+                            self._configs[config.app_id] = config
+                            logger.info(f"Loaded single-bot config: {config.app_id}")
+                    except Exception as e:
+                        logger.exception(f"Failed to parse single-bot config: {e}")
+
+    async def start(self) -> None:
+        """Start all enabled bots."""
+        if self._running:
+            return
+
+        with self._lock:
+            self._running = True
+            for app_id, config in self._configs.items():
+                if config.enabled:
+                    await self._start_bot(app_id)
+
+    async def stop(self) -> None:
+        """Stop all bots."""
+        with self._lock:
+            self._running = False
+            for app_id in list(self._bots.keys()):
+                await self._stop_bot(app_id)
+
+    async def add_bot(self, config: FeishuBotConfig) -> bool:
+        """Add or update a bot configuration and start it if enabled."""
+        with self._lock:
+            self._configs[config.app_id] = config
+            
+            # Stop existing bot if running
+            if config.app_id in self._bots:
+                await self._stop_bot(config.app_id)
+            
+            # Start if enabled
+            if config.enabled and self._running:
+                return await self._start_bot(config.app_id)
+            return True
+
+    async def remove_bot(self, app_id: str) -> bool:
+        """Remove a bot configuration and stop it if running."""
+        with self._lock:
+            if app_id in self._bots:
+                await self._stop_bot(app_id)
+            if app_id in self._configs:
+                del self._configs[app_id]
+                logger.info(f"Removed bot: {app_id}")
+                return True
+            return False
+
+    async def restart_bot(self, app_id: str) -> bool:
+        """Restart a specific bot."""
+        with self._lock:
+            if app_id not in self._configs:
+                logger.warning(f"Bot not found: {app_id}")
+                return False
+            
+            if app_id in self._bots:
+                await self._stop_bot(app_id)
+            
+            if self._configs[app_id].enabled:
+                return await self._start_bot(app_id)
+            return True
+
+    def get_bot_status(self) -> dict[str, Any]:
+        """Get status of all bots."""
+        with self._lock:
+            bots_status = {}
+            for app_id, config in self._configs.items():
+                channel = self._bots.get(app_id)
+                bots_status[app_id] = {
+                    "name": config.name or app_id,
+                    "description": config.description,
+                    "enabled": config.enabled,
+                    "agent_id": config.agent_id,
+                    "running": channel is not None and channel.is_running,
+                }
+            return bots_status
+
+    def get_channel(self, channel_name: str) -> FeishuChannel | None:
+        """Get a bot channel by name."""
+        with self._lock:
+            for app_id, channel in self._bots.items():
+                if self._get_channel_name(app_id) == channel_name:
+                    return channel
+            return None
+
+    async def _start_bot(self, app_id: str) -> bool:
+        """Start a single bot (internal, assumes lock is held)."""
+        if app_id not in self._configs:
+            return False
+        
+        config = self._configs[app_id]
+        channel_name = self._get_channel_name(app_id)
+        
+        # Build bot config dict for FeishuChannel
+        bot_channel_config = {
+            "app_id": config.app_id,
+            "app_secret": config.app_secret,
+            "verification_token": config.verification_token,
+            "encrypt_key": config.encrypt_key,
+            "domain": config.domain,
+            "session": {
+                "assistant_id": config.agent_id,
+                "config": {
+                    "recursion_limit": config.recursion_limit,
+                },
+                "context": {
+                    "thinking_enabled": config.thinking_enabled,
+                    "is_plan_mode": config.is_plan_mode,
+                    "subagent_enabled": config.subagent_enabled,
+                },
+            },
+        }
+        
+        # Create and start the channel
+        try:
+            channel = FeishuChannel(bus=self._bus, config=bot_channel_config)
+            # Override the channel name to include the app_id
+            channel.name = channel_name
+            await channel.start()
+            self._bots[app_id] = channel
+            logger.info(f"Started bot: {config.name or app_id} (channel: {channel_name})")
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to start bot {app_id}: {e}")
+            return False
+
+    async def _stop_bot(self, app_id: str) -> None:
+        """Stop a single bot (internal, assumes lock is held)."""
+        if app_id in self._bots:
+            try:
+                await self._bots[app_id].stop()
+                logger.info(f"Stopped bot: {app_id}")
+            except Exception as e:
+                logger.exception(f"Error stopping bot {app_id}: {e}")
+            finally:
+                del self._bots[app_id]
