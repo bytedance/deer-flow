@@ -174,9 +174,7 @@ class TestGetCheckpointer:
 
         with (
             patch.dict(sys.modules, {"langgraph.checkpoint.sqlite": mock_module}),
-            patch(
-                "deerflow.agents.checkpointer.provider.ensure_sqlite_parent_dir"
-            ) as mock_ensure,
+            patch("deerflow.agents.checkpointer.provider.ensure_sqlite_parent_dir") as mock_ensure,
             patch(
                 "deerflow.agents.checkpointer.provider.resolve_sqlite_conn_str",
                 return_value="/tmp/resolved/relative/test.db",
@@ -188,6 +186,42 @@ class TestGetCheckpointer:
         assert cp is mock_saver_instance
         mock_ensure.assert_called_once_with("/tmp/resolved/relative/test.db")
         mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/resolved/relative/test.db")
+
+    def test_sqlite_ensure_parent_dir_before_connect(self):
+        """ensure_sqlite_parent_dir must be called before from_conn_string."""
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "relative/test.db"})
+
+        call_order = []
+
+        mock_saver_instance = MagicMock()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string = MagicMock(side_effect=lambda *a, **kw: (call_order.append("connect"), mock_cm)[1])
+
+        mock_module = MagicMock()
+        mock_module.SqliteSaver = mock_saver_cls
+
+        def record_ensure(*a, **kw):
+            call_order.append("ensure")
+
+        with (
+            patch.dict(sys.modules, {"langgraph.checkpoint.sqlite": mock_module}),
+            patch(
+                "deerflow.agents.checkpointer.provider.ensure_sqlite_parent_dir",
+                side_effect=record_ensure,
+            ),
+            patch(
+                "deerflow.agents.checkpointer.provider.resolve_sqlite_conn_str",
+                return_value="/tmp/resolved/relative/test.db",
+            ),
+        ):
+            reset_checkpointer()
+            get_checkpointer()
+
+        assert call_order == ["ensure", "connect"]
 
     def test_postgres_creates_saver(self):
         """Postgres checkpointer is created when packages are available."""
