@@ -17,10 +17,17 @@ class ModelResponse(BaseModel):
     supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort")
 
 
+class TokenUsageResponse(BaseModel):
+    """Token usage display configuration."""
+
+    enabled: bool = Field(default=False, description="Whether token usage tracking is enabled")
+
+
 class ModelsListResponse(BaseModel):
     """Response model for listing all models."""
 
     models: list[ModelResponse]
+    token_usage: TokenUsageResponse
 
 
 @router.get(
@@ -70,7 +77,10 @@ async def list_models() -> ModelsListResponse:
         )
         for model in config.models
     ]
-    return ModelsListResponse(models=models)
+    return ModelsListResponse(
+        models=models,
+        token_usage=TokenUsageResponse(enabled=config.token_usage.enabled),
+    )
 
 
 @router.get(

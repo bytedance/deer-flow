@@ -37,11 +37,13 @@ export function MessageList({
   threadId,
   thread,
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
+  tokenUsageEnabled = false,
 }: {
   className?: string;
   threadId: string;
   thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
+  tokenUsageEnabled?: boolean;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
@@ -64,6 +66,7 @@ export function MessageList({
                   message={msg}
                   isLoading={thread.isLoading}
                   threadId={threadId}
+                  tokenUsageEnabled={tokenUsageEnabled}
                 />
               );
             });
