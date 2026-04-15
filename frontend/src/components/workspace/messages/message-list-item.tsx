@@ -1,5 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { CoinsIcon, FileIcon, Loader2Icon } from "lucide-react";
+import { FileIcon, Loader2Icon } from "lucide-react";
 import { memo, useMemo, type ImgHTMLAttributes } from "react";
 import rehypeKatex from "rehype-katex";
 
@@ -20,11 +20,6 @@ import { Badge } from "@/components/ui/badge";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
-  formatTokenCount,
-  getUsageMetadata,
-  type TokenUsage,
-} from "@/core/messages/usage";
-import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
   parseUploadedFiles,
@@ -38,6 +33,7 @@ import { cn } from "@/lib/utils";
 import { CopyButton } from "../copy-button";
 
 import { MarkdownContent } from "./markdown-content";
+import { MessageTokenUsage } from "./message-token-usage";
 
 export function MessageListItem({
   className,
@@ -143,7 +139,6 @@ function MessageContent_({
 
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
-  const usage = useMemo(() => getUsageMetadata(message), [message]);
 
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
@@ -193,7 +188,11 @@ function MessageContent_({
           <ReasoningTrigger />
           <ReasoningContent>{reasoningContent}</ReasoningContent>
         </Reasoning>
-        {tokenUsageEnabled && !isLoading && <MessageTokenUsage usage={usage} />}
+        <MessageTokenUsage
+          enabled={tokenUsageEnabled}
+          isLoading={isLoading}
+          message={message}
+        />
       </AIElementMessageContent>
     );
   }
@@ -231,36 +230,12 @@ function MessageContent_({
         className="my-3"
         components={components}
       />
-      {tokenUsageEnabled && !isLoading && <MessageTokenUsage usage={usage} />}
+      <MessageTokenUsage
+        enabled={tokenUsageEnabled}
+        isLoading={isLoading}
+        message={message}
+      />
     </AIElementMessageContent>
-  );
-}
-
-function MessageTokenUsage({ usage }: { usage: TokenUsage | null }) {
-  const { t } = useI18n();
-
-  return (
-    <div className="text-muted-foreground border-border/60 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 border-t pt-2 text-[11px]">
-      <span className="inline-flex items-center gap-1 font-medium">
-        <CoinsIcon className="size-3" />
-        {t.tokenUsage.label}
-      </span>
-      {usage ? (
-        <>
-          <span>
-            {t.tokenUsage.input}: {formatTokenCount(usage.inputTokens)}
-          </span>
-          <span>
-            {t.tokenUsage.output}: {formatTokenCount(usage.outputTokens)}
-          </span>
-          <span className="font-medium">
-            {t.tokenUsage.total}: {formatTokenCount(usage.totalTokens)}
-          </span>
-        </>
-      ) : (
-        <span>{t.tokenUsage.unavailableShort}</span>
-      )}
-    </div>
   );
 }
 
