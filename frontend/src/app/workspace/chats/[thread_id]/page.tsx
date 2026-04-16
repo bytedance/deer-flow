@@ -22,6 +22,7 @@ import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
+import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
@@ -36,6 +37,7 @@ export default function ChatPage() {
     useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
   const [mounted, setMounted] = useState(false);
+  const { tokenUsageEnabled } = useModels();
   useSpecificChatMode();
 
   useEffect(() => {
@@ -145,7 +147,10 @@ export default function ChatPage() {
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div className="flex items-center gap-2">
-              <TokenUsageIndicator messages={thread.messages} />
+              <TokenUsageIndicator
+                enabled={tokenUsageEnabled}
+                messages={thread.messages}
+              />
               <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
@@ -157,6 +162,7 @@ export default function ChatPage() {
                 threadId={threadId}
                 thread={thread}
                 paddingBottom={messageListPaddingBottom}
+                tokenUsageEnabled={tokenUsageEnabled}
                 onSubmitClarification={handleClarificationSubmit}
               />
             </div>
