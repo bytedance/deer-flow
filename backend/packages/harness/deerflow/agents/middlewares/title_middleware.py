@@ -124,9 +124,13 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         try:
             if config.model_name:
-                model = create_chat_model(name=config.model_name, thinking_enabled=False)
+                # Title model runs as middleware **inside** the lead-agent graph,
+                # which already injects Langfuse at the invocation root. Opt out of
+                # model-level tracing to keep the title call as a child span instead
+                # of a separate root trace.
+                model = create_chat_model(name=config.model_name, thinking_enabled=False, attach_tracing=False)
             else:
-                model = create_chat_model(thinking_enabled=False)
+                model = create_chat_model(thinking_enabled=False, attach_tracing=False)
             response = await model.ainvoke(prompt)
             title = self._parse_title(response.content)
             if title:

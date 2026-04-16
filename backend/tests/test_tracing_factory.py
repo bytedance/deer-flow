@@ -35,26 +35,27 @@ def clear_tracing_env(monkeypatch):
     tracing_module._tracing_config = None
 
 
-def test_build_tracing_callbacks_returns_empty_list_when_disabled(monkeypatch):
+def test_build_langfuse_handler_returns_none_when_disabled(monkeypatch):
     monkeypatch.setattr(tracing_factory, "validate_enabled_tracing_providers", lambda: None)
     monkeypatch.setattr(tracing_factory, "get_enabled_tracing_providers", lambda: [])
 
-    callbacks = tracing_factory.build_tracing_callbacks()
-
-    assert callbacks == []
+    assert tracing_factory.build_langfuse_handler() is None
 
 
-def test_build_tracing_callbacks_creates_langsmith_and_langfuse(monkeypatch):
-    class FakeLangSmithTracer:
-        def __init__(self, *, project_name: str):
-            self.project_name = project_name
+def test_build_langfuse_handler_returns_none_when_only_langsmith_enabled(monkeypatch):
+    monkeypatch.setattr(tracing_factory, "validate_enabled_tracing_providers", lambda: None)
+    monkeypatch.setattr(tracing_factory, "get_enabled_tracing_providers", lambda: ["langsmith"])
 
+    assert tracing_factory.build_langfuse_handler() is None
+
+
+def test_build_langfuse_handler_creates_handler_when_enabled(monkeypatch):
     class FakeLangfuseHandler:
         def __init__(self, *, public_key: str):
             self.public_key = public_key
 
-    monkeypatch.setattr(tracing_factory, "get_enabled_tracing_providers", lambda: ["langsmith", "langfuse"])
     monkeypatch.setattr(tracing_factory, "validate_enabled_tracing_providers", lambda: None)
+    monkeypatch.setattr(tracing_factory, "get_enabled_tracing_providers", lambda: ["langfuse"])
     monkeypatch.setattr(
         tracing_factory,
         "get_tracing_config",
@@ -62,7 +63,6 @@ def test_build_tracing_callbacks_creates_langsmith_and_langfuse(monkeypatch):
             "Cfg",
             (),
             {
-                "langsmith": type("LangSmithCfg", (), {"project": "smith-project"})(),
                 "langfuse": type(
                     "LangfuseCfg",
                     (),
@@ -75,23 +75,21 @@ def test_build_tracing_callbacks_creates_langsmith_and_langfuse(monkeypatch):
             },
         )(),
     )
-    monkeypatch.setattr(tracing_factory, "_create_langsmith_tracer", lambda cfg: FakeLangSmithTracer(project_name=cfg.project))
     monkeypatch.setattr(
         tracing_factory,
         "_create_langfuse_handler",
         lambda cfg: FakeLangfuseHandler(public_key=cfg.public_key),
     )
 
-    callbacks = tracing_factory.build_tracing_callbacks()
+    handler = tracing_factory.build_langfuse_handler()
 
-    assert len(callbacks) == 2
-    assert callbacks[0].project_name == "smith-project"
-    assert callbacks[1].public_key == "pk-lf-test"
+    assert handler is not None
+    assert handler.public_key == "pk-lf-test"
 
 
-def test_build_tracing_callbacks_raises_when_enabled_provider_fails(monkeypatch):
-    monkeypatch.setattr(tracing_factory, "get_enabled_tracing_providers", lambda: ["langfuse"])
+def test_build_langfuse_handler_raises_when_init_fails(monkeypatch):
     monkeypatch.setattr(tracing_factory, "validate_enabled_tracing_providers", lambda: None)
+    monkeypatch.setattr(tracing_factory, "get_enabled_tracing_providers", lambda: ["langfuse"])
     monkeypatch.setattr(
         tracing_factory,
         "get_tracing_config",
@@ -110,10 +108,10 @@ def test_build_tracing_callbacks_raises_when_enabled_provider_fails(monkeypatch)
     monkeypatch.setattr(tracing_factory, "_create_langfuse_handler", lambda cfg: (_ for _ in ()).throw(RuntimeError("boom")))
 
     with pytest.raises(RuntimeError, match="Langfuse tracing initialization failed"):
-        tracing_factory.build_tracing_callbacks()
+        tracing_factory.build_langfuse_handler()
 
 
-def test_build_tracing_callbacks_raises_for_explicitly_enabled_misconfigured_provider(monkeypatch):
+def test_build_langfuse_handler_raises_for_explicitly_enabled_misconfigured_provider(monkeypatch):
     from deerflow.config import tracing_config as tracing_module
 
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
@@ -122,7 +120,7 @@ def test_build_tracing_callbacks_raises_for_explicitly_enabled_misconfigured_pro
     tracing_module._tracing_config = None
 
     with pytest.raises(ValueError, match="LANGFUSE_PUBLIC_KEY"):
-        tracing_factory.build_tracing_callbacks()
+        tracing_factory.build_langfuse_handler()
 
 
 def test_create_langfuse_handler_initializes_client_before_handler(monkeypatch):

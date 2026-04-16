@@ -881,3 +881,44 @@ class TestReinforcementHint:
         prompt = model.ainvoke.await_args.args[0]
         assert "Explicit correction signals were detected" in prompt
         assert "Positive reinforcement signals were detected" in prompt
+
+
+def test_get_model_attaches_langfuse_callback_for_standalone_use(monkeypatch) -> None:
+    """Regression test for the standalone-tracing path.
+
+    ``MemoryUpdater`` runs on a background thread outside of any LangGraph
+    invocation, so it has no graph-level Langfuse handler. The model factory
+    must therefore attach the Langfuse callback directly to the model the
+    updater builds, otherwise memory-update LLM calls disappear from
+    Langfuse entirely (see PR #2001 review feedback)."""
+    from deerflow.models import factory as factory_module
+    import deerflow.tracing as tracing_module
+
+    sentinel_handler = object()
+
+    captured_kwargs: dict = {}
+
+    class _StubModel:
+        def __init__(self, **kwargs):
+            self.callbacks: list = []
+
+    def _fake_create_chat_model(**kwargs):
+        captured_kwargs.update(kwargs)
+        model = _StubModel()
+        # Mimic factory's standalone branch.
+        if kwargs.get("attach_tracing", True):
+            model.callbacks = [sentinel_handler]
+        return model
+
+    # Patch at the symbol the updater module imported, not the factory module.
+    from deerflow.agents.memory import updater as updater_module
+
+    monkeypatch.setattr(updater_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(tracing_module, "build_langfuse_handler", lambda: sentinel_handler)
+
+    updater = MemoryUpdater()
+    model = updater._get_model()
+
+    # Standalone caller — must NOT opt out of tracing.
+    assert captured_kwargs.get("attach_tracing", True) is True
+    assert sentinel_handler in model.callbacks

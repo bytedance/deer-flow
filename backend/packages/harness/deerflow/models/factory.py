@@ -4,7 +4,6 @@ from langchain.chat_models import BaseChatModel
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
-from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +29,28 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     return disable_kwargs
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, **kwargs) -> BaseChatModel:
+def create_chat_model(
+    name: str | None = None,
+    thinking_enabled: bool = False,
+    attach_tracing: bool = True,
+    **kwargs,
+) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
         name: The name of the model to create. If None, the first model in the config will be used.
+        thinking_enabled: Whether to enable extended thinking for supported models.
+        attach_tracing: Whether to attach tracing callbacks (e.g. Langfuse) directly to the
+            returned model. Defaults to ``True`` so that **standalone** callers — those that
+            invoke the model outside of a LangGraph run with a Langfuse-aware ``RunnableConfig``
+            (e.g. memory updater, title generation when called outside the graph, security
+            scanner, subagent executor, embedded client) — keep automatic Langfuse coverage.
+
+            Callers that already inject the Langfuse handler at the **graph invocation root**
+            (such as ``make_lead_agent``) MUST pass ``attach_tracing=False`` for any model they
+            build, otherwise model-level callbacks would form a separate root callback manager
+            and break trace nesting (every LLM call would become its own root trace instead of
+            a child span of the agent run).
 
     Returns:
         A chat model instance.
@@ -115,9 +131,23 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
 
     model_instance = model_class(**{**model_settings_from_config, **kwargs})
 
-    callbacks = build_tracing_callbacks()
-    if callbacks:
-        existing_callbacks = model_instance.callbacks or []
-        model_instance.callbacks = [*existing_callbacks, *callbacks]
-        logger.debug(f"Tracing attached to model '{name}' with providers={len(callbacks)}")
+    # Attach tracing callbacks (Langfuse) for standalone callers. Graph callers
+    # that wire Langfuse at the invocation root (see ``make_lead_agent``) opt
+    # out via ``attach_tracing=False`` so that model-level callbacks do not
+    # form a separate root callback manager and break trace nesting. LangSmith
+    # is auto-injected by langchain-core when ``LANGSMITH_TRACING`` is set and
+    # therefore needs no wiring here.
+    if attach_tracing:
+        from deerflow.tracing import build_langfuse_handler
+
+        try:
+            handler = build_langfuse_handler()
+        except Exception:  # pragma: no cover - defensive: never fail model creation on tracing init
+            logger.warning("Failed to build Langfuse handler for model '%s'; continuing without tracing", name, exc_info=True)
+            handler = None
+        if handler is not None:
+            existing_callbacks = list(model_instance.callbacks or [])
+            if handler not in existing_callbacks:
+                model_instance.callbacks = [*existing_callbacks, handler]
+            logger.debug("Langfuse callback attached to standalone model '%s'", name)
     return model_instance

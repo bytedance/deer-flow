@@ -91,7 +91,7 @@ class TestTitleMiddlewareCoreLogic:
         title = result["title"]
 
         assert title == "短标题"
-        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False)
+        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False, attach_tracing=False)
         model.ainvoke.assert_awaited_once()
 
     def test_generate_title_normalizes_structured_message_content(self, monkeypatch):

@@ -72,10 +72,9 @@ class FakeChatModel(BaseChatModel):
 
 
 def _patch_factory(monkeypatch, app_config: AppConfig, model_class=FakeChatModel):
-    """Patch get_app_config, resolve_class, and tracing for isolated unit tests."""
+    """Patch get_app_config and resolve_class for isolated unit tests."""
     monkeypatch.setattr(factory_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: model_class)
-    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
 
 
 # ---------------------------------------------------------------------------
@@ -97,21 +96,69 @@ def test_uses_first_model_when_name_is_none(monkeypatch):
 def test_raises_when_model_not_found(monkeypatch):
     cfg = _make_app_config([_make_model("only-model")])
     monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
-    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
 
     with pytest.raises(ValueError, match="ghost-model"):
         factory_module.create_chat_model(name="ghost-model")
 
 
-def test_appends_all_tracing_callbacks(monkeypatch):
+def test_attaches_langfuse_callback_for_standalone_callers(monkeypatch):
+    """Standalone callers (memory updater, security scanner, subagent executor,
+    embedded client, etc.) invoke models outside a LangGraph run, so they have
+    no graph-level Langfuse handler. ``create_chat_model`` must attach the
+    Langfuse callback directly to the model in that case so those flows still
+    appear in Langfuse instead of being silently dropped."""
     cfg = _make_app_config([_make_model("alpha")])
     _patch_factory(monkeypatch, cfg)
-    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: ["smith-callback", "langfuse-callback"])
+
+    sentinel_handler = object()
+    monkeypatch.setattr(factory_module, "build_langfuse_handler", lambda: sentinel_handler, raising=False)
+    # Also patch via the import path used inside the function body.
+    import deerflow.tracing as tracing_module
+
+    monkeypatch.setattr(tracing_module, "build_langfuse_handler", lambda: sentinel_handler)
 
     FakeChatModel.captured_kwargs = {}
     model = factory_module.create_chat_model(name="alpha")
 
-    assert model.callbacks == ["smith-callback", "langfuse-callback"]
+    assert sentinel_handler in (model.callbacks or [])
+
+
+def test_attach_tracing_false_skips_callback_for_graph_callers(monkeypatch):
+    """Graph callers (``make_lead_agent``, title middleware running inside the
+    graph) inject Langfuse at the invocation root. They MUST opt out of
+    model-level tracing — otherwise the model would form a separate root
+    callback manager and break trace nesting."""
+    cfg = _make_app_config([_make_model("alpha")])
+    _patch_factory(monkeypatch, cfg)
+
+    sentinel_handler = object()
+    import deerflow.tracing as tracing_module
+
+    monkeypatch.setattr(tracing_module, "build_langfuse_handler", lambda: sentinel_handler)
+
+    FakeChatModel.captured_kwargs = {}
+    model = factory_module.create_chat_model(name="alpha", attach_tracing=False)
+
+    assert not getattr(model, "callbacks", None)
+
+
+def test_create_chat_model_survives_tracing_init_failure(monkeypatch):
+    """A failure inside ``build_langfuse_handler`` must not break model creation
+    for standalone callers — tracing is best-effort, model availability is not."""
+    cfg = _make_app_config([_make_model("alpha")])
+    _patch_factory(monkeypatch, cfg)
+
+    def _boom():
+        raise RuntimeError("langfuse unreachable")
+
+    import deerflow.tracing as tracing_module
+
+    monkeypatch.setattr(tracing_module, "build_langfuse_handler", _boom)
+
+    FakeChatModel.captured_kwargs = {}
+    model = factory_module.create_chat_model(name="alpha")
+
+    assert not getattr(model, "callbacks", None)
 
 
 # ---------------------------------------------------------------------------

@@ -9,12 +9,6 @@ from deerflow.config import (
 )
 
 
-def _create_langsmith_tracer(config) -> Any:
-    from langchain_core.tracers.langchain import LangChainTracer
-
-    return LangChainTracer(project_name=config.project)
-
-
 def _create_langfuse_handler(config) -> Any:
     from langfuse import Langfuse
     from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
@@ -29,26 +23,27 @@ def _create_langfuse_handler(config) -> Any:
     return LangfuseCallbackHandler(public_key=config.public_key)
 
 
-def build_tracing_callbacks() -> list[Any]:
-    """Build callbacks for all explicitly enabled tracing providers."""
+def build_langfuse_handler() -> Any | None:
+    """Build a Langfuse LangChain CallbackHandler if Langfuse tracing is enabled.
+
+    Returns ``None`` when Langfuse is not configured. Raises ``ValueError`` via
+    ``validate_enabled_tracing_providers()`` when a tracing provider is
+    explicitly enabled but its required environment variables are missing.
+    Raises ``RuntimeError`` when Langfuse is enabled and configured but the
+    ``CallbackHandler`` construction itself fails (e.g. unreachable host or
+    incompatible ``langfuse`` package version).
+
+    LangSmith is intentionally not handled here: when ``LANGSMITH_TRACING`` is
+    set, ``langchain_core.callbacks.manager`` auto-injects ``LangChainTracer``
+    into the root callback manager of every run, so it does not need an
+    application-level callback wiring.
+    """
     validate_enabled_tracing_providers()
-    enabled_providers = get_enabled_tracing_providers()
-    if not enabled_providers:
-        return []
+    if "langfuse" not in get_enabled_tracing_providers():
+        return None
 
     tracing_config = get_tracing_config()
-    callbacks: list[Any] = []
-
-    for provider in enabled_providers:
-        if provider == "langsmith":
-            try:
-                callbacks.append(_create_langsmith_tracer(tracing_config.langsmith))
-            except Exception as exc:  # pragma: no cover - exercised via tests with monkeypatch
-                raise RuntimeError(f"LangSmith tracing initialization failed: {exc}") from exc
-        elif provider == "langfuse":
-            try:
-                callbacks.append(_create_langfuse_handler(tracing_config.langfuse))
-            except Exception as exc:  # pragma: no cover - exercised via tests with monkeypatch
-                raise RuntimeError(f"Langfuse tracing initialization failed: {exc}") from exc
-
-    return callbacks
+    try:
+        return _create_langfuse_handler(tracing_config.langfuse)
+    except Exception as exc:  # pragma: no cover - exercised via tests with monkeypatch
+        raise RuntimeError(f"Langfuse tracing initialization failed: {exc}") from exc

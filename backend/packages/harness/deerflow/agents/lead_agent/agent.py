@@ -22,6 +22,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
+from deerflow.tracing import build_langfuse_handler
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +62,11 @@ def _create_summarization_middleware() -> DeerFlowSummarizationMiddleware | None
 
     # Prepare model parameter
     if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False)
+        model = create_chat_model(name=config.model_name, thinking_enabled=False, attach_tracing=False)
     else:
         # Use a lightweight model for summarization to save costs
         # Falls back to default model if not explicitly specified
-        model = create_chat_model(thinking_enabled=False)
+        model = create_chat_model(thinking_enabled=False, attach_tracing=False)
 
     # Prepare kwargs
     kwargs = {
@@ -335,10 +336,26 @@ def make_lead_agent(config: RunnableConfig):
         }
     )
 
+    # Inject Langfuse callback at the root invocation config so the entire
+    # LangGraph run becomes a single Langfuse trace and all node / LLM / tool
+    # calls nest as child spans. LangSmith needs no wiring here — langchain-core
+    # auto-injects LangChainTracer when LANGSMITH_TRACING is set.
+    #
+    # Note: ``make_lead_agent`` is called once per request with a fresh config
+    # dict, so we do not guard against duplicate injection — each invocation
+    # starts clean.
+    langfuse_handler = build_langfuse_handler()
+    if langfuse_handler is not None:
+        existing_callbacks = config.get("callbacks") or []
+        if not isinstance(existing_callbacks, list):
+            existing_callbacks = list(existing_callbacks)
+        config["callbacks"] = [*existing_callbacks, langfuse_handler]
+        logger.info("Langfuse tracing callback attached at graph invocation root")
+
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
+            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
             middleware=_build_middlewares(config, model_name=model_name),
             system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
@@ -347,7 +364,7 @@ def make_lead_agent(config: RunnableConfig):
 
     # Default lead agent (unchanged behavior)
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
+        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, attach_tracing=False),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
         system_prompt=apply_prompt_template(
