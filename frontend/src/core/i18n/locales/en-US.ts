@@ -298,9 +298,13 @@ export const enUS: Translations = {
   // Token Usage
   tokenUsage: {
     title: "Token Usage",
+    label: "Tokens",
     input: "Input",
     output: "Output",
     total: "Total",
+    unavailable:
+      "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
+    unavailableShort: "No usage returned",
   },
 
   // Shortcuts

@@ -9,5 +9,10 @@ export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
     enabled,
     refetchOnWindowFocus: false,
   });
-  return { models: data ?? [], isLoading, error };
+  return {
+    models: data?.models ?? [],
+    tokenUsageEnabled: data?.token_usage.enabled ?? false,
+    isLoading,
+    error,
+  };
 }

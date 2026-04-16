@@ -284,9 +284,13 @@ export const zhCN: Translations = {
   // Token Usage
   tokenUsage: {
     title: "Token 用量",
+    label: "Tokens",
     input: "输入",
     output: "输出",
     total: "总计",
+    unavailable:
+      "暂无 Token 用量。只有模型成功返回且供应商提供 usage_metadata 时才会显示。",
+    unavailableShort: "未返回用量",
   },
 
   // Shortcuts
