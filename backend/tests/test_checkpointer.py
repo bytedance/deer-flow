@@ -150,6 +150,79 @@ class TestGetCheckpointer:
         mock_saver_cls.from_conn_string.assert_called_once()
         mock_saver_instance.setup.assert_called_once()
 
+    def test_sqlite_creates_parent_dir(self):
+        """Sync SQLite checkpointer should call ensure_sqlite_parent_dir before connecting.
+
+        This mirrors the async checkpointer's behaviour and prevents
+        'sqlite3.OperationalError: unable to open database file' when the
+        parent directory for the database file does not yet exist (e.g. when
+        using the harness package from an external virtualenv where the
+        .deer-flow directory has not been created).
+        """
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "relative/test.db"})
+
+        mock_saver_instance = MagicMock()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string = MagicMock(return_value=mock_cm)
+
+        mock_module = MagicMock()
+        mock_module.SqliteSaver = mock_saver_cls
+
+        with (
+            patch.dict(sys.modules, {"langgraph.checkpoint.sqlite": mock_module}),
+            patch("deerflow.agents.checkpointer.provider.ensure_sqlite_parent_dir") as mock_ensure,
+            patch(
+                "deerflow.agents.checkpointer.provider.resolve_sqlite_conn_str",
+                return_value="/tmp/resolved/relative/test.db",
+            ),
+        ):
+            reset_checkpointer()
+            cp = get_checkpointer()
+
+        assert cp is mock_saver_instance
+        mock_ensure.assert_called_once_with("/tmp/resolved/relative/test.db")
+        mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/resolved/relative/test.db")
+
+    def test_sqlite_ensure_parent_dir_before_connect(self):
+        """ensure_sqlite_parent_dir must be called before from_conn_string."""
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "relative/test.db"})
+
+        call_order = []
+
+        mock_saver_instance = MagicMock()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string = MagicMock(side_effect=lambda *a, **kw: (call_order.append("connect"), mock_cm)[1])
+
+        mock_module = MagicMock()
+        mock_module.SqliteSaver = mock_saver_cls
+
+        def record_ensure(*a, **kw):
+            call_order.append("ensure")
+
+        with (
+            patch.dict(sys.modules, {"langgraph.checkpoint.sqlite": mock_module}),
+            patch(
+                "deerflow.agents.checkpointer.provider.ensure_sqlite_parent_dir",
+                side_effect=record_ensure,
+            ),
+            patch(
+                "deerflow.agents.checkpointer.provider.resolve_sqlite_conn_str",
+                return_value="/tmp/resolved/relative/test.db",
+            ),
+        ):
+            reset_checkpointer()
+            get_checkpointer()
+
+        assert call_order == ["ensure", "connect"]
+
     def test_postgres_creates_saver(self):
         """Postgres checkpointer is created when packages are available."""
         load_checkpointer_config_from_dict({"type": "postgres", "connection_string": "postgresql://localhost/db"})
