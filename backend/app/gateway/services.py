@@ -301,9 +301,16 @@ async def start_run(
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
     context = getattr(body, "context", None)
-    if context:
-        configurable = config.setdefault("configurable", {})
-        configurable.update({k: v for k, v in body.context.items() if k in _CONTEXT_CONFIGURABLE_KEYS})
+    if context and isinstance(context, dict):
+        agent_keys = {k: v for k, v in context.items() if k in _CONTEXT_CONFIGURABLE_KEYS}
+        if "context" in config:
+            if isinstance(config["context"], dict):
+                for k, v in agent_keys.items():
+                    config["context"].setdefault(k, v)
+        else:
+            configurable = config.setdefault("configurable", {})
+            for k, v in agent_keys.items():
+                configurable.setdefault(k, v)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
