@@ -42,9 +42,10 @@ _CONTEXT_CONFIGURABLE_KEYS = frozenset(
         "is_plan_mode",
         "subagent_enabled",
         "max_concurrent_subagents",
-    }
+        "agent_name",
+        "is_bootstrap",
+     }
 )
-
 
 # ---------------------------------------------------------------------------
 # SSE formatting
