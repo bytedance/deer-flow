@@ -35,7 +35,7 @@ pnpm dev
 # The app will be available at http://localhost:3000
 ```
 
-### Build
+### Build & Test
 
 ```bash
 # Type check
@@ -49,6 +49,9 @@ pnpm format:write
 
 # Lint
 pnpm lint
+
+# Run unit tests
+pnpm test
 
 # Build for production
 pnpm build
@@ -82,6 +85,8 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:2024"
 ## Project Structure
 
 ```
+tests/
+└── unit/                   # Unit tests (mirrors src/ layout)
 src/
 ├── app/                    # Next.js App Router pages
 │   ├── api/                # API routes
@@ -119,6 +124,7 @@ src/
 | `pnpm dev`          | Start development server with Turbopack |
 | `pnpm build`        | Build for production                    |
 | `pnpm start`        | Start production server                 |
+| `pnpm test`         | Run unit tests with Vitest              |
 | `pnpm format`       | Check formatting with Prettier          |
 | `pnpm format:write` | Apply formatting with Prettier          |
 | `pnpm lint`         | Run ESLint                              |
