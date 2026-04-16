@@ -13,7 +13,6 @@ import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
-import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import type { AgentThread, AgentThreadState } from "./types";
@@ -336,17 +335,43 @@ export function useThreadStream({
       sendInFlightRef.current = true;
 
       const text = message.text.trim();
+      const messageFiles = message.files ?? [];
+      const uploadedFileInfoByIndex = messageFiles.map((file) =>
+        file.upload?.status === "uploaded" && file.upload.info
+          ? file.upload.info
+          : undefined,
+      );
+      const pendingFilePartsWithIndex = messageFiles
+        .map((file, index) => ({ file, index }))
+        .filter(({ file }) => !file.upload?.info);
 
       // Capture current count before showing optimistic messages
       prevMsgCountRef.current = thread.messages.length;
 
       // Build optimistic files list with uploading status
-      const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
-        (f) => ({
-          filename: f.filename ?? "",
-          size: 0,
-          status: "uploading" as const,
-        }),
+      const optimisticFiles: FileInMessage[] = messageFiles.map(
+        (file, index) => {
+          const uploadedInfo = uploadedFileInfoByIndex[index];
+          if (uploadedInfo) {
+            return {
+              filename: file.filename ?? uploadedInfo.filename,
+              size: uploadedInfo.size,
+              path: uploadedInfo.virtual_path,
+              stored_filename: uploadedInfo.filename,
+              markdown_file: uploadedInfo.markdown_file,
+              status: "uploaded" as const,
+              progress: 100,
+            };
+          }
+
+          return {
+            filename: file.filename ?? "",
+            size: 0,
+            status: "uploading" as const,
+            progress: file.upload?.progress ?? 0,
+            stored_filename: file.upload?.storedFilename,
+          };
+        },
       );
 
       const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
@@ -365,7 +390,7 @@ export function useThreadStream({
         });
       }
 
-      if (optimisticFiles.length > 0 && !hideFromUI) {
+      if (pendingFilePartsWithIndex.length > 0 && !hideFromUI) {
         // Mock AI message while files are being uploaded
         newOptimistic.push({
           type: "ai",
@@ -383,15 +408,13 @@ export function useThreadStream({
         _handleOnStart(threadId);
       }
 
-      let uploadedFileInfo: UploadedFileInfo[] = [];
-
       try {
         // Upload files first if any
-        if (message.files && message.files.length > 0) {
+        if (pendingFilePartsWithIndex.length > 0) {
           setIsUploading(true);
           try {
-            const filePromises = message.files.map((fileUIPart) =>
-              promptInputFilePartToFile(fileUIPart),
+            const filePromises = pendingFilePartsWithIndex.map(({ file }) =>
+              promptInputFilePartToFile(file),
             );
 
             const conversionResults = await Promise.all(filePromises);
@@ -411,25 +434,132 @@ export function useThreadStream({
             }
 
             if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
-              uploadedFileInfo = uploadResponse.files;
+              const totalFileBytes = files.reduce(
+                (sum, file) => sum + Math.max(file.size, 0),
+                0,
+              );
+              const fileByteOffsets = files.reduce<number[]>(
+                (offsets, file, index) => {
+                  if (index === 0) {
+                    offsets.push(0);
+                    return offsets;
+                  }
+
+                  const previousOffset = offsets[index - 1] ?? 0;
+                  const previousSize = Math.max(files[index - 1]?.size ?? 0, 0);
+                  offsets.push(previousOffset + previousSize);
+                  return offsets;
+                },
+                [],
+              );
+
+              const uploadResponse = await uploadFiles(threadId, files, {
+                onProgress: (progress) => {
+                  if (hideFromUI) {
+                    return;
+                  }
+
+                  const fileProgresses =
+                    totalFileBytes > 0
+                      ? files.map((file, index) => {
+                          const approximateLoadedBytes = Math.round(
+                            (progress / 100) * totalFileBytes,
+                          );
+                          const fileOffset = fileByteOffsets[index] ?? 0;
+                          const fileSize = Math.max(file.size, 0);
+
+                          if (fileSize === 0) {
+                            return progress > 0 ? 100 : 0;
+                          }
+
+                          const loadedForFile = Math.min(
+                            fileSize,
+                            Math.max(0, approximateLoadedBytes - fileOffset),
+                          );
+
+                          return Math.min(
+                            100,
+                            Math.max(
+                              0,
+                              Math.round((loadedForFile / fileSize) * 100),
+                            ),
+                          );
+                        })
+                      : files.map(() => progress);
+
+                  setOptimisticMessages((messages) => {
+                    const humanMessage = messages[0];
+                    if (!humanMessage || humanMessage.type !== "human") {
+                      return messages;
+                    }
+
+                    const existingFiles =
+                      (humanMessage.additional_kwargs?.files as
+                        | FileInMessage[]
+                        | undefined) ?? [];
+
+                    return [
+                      {
+                        ...humanMessage,
+                        additional_kwargs: {
+                          ...humanMessage.additional_kwargs,
+                          files: existingFiles.map((file, index) => {
+                            if (file.status === "uploaded") {
+                              return {
+                                ...file,
+                                status: "uploaded" as const,
+                                progress: 100,
+                              };
+                            }
+
+                            return {
+                              ...file,
+                              status: "uploading" as const,
+                              progress: fileProgresses[index] ?? progress,
+                            };
+                          }),
+                        },
+                      },
+                      ...messages.slice(1),
+                    ];
+                  });
+                },
+              });
+              uploadResponse.files.forEach((info, uploadIndex) => {
+                const originalIndex =
+                  pendingFilePartsWithIndex[uploadIndex]?.index ?? uploadIndex;
+                uploadedFileInfoByIndex[originalIndex] = info;
+              });
 
               // Update optimistic human message with uploaded status + paths
-              const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                (info) => ({
-                  filename: info.filename,
+              const uploadedFiles: FileInMessage[] = messageFiles.reduce<
+                FileInMessage[]
+              >((acc, file, index) => {
+                const info = uploadedFileInfoByIndex[index];
+                if (!info) {
+                  return acc;
+                }
+                acc.push({
+                  filename: file.filename ?? info.filename,
                   size: info.size,
                   path: info.virtual_path,
+                  stored_filename: info.filename,
+                  markdown_file: info.markdown_file,
                   status: "uploaded" as const,
-                }),
-              );
+                  progress: 100,
+                });
+                return acc;
+              }, []);
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
                   const humanMessage: Message = messages[0];
                   return [
                     {
                       ...humanMessage,
-                      additional_kwargs: { files: uploadedFiles },
+                      additional_kwargs: {
+                        ...humanMessage.additional_kwargs,
+                        files: uploadedFiles,
+                      },
                     },
                     ...messages.slice(1),
                   ];
@@ -451,14 +581,23 @@ export function useThreadStream({
         }
 
         // Build files metadata for submission (included in additional_kwargs)
-        const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
-          (info) => ({
-            filename: info.filename,
+        const filesForSubmit: FileInMessage[] = messageFiles.reduce<
+          FileInMessage[]
+        >((acc, file, index) => {
+          const info = uploadedFileInfoByIndex[index];
+          if (!info) {
+            return acc;
+          }
+          acc.push({
+            filename: file.filename ?? info.filename,
             size: info.size,
             path: info.virtual_path,
+            stored_filename: info.filename,
+            markdown_file: info.markdown_file,
             status: "uploaded" as const,
-          }),
-        );
+          });
+          return acc;
+        }, []);
 
         await thread.submit(
           {

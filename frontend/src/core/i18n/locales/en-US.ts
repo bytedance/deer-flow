@@ -42,6 +42,7 @@ export const enUS: Translations = {
     preview: "Preview",
     cancel: "Cancel",
     save: "Save",
+    retry: "Retry",
     install: "Install",
     create: "Create",
     import: "Import",
@@ -284,6 +285,7 @@ export const enUS: Translations = {
   uploads: {
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
+    uploadFailed: "Upload failed",
   },
 
   subtasks: {

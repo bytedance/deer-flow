@@ -339,7 +339,10 @@ export interface FileInMessage {
   filename: string;
   size: number; // bytes
   path?: string; // virtual path, may not be set during upload
+  stored_filename?: string; // actual stored basename used for backend resolution
+  markdown_file?: string; // generated markdown sidecar for convertible uploads
   status?: "uploading" | "uploaded";
+  progress?: number; // 0-100, only used for optimistic upload UI
 }
 
 /**

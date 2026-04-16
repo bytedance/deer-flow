@@ -29,6 +29,18 @@ export interface ListFilesResponse {
   count: number;
 }
 
+export interface UploadFilesOptions {
+  onProgress?: (progress: number) => void;
+  signal?: AbortSignal;
+}
+
+export class UploadedFileNotFoundError extends Error {
+  constructor(message = "Uploaded file already removed") {
+    super(message);
+    this.name = "UploadedFileNotFoundError";
+  }
+}
+
 async function readErrorDetail(
   response: Response,
   fallback: string,
@@ -43,6 +55,7 @@ async function readErrorDetail(
 export async function uploadFiles(
   threadId: string,
   files: File[],
+  options?: UploadFilesOptions,
 ): Promise<UploadResponse> {
   const formData = new FormData();
 
@@ -50,19 +63,92 @@ export async function uploadFiles(
     formData.append("files", file);
   });
 
-  const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads`,
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
+  return new Promise<UploadResponse>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    const abortError = new DOMException("Upload aborted", "AbortError");
 
-  if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Upload failed"));
-  }
+    const finalize = () => {
+      settled = true;
+      options?.signal?.removeEventListener("abort", handleAbort);
+    };
 
-  return response.json();
+    const rejectOnce = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      finalize();
+      reject(error);
+    };
+
+    const resolveOnce = (payload: UploadResponse) => {
+      if (settled) {
+        return;
+      }
+      finalize();
+      resolve(payload);
+    };
+
+    const handleAbort = () => {
+      try {
+        xhr.abort();
+      } catch {
+        // Best-effort: XHR may already be complete.
+      }
+      rejectOnce(abortError);
+    };
+
+    if (options?.signal?.aborted) {
+      rejectOnce(abortError);
+      return;
+    }
+
+    xhr.open("POST", `${getBackendBaseURL()}/api/threads/${threadId}/uploads`);
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        return;
+      }
+      const progress = Math.min(
+        100,
+        Math.max(0, Math.round((event.loaded / event.total) * 100)),
+      );
+      options?.onProgress?.(progress);
+    };
+
+    xhr.onerror = () => {
+      rejectOnce(new Error("Upload failed"));
+    };
+
+    xhr.onabort = () => {
+      rejectOnce(abortError);
+    };
+
+    xhr.onload = () => {
+      const responseText = xhr.responseText || "";
+      let payload: UploadResponse | { detail?: string } | undefined;
+      try {
+        payload = responseText
+          ? (JSON.parse(responseText) as UploadResponse | { detail?: string })
+          : undefined;
+      } catch {
+        payload = undefined;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const detail =
+          payload && "detail" in payload ? payload.detail : undefined;
+        rejectOnce(new Error(detail ?? "Upload failed"));
+        return;
+      }
+
+      options?.onProgress?.(100);
+      resolveOnce(payload as UploadResponse);
+    };
+
+    options?.signal?.addEventListener("abort", handleAbort, { once: true });
+    xhr.send(formData);
+  });
 }
 
 /**
@@ -92,13 +178,16 @@ export async function deleteUploadedFile(
   filename: string,
 ): Promise<{ success: boolean; message: string }> {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${filename}`,
+    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${encodeURIComponent(filename)}`,
     {
       method: "DELETE",
     },
   );
 
   if (!response.ok) {
+    if (response.status === 404) {
+      throw new UploadedFileNotFoundError();
+    }
     throw new Error(await readErrorDetail(response, "Failed to delete file"));
   }
 

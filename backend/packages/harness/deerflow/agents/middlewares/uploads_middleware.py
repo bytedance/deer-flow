@@ -149,8 +149,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """Extract file info from message additional_kwargs.files.
 
         The frontend sends uploaded file metadata in additional_kwargs.files
-        after a successful upload. Each entry has: filename, size (bytes),
-        path (virtual path), status.
+        after a successful upload. Each entry has: filename (display name),
+        size (bytes), path (virtual path), status, and optionally
+        stored_filename (actual basename on disk) and markdown_file.
 
         Args:
             message: The human message to inspect.
@@ -169,19 +170,45 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if not isinstance(f, dict):
                 continue
             filename = f.get("filename") or ""
+            stored_filename = f.get("stored_filename") or filename
+            markdown_file = f.get("markdown_file")
             if not filename or Path(filename).name != filename:
                 continue
-            if uploads_dir is not None and not (uploads_dir / filename).is_file():
+            if not stored_filename or Path(stored_filename).name != stored_filename:
+                continue
+            if markdown_file and Path(markdown_file).name != markdown_file:
+                markdown_file = None
+            if uploads_dir is not None and not (uploads_dir / stored_filename).is_file():
                 continue
             files.append(
                 {
                     "filename": filename,
+                    "stored_filename": stored_filename,
+                    "markdown_file": markdown_file,
                     "size": int(f.get("size") or 0),
-                    "path": f"/mnt/user-data/uploads/{filename}",
+                    "path": f"/mnt/user-data/uploads/{stored_filename}",
                     "extension": Path(filename).suffix,
                 }
             )
         return files if files else None
+
+    def _collect_uploaded_file_metadata(self, messages: list) -> tuple[dict[str, str], set[str]]:
+        """Collect display-name mappings and generated markdown sidecars from messages."""
+        stored_name_to_display_name: dict[str, str] = {}
+        generated_markdown_files: set[str] = set()
+
+        for message in messages:
+            if not isinstance(message, HumanMessage):
+                continue
+            known_files = self._files_from_kwargs(message, uploads_dir=None) or []
+            for file in known_files:
+                stored_filename = file["stored_filename"]
+                stored_name_to_display_name.setdefault(stored_filename, file["filename"])
+                markdown_file = file.get("markdown_file")
+                if markdown_file:
+                    generated_markdown_files.add(markdown_file)
+
+        return stored_name_to_display_name, generated_markdown_files
 
     @override
     def before_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
@@ -223,23 +250,29 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 pass  # get_config() raises outside a runnable context (e.g. unit tests)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
+        stored_name_to_display_name, historical_markdown_files = self._collect_uploaded_file_metadata(messages)
+
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
 
         # Collect historical files from the uploads directory (all except the new ones)
-        new_filenames = {f["filename"] for f in new_files}
+        new_stored_filenames = {f["stored_filename"] for f in new_files}
+        current_markdown_files = {f["markdown_file"] for f in new_files if f.get("markdown_file")}
+        skipped_historical_filenames = new_stored_filenames | historical_markdown_files | current_markdown_files
         historical_files: list[dict] = []
         if uploads_dir and uploads_dir.exists():
             for file_path in sorted(uploads_dir.iterdir()):
-                if file_path.is_file() and file_path.name not in new_filenames:
+                if file_path.is_file() and file_path.name not in skipped_historical_filenames:
                     stat = file_path.stat()
                     outline, preview = _extract_outline_for_file(file_path)
+                    display_name = stored_name_to_display_name.get(file_path.name, file_path.name)
                     historical_files.append(
                         {
-                            "filename": file_path.name,
+                            "filename": display_name,
+                            "stored_filename": file_path.name,
                             "size": stat.st_size,
                             "path": f"/mnt/user-data/uploads/{file_path.name}",
-                            "extension": file_path.suffix,
+                            "extension": Path(display_name).suffix or file_path.suffix,
                             "outline": outline,
                             "outline_preview": preview,
                         }
@@ -248,7 +281,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         # Attach outlines to new files as well
         if uploads_dir:
             for file in new_files:
-                phys_path = uploads_dir / file["filename"]
+                phys_path = uploads_dir / file["stored_filename"]
                 outline, preview = _extract_outline_for_file(phys_path)
                 file["outline"] = outline
                 file["outline_preview"] = preview

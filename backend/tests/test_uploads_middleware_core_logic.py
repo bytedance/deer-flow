@@ -104,7 +104,50 @@ class TestFilesFromKwargs:
         assert result is not None
         assert len(result) == 1
         assert result[0]["filename"] == "data.csv"
+        assert result[0]["stored_filename"] == "data.csv"
         assert result[0]["path"] == "/mnt/user-data/uploads/data.csv"
+
+    def test_prefers_stored_filename_for_disk_lookup_and_path(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "draft_abc123.pdf").write_text("pdf")
+        msg = _human(
+            "hi",
+            files=[
+                {
+                    "filename": "Quarterly Report.pdf",
+                    "stored_filename": "draft_abc123.pdf",
+                    "size": 3,
+                    "path": "/mnt/user-data/uploads/draft_abc123.pdf",
+                }
+            ],
+        )
+        result = mw._files_from_kwargs(msg, uploads_dir)
+        assert result is not None
+        assert result[0]["filename"] == "Quarterly Report.pdf"
+        assert result[0]["stored_filename"] == "draft_abc123.pdf"
+        assert result[0]["markdown_file"] is None
+        assert result[0]["path"] == "/mnt/user-data/uploads/draft_abc123.pdf"
+
+    def test_keeps_markdown_file_metadata_when_present(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "draft_abc123.pdf").write_text("pdf")
+        msg = _human(
+            "hi",
+            files=[
+                {
+                    "filename": "Quarterly Report.pdf",
+                    "stored_filename": "draft_abc123.pdf",
+                    "markdown_file": "draft_abc123.md",
+                    "size": 3,
+                    "path": "/mnt/user-data/uploads/draft_abc123.pdf",
+                }
+            ],
+        )
+        result = mw._files_from_kwargs(msg, uploads_dir)
+        assert result is not None
+        assert result[0]["markdown_file"] == "draft_abc123.md"
 
     def test_skips_nonexistent_but_accepts_existing_in_mixed_list(self, tmp_path):
         mw = _middleware(tmp_path)
@@ -288,6 +331,8 @@ class TestBeforeAgent:
         assert result["uploaded_files"] == [
             {
                 "filename": "notes.txt",
+                "stored_filename": "notes.txt",
+                "markdown_file": None,
                 "size": 5,
                 "path": "/mnt/user-data/uploads/notes.txt",
                 "extension": ".txt",
@@ -295,6 +340,74 @@ class TestBeforeAgent:
                 "outline_preview": [],
             }
         ]
+
+    def test_stored_filename_does_not_reappear_as_historical_and_still_loads_outline(
+        self, tmp_path
+    ):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "draft_abc123.pdf").write_bytes(b"%PDF fake")
+        (uploads_dir / "draft_abc123.md").write_text(
+            "# Executive Summary\n\nBody text.\n",
+            encoding="utf-8",
+        )
+
+        msg = _human(
+            "summarise",
+            files=[
+                {
+                    "filename": "Quarterly Report.pdf",
+                    "stored_filename": "draft_abc123.pdf",
+                    "markdown_file": "draft_abc123.md",
+                    "size": 9,
+                    "path": "/mnt/user-data/uploads/draft_abc123.pdf",
+                }
+            ],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Quarterly Report.pdf" in content
+        assert "draft_abc123.md" not in content
+        assert "/mnt/user-data/uploads/draft_abc123.pdf" in content
+        assert "previous messages" not in content
+        assert "Executive Summary" in content
+
+    def test_historical_files_keep_display_name_and_hide_generated_markdown_sidecars(
+        self, tmp_path
+    ):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "draft_abc123.pdf").write_bytes(b"%PDF fake")
+        (uploads_dir / "draft_abc123.md").write_text(
+            "# Executive Summary\n\nBody text.\n",
+            encoding="utf-8",
+        )
+
+        first = _human(
+            "summarise",
+            files=[
+                {
+                    "filename": "Quarterly Report.pdf",
+                    "stored_filename": "draft_abc123.pdf",
+                    "markdown_file": "draft_abc123.md",
+                    "size": 9,
+                    "path": "/mnt/user-data/uploads/draft_abc123.pdf",
+                }
+            ],
+        )
+        second = _human("follow-up question")
+
+        result = mw.before_agent(self._state(first, second), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "previous messages" in content
+        assert "Quarterly Report.pdf" in content
+        assert "- draft_abc123.pdf (" not in content
+        assert "draft_abc123.md" not in content
+        assert "/mnt/user-data/uploads/draft_abc123.pdf" in content
 
     def test_historical_files_from_uploads_dir_excluding_new(self, tmp_path):
         mw = _middleware(tmp_path)

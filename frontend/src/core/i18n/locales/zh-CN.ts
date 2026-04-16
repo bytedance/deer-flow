@@ -42,6 +42,7 @@ export const zhCN: Translations = {
     preview: "预览",
     cancel: "取消",
     save: "保存",
+    retry: "重试",
     install: "安装",
     create: "创建",
     import: "导入",
@@ -270,6 +271,7 @@ export const zhCN: Translations = {
   uploads: {
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",
+    uploadFailed: "上传失败",
   },
 
   subtasks: {
