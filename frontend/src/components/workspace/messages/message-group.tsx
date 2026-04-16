@@ -348,13 +348,15 @@ function ToolCall({
       description = t.toolCalls.writeFile;
     }
     const path: string | undefined = (args as { path: string })?.path;
+    
     if (
       isLoading &&
       isLast &&
       artifacts &&
       artifacts.autoOpen &&
       artifacts.autoSelect &&
-      path
+      path &&
+      !result
     ) {
       const artifactsContext = artifacts;
       setTimeout(() => {

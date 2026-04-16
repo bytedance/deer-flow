@@ -14,6 +14,7 @@ import {
   hasContent,
   hasPresentFiles,
   hasReasoning,
+  hasToolCalls,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
@@ -27,6 +28,7 @@ import { StreamingIndicator } from "../streaming-indicator";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
+import { MessageTokenUsageList } from "./message-token-usage";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
 
@@ -46,11 +48,13 @@ export function MessageList({
   threadId,
   thread,
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
+  tokenUsageEnabled = false,
 }: {
   className?: string;
   threadId: string;
   thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
+  tokenUsageEnabled?: boolean;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
@@ -73,6 +77,7 @@ export function MessageList({
                   message={msg}
                   isLoading={thread.isLoading}
                   threadId={threadId}
+                  tokenUsageEnabled={tokenUsageEnabled}
                 />
               );
             });
@@ -80,12 +85,18 @@ export function MessageList({
             const message = group.messages[0];
             if (message && hasContent(message)) {
               return (
-                <MarkdownContent
-                  key={group.id}
-                  content={extractContentFromMessage(message)}
-                  isLoading={thread.isLoading}
-                  rehypePlugins={rehypePlugins}
-                />
+                <div key={group.id} className="w-full">
+                  <MarkdownContent
+                    content={extractContentFromMessage(message)}
+                    isLoading={thread.isLoading}
+                    rehypePlugins={rehypePlugins}
+                  />
+                  <MessageTokenUsageList
+                    enabled={tokenUsageEnabled}
+                    isLoading={thread.isLoading}
+                    messages={group.messages}
+                  />
+                </div>
               );
             }
             return null;
@@ -108,6 +119,11 @@ export function MessageList({
                   />
                 )}
                 <ArtifactFileList files={files} threadId={threadId} />
+                <MessageTokenUsageList
+                  enabled={tokenUsageEnabled}
+                  isLoading={thread.isLoading}
+                  messages={group.messages}
+                />
               </div>
             );
           } else if (group.type === "assistant:subagent") {
@@ -217,15 +233,31 @@ export function MessageList({
                 className="relative z-1 flex flex-col gap-2"
               >
                 {results}
+                <MessageTokenUsageList
+                  enabled={tokenUsageEnabled}
+                  isLoading={thread.isLoading}
+                  messages={group.messages}
+                />
               </div>
             );
           }
+          const tokenUsageMessages = group.messages.filter(
+            (message) =>
+              message.type === "ai" &&
+              (hasToolCalls(message) ? true : !hasContent(message)),
+          );
           return (
-            <MessageGroup
-              key={"group-" + group.id}
-              messages={group.messages}
-              isLoading={thread.isLoading}
-            />
+            <div key={"group-" + group.id} className="w-full">
+              <MessageGroup
+                messages={group.messages}
+                isLoading={thread.isLoading}
+              />
+              <MessageTokenUsageList
+                enabled={tokenUsageEnabled}
+                isLoading={thread.isLoading}
+                messages={tokenUsageMessages}
+              />
+            </div>
           );
         })}
         {thread.isLoading && <StreamingIndicator className="my-4" />}
