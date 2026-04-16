@@ -298,6 +298,8 @@ async def start_run(
             "is_plan_mode",
             "subagent_enabled",
             "max_concurrent_subagents",
+            "agent_name",
+            "is_bootstrap",
         }
         configurable = config.setdefault("configurable", {})
         for key in _CONTEXT_CONFIGURABLE_KEYS:
@@ -345,8 +347,9 @@ async def sse_consumer(
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
     """
+    last_event_id = request.headers.get("Last-Event-ID")
     try:
-        async for entry in bridge.subscribe(record.run_id):
+        async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
                 break
 

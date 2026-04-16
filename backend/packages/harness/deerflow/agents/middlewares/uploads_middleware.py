@@ -10,8 +10,50 @@ from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.config.paths import Paths, get_paths
+from deerflow.utils.file_conversion import extract_outline
 
 logger = logging.getLogger(__name__)
+
+
+_OUTLINE_PREVIEW_LINES = 5
+
+
+def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
+    """Return the document outline and fallback preview for *file_path*.
+
+    Looks for a sibling ``<stem>.md`` file produced by the upload conversion
+    pipeline.
+
+    Returns:
+        (outline, preview) where:
+        - outline: list of ``{title, line}`` dicts (plus optional sentinel).
+          Empty when no headings are found or no .md exists.
+        - preview: first few non-empty lines of the .md, used as a content
+          anchor when outline is empty so the agent has some context.
+          Empty when outline is non-empty (no fallback needed).
+    """
+    md_path = file_path.with_suffix(".md")
+    if not md_path.is_file():
+        return [], []
+
+    outline = extract_outline(md_path)
+    if outline:
+        logger.debug("Extracted %d outline entries from %s", len(outline), file_path.name)
+        return outline, []
+
+    # outline is empty — read the first few non-empty lines as a content preview
+    preview: list[str] = []
+    try:
+        with md_path.open(encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped:
+                    preview.append(stripped)
+                if len(preview) >= _OUTLINE_PREVIEW_LINES:
+                    break
+    except Exception:
+        logger.debug("Failed to read preview lines from %s", md_path, exc_info=True)
+    return [], preview
 
 
 class UploadsMiddlewareState(AgentState):
@@ -39,12 +81,38 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         super().__init__()
         self._paths = Paths(base_dir) if base_dir else get_paths()
 
+    def _format_file_entry(self, file: dict, lines: list[str]) -> None:
+        """Append a single file entry (name, size, path, optional outline) to lines."""
+        size_kb = file["size"] / 1024
+        size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+        lines.append(f"- {file['filename']} ({size_str})")
+        lines.append(f"  Path: {file['path']}")
+        outline = file.get("outline") or []
+        if outline:
+            truncated = outline[-1].get("truncated", False)
+            visible = [e for e in outline if not e.get("truncated")]
+            lines.append("  Document outline (use `read_file` with line ranges to read sections):")
+            for entry in visible:
+                lines.append(f"    L{entry['line']}: {entry['title']}")
+            if truncated:
+                lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further)")
+        else:
+            preview = file.get("outline_preview") or []
+            if preview:
+                lines.append("  No structural headings detected. Document begins with:")
+                for text in preview:
+                    lines.append(f"    > {text}")
+            lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
+        lines.append("")
+
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
         """Create a formatted message listing uploaded files.
 
         Args:
             new_files: Files uploaded in the current message.
             historical_files: Files uploaded in previous messages.
+                Each file dict may contain an optional ``outline`` key — a list of
+                ``{title, line}`` dicts extracted from the converted Markdown file.
 
         Returns:
             Formatted string inside <uploaded_files> tags.
@@ -55,25 +123,24 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         lines.append("")
         if new_files:
             for file in new_files:
-                size_kb = file["size"] / 1024
-                size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-                lines.append(f"- {file['filename']} ({size_str})")
-                lines.append(f"  Path: {file['path']}")
-                lines.append("")
+                self._format_file_entry(file, lines)
         else:
             lines.append("(empty)")
+            lines.append("")
 
         if historical_files:
             lines.append("The following files were uploaded in previous messages and are still available:")
             lines.append("")
             for file in historical_files:
-                size_kb = file["size"] / 1024
-                size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-                lines.append(f"- {file['filename']} ({size_str})")
-                lines.append(f"  Path: {file['path']}")
-                lines.append("")
+                self._format_file_entry(file, lines)
 
-        lines.append("You can read these files using the `read_file` tool with the paths shown above.")
+        lines.append("To work with these files:")
+        lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
+        lines.append("- Use `grep` to search for keywords when you are not sure which section to look at")
+        lines.append("  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).")
+        lines.append("- Use `glob` to find files by name pattern")
+        lines.append("  (e.g. `glob(pattern='**/*.md', path='/mnt/user-data/uploads/')`).")
+        lines.append("- Only fall back to web search if the file content is clearly insufficient to answer the question.")
         lines.append("</uploaded_files>")
 
         return "\n".join(lines)
@@ -147,6 +214,13 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         # Resolve uploads directory for existence checks
         thread_id = (runtime.context or {}).get("thread_id")
+        if thread_id is None:
+            try:
+                from langgraph.config import get_config
+
+                thread_id = get_config().get("configurable", {}).get("thread_id")
+            except RuntimeError:
+                pass  # get_config() raises outside a runnable context (e.g. unit tests)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
@@ -159,14 +233,25 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             for file_path in sorted(uploads_dir.iterdir()):
                 if file_path.is_file() and file_path.name not in new_filenames:
                     stat = file_path.stat()
+                    outline, preview = _extract_outline_for_file(file_path)
                     historical_files.append(
                         {
                             "filename": file_path.name,
                             "size": stat.st_size,
                             "path": f"/mnt/user-data/uploads/{file_path.name}",
                             "extension": file_path.suffix,
+                            "outline": outline,
+                            "outline_preview": preview,
                         }
                     )
+
+        # Attach outlines to new files as well
+        if uploads_dir:
+            for file in new_files:
+                phys_path = uploads_dir / file["filename"]
+                outline, preview = _extract_outline_for_file(phys_path)
+                file["outline"] = outline
+                file["outline_preview"] = preview
 
         if not new_files and not historical_files:
             return None
@@ -177,21 +262,25 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         files_message = self._create_files_message(new_files, historical_files)
 
         # Extract original content - handle both string and list formats
-        original_content = ""
-        if isinstance(last_message.content, str):
-            original_content = last_message.content
-        elif isinstance(last_message.content, list):
-            text_parts = []
-            for block in last_message.content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-            original_content = "\n".join(text_parts)
+        original_content = last_message.content
+        if isinstance(original_content, str):
+            # Simple case: string content, just prepend files message
+            updated_content = f"{files_message}\n\n{original_content}"
+        elif isinstance(original_content, list):
+            # Complex case: list content (multimodal), preserve all blocks
+            # Prepend files message as the first text block
+            files_block = {"type": "text", "text": f"{files_message}\n\n"}
+            # Keep all original blocks (including images)
+            updated_content = [files_block, *original_content]
+        else:
+            # Other types, preserve as-is
+            updated_content = original_content
 
         # Create new message with combined content.
         # Preserve additional_kwargs (including files metadata) so the frontend
         # can read structured file info from the streamed message.
         updated_message = HumanMessage(
-            content=f"{files_message}\n\n{original_content}",
+            content=updated_content,
             id=last_message.id,
             additional_kwargs=last_message.additional_kwargs,
         )

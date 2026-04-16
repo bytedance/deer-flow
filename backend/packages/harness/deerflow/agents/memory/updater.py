@@ -1,22 +1,35 @@
 """Memory updater for reading, writing, and updating memory data."""
 
+import asyncio
+import atexit
+import concurrent.futures
 import json
 import logging
 import math
 import re
 import uuid
-from datetime import datetime
+from collections.abc import Awaitable
 from typing import Any
 
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
-from deerflow.agents.memory.storage import create_empty_memory, get_memory_storage
+from deerflow.agents.memory.storage import (
+    create_empty_memory,
+    get_memory_storage,
+    utc_now_iso_z,
+)
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
+
+_SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="memory-updater-sync",
+)
+atexit.register(lambda: _SYNC_MEMORY_UPDATER_EXECUTOR.shutdown(wait=False))
 
 
 def _create_empty_memory() -> dict[str, Any]:
@@ -86,7 +99,7 @@ def create_memory_fact(
 
     normalized_category = category.strip() or "context"
     validated_confidence = _validate_confidence(confidence)
-    now = datetime.utcnow().isoformat() + "Z"
+    now = utc_now_iso_z()
     memory_data = get_memory_data(agent_name)
     updated_memory = dict(memory_data)
     facts = list(memory_data.get("facts", []))
@@ -203,6 +216,39 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
+def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
+    """Run an async memory update from sync code, including nested-loop contexts."""
+    handed_off = False
+
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(asyncio.run, coro)
+            handed_off = True
+            return future.result()
+
+        handed_off = True
+        return asyncio.run(coro)
+    except Exception:
+        if not handed_off:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.debug(
+                        "Failed to close un-awaited memory update coroutine",
+                        exc_info=True,
+                    )
+
+        logger.exception("Failed to run async memory update from sync context")
+        return False
+
+
 # Matches sentences that describe a file-upload *event* rather than general
 # file-related work.  Deliberately narrow to avoid removing legitimate facts
 # such as "User works with CSV files" or "prefers PDF export".
@@ -246,7 +292,7 @@ def _fact_content_key(content: Any) -> str | None:
     stripped = content.strip()
     if not stripped:
         return None
-    return stripped
+    return stripped.casefold()
 
 
 class MemoryUpdater:
@@ -266,88 +312,144 @@ class MemoryUpdater:
         model_name = self._model_name or config.model_name
         return create_chat_model(name=model_name, thinking_enabled=False)
 
-    def update_memory(
+    def _build_correction_hint(
+        self,
+        correction_detected: bool,
+        reinforcement_detected: bool,
+    ) -> str:
+        """Build optional prompt hints for correction and reinforcement signals."""
+        correction_hint = ""
+        if correction_detected:
+            correction_hint = (
+                "IMPORTANT: Explicit correction signals were detected in this conversation. "
+                "Pay special attention to what the agent got wrong, what the user corrected, "
+                "and record the correct approach as a fact with category "
+                '"correction" and confidence >= 0.95 when appropriate.'
+            )
+        if reinforcement_detected:
+            reinforcement_hint = (
+                "IMPORTANT: Positive reinforcement signals were detected in this conversation. "
+                "The user explicitly confirmed the agent's approach was correct or helpful. "
+                "Record the confirmed approach, style, or preference as a fact with category "
+                '"preference" or "behavior" and confidence >= 0.9 when appropriate.'
+            )
+            correction_hint = (correction_hint + "\n" + reinforcement_hint).strip() if correction_hint else reinforcement_hint
+
+        return correction_hint
+
+    def _prepare_update_prompt(
+        self,
+        messages: list[Any],
+        agent_name: str | None,
+        correction_detected: bool,
+        reinforcement_detected: bool,
+    ) -> tuple[dict[str, Any], str] | None:
+        """Load memory and build the update prompt for a conversation."""
+        config = get_memory_config()
+        if not config.enabled or not messages:
+            return None
+
+        current_memory = get_memory_data(agent_name)
+        conversation_text = format_conversation_for_update(messages)
+        if not conversation_text.strip():
+            return None
+
+        correction_hint = self._build_correction_hint(
+            correction_detected=correction_detected,
+            reinforcement_detected=reinforcement_detected,
+        )
+        prompt = MEMORY_UPDATE_PROMPT.format(
+            current_memory=json.dumps(current_memory, indent=2),
+            conversation=conversation_text,
+            correction_hint=correction_hint,
+        )
+        return current_memory, prompt
+
+    def _finalize_update(
+        self,
+        current_memory: dict[str, Any],
+        response_content: Any,
+        thread_id: str | None,
+        agent_name: str | None,
+    ) -> bool:
+        """Parse the model response, apply updates, and persist memory."""
+        response_text = _extract_text(response_content).strip()
+
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+
+        update_data = json.loads(response_text)
+        updated_memory = self._apply_updates(current_memory, update_data, thread_id)
+        updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+        return get_memory_storage().save(updated_memory, agent_name)
+
+    async def aupdate_memory(
         self,
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
         correction_detected: bool = False,
+        reinforcement_detected: bool = False,
     ) -> bool:
-        """Update memory based on conversation messages.
-
-        Args:
-            messages: List of conversation messages.
-            thread_id: Optional thread ID for tracking source.
-            agent_name: If provided, updates per-agent memory. If None, updates global memory.
-            correction_detected: Whether recent turns include an explicit correction signal.
-
-        Returns:
-            True if update was successful, False otherwise.
-        """
-        config = get_memory_config()
-        if not config.enabled:
-            return False
-
-        if not messages:
-            return False
-
+        """Update memory asynchronously based on conversation messages."""
         try:
-            # Get current memory
-            current_memory = get_memory_data(agent_name)
-
-            # Format conversation for prompt
-            conversation_text = format_conversation_for_update(messages)
-
-            if not conversation_text.strip():
+            prepared = await asyncio.to_thread(
+                self._prepare_update_prompt,
+                messages=messages,
+                agent_name=agent_name,
+                correction_detected=correction_detected,
+                reinforcement_detected=reinforcement_detected,
+            )
+            if prepared is None:
                 return False
 
-            # Build prompt
-            correction_hint = ""
-            if correction_detected:
-                correction_hint = (
-                    "IMPORTANT: Explicit correction signals were detected in this conversation. "
-                    "Pay special attention to what the agent got wrong, what the user corrected, "
-                    "and record the correct approach as a fact with category "
-                    '"correction" and confidence >= 0.95 when appropriate.'
-                )
-
-            prompt = MEMORY_UPDATE_PROMPT.format(
-                current_memory=json.dumps(current_memory, indent=2),
-                conversation=conversation_text,
-                correction_hint=correction_hint,
-            )
-
-            # Call LLM
+            current_memory, prompt = prepared
             model = self._get_model()
-            response = model.invoke(prompt)
-            response_text = _extract_text(response.content).strip()
-
-            # Parse response
-            # Remove markdown code blocks if present
-            if response_text.startswith("```"):
-                lines = response_text.split("\n")
-                response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-
-            update_data = json.loads(response_text)
-
-            # Apply updates
-            updated_memory = self._apply_updates(current_memory, update_data, thread_id)
-
-            # Strip file-upload mentions from all summaries before saving.
-            # Uploaded files are session-scoped and won't exist in future sessions,
-            # so recording upload events in long-term memory causes the agent to
-            # try (and fail) to locate those files in subsequent conversations.
-            updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-
-            # Save
-            return get_memory_storage().save(updated_memory, agent_name)
-
+            response = await model.ainvoke(prompt)
+            return await asyncio.to_thread(
+                self._finalize_update,
+                current_memory=current_memory,
+                response_content=response.content,
+                thread_id=thread_id,
+                agent_name=agent_name,
+            )
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
             logger.exception("Memory update failed: %s", e)
             return False
+
+    def update_memory(
+        self,
+        messages: list[Any],
+        thread_id: str | None = None,
+        agent_name: str | None = None,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+    ) -> bool:
+        """Synchronously update memory via the async updater path.
+
+        Args:
+            messages: List of conversation messages.
+            thread_id: Optional thread ID for tracking source.
+            agent_name: If provided, updates per-agent memory. If None, updates global memory.
+            correction_detected: Whether recent turns include an explicit correction signal.
+            reinforcement_detected: Whether recent turns include a positive reinforcement signal.
+
+        Returns:
+            True if update was successful, False otherwise.
+        """
+        return _run_async_update_sync(
+            self.aupdate_memory(
+                messages=messages,
+                thread_id=thread_id,
+                agent_name=agent_name,
+                correction_detected=correction_detected,
+                reinforcement_detected=reinforcement_detected,
+            )
+        )
 
     def _apply_updates(
         self,
@@ -366,7 +468,7 @@ class MemoryUpdater:
             Updated memory data.
         """
         config = get_memory_config()
-        now = datetime.utcnow().isoformat() + "Z"
+        now = utc_now_iso_z()
 
         # Update user sections
         user_updates = update_data.get("user", {})
@@ -441,6 +543,7 @@ def update_memory_from_conversation(
     thread_id: str | None = None,
     agent_name: str | None = None,
     correction_detected: bool = False,
+    reinforcement_detected: bool = False,
 ) -> bool:
     """Convenience function to update memory from a conversation.
 
@@ -449,9 +552,10 @@ def update_memory_from_conversation(
         thread_id: Optional thread ID.
         agent_name: If provided, updates per-agent memory. If None, updates global memory.
         correction_detected: Whether recent turns include an explicit correction signal.
+        reinforcement_detected: Whether recent turns include a positive reinforcement signal.
 
     Returns:
         True if successful, False otherwise.
     """
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name, correction_detected)
+    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected)

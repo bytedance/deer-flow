@@ -8,7 +8,10 @@ import pytest
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
+    _get_custom_mount_for_path,
+    _get_custom_mounts,
     _is_acp_workspace_path,
+    _is_custom_mount_path,
     _is_skills_path,
     _reject_path_traversal,
     _resolve_acp_workspace_path,
@@ -37,6 +40,53 @@ _THREAD_DATA = {
 def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
     assert Path(replace_virtual_path("/mnt/user-data/workspace/a.txt", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
     assert Path(replace_virtual_path("/mnt/user-data", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
+
+
+def test_replace_virtual_path_preserves_trailing_slash() -> None:
+    """Trailing slash must survive virtual-to-actual path replacement.
+
+    Regression: '/mnt/user-data/workspace/' was previously returned without
+    the trailing slash, causing string concatenations like
+    output_dir + 'file.txt' to produce a missing-separator path.
+    """
+    result = replace_virtual_path("/mnt/user-data/workspace/", _THREAD_DATA)
+    assert result.endswith("/"), f"Expected trailing slash, got: {result!r}"
+    assert result == "/tmp/deer-flow/threads/t1/user-data/workspace/"
+
+
+def test_replace_virtual_path_preserves_trailing_slash_windows_style() -> None:
+    """Trailing slash must be preserved as backslash when actual_base is Windows-style.
+
+    If actual_base uses backslash separators, appending '/' would produce a
+    mixed-separator path.  The separator must match the style of actual_base.
+    """
+    win_thread_data = {
+        "workspace_path": r"C:\deer-flow\threads\t1\user-data\workspace",
+        "uploads_path": r"C:\deer-flow\threads\t1\user-data\uploads",
+        "outputs_path": r"C:\deer-flow\threads\t1\user-data\outputs",
+    }
+    result = replace_virtual_path("/mnt/user-data/workspace/", win_thread_data)
+    assert result.endswith("\\"), f"Expected trailing backslash for Windows path, got: {result!r}"
+    assert "/" not in result, f"Mixed separators in Windows path: {result!r}"
+
+
+def test_replace_virtual_path_preserves_windows_style_for_nested_subdir_trailing_slash() -> None:
+    """Nested Windows-style subdirectories must keep backslashes throughout."""
+    win_thread_data = {
+        "workspace_path": r"C:\deer-flow\threads\t1\user-data\workspace",
+        "uploads_path": r"C:\deer-flow\threads\t1\user-data\uploads",
+        "outputs_path": r"C:\deer-flow\threads\t1\user-data\outputs",
+    }
+    result = replace_virtual_path("/mnt/user-data/workspace/subdir/", win_thread_data)
+    assert result == "C:\\deer-flow\\threads\\t1\\user-data\\workspace\\subdir\\"
+    assert "/" not in result, f"Mixed separators in Windows path: {result!r}"
+
+
+def test_replace_virtual_paths_in_command_preserves_trailing_slash() -> None:
+    """Trailing slash on a virtual path inside a command must be preserved."""
+    cmd = """python -c "output_dir = '/mnt/user-data/workspace/'; print(output_dir + 'some_file.txt')\""""
+    result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
+    assert "/tmp/deer-flow/threads/t1/user-data/workspace/" in result, f"Trailing slash lost in: {result!r}"
 
 
 # ---------- mask_local_paths_in_output ----------
@@ -94,6 +144,25 @@ def test_reject_path_traversal_allows_normal_paths() -> None:
 def test_validate_local_tool_path_rejects_non_virtual_path() -> None:
     with pytest.raises(PermissionError, match="Only paths under"):
         validate_local_tool_path("/Users/someone/config.yaml", _THREAD_DATA)
+
+
+def test_validate_local_tool_path_rejects_non_virtual_path_mentions_configured_mounts() -> None:
+    with pytest.raises(PermissionError, match="configured mount paths"):
+        validate_local_tool_path("/Users/someone/config.yaml", _THREAD_DATA)
+
+
+def test_validate_local_tool_path_prioritizes_user_data_before_custom_mounts() -> None:
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    mounts = [
+        VolumeMountConfig(host_path="/tmp/host-user-data", container_path=VIRTUAL_PATH_PREFIX, read_only=False),
+    ]
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", _THREAD_DATA, read_only=True)
+
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/../../etc/passwd", _THREAD_DATA, read_only=True)
 
 
 def test_validate_local_tool_path_rejects_bare_virtual_root() -> None:
@@ -233,6 +302,22 @@ def test_replace_virtual_paths_in_command_replaces_both() -> None:
 def test_validate_local_bash_command_paths_blocks_host_paths() -> None:
     with pytest.raises(PermissionError, match="Unsafe absolute paths"):
         validate_local_bash_command_paths("cat /etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_allows_https_urls() -> None:
+    """URLs like https://github.com/... must not be flagged as unsafe absolute paths."""
+    validate_local_bash_command_paths(
+        "cd /mnt/user-data/workspace && git clone https://github.com/CherryHQ/cherry-studio.git",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_allows_http_urls() -> None:
+    """HTTP URLs must not be flagged as unsafe absolute paths."""
+    validate_local_bash_command_paths(
+        "curl http://example.com/file.tar.gz -o /mnt/user-data/workspace/file.tar.gz",
+        _THREAD_DATA,
+    )
 
 
 def test_validate_local_bash_command_paths_allows_virtual_and_system_paths() -> None:
@@ -567,6 +652,156 @@ def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None
                 validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
 
 
+# ---------- Custom mount path tests ----------
+
+
+def _mock_custom_mounts():
+    """Create mock VolumeMountConfig objects for testing."""
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    return [
+        VolumeMountConfig(host_path="/home/user/code-read", container_path="/mnt/code-read", read_only=True),
+        VolumeMountConfig(host_path="/home/user/data", container_path="/mnt/data", read_only=False),
+    ]
+
+
+def test_is_custom_mount_path_recognises_configured_mounts() -> None:
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        assert _is_custom_mount_path("/mnt/code-read") is True
+        assert _is_custom_mount_path("/mnt/code-read/src/main.py") is True
+        assert _is_custom_mount_path("/mnt/data") is True
+        assert _is_custom_mount_path("/mnt/data/file.txt") is True
+        assert _is_custom_mount_path("/mnt/code-read-extra/foo") is False
+        assert _is_custom_mount_path("/mnt/other") is False
+
+
+def test_get_custom_mount_for_path_returns_longest_prefix() -> None:
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    mounts = [
+        VolumeMountConfig(host_path="/var/mnt", container_path="/mnt", read_only=False),
+        VolumeMountConfig(host_path="/home/user/code", container_path="/mnt/code", read_only=True),
+    ]
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        mount = _get_custom_mount_for_path("/mnt/code/file.py")
+        assert mount is not None
+        assert mount.container_path == "/mnt/code"
+
+
+def test_validate_local_tool_path_allows_custom_mount_read() -> None:
+    """read_file / ls should be able to access custom mount paths."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        validate_local_tool_path("/mnt/code-read/src/main.py", _THREAD_DATA, read_only=True)
+        validate_local_tool_path("/mnt/data/file.txt", _THREAD_DATA, read_only=True)
+
+
+def test_validate_local_tool_path_blocks_read_only_mount_write() -> None:
+    """write_file / str_replace must NOT write to read-only custom mounts."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        with pytest.raises(PermissionError, match="Write access to read-only mount is not allowed"):
+            validate_local_tool_path("/mnt/code-read/src/main.py", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_allows_writable_mount_write() -> None:
+    """write_file / str_replace should succeed on writable custom mounts."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        validate_local_tool_path("/mnt/data/file.txt", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_blocks_traversal_in_custom_mount() -> None:
+    """Path traversal via .. in custom mount paths must be rejected."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_tool_path("/mnt/code-read/../../etc/passwd", _THREAD_DATA, read_only=True)
+
+
+def test_validate_local_bash_command_paths_allows_custom_mount() -> None:
+    """bash commands referencing custom mount paths should be allowed."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        validate_local_bash_command_paths("cat /mnt/code-read/src/main.py", _THREAD_DATA)
+        validate_local_bash_command_paths("ls /mnt/data", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_traversal_in_custom_mount() -> None:
+    """Bash commands with traversal in custom mount paths should be blocked."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_bash_command_paths("cat /mnt/code-read/../../etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_still_blocks_non_mount_paths() -> None:
+    """Paths not matching any custom mount should still be blocked."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+            validate_local_bash_command_paths("cat /etc/shadow", _THREAD_DATA)
+
+
+def test_get_custom_mounts_caching(monkeypatch, tmp_path) -> None:
+    """_get_custom_mounts should cache after first successful load."""
+    # Clear any existing cache
+    if hasattr(_get_custom_mounts, "_cached"):
+        monkeypatch.delattr(_get_custom_mounts, "_cached")
+
+    # Use real directories so host_path.exists() filtering passes
+    dir_a = tmp_path / "code-read"
+    dir_a.mkdir()
+    dir_b = tmp_path / "data"
+    dir_b.mkdir()
+
+    from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+
+    mounts = [
+        VolumeMountConfig(host_path=str(dir_a), container_path="/mnt/code-read", read_only=True),
+        VolumeMountConfig(host_path=str(dir_b), container_path="/mnt/data", read_only=False),
+    ]
+    mock_sandbox = SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", mounts=mounts)
+    mock_config = SimpleNamespace(sandbox=mock_sandbox)
+
+    with patch("deerflow.config.get_app_config", return_value=mock_config):
+        result = _get_custom_mounts()
+        assert len(result) == 2
+
+    # After caching, should return cached value even without mock
+    assert hasattr(_get_custom_mounts, "_cached")
+    assert len(_get_custom_mounts()) == 2
+
+    # Cleanup
+    monkeypatch.delattr(_get_custom_mounts, "_cached")
+
+
+def test_get_custom_mounts_filters_nonexistent_host_path(monkeypatch, tmp_path) -> None:
+    """_get_custom_mounts should only return mounts whose host_path exists."""
+    if hasattr(_get_custom_mounts, "_cached"):
+        monkeypatch.delattr(_get_custom_mounts, "_cached")
+
+    from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+
+    existing_dir = tmp_path / "existing"
+    existing_dir.mkdir()
+
+    mounts = [
+        VolumeMountConfig(host_path=str(existing_dir), container_path="/mnt/existing", read_only=True),
+        VolumeMountConfig(host_path="/nonexistent/path/12345", container_path="/mnt/ghost", read_only=False),
+    ]
+    mock_sandbox = SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", mounts=mounts)
+    mock_config = SimpleNamespace(sandbox=mock_sandbox)
+
+    with patch("deerflow.config.get_app_config", return_value=mock_config):
+        result = _get_custom_mounts()
+        assert len(result) == 1
+        assert result[0].container_path == "/mnt/existing"
+
+    # Cleanup
+    monkeypatch.delattr(_get_custom_mounts, "_cached")
+
+
+def test_get_custom_mount_for_path_boundary_no_false_prefix_match() -> None:
+    """_get_custom_mount_for_path must not match /mnt/code-read-extra for /mnt/code-read."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        mount = _get_custom_mount_for_path("/mnt/code-read-extra/foo")
+        assert mount is None
+
+
 def test_str_replace_parallel_updates_should_preserve_both_edits(monkeypatch) -> None:
     class SharedSandbox:
         def __init__(self) -> None:
@@ -783,3 +1018,39 @@ def test_str_replace_and_append_on_same_path_should_preserve_both_updates(monkey
 
     assert failures == []
     assert sandbox.content == "ALPHA\ntail\n"
+
+
+def test_file_operation_lock_memory_cleanup() -> None:
+    """Verify that released locks are eventually cleaned up by WeakValueDictionary.
+
+    This ensures that the sandbox component doesn't leak memory over time when
+    operating on many unique file paths.
+    """
+    import gc
+
+    from deerflow.sandbox.file_operation_lock import _FILE_OPERATION_LOCKS, get_file_operation_lock
+
+    class MockSandbox:
+        id = "test_cleanup_sandbox"
+
+    test_path = "/tmp/deer-flow/memory_leak_test_file.txt"
+    lock_key = (MockSandbox.id, test_path)
+
+    # 确保测试开始前 key 不存在
+    assert lock_key not in _FILE_OPERATION_LOCKS
+
+    def _use_lock_and_release() -> None:
+        # Create and acquire the lock within this scope
+        lock = get_file_operation_lock(MockSandbox(), test_path)
+        with lock:
+            pass
+        # As soon as this function returns, the local 'lock' variable is destroyed.
+        # Its reference count goes to zero, triggering WeakValueDictionary cleanup.
+
+    _use_lock_and_release()
+
+    # Force a garbage collection to be absolutely sure
+    gc.collect()
+
+    # 检查特定 key 是否被清理（而不是检查总长度）
+    assert lock_key not in _FILE_OPERATION_LOCKS

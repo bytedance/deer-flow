@@ -1,47 +1,67 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install setup doctor dev dev-pro dev-daemon dev-daemon-pro start start-pro start-daemon start-daemon-pro stop up up-pro down clean docker-init docker-start docker-start-pro docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 BASH ?= bash
+BACKEND_UV_RUN = cd backend && uv run
 
 # Detect OS for Windows compatibility
 ifeq ($(OS),Windows_NT)
     SHELL := cmd.exe
     PYTHON ?= python
+    # Run repo shell scripts through Git Bash when Make is launched from cmd.exe / PowerShell.
+    RUN_WITH_GIT_BASH = call scripts\run-with-git-bash.cmd
 else
     PYTHON ?= python3
+    RUN_WITH_GIT_BASH =
 endif
 
 help:
 	@echo "DeerFlow Development Commands:"
+	@echo "  make setup           - Interactive setup wizard (recommended for new users)"
+	@echo "  make doctor          - Check configuration and system requirements"
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make install         - Install all dependencies (frontend + backend)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
 	@echo "  make dev             - Start all services in development mode (with hot-reloading)"
-	@echo "  make dev-daemon      - Start all services in background (daemon mode)"
+	@echo "  make dev-pro         - Start in dev + Gateway mode (experimental, no LangGraph server)"
+	@echo "  make dev-daemon      - Start dev services in background (daemon mode)"
+	@echo "  make dev-daemon-pro  - Start dev daemon + Gateway mode (experimental)"
 	@echo "  make start           - Start all services in production mode (optimized, no hot-reloading)"
+	@echo "  make start-pro       - Start in prod + Gateway mode (experimental)"
+	@echo "  make start-daemon    - Start prod services in background (daemon mode)"
+	@echo "  make start-daemon-pro - Start prod daemon + Gateway mode (experimental)"
 	@echo "  make stop            - Stop all running services"
 	@echo "  make clean           - Clean up processes and temporary files"
 	@echo ""
 	@echo "Docker Production Commands:"
 	@echo "  make up              - Build and start production Docker services (localhost:2026)"
+	@echo "  make up-pro          - Build and start production Docker in Gateway mode (experimental)"
 	@echo "  make down            - Stop and remove production Docker containers"
 	@echo ""
 	@echo "Docker Development Commands:"
 	@echo "  make docker-init     - Pull the sandbox image"
 	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
+	@echo "  make docker-start-pro - Start Docker in Gateway mode (experimental, no LangGraph container)"
 	@echo "  make docker-stop     - Stop Docker development services"
 	@echo "  make docker-logs     - View Docker development logs"
 	@echo "  make docker-logs-frontend - View Docker frontend logs"
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
 
+## Setup & Diagnosis
+setup:
+	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py
+
+doctor:
+	@$(BACKEND_UV_RUN) python ../scripts/doctor.py
+
 config:
 	@$(PYTHON) ./scripts/configure.py
 
 config-upgrade:
-	@./scripts/config-upgrade.sh
+	@$(RUN_WITH_GIT_BASH) ./scripts/config-upgrade.sh
 
 # Check required tools
 check:
@@ -99,45 +119,46 @@ setup-sandbox:
 # Start all services in development mode (with hot-reloading)
 dev:
 	@$(PYTHON) ./scripts/check.py
-ifeq ($(OS),Windows_NT)
-	@call scripts\run-with-git-bash.cmd ./scripts/serve.sh --dev
-else
-	@./scripts/serve.sh --dev
-endif
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev
+
+# Start all services in dev + Gateway mode (experimental: agent runtime embedded in Gateway)
+dev-pro:
+	@$(PYTHON) ./scripts/check.py
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev --gateway
 
 # Start all services in production mode (with optimizations)
 start:
 	@$(PYTHON) ./scripts/check.py
-ifeq ($(OS),Windows_NT)
-	@call scripts\run-with-git-bash.cmd ./scripts/serve.sh --prod
-else
-	@./scripts/serve.sh --prod
-endif
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod
+
+# Start all services in prod + Gateway mode (experimental)
+start-pro:
+	@$(PYTHON) ./scripts/check.py
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --gateway
 
 # Start all services in daemon mode (background)
 dev-daemon:
 	@$(PYTHON) ./scripts/check.py
-ifeq ($(OS),Windows_NT)
-	@call scripts\run-with-git-bash.cmd ./scripts/start-daemon.sh
-else
-	@./scripts/start-daemon.sh
-endif
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev --daemon
+
+# Start daemon + Gateway mode (experimental)
+dev-daemon-pro:
+	@$(PYTHON) ./scripts/check.py
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev --gateway --daemon
+
+# Start prod services in daemon mode (background)
+start-daemon:
+	@$(PYTHON) ./scripts/check.py
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --daemon
+
+# Start prod daemon + Gateway mode (experimental)
+start-daemon-pro:
+	@$(PYTHON) ./scripts/check.py
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --gateway --daemon
 
 # Stop all services
 stop:
-	@echo "Stopping all services..."
-	@-pkill -f "langgraph dev" 2>/dev/null || true
-	@-pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
-	@-pkill -f "next dev" 2>/dev/null || true
-	@-pkill -f "next start" 2>/dev/null || true
-	@-pkill -f "next-server" 2>/dev/null || true
-	@-pkill -f "next-server" 2>/dev/null || true
-	@-nginx -c $(PWD)/docker/nginx/nginx.local.conf -p $(PWD) -s quit 2>/dev/null || true
-	@sleep 1
-	@-pkill -9 nginx 2>/dev/null || true
-	@echo "Cleaning up sandbox containers..."
-	@-./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
-	@echo "✓ All services stopped"
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --stop
 
 # Clean up
 clean: stop
@@ -153,25 +174,29 @@ clean: stop
 
 # Initialize Docker containers and install dependencies
 docker-init:
-	@./scripts/docker.sh init
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh init
 
 # Start Docker development environment
 docker-start:
-	@./scripts/docker.sh start
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh start
+
+# Start Docker in Gateway mode (experimental)
+docker-start-pro:
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh start --gateway
 
 # Stop Docker development environment
 docker-stop:
-	@./scripts/docker.sh stop
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh stop
 
 # View Docker development logs
 docker-logs:
-	@./scripts/docker.sh logs
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs
 
 # View Docker development logs
 docker-logs-frontend:
-	@./scripts/docker.sh logs --frontend
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --frontend
 docker-logs-gateway:
-	@./scripts/docker.sh logs --gateway
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --gateway
 
 # ==========================================
 # Production Docker Commands
@@ -179,8 +204,12 @@ docker-logs-gateway:
 
 # Build and start production services
 up:
-	@./scripts/deploy.sh
+	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh
+
+# Build and start production services in Gateway mode
+up-pro:
+	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh --gateway
 
 # Stop and remove production containers
 down:
-	@./scripts/deploy.sh down
+	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh down

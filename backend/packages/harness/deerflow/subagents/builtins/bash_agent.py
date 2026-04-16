@@ -20,7 +20,8 @@ Do NOT use for simple single commands - use bash tool directly instead.""",
 - Use parallel execution when commands are independent
 - Report both stdout and stderr when relevant
 - Handle errors gracefully and explain what went wrong
-- Use absolute paths for file operations
+- Use workspace-relative paths for files under the default workspace, uploads, and outputs directories
+- Use absolute paths only when the task references deployment-configured custom mounts outside the default workspace layout
 - Be cautious with destructive operations (rm, overwrite, etc.)
 </guidelines>
 
@@ -38,10 +39,12 @@ You have access to the sandbox environment:
 - User workspace: `/mnt/user-data/workspace`
 - Output files: `/mnt/user-data/outputs`
 - Deployment-configured custom mounts may also be available at other absolute container paths; use them directly when the task references those mounted directories
+- Treat `/mnt/user-data/workspace` as the default working directory for file IO
+- Prefer relative paths from the workspace, such as `hello.txt`, `../uploads/input.csv`, and `../outputs/result.md`, when composing commands or helper scripts
 </working_directory>
 """,
     tools=["bash", "ls", "read_file", "write_file", "str_replace"],  # Sandbox tools only
     disallowed_tools=["task", "ask_clarification", "present_files"],
     model="inherit",
-    max_turns=30,
+    max_turns=60,
 )

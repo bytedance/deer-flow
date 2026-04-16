@@ -280,16 +280,17 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
         label={t.toolCalls.viewWebPage}
         icon={GlobeIcon}
-        onClick={() => {
-          window.open(url, "_blank");
-        }}
       >
         <ChainOfThoughtSearchResult>
           {url && (
-            <a href={url} target="_blank" rel="noopener noreferrer">
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="cursor-pointer"
+            >
               {title}
             </a>
           )}
@@ -335,7 +336,7 @@ function ToolCall({
       description = t.toolCalls.writeFile;
     }
     const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path) {
+    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
       setTimeout(() => {
         const url = new URL(
           `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
