@@ -21,10 +21,11 @@ config_version: 7
 log_level: info
 
 # ============================================================================
-# Token Usage Tracking
+# Token Usage
 # ============================================================================
-# Track LLM token usage per model call (input/output/total tokens)
-# Logs at info level via TokenUsageMiddleware
+# Enable token usage collection and display.
+# When enabled, DeerFlow records input/output/total tokens per model call
+# and shows usage metadata in the workspace UI when providers return it.
 token_usage:
   enabled: false
 
