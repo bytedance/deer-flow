@@ -27,6 +27,7 @@ def setup_agent(
 
     agent_name: str | None = runtime.context.get("agent_name") if runtime.context else None
     agent_dir = None
+    is_new_dir = False
 
     try:
         agent_name = validate_agent_name(agent_name)
@@ -59,7 +60,7 @@ def setup_agent(
     except Exception as e:
         import shutil
 
-        if agent_name and is_new_dir and agent_dir.exists():
+        if agent_name and is_new_dir and agent_dir is not None and agent_dir.exists():
             # Cleanup the custom agent directory only if it was newly created during this call
             shutil.rmtree(agent_dir)
         logger.error(f"[agent_creator] Failed to create agent '{agent_name}': {e}", exc_info=True)

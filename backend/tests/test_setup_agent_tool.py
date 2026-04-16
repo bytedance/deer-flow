@@ -117,7 +117,7 @@ class TestSetupAgentNoDataLoss:
 
     def test_successful_setup_creates_files(self, tmp_path: Path):
         """Happy path: setup_agent creates config.yaml and SOUL.md."""
-        result = _call_setup_agent(tmp_path, soul="# My Agent", description="A test agent")
+        _call_setup_agent(tmp_path, soul="# My Agent", description="A test agent")
 
         agent_dir = tmp_path / "agents" / "test-agent"
         assert agent_dir.exists()
