@@ -277,22 +277,29 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
     try:
         # Update config if any config fields changed
-        config_changed = any(v is not None for v in [request.description, request.model, request.tool_groups, request.skills])
+        # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
+        # This is critical for skills where None means "inherit all" (not "don't change").
+        fields_set = request.model_fields_set
+        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills"})
 
         if config_changed:
             updated: dict = {
                 "name": agent_cfg.name,
-                "description": request.description if request.description is not None else agent_cfg.description,
+                "description": request.description if "description" in fields_set else agent_cfg.description,
             }
-            new_model = request.model if request.model is not None else agent_cfg.model
+            new_model = request.model if "model" in fields_set else agent_cfg.model
             if new_model is not None:
                 updated["model"] = new_model
 
-            new_tool_groups = request.tool_groups if request.tool_groups is not None else agent_cfg.tool_groups
+            new_tool_groups = request.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
             if new_tool_groups is not None:
                 updated["tool_groups"] = new_tool_groups
 
-            new_skills = request.skills if request.skills is not None else agent_cfg.skills
+            # skills: None = inherit all, [] = no skills, ["a","b"] = whitelist
+            if "skills" in fields_set:
+                new_skills = request.skills
+            else:
+                new_skills = agent_cfg.skills
             if new_skills is not None:
                 updated["skills"] = new_skills
 

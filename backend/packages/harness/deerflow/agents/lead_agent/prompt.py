@@ -178,14 +178,14 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
         ),
     }
 
+    # Lazy import moved outside loop to avoid repeated import overhead
+    from deerflow.subagents.registry import get_subagent_config
+
     lines = []
     for name in available_names:
         if name in builtin_descriptions:
             lines.append(f"- **{name}**: {builtin_descriptions[name]}")
         else:
-            # Custom subagent: use its description from config (lazy import to avoid circular deps)
-            from deerflow.subagents.registry import get_subagent_config
-
             config = get_subagent_config(name)
             if config is not None:
                 desc = config.description.split("\n")[0].strip()  # First line only for brevity
