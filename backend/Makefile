@@ -1,5 +1,5 @@
 install:
-	uv sync
+	uv sync --all-packages
 
 dev:
 	uv run langgraph dev --no-browser --no-reload --n-jobs-per-worker 10

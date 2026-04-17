@@ -16,15 +16,32 @@
 PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name]}"
 TIMEOUT="${2:-60}"
 SERVICE="${3:-Service}"
+OS_NAME="$(uname -s 2>/dev/null || echo unknown)"
 
 elapsed=0
 interval=1
 
+http_probe_localhost() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -sf --max-time 1 "http://127.0.0.1:$PORT/" >/dev/null 2>&1
+        return $?
+    fi
+    return 1
+}
+
+tcp_probe_localhost() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" >/dev/null 2>&1
+        return $?
+    fi
+    bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" >/dev/null 2>&1
+    return $?
+}
+
 is_port_listening() {
-    if command -v lsof >/dev/null 2>&1; then
-        if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
-            return 0
-        fi
+    if [ "$OS_NAME" = "Darwin" ]; then
+        http_probe_localhost && return 0
+        tcp_probe_localhost && return 0
     fi
 
     if command -v ss >/dev/null 2>&1; then
@@ -39,13 +56,20 @@ is_port_listening() {
         fi
     fi
 
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" >/dev/null 2>&1
-        return $?
+    if [ "$OS_NAME" != "Darwin" ] && command -v lsof >/dev/null 2>&1; then
+        if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+            return 0
+        fi
     fi
 
-    return 1
+    tcp_probe_localhost
+    return $?
 }
+
+if [ "${DEER_FLOW_WAIT_FOR_PORT_SINGLE_CHECK:-0}" = "1" ]; then
+    is_port_listening
+    exit $?
+fi
 
 while ! is_port_listening; do
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
