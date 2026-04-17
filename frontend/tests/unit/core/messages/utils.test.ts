@@ -58,8 +58,8 @@ test("aggregates token usage messages once per assistant turn", () => {
   ]);
 
   expect(
-    usageMessagesByGroupIndex.map((groupMessages) =>
-      groupMessages?.map((message) => message.id) ?? null,
+    usageMessagesByGroupIndex.map(
+      (groupMessages) => groupMessages?.map((message) => message.id) ?? null,
     ),
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
 });

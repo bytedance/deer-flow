@@ -72,7 +72,11 @@ test("builds todo-aware debug step labels across the full thread", () => {
           },
         },
       ],
-      usage_metadata: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+      usage_metadata: {
+        input_tokens: 100,
+        output_tokens: 20,
+        total_tokens: 120,
+      },
     },
     {
       id: "tool-1",
@@ -139,11 +143,20 @@ test("marks multi-action AI steps as shared attribution", () => {
           id: "write_todos:1",
           name: "write_todos",
           args: {
-            todos: [{ content: "Inspect stream mode handling", status: "in_progress" }],
+            todos: [
+              {
+                content: "Inspect stream mode handling",
+                status: "in_progress",
+              },
+            ],
           },
         },
       ],
-      usage_metadata: { input_tokens: 120, output_tokens: 30, total_tokens: 150 },
+      usage_metadata: {
+        input_tokens: 120,
+        output_tokens: 30,
+        total_tokens: 150,
+      },
     },
   ] as Message[];
 
@@ -171,7 +184,12 @@ test("prefers backend attribution metadata when available", () => {
           id: "write_todos:1",
           name: "write_todos",
           args: {
-            todos: [{ content: "Fallback label should not win", status: "in_progress" }],
+            todos: [
+              {
+                content: "Fallback label should not win",
+                status: "in_progress",
+              },
+            ],
           },
         },
       ],
@@ -244,7 +262,11 @@ test("labels removal-only todo updates even when backend attribution has no acti
           },
         },
       ],
-      usage_metadata: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+      usage_metadata: {
+        input_tokens: 100,
+        output_tokens: 20,
+        total_tokens: 120,
+      },
     },
     {
       id: "ai-2",
