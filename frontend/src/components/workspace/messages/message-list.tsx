@@ -403,7 +403,6 @@ export function MessageList({
                 </div>,
               );
             }
-
             for (const message of group.messages.filter(
               (message) => message.type === "ai",
             )) {
