@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 
 from deerflow.tools.builtins.setup_agent_tool import setup_agent
 
-
 # --- Helpers ---
 
 class _DummyRuntime(SimpleNamespace):
