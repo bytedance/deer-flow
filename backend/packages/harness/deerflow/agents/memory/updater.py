@@ -228,7 +228,7 @@ def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
             loop = None
 
         if loop is not None and loop.is_running():
-            future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(asyncio.run, coro)
+            future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(loop.run_until_complete, coro)
             handed_off = True
             return future.result()
 
