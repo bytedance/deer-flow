@@ -110,6 +110,93 @@ class TestFileMemoryStorage:
                 assert result is True
                 assert memory_file.exists()
 
+    def test_save_does_not_mutate_caller_dict(self, tmp_path):
+        """save() must not mutate the caller's dict (lastUpdated side-effect)."""
+        memory_file = tmp_path / "memory.json"
+
+        def mock_get_paths():
+            mock_paths = MagicMock()
+            mock_paths.memory_file = memory_file
+            return mock_paths
+
+        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
+            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
+                storage = FileMemoryStorage()
+                original = {"version": "1.0", "facts": []}
+                before_keys = set(original.keys())
+                storage.save(original)
+                assert set(original.keys()) == before_keys, "save() must not add keys to caller's dict"
+                assert "lastUpdated" not in original
+
+    def test_cache_not_corrupted_when_save_fails(self, tmp_path):
+        """Cache must remain clean when save() raises OSError.
+
+        If save() fails, the cache must NOT be updated with the new data.
+        Together with the deepcopy in updater._finalize_update(), this prevents
+        stale mutations from leaking into the cache when persistence fails.
+        """
+        memory_file = tmp_path / "memory.json"
+        memory_file.parent.mkdir(parents=True, exist_ok=True)
+        original_data = {"version": "1.0", "facts": [{"content": "original"}]}
+        import json as _json
+
+        memory_file.write_text(_json.dumps(original_data))
+
+        def mock_get_paths():
+            mock_paths = MagicMock()
+            mock_paths.memory_file = memory_file
+            return mock_paths
+
+        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
+            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
+                storage = FileMemoryStorage()
+                # Warm the cache
+                cached = storage.load()
+                assert cached["facts"][0]["content"] == "original"
+
+                # Simulate save failure: mkdir succeeds but open() raises
+                modified = {"version": "1.0", "facts": [{"content": "mutated"}]}
+                with patch("builtins.open", side_effect=OSError("disk full")):
+                    result = storage.save(modified)
+                assert result is False
+
+                # Cache must still reflect the original data, not the failed write
+                after = storage.load()
+                assert after["facts"][0]["content"] == "original"
+
+    def test_cache_thread_safety(self, tmp_path):
+        """Concurrent load/reload calls must not race on _memory_cache."""
+        memory_file = tmp_path / "memory.json"
+        memory_file.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+
+        memory_file.write_text(_json.dumps({"version": "1.0", "facts": []}))
+
+        def mock_get_paths():
+            mock_paths = MagicMock()
+            mock_paths.memory_file = memory_file
+            return mock_paths
+
+        errors: list[Exception] = []
+
+        def load_many(storage: FileMemoryStorage) -> None:
+            try:
+                for _ in range(50):
+                    storage.load()
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
+            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
+                storage = FileMemoryStorage()
+                threads = [threading.Thread(target=load_many, args=(storage,)) for _ in range(8)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+        assert not errors, f"Thread-safety errors: {errors}"
+
     def test_reload_forces_cache_invalidation(self, tmp_path):
         """Should force reload from file and invalidate cache."""
         memory_file = tmp_path / "memory.json"

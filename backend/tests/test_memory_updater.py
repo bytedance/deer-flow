@@ -881,3 +881,53 @@ class TestReinforcementHint:
         prompt = model.ainvoke.await_args.args[0]
         assert "Explicit correction signals were detected" in prompt
         assert "Positive reinforcement signals were detected" in prompt
+
+
+class TestFinalizeCacheIsolation:
+    """_finalize_update must not mutate the cached memory object."""
+
+    def test_deepcopy_prevents_cache_corruption_on_save_failure(self):
+        """If save() fails, the in-memory snapshot used by _finalize_update
+        must remain independent of any object the storage layer may still hold in
+        its cache.  The deepcopy in _finalize_update achieves this — the object
+        passed to _apply_updates is always a fresh copy, never the cache reference.
+        """
+        updater = MemoryUpdater()
+        original_memory = _make_memory(facts=[{"id": "fact_orig", "content": "original", "category": "context", "confidence": 0.9, "createdAt": "2024-01-01T00:00:00Z", "source": "t1"}])
+
+        import json as _json
+
+        new_fact_json = _json.dumps(
+            {
+                "user": {},
+                "history": {},
+                "newFacts": [{"content": "new fact", "category": "context", "confidence": 0.9}],
+                "factsToRemove": [],
+            }
+        )
+        mock_response = MagicMock()
+        mock_response.content = new_fact_json
+        mock_model = AsyncMock()
+        mock_model.ainvoke = AsyncMock(return_value=mock_response)
+
+        saved_objects: list[dict] = []
+        save_mock = MagicMock(side_effect=lambda m, a=None: saved_objects.append(m) or False)  # always fails
+
+        with (
+            patch.object(updater, "_get_model", return_value=mock_model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True, fact_confidence_threshold=0.7)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=original_memory),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=save_mock)),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "hello"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "world"
+            ai_msg.tool_calls = []
+            updater.update_memory([msg, ai_msg], thread_id="t1")
+
+        # original_memory must not have been mutated — deepcopy isolates the mutation
+        assert len(original_memory["facts"]) == 1, "original_memory must not be mutated by _apply_updates"
+        assert original_memory["facts"][0]["content"] == "original"
