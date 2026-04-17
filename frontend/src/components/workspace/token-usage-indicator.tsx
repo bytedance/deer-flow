@@ -129,6 +129,10 @@ export function TokenUsageIndicator({
             );
           })}
         </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <div className="text-muted-foreground px-2 py-2 text-xs leading-relaxed">
+          {t.tokenUsage.note}
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );

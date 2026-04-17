@@ -294,6 +294,7 @@ export const zhCN: Translations = {
     unavailable:
       "暂无 Token 用量。只有模型成功返回且供应商提供 usage_metadata 时才会显示。",
     unavailableShort: "未返回用量",
+    note: "基于供应商返回的 usage_metadata 展示。当前总量是 best-effort 的会话参考值，可能与平台账单页不完全一致。",
     presets: {
       off: "关闭",
       summary: "总览",

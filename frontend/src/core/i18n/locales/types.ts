@@ -238,6 +238,7 @@ export interface Translations {
     view: string;
     unavailable: string;
     unavailableShort: string;
+    note: string;
     presets: {
       off: string;
       summary: string;
