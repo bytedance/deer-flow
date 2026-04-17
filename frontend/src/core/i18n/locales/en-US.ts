@@ -304,9 +304,31 @@ export const enUS: Translations = {
     input: "Input",
     output: "Output",
     total: "Total",
+    view: "Display",
     unavailable:
       "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
     unavailableShort: "No usage returned",
+    presets: {
+      off: "Off",
+      summary: "Summary",
+      perTurn: "Per turn",
+      debug: "Debug",
+    },
+    presetDescriptions: {
+      off: "Hide token usage in the header and conversation.",
+      summary: "Show only the current conversation total in the header.",
+      perTurn:
+        "Show the header total and one token summary per assistant turn.",
+      debug: "Show the header total and step-level token debugging details.",
+    },
+    finalAnswer: "Final answer",
+    stepTotal: "Step total",
+    sharedAttribution: "Shared across multiple actions in this step",
+    subagent: (description: string) => `Subagent: ${description}`,
+    startTodo: (content: string) => `Start To-do: ${content}`,
+    completeTodo: (content: string) => `Complete To-do: ${content}`,
+    updateTodo: (content: string) => `Update To-do: ${content}`,
+    removeTodo: (content: string) => `Remove To-do: ${content}`,
   },
 
   // Shortcuts

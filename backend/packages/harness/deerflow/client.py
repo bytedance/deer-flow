@@ -264,25 +264,35 @@ class DeerFlowClient:
         return [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in tool_calls]
 
     @staticmethod
-    def _ai_text_event(msg_id: str | None, text: str, usage: dict | None) -> "StreamEvent":
-        """Build a ``messages-tuple`` AI text event, attaching usage when present."""
+    def _serialize_additional_kwargs(msg) -> dict[str, Any] | None:
+        """Copy message additional_kwargs when present."""
+        additional_kwargs = getattr(msg, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict) and additional_kwargs:
+            return dict(additional_kwargs)
+        return None
+
+    @staticmethod
+    def _ai_text_event(msg_id: str | None, text: str, usage: dict | None, additional_kwargs: dict[str, Any] | None = None) -> "StreamEvent":
+        """Build a ``messages-tuple`` AI text event."""
         data: dict[str, Any] = {"type": "ai", "content": text, "id": msg_id}
         if usage:
             data["usage_metadata"] = usage
+        if additional_kwargs:
+            data["additional_kwargs"] = additional_kwargs
         return StreamEvent(type="messages-tuple", data=data)
 
     @staticmethod
-    def _ai_tool_calls_event(msg_id: str | None, tool_calls) -> "StreamEvent":
+    def _ai_tool_calls_event(msg_id: str | None, tool_calls, additional_kwargs: dict[str, Any] | None = None) -> "StreamEvent":
         """Build a ``messages-tuple`` AI tool-calls event."""
-        return StreamEvent(
-            type="messages-tuple",
-            data={
-                "type": "ai",
-                "content": "",
-                "id": msg_id,
-                "tool_calls": DeerFlowClient._serialize_tool_calls(tool_calls),
-            },
-        )
+        data: dict[str, Any] = {
+            "type": "ai",
+            "content": "",
+            "id": msg_id,
+            "tool_calls": DeerFlowClient._serialize_tool_calls(tool_calls),
+        }
+        if additional_kwargs:
+            data["additional_kwargs"] = additional_kwargs
+        return StreamEvent(type="messages-tuple", data=data)
 
     @staticmethod
     def _tool_message_event(msg: ToolMessage) -> "StreamEvent":
@@ -307,19 +317,30 @@ class DeerFlowClient:
                 d["tool_calls"] = DeerFlowClient._serialize_tool_calls(msg.tool_calls)
             if getattr(msg, "usage_metadata", None):
                 d["usage_metadata"] = msg.usage_metadata
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
             return d
         if isinstance(msg, ToolMessage):
-            return {
+            d = {
                 "type": "tool",
                 "content": DeerFlowClient._extract_text(msg.content),
                 "name": getattr(msg, "name", None),
                 "tool_call_id": getattr(msg, "tool_call_id", None),
                 "id": getattr(msg, "id", None),
             }
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
+            return d
         if isinstance(msg, HumanMessage):
-            return {"type": "human", "content": msg.content, "id": getattr(msg, "id", None)}
+            d = {"type": "human", "content": msg.content, "id": getattr(msg, "id", None)}
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
+            return d
         if isinstance(msg, SystemMessage):
-            return {"type": "system", "content": msg.content, "id": getattr(msg, "id", None)}
+            d = {"type": "system", "content": msg.content, "id": getattr(msg, "id", None)}
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
+            return d
         return {"type": "unknown", "content": str(msg), "id": getattr(msg, "id", None)}
 
     @staticmethod
@@ -542,6 +563,7 @@ class DeerFlowClient:
             - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str}
             - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str, "usage_metadata": {...}}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
+            - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "additional_kwargs": {...}}
             - type="messages-tuple"  data={"type": "tool", "content": str, "name": str, "tool_call_id": str, "id": str}
             - type="end"             data={"usage": {"input_tokens": int, "output_tokens": int, "total_tokens": int}}
         """
@@ -564,6 +586,7 @@ class DeerFlowClient:
         # in both the final ``messages`` chunk and the values snapshot —
         # count it only on whichever arrives first.
         counted_usage_ids: set[str] = set()
+        sent_additional_kwargs_ids: set[str] = set()
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
@@ -620,17 +643,28 @@ class DeerFlowClient:
 
                 if isinstance(msg_chunk, AIMessage):
                     text = self._extract_text(msg_chunk.content)
+                    additional_kwargs = self._serialize_additional_kwargs(msg_chunk)
                     counted_usage = _account_usage(msg_id, msg_chunk.usage_metadata)
+                    sent_additional_kwargs = False
 
                     if text:
                         if msg_id:
                             streamed_ids.add(msg_id)
-                        yield self._ai_text_event(msg_id, text, counted_usage)
+                        yield self._ai_text_event(msg_id, text, counted_usage, additional_kwargs)
+                        sent_additional_kwargs = bool(additional_kwargs)
 
                     if msg_chunk.tool_calls:
                         if msg_id:
                             streamed_ids.add(msg_id)
-                        yield self._ai_tool_calls_event(msg_id, msg_chunk.tool_calls)
+                        yield self._ai_tool_calls_event(
+                            msg_id,
+                            msg_chunk.tool_calls,
+                            None if sent_additional_kwargs else additional_kwargs,
+                        )
+                        sent_additional_kwargs = sent_additional_kwargs or bool(additional_kwargs)
+
+                    if msg_id and sent_additional_kwargs:
+                        sent_additional_kwargs_ids.add(msg_id)
 
                 elif isinstance(msg_chunk, ToolMessage):
                     if msg_id:
@@ -653,17 +687,36 @@ class DeerFlowClient:
                 if msg_id and msg_id in streamed_ids:
                     if isinstance(msg, AIMessage):
                         _account_usage(msg_id, getattr(msg, "usage_metadata", None))
+                        additional_kwargs = self._serialize_additional_kwargs(msg)
+                        if additional_kwargs and msg_id not in sent_additional_kwargs_ids:
+                            yield self._ai_text_event(msg_id, "", None, additional_kwargs)
+                            sent_additional_kwargs_ids.add(msg_id)
                     continue
 
                 if isinstance(msg, AIMessage):
                     counted_usage = _account_usage(msg_id, msg.usage_metadata)
+                    additional_kwargs = self._serialize_additional_kwargs(msg)
+                    sent_additional_kwargs = False
 
                     if msg.tool_calls:
-                        yield self._ai_tool_calls_event(msg_id, msg.tool_calls)
+                        yield self._ai_tool_calls_event(msg_id, msg.tool_calls, additional_kwargs)
+                        sent_additional_kwargs = bool(additional_kwargs)
 
                     text = self._extract_text(msg.content)
                     if text:
-                        yield self._ai_text_event(msg_id, text, counted_usage)
+                        yield self._ai_text_event(
+                            msg_id,
+                            text,
+                            counted_usage,
+                            None if sent_additional_kwargs else additional_kwargs,
+                        )
+                        sent_additional_kwargs = sent_additional_kwargs or bool(additional_kwargs)
+                    elif additional_kwargs and msg_id and msg_id not in sent_additional_kwargs_ids:
+                        yield self._ai_text_event(msg_id, "", None, additional_kwargs)
+                        sent_additional_kwargs = True
+
+                    if msg_id and sent_additional_kwargs:
+                        sent_additional_kwargs_ids.add(msg_id)
 
                 elif isinstance(msg, ToolMessage):
                     yield self._tool_message_event(msg)
