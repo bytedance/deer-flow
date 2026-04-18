@@ -1,0 +1,63 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [ 'main' ]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/e2e-tests.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/e2e-tests.yml'
+
+concurrency:
+  group: e2e-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-tests:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Use pinned pnpm version
+        run: corepack prepare pnpm@10.26.2 --activate
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install chromium --with-deps
+
+      - name: Run E2E tests
+        working-directory: frontend
+        run: pnpm exec playwright test
+        env:
+          SKIP_ENV_VALIDATION: '1'
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7

@@ -55,5 +55,7 @@ web/
 backend/Dockerfile.langgraph
 config.yaml.bak
 .playwright-mcp
+/frontend/test-results/
+/frontend/playwright-report/
 .gstack/
 .worktrees
