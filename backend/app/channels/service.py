@@ -52,35 +52,6 @@ class ChannelService:
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
         default_session = config.pop("session", None)
         channel_sessions = {name: channel_config.get("session") for name, channel_config in config.items() if isinstance(channel_config, dict)}
-
-        # Process feishu_bots config and add sessions for each bot
-        if "feishu_bots" in config and isinstance(config["feishu_bots"], list):
-            try:
-                from app.channels.feishu import FeishuBotConfig
-
-                for bot_config_dict in config["feishu_bots"]:
-                    if isinstance(bot_config_dict, dict):
-                        try:
-                            bot_config = FeishuBotConfig(**bot_config_dict)
-                            channel_name = f"feishu_{bot_config.app_id}"
-                            channel_sessions[channel_name] = {
-                                "assistant_id": bot_config.agent_id,
-                                "config": {
-                                    "recursion_limit": bot_config.recursion_limit,
-                                },
-                                "context": {
-                                    "thinking_enabled": bot_config.thinking_enabled,
-                                    "is_plan_mode": bot_config.is_plan_mode,
-                                    "subagent_enabled": bot_config.subagent_enabled,
-                                },
-                            }
-                            logger.info(f"Added session for Feishu bot: {channel_name} (agent: {bot_config.agent_id})")
-                        except Exception as e:
-                            logger.exception(f"Failed to process Feishu bot config: {e}")
-            except Exception as e:
-                logger.exception(f"Failed to import FeishuBotConfig: {e}")
-
-        logger.info("[ChannelService] built channel_sessions keys: %s", list(channel_sessions.keys()))
         self.manager = ChannelManager(
             bus=self.bus,
             store=self.store,
@@ -92,7 +63,6 @@ class ChannelService:
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
         self._running = False
-        self._feishu_bot_manager = None  # Lazy initialized
 
     @classmethod
     def from_app_config(cls) -> ChannelService:
@@ -114,28 +84,11 @@ class ChannelService:
 
         await self.manager.start()
 
-        # Start FeishuBotManager if feishu_bots are configured
-        if "feishu_bots" in self._config or "feishu" in self._config:
-            try:
-                from app.channels.feishu import FeishuBotManager
-
-                self._feishu_bot_manager = FeishuBotManager(bus=self.bus)
-                self._feishu_bot_manager.load_bots_from_config(self._config)
-                await self._feishu_bot_manager.start()
-            except Exception as e:
-                logger.exception("Failed to start FeishuBotManager: %s", e)
-                self._feishu_bot_manager = None
-
-        # Start other channels (except feishu if we're using multi-bot)
         for name, channel_config in self._config.items():
             if not isinstance(channel_config, dict):
                 continue
             if not channel_config.get("enabled", False):
                 logger.info("Channel %s is disabled, skipping", name)
-                continue
-            # Skip single feishu channel if we're using feishu_bots
-            if name == "feishu" and self._feishu_bot_manager is not None:
-                logger.info("Skipping single feishu channel (using feishu_bots instead)")
                 continue
 
             await self._start_channel(name, channel_config)
@@ -152,15 +105,6 @@ class ChannelService:
             except Exception:
                 logger.exception("Error stopping channel %s", name)
         self._channels.clear()
-
-        # Stop FeishuBotManager
-        if self._feishu_bot_manager is not None:
-            try:
-                await self._feishu_bot_manager.stop()
-                logger.info("FeishuBotManager stopped")
-            except Exception as e:
-                logger.exception("Error stopping FeishuBotManager: %s", e)
-            self._feishu_bot_manager = None
 
         await self.manager.stop()
         self._running = False
@@ -207,20 +151,6 @@ class ChannelService:
             logger.exception("Failed to start channel %s", name)
             return False
 
-    def get_channel(self, name: str) -> Channel | None:
-        """Return a running channel instance by name when available."""
-        # Check regular channels first
-        if name in self._channels:
-            return self._channels.get(name)
-        # Check FeishuBotManager channels
-        if self._feishu_bot_manager is not None:
-            return self._feishu_bot_manager.get_channel(name)
-        return None
-
-    def get_feishu_bot_manager(self) -> Any:
-        """Return the FeishuBotManager instance if available."""
-        return self._feishu_bot_manager
-
     def get_status(self) -> dict[str, Any]:
         """Return status information for all channels."""
         channels_status = {}
@@ -232,13 +162,14 @@ class ChannelService:
                 "enabled": enabled,
                 "running": running,
             }
-        # Add Feishu bots status if available
-        if self._feishu_bot_manager is not None:
-            channels_status["feishu_bots"] = self._feishu_bot_manager.get_bot_status()
         return {
             "service_running": self._running,
             "channels": channels_status,
         }
+
+    def get_channel(self, name: str) -> Channel | None:
+        """Return a running channel instance by name when available."""
+        return self._channels.get(name)
 
 
 # -- singleton access -------------------------------------------------------
