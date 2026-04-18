@@ -132,6 +132,81 @@ models:
   #     thinking:
   #       type: disabled
 
+  # Example: Zhipu Claude-compatible models (Anthropic SDK compatible)
+  # Model availability depends on your Zhipu plan. Common options include:
+  # glm-5.1, glm-5-turbo, glm-4.7, glm-4.5-air
+  # - name: zhipu-glm-5-1
+  #   display_name: Zhipu GLM-5.1
+  #   use: langchain_anthropic:ChatAnthropic
+  #   model: glm-5.1
+  #   api_key: $ANTHROPIC_API_KEY
+  #   base_url: https://open.bigmodel.cn/api/anthropic
+  #   default_request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #
+  # - name: zhipu-glm-5-turbo
+  #   display_name: Zhipu GLM-5-Turbo
+  #   use: langchain_anthropic:ChatAnthropic
+  #   model: glm-5-turbo
+  #   api_key: $ANTHROPIC_API_KEY
+  #   base_url: https://open.bigmodel.cn/api/anthropic
+  #   default_request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #
+  # - name: zhipu-glm-4-7
+  #   display_name: Zhipu GLM-4.7
+  #   use: langchain_anthropic:ChatAnthropic
+  #   model: glm-4.7
+  #   api_key: $ANTHROPIC_API_KEY
+  #   base_url: https://open.bigmodel.cn/api/anthropic
+  #   default_request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #
+  # - name: zhipu-glm-4-5-air
+  #   display_name: Zhipu GLM-4.5-Air
+  #   use: langchain_anthropic:ChatAnthropic
+  #   model: glm-4.5-air
+  #   api_key: $ANTHROPIC_API_KEY
+  #   base_url: https://open.bigmodel.cn/api/anthropic
+  #   default_request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+
+  # Example: Zhipu OpenAI-compatible models
+  # Endpoint: https://open.bigmodel.cn/api/paas/v4
+  # - name: zhipu-openai-glm-5-1
+  #   display_name: Zhipu GLM-5.1 (OpenAI API)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: glm-5.1
+  #   api_key: $ZHIPU_API_KEY
+  #   base_url: https://open.bigmodel.cn/api/paas/v4
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #
+  # - name: zhipu-openai-glm-5-turbo
+  #   display_name: Zhipu GLM-5-Turbo (OpenAI API)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: glm-5-turbo
+  #   api_key: $ZHIPU_API_KEY
+  #   base_url: https://open.bigmodel.cn/api/paas/v4
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #
+  # - name: zhipu-openai-glm-4-7
+  #   display_name: Zhipu GLM-4.7 (OpenAI API)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: glm-4.7
+  #   api_key: $ZHIPU_API_KEY
+  #   base_url: https://open.bigmodel.cn/api/paas/v4
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+
   # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
   #   display_name: Gemini 2.5 Pro

@@ -123,6 +123,67 @@ models:
 
 If your OpenRouter key lives in a different environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
+For Zhipu's Claude-compatible endpoint, keep using `langchain_anthropic:ChatAnthropic` and set `base_url`:
+
+```yaml
+models:
+  - name: zhipu-glm-5-1
+    display_name: Zhipu GLM-5.1
+    use: langchain_anthropic:ChatAnthropic
+    model: glm-5.1
+    api_key: $ANTHROPIC_API_KEY
+    base_url: https://open.bigmodel.cn/api/anthropic
+
+  - name: zhipu-glm-5-turbo
+    display_name: Zhipu GLM-5-Turbo
+    use: langchain_anthropic:ChatAnthropic
+    model: glm-5-turbo
+    api_key: $ANTHROPIC_API_KEY
+    base_url: https://open.bigmodel.cn/api/anthropic
+
+  - name: zhipu-glm-4-7
+    display_name: Zhipu GLM-4.7
+    use: langchain_anthropic:ChatAnthropic
+    model: glm-4.7
+    api_key: $ANTHROPIC_API_KEY
+    base_url: https://open.bigmodel.cn/api/anthropic
+
+  - name: zhipu-glm-4-5-air
+    display_name: Zhipu GLM-4.5-Air
+    use: langchain_anthropic:ChatAnthropic
+    model: glm-4.5-air
+    api_key: $ANTHROPIC_API_KEY
+    base_url: https://open.bigmodel.cn/api/anthropic
+```
+
+Available models depend on your Zhipu plan.
+
+For Zhipu's OpenAI-compatible endpoint, use `langchain_openai:ChatOpenAI` with `base_url`:
+
+```yaml
+models:
+  - name: zhipu-openai-glm-5-1
+    display_name: Zhipu GLM-5.1 (OpenAI API)
+    use: langchain_openai:ChatOpenAI
+    model: glm-5.1
+    api_key: $ZHIPU_API_KEY
+    base_url: https://open.bigmodel.cn/api/paas/v4
+
+  - name: zhipu-openai-glm-5-turbo
+    display_name: Zhipu GLM-5-Turbo (OpenAI API)
+    use: langchain_openai:ChatOpenAI
+    model: glm-5-turbo
+    api_key: $ZHIPU_API_KEY
+    base_url: https://open.bigmodel.cn/api/paas/v4
+
+  - name: zhipu-openai-glm-4-7
+    display_name: Zhipu GLM-4.7 (OpenAI API)
+    use: langchain_openai:ChatOpenAI
+    model: glm-4.7
+    api_key: $ZHIPU_API_KEY
+    base_url: https://open.bigmodel.cn/api/paas/v4
+```
+
 **Thinking Models**:
 Some models support "thinking" mode for complex reasoning:
 

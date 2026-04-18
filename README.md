@@ -163,6 +163,67 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
+   Zhipu also provides a Claude-compatible endpoint. You can configure multiple Zhipu models with `langchain_anthropic:ChatAnthropic` plus `base_url: https://open.bigmodel.cn/api/anthropic`:
+
+   ```yaml
+   models:
+     - name: zhipu-glm-5-1
+       display_name: Zhipu GLM-5.1
+       use: langchain_anthropic:ChatAnthropic
+       model: glm-5.1
+       api_key: $ANTHROPIC_API_KEY
+       base_url: https://open.bigmodel.cn/api/anthropic
+
+     - name: zhipu-glm-5-turbo
+       display_name: Zhipu GLM-5-Turbo
+       use: langchain_anthropic:ChatAnthropic
+       model: glm-5-turbo
+       api_key: $ANTHROPIC_API_KEY
+       base_url: https://open.bigmodel.cn/api/anthropic
+
+     - name: zhipu-glm-4-7
+       display_name: Zhipu GLM-4.7
+       use: langchain_anthropic:ChatAnthropic
+       model: glm-4.7
+       api_key: $ANTHROPIC_API_KEY
+       base_url: https://open.bigmodel.cn/api/anthropic
+
+     - name: zhipu-glm-4-5-air
+       display_name: Zhipu GLM-4.5-Air
+       use: langchain_anthropic:ChatAnthropic
+       model: glm-4.5-air
+       api_key: $ANTHROPIC_API_KEY
+       base_url: https://open.bigmodel.cn/api/anthropic
+   ```
+
+   Available models depend on your Zhipu plan.
+
+   Zhipu also provides an OpenAI-compatible endpoint (`https://open.bigmodel.cn/api/paas/v4`):
+
+   ```yaml
+   models:
+     - name: zhipu-openai-glm-5-1
+       display_name: Zhipu GLM-5.1 (OpenAI API)
+       use: langchain_openai:ChatOpenAI
+       model: glm-5.1
+       api_key: $ZHIPU_API_KEY
+       base_url: https://open.bigmodel.cn/api/paas/v4
+
+     - name: zhipu-openai-glm-5-turbo
+       display_name: Zhipu GLM-5-Turbo (OpenAI API)
+       use: langchain_openai:ChatOpenAI
+       model: glm-5-turbo
+       api_key: $ZHIPU_API_KEY
+       base_url: https://open.bigmodel.cn/api/paas/v4
+
+     - name: zhipu-openai-glm-4-7
+       display_name: Zhipu GLM-4.7 (OpenAI API)
+       use: langchain_openai:ChatOpenAI
+       model: glm-4.7
+       api_key: $ZHIPU_API_KEY
+       base_url: https://open.bigmodel.cn/api/paas/v4
+   ```
+
    For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
 
    CLI-backed provider examples:
