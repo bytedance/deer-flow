@@ -440,7 +440,7 @@ Content-Type: multipart/form-data
 - PDF (`.pdf`)
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
-- Word (`.doc`, `.docx`)
+- Word (`.docx`)
 
 #### List Uploaded Files
 

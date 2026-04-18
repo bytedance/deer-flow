@@ -1035,7 +1035,7 @@ class DeerFlowClient:
     def upload_files(self, thread_id: str, files: list[str | Path]) -> dict:
         """Upload local files into a thread's uploads directory.
 
-        For PDF, PPT, Excel, and Word files, they are also converted to Markdown.
+        For PDF, PPT, Excel, and DOCX Word files, they are also converted to Markdown.
 
         Args:
             thread_id: Target thread ID.

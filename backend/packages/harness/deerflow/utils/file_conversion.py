@@ -1,6 +1,6 @@
 """File conversion utilities.
 
-Converts document files (PDF, PPT, Excel, Word) to Markdown.
+Converts document files (PDF, PPT, Excel, and DOCX Word) to Markdown.
 
 PDF conversion strategy (auto mode):
   1. Try pymupdf4llm if installed — better heading detection, faster on most files.
@@ -28,7 +28,6 @@ CONVERTIBLE_EXTENSIONS = {
     ".pptx",
     ".xls",
     ".xlsx",
-    ".doc",
     ".docx",
 }
 

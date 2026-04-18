@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from deerflow.utils.file_conversion import (
     _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
+    CONVERTIBLE_EXTENSIONS,
     MAX_OUTLINE_ENTRIES,
     _do_convert,
     _pymupdf_output_too_sparse,
@@ -95,6 +96,11 @@ class TestPymupdfOutputTooSparse:
 
 class TestDoConvert:
     """Verify that _do_convert routes to the right sub-converter."""
+
+    def test_legacy_doc_is_not_marked_convertible(self):
+        """Legacy .doc files should not be advertised as markdown-convertible."""
+        assert ".doc" not in CONVERTIBLE_EXTENSIONS
+        assert ".docx" in CONVERTIBLE_EXTENSIONS
 
     def test_non_pdf_always_uses_markitdown(self, tmp_path):
         """DOCX / XLSX / PPTX always go through MarkItDown regardless of setting."""

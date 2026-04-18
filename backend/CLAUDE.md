@@ -218,7 +218,7 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
 | **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /install` - install from .skill archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`) |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
-| **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
+| **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Docx); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
@@ -510,7 +510,7 @@ When using `make dev` from root, the frontend automatically connects through ngi
 
 Multi-file upload with automatic document conversion:
 - Endpoint: `POST /api/threads/{thread_id}/uploads`
-- Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
+- Supports: PDF, PPT, Excel, and `.docx` Word documents (converted via `markitdown`)
 - Rejects directory inputs before copying so uploads stay all-or-nothing
 - Reuses one conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories
