@@ -73,6 +73,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
+  - [Kernel Export and Push](#kernel-export-and-push)
   - [Documentation](#documentation)
   - [⚠️ Security Notice](#️-security-notice)
     - [Improper Deployment May Introduce Security Risks](#improper-deployment-may-introduce-security-risks)
@@ -696,6 +697,31 @@ client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": 
 ```
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
+
+## Kernel Export and Push
+
+For maintainers who need to export a standalone `deerflow-kernel` repository and push it to an internal Git server:
+
+1. Export kernel sources from this monorepo.
+
+  ```bash
+  ./scripts/export-deerflow-kernel.sh --output /tmp/deerflow-kernel --force
+  ```
+
+2. Push with SSH.
+
+  ```bash
+  DEERFLOW_KERNEL_SSH_ALLOW_INTERACTIVE=1 \
+  ./scripts/push-deerflow-kernel.sh \
+    --output /tmp/deerflow-kernel \
+    --skip-export \
+    --merge-remote-history \
+    --remote-url git@code.tiancloud.com:xiaosi/deerflow-kernel.git
+  ```
+
+Notes:
+- `--merge-remote-history` auto-handles non-fast-forward rejects when remote `main` already has commits.
+- For HTTP remotes, set `DEERFLOW_KERNEL_GIT_USERNAME` and `DEERFLOW_KERNEL_GIT_PASSWORD` (or `DEERFLOW_KERNEL_GIT_TOKEN`).
 
 ## Documentation
 

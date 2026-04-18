@@ -58,6 +58,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
+  - [内核导出与推送](#内核导出与推送)
   - [文档](#文档)
   - [⚠️ 安全使用](#️-安全使用)
   - [参与贡献](#参与贡献)
@@ -526,6 +527,31 @@ client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": 
 ```
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
+
+## 内核导出与推送
+
+如果你需要把当前仓库导出为独立的 `deerflow-kernel` 仓库并推送到内部 Git：
+
+1. 从当前 monorepo 导出内核代码。
+
+  ```bash
+  ./scripts/export-deerflow-kernel.sh --output /tmp/deerflow-kernel --force
+  ```
+
+2. 使用 SSH 推送。
+
+  ```bash
+  DEERFLOW_KERNEL_SSH_ALLOW_INTERACTIVE=1 \
+  ./scripts/push-deerflow-kernel.sh \
+    --output /tmp/deerflow-kernel \
+    --skip-export \
+    --merge-remote-history \
+    --remote-url git@code.tiancloud.com:xiaosi/deerflow-kernel.git
+  ```
+
+说明：
+- `--merge-remote-history` 会在远端 `main` 已有提交导致非快进拒绝时，自动拉取并合并后重试推送。
+- 如果使用 HTTP 远端，请设置 `DEERFLOW_KERNEL_GIT_USERNAME` 和 `DEERFLOW_KERNEL_GIT_PASSWORD`（或 `DEERFLOW_KERNEL_GIT_TOKEN`）。
 
 ## 文档
 

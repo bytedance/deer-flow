@@ -82,6 +82,31 @@ Return a short status report with:
 4. Remaining user action: model config, env var values, auth files, or nothing
 5. Exact next command to start DeerFlow
 
+## Optional Maintenance Task: Export deerflow-kernel
+
+Use this only when the user explicitly asks to export/publish a standalone kernel repository.
+
+1. Export kernel files from this monorepo:
+
+```bash
+./scripts/export-deerflow-kernel.sh --output /tmp/deerflow-kernel --force
+```
+
+2. Push to internal Git with SSH (supports passphrase-protected keys):
+
+```bash
+DEERFLOW_KERNEL_SSH_ALLOW_INTERACTIVE=1 \
+./scripts/push-deerflow-kernel.sh \
+  --output /tmp/deerflow-kernel \
+  --skip-export \
+  --merge-remote-history \
+  --remote-url git@code.tiancloud.com:xiaosi/deerflow-kernel.git
+```
+
+Notes:
+- `--merge-remote-history` handles non-fast-forward rejections when remote `main` already has commits.
+- For HTTP remotes, set `DEERFLOW_KERNEL_GIT_USERNAME` and `DEERFLOW_KERNEL_GIT_PASSWORD` (or `DEERFLOW_KERNEL_GIT_TOKEN`).
+
 ## EXECUTE NOW
 
 Complete the steps above. When finished, stop after the setup boundary and report status instead of continuing into unrelated project work.
