@@ -1047,6 +1047,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
+        thread_data = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
@@ -1061,6 +1062,8 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         if not children:
             return "(empty)"
         output = "\n".join(children)
+        if thread_data is not None:
+            output = mask_local_paths_in_output(output, thread_data)
         try:
             from deerflow.config.app_config import get_app_config
 
