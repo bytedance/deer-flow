@@ -4,7 +4,7 @@ from unittest.mock import patch
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
-from deerflow.sandbox.tools import glob_tool, grep_tool
+from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool
 
 
 def _make_runtime(tmp_path):
@@ -391,3 +391,71 @@ def test_aio_sandbox_grep_skips_mismatched_line_number_payloads(monkeypatch) -> 
 
     assert matches == [GrepMatch(path="/mnt/user-data/workspace/app.py", line_number=7, line="TODO = True")]
     assert truncated is False
+
+
+# ---------------------------------------------------------------------------
+# ls_tool — path masking
+# ---------------------------------------------------------------------------
+
+
+def test_ls_tool_masks_user_data_host_paths(tmp_path, monkeypatch) -> None:
+    """ls_tool output must not leak host user-data paths; they should be virtual."""
+    runtime = _make_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    (workspace / "report.txt").write_text("hello\n", encoding="utf-8")
+    (workspace / "subdir").mkdir()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list workspace",
+        path="/mnt/user-data/workspace",
+    )
+
+    # Virtual paths must be present
+    assert "/mnt/user-data/workspace" in result
+    # Host paths must NOT leak
+    assert str(workspace) not in result
+    assert str(tmp_path) not in result
+
+
+def test_ls_tool_masks_skills_host_paths(tmp_path, monkeypatch) -> None:
+    """ls_tool output must not leak host skills paths; they should be virtual."""
+    runtime = _make_runtime(tmp_path)
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "public").mkdir(parents=True)
+    (skills_dir / "public" / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=str(skills_dir)),
+    ):
+        result = ls_tool.func(
+            runtime=runtime,
+            description="list skills",
+            path="/mnt/skills",
+        )
+
+    # Virtual paths must be present
+    assert "/mnt/skills" in result
+    # Host paths must NOT leak
+    assert str(skills_dir) not in result
+    assert str(tmp_path) not in result
+
+
+def test_ls_tool_returns_empty_for_empty_directory(tmp_path, monkeypatch) -> None:
+    """ls_tool should return '(empty)' for an empty directory."""
+    runtime = _make_runtime(tmp_path)
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list empty dir",
+        path="/mnt/user-data/workspace",
+    )
+
+    assert result == "(empty)"
