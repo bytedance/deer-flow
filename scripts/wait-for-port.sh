@@ -39,11 +39,6 @@ is_port_listening() {
         fi
     fi
 
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" >/dev/null 2>&1
-        return $?
-    fi
-
     return 1
 }
 
