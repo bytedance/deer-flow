@@ -484,8 +484,9 @@ uploads:
   # isolation applies. Keep this disabled unless uploads come from a fully
   # trusted source and you intentionally accept host-side parser risk.
   auto_convert_documents: false
-  # PDF-to-Markdown converter used when a PDF is uploaded after automatic
-  # document conversion is explicitly enabled.
+  # Controls which PDF-to-Markdown converter is used whenever PDF conversion
+  # runs. Automatic upload conversion is gated separately by
+  # auto_convert_documents.
   # auto        — prefer pymupdf4llm when installed; fall back to MarkItDown for
   #               image-based or encrypted PDFs (recommended default).
   # pymupdf4llm — always use pymupdf4llm (must be installed: uv add pymupdf4llm).

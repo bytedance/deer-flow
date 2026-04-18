@@ -70,6 +70,7 @@ def test_upload_files_does_not_auto_convert_documents_by_default(tmp_path):
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=False),
         patch.object(uploads, "convert_file_to_markdown", AsyncMock()) as convert_mock,
     ):
         file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
