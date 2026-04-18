@@ -61,6 +61,28 @@ _AUTH_PATTERNS = (
     "无权",
     "未授权",
 )
+_TRANSIENT_PATTERNS = (
+    "peer closed connection",
+    "incomplete chunked read",
+    "server disconnected",
+    "connection reset",
+    "connection aborted",
+    "connection dropped",
+    "broken pipe",
+    "eof occurred",
+)
+_SDK_TRANSIENT_ERROR_NAMES = {
+    "APITimeoutError",
+    "APIConnectionError",
+    "InternalServerError",
+}
+_HTTP_TRANSIENT_ERROR_NAMES = {
+    "ReadError",
+    "RemoteProtocolError",
+    "ConnectError",
+    "ReadTimeout",
+}
+_HTTP_TRANSIENT_ERROR_MODULE_PREFIXES = ("httpx", "httpcore")
 
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -155,17 +177,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if _matches_any(lowered, _AUTH_PATTERNS):
             return False, "auth"
 
-        exc_name = exc.__class__.__name__
-        if exc_name in {
-            "APITimeoutError",
-            "APIConnectionError",
-            "InternalServerError",
-        }:
+        if _is_known_transient_exception(exc):
             return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:
             return True, "transient"
         if _matches_any(lowered, _BUSY_PATTERNS):
             return True, "busy"
+        if _matches_any(lowered, _TRANSIENT_PATTERNS):
+            return True, "transient"
 
         return False, "generic"
 
@@ -307,6 +326,18 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
 def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:
     return any(pattern in detail for pattern in patterns)
+
+
+def _is_known_transient_exception(exc: BaseException) -> bool:
+    exc_name = exc.__class__.__name__
+    if exc_name in _SDK_TRANSIENT_ERROR_NAMES:
+        return True
+
+    if exc_name not in _HTTP_TRANSIENT_ERROR_NAMES:
+        return False
+
+    module_name = exc.__class__.__module__
+    return module_name.startswith(_HTTP_TRANSIENT_ERROR_MODULE_PREFIXES)
 
 
 def _extract_error_code(exc: BaseException) -> Any:
