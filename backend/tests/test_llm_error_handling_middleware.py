@@ -297,6 +297,82 @@ def test_circuit_breaker_does_not_trip_on_non_retriable_errors(monkeypatch: pyte
     assert middleware._check_circuit() is False
 
 
+# ---------- ReadError / RemoteProtocolError retriable classification ----------
+
+
+class _ReadError(Exception):
+    """Local stand-in for httpx.ReadError — same class name, no httpx dependency."""
+
+
+class _RemoteProtocolError(Exception):
+    """Local stand-in for httpx.RemoteProtocolError — same class name, no httpx dependency."""
+
+
+_ReadError.__name__ = "ReadError"
+_RemoteProtocolError.__name__ = "RemoteProtocolError"
+
+
+def test_classify_error_read_error_is_retriable() -> None:
+    middleware = _build_middleware()
+    exc = _ReadError("Connection dropped mid-stream")
+    exc.__class__.__name__ = "ReadError"
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_classify_error_remote_protocol_error_is_retriable() -> None:
+    middleware = _build_middleware()
+    exc = _RemoteProtocolError("Server closed connection unexpectedly")
+    exc.__class__.__name__ = "RemoteProtocolError"
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_sync_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+    waits: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda d: waits.append(d))
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _ReadError("Connection dropped mid-stream")
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert "temporarily unavailable" in result.content
+    assert attempts == 3  # exhausted all retries
+    assert len(waits) == 2  # slept between attempts 1→2 and 2→3
+
+
+@pytest.mark.anyio
+async def test_async_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+    waits: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        waits.append(d)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _ReadError("Connection dropped mid-stream")
+
+    result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert "temporarily unavailable" in result.content
+    assert attempts == 3  # exhausted all retries
+    assert len(waits) == 2  # slept between attempts 1→2 and 2→3
+
+
 @pytest.mark.anyio
 async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify async version of circuit breaker correctly handles state transitions."""
