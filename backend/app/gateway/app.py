@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Upper bound (seconds) each lifespan shutdown hook is allowed to run.
 # Bounds worker exit time so uvicorn's reload supervisor does not keep
-# firing signals into a stuck worker — see fix/bounded-lifespan-shutdown.
+# firing signals into a worker that is stuck waiting for shutdown cleanup.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 
 
