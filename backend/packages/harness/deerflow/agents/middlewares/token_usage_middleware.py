@@ -70,6 +70,10 @@ def _todo_action_kind(previous: Todo | None, current: Todo) -> str:
 
 
 def _build_todo_actions(previous_todos: list[Todo], next_todos: list[Todo]) -> list[dict[str, Any]]:
+    # Keep this diffing behavior aligned with
+    # frontend/src/core/messages/usage-model.ts::buildTodoDiffLabels so the
+    # frontend fallback path produces the same labels when attribution metadata
+    # is missing or malformed.
     previous_by_content: dict[str, list[tuple[int, Todo]]] = defaultdict(list)
     matched_previous_indices: set[int] = set()
 
@@ -230,9 +234,18 @@ def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
             args = raw_tool_call.get("args") if isinstance(raw_tool_call.get("args"), dict) else {}
             current_todos = _normalize_todos(args.get("todos"))
 
-    tool_call_ids = [tool_call_id for tool_call in tool_calls if isinstance(tool_call, dict) for tool_call_id in [_string_arg(tool_call.get("id"))] if tool_call_id is not None]
+    tool_call_ids: list[str] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+
+        tool_call_id = _string_arg(tool_call.get("id"))
+        if tool_call_id is not None:
+            tool_call_ids.append(tool_call_id)
 
     return {
+        # Schema changes should remain additive where possible so older
+        # frontends can ignore unknown fields and fall back safely.
         "version": 1,
         "kind": _infer_step_kind(message, actions),
         "shared_attribution": len(actions) > 1,

@@ -247,6 +247,95 @@ test("falls back safely when attribution payload is malformed", () => {
   ]);
 });
 
+test("ignores attribution actions that are not objects", () => {
+  const messages = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [],
+      additional_kwargs: {
+        token_usage_attribution: {
+          version: 1,
+          kind: "tool_batch",
+          shared_attribution: true,
+          actions: [
+            null,
+            "bad-action",
+            { kind: "search", query: "valid search", ignored: "extra-field" },
+          ],
+        },
+      },
+      usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+    },
+  ] as Message[];
+
+  expect(buildTokenDebugSteps(messages, enUS)).toEqual([
+    expect.objectContaining({
+      messageId: "ai-1",
+      label: 'Search for "valid search"',
+    }),
+  ]);
+});
+
+test("ignores malformed attribution fields and falls back to message content", () => {
+  const messages = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Real final answer",
+      tool_calls: [],
+      additional_kwargs: {
+        token_usage_attribution: {
+          version: 1,
+          kind: null,
+          shared_attribution: null,
+          tool_call_ids: [null, "tool-1", 123],
+          actions: [{ query: "missing kind" }],
+        },
+      },
+      usage_metadata: { input_tokens: 9, output_tokens: 3, total_tokens: 12 },
+    },
+  ] as Message[];
+
+  expect(buildTokenDebugSteps(messages, enUS)).toEqual([
+    expect.objectContaining({
+      messageId: "ai-1",
+      label: "Final answer",
+      sharedAttribution: false,
+    }),
+  ]);
+});
+
+test("ignores unknown top-level attribution fields", () => {
+  const messages = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [],
+      additional_kwargs: {
+        token_usage_attribution: {
+          version: 1,
+          kind: "tool_batch",
+          shared_attribution: false,
+          unknown_field: "ignored",
+          actions: [{ kind: "subagent", description: "Inspect the fix" }],
+        },
+      },
+      usage_metadata: { input_tokens: 12, output_tokens: 4, total_tokens: 16 },
+    },
+  ] as Message[];
+
+  expect(buildTokenDebugSteps(messages, enUS)).toEqual([
+    expect.objectContaining({
+      messageId: "ai-1",
+      label: "Subagent: Inspect the fix",
+      sharedAttribution: false,
+    }),
+  ]);
+});
+
 test("labels removal-only todo updates even when backend attribution has no actions", () => {
   const messages = [
     {

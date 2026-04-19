@@ -66,6 +66,12 @@ interface TokenUsageAttribution {
   actions?: TokenUsageAttributionAction[];
 }
 
+// Keep the write_todos diffing semantics aligned with
+// backend/packages/harness/deerflow/agents/middlewares/token_usage_middleware.py
+//::_build_todo_actions. The frontend fallback path intentionally mirrors the
+// backend attribution labels so malformed or missing metadata degrades
+// predictably instead of changing step labels.
+
 export function getTokenUsageViewPreset(
   preferences: TokenUsagePreferences,
 ): TokenUsageViewPreset {
@@ -469,6 +475,8 @@ function normalizeTokenUsageAttribution(
   }
 
   return {
+    // Versioning is additive for now: the frontend should ignore unknown
+    // fields and fall back when required fields become incompatible.
     version: typeof record.version === "number" ? record.version : undefined,
     kind: isTokenUsageAttributionKind(record.kind) ? record.kind : undefined,
     shared_attribution:

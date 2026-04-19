@@ -106,32 +106,66 @@ export function MessageGroup({
     }
   }, [lastToolCallStep, steps]);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const renderedDebugMessageIds = new Set<string>();
+  const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
+    const firstIndices = new Map<string, number>();
 
-  const renderDebugSummaryOnce = (messageId?: string) => {
+    if (!showTokenDebugSummaries) {
+      return firstIndices;
+    }
+
+    for (const [index, step] of steps.entries()) {
+      const messageId = step.messageId;
+      if (!messageId || firstIndices.has(messageId)) {
+        continue;
+      }
+
+      const debugStep = debugStepByMessageId.get(messageId);
+      if (!debugStep) {
+        continue;
+      }
+
+      const toolCallCount = toolCallCountByMessageId.get(messageId) ?? 0;
+      if (!debugStep.sharedAttribution && toolCallCount > 0) {
+        continue;
+      }
+      if (
+        !debugStep.sharedAttribution &&
+        toolCallCount === 0 &&
+        debugStep.label === t.common.thinking &&
+        debugStep.secondaryLabels.length === 0
+      ) {
+        continue;
+      }
+
+      firstIndices.set(messageId, index);
+    }
+
+    return firstIndices;
+  }, [
+    debugStepByMessageId,
+    showTokenDebugSummaries,
+    steps,
+    t.common.thinking,
+    toolCallCountByMessageId,
+  ]);
+
+  const renderDebugSummary = (
+    messageId: string | undefined,
+    stepIndex: number,
+  ) => {
     if (!showTokenDebugSummaries || !messageId) {
       return null;
     }
 
     const debugStep = debugStepByMessageId.get(messageId);
-    if (!debugStep || renderedDebugMessageIds.has(messageId)) {
-      return null;
-    }
-
-    const toolCallCount = toolCallCountByMessageId.get(messageId) ?? 0;
-    if (!debugStep.sharedAttribution && toolCallCount > 0) {
+    if (!debugStep) {
       return null;
     }
     if (
-      !debugStep.sharedAttribution &&
-      toolCallCount === 0 &&
-      debugStep.label === t.common.thinking &&
-      debugStep.secondaryLabels.length === 0
+      firstEligibleDebugSummaryStepIndexByMessageId.get(messageId) !== stepIndex
     ) {
       return null;
     }
-
-    renderedDebugMessageIds.add(messageId);
 
     return (
       <ChainOfThoughtStep
@@ -224,9 +258,10 @@ export function MessageGroup({
         <ChainOfThoughtContent className="px-4 pb-2">
           {showAbove &&
             aboveLastToolCallSteps.flatMap((step) => {
+              const stepIndex = steps.indexOf(step);
               if (step.type === "reasoning") {
                 return [
-                  renderDebugSummaryOnce(step.messageId),
+                  renderDebugSummary(step.messageId, stepIndex),
                   <ChainOfThoughtStep
                     key={step.id}
                     label={
@@ -241,11 +276,14 @@ export function MessageGroup({
               }
 
               return [
-                renderDebugSummaryOnce(step.messageId),
+                renderDebugSummary(step.messageId, stepIndex),
                 renderToolCall(step),
               ];
             })}
-          {renderDebugSummaryOnce(lastToolCallStep.messageId)}
+          {renderDebugSummary(
+            lastToolCallStep.messageId,
+            steps.indexOf(lastToolCallStep),
+          )}
           {lastToolCallStep && (
             <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
               {renderToolCall(lastToolCallStep, { isLast: true })}
@@ -255,7 +293,10 @@ export function MessageGroup({
       )}
       {lastReasoningStep && (
         <>
-          {renderDebugSummaryOnce(lastReasoningStep.messageId)}
+          {renderDebugSummary(
+            lastReasoningStep.messageId,
+            steps.indexOf(lastReasoningStep),
+          )}
           <Button
             key={lastReasoningStep.id}
             className="w-full items-start justify-start text-left"
