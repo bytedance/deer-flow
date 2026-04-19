@@ -123,7 +123,8 @@ async def run_messages(
     run = await _resolve_run(run_id, request)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
-        run["thread_id"], run_id,
+        run["thread_id"],
+        run_id,
         limit=limit + 1,
         before_seq=before_seq,
         after_seq=after_seq,

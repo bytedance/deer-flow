@@ -22,3 +22,12 @@ export interface AgentThreadContext extends Record<string, unknown> {
 export interface AgentThread extends Thread<AgentThreadState> {
   context?: AgentThreadContext;
 }
+
+export interface RunMessage {
+  run_id: string;
+  content: Message;
+  metadata: {
+    caller: string;
+  };
+  created_at: string;
+}

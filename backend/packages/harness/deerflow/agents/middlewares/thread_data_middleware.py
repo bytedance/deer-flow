@@ -1,8 +1,10 @@
 import logging
+from datetime import UTC, datetime
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import HumanMessage
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
@@ -97,8 +99,20 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             paths = self._create_thread_directories(thread_id, user_id=user_id)
             logger.debug("Created thread data directories for thread %s", thread_id)
 
+        messages = list(state.get("messages", []))
+        last_message = messages[-1] if messages else None
+
+        if last_message and isinstance(last_message, HumanMessage):
+            messages[-1] = HumanMessage(
+                content=last_message.content,
+                id=last_message.id,
+                name=last_message.name or "user-input",
+                additional_kwargs={**last_message.additional_kwargs, "run_id": runtime.context.get("run_id"), "timestamp": datetime.now(UTC).isoformat()},
+            )
+
         return {
             "thread_data": {
                 **paths,
-            }
+            },
+            "messages": messages,
         }

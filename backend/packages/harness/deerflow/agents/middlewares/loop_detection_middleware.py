@@ -362,7 +362,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # the conversation; injecting one mid-conversation crashes
             # langchain_anthropic's _format_messages(). HumanMessage works
             # with all providers. See #1299.
-            return {"messages": [HumanMessage(content=warning)]}
+            return {"messages": [HumanMessage(content=warning, name="loop_warning")]}
 
         return None
 

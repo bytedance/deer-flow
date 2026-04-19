@@ -28,7 +28,6 @@ class MemoryRunStore(RunStore):
         kwargs=None,
         error=None,
         created_at=None,
-        follow_up_to_run_id=None,
     ):
         now = datetime.now(UTC).isoformat()
         self._runs[run_id] = {
@@ -41,7 +40,6 @@ class MemoryRunStore(RunStore):
             "metadata": metadata or {},
             "kwargs": kwargs or {},
             "error": error,
-            "follow_up_to_run_id": follow_up_to_run_id,
             "created_at": created_at or now,
             "updated_at": now,
         }

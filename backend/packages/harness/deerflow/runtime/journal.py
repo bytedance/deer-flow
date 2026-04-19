@@ -6,7 +6,10 @@ handles token usage accumulation.
 
 Key design decisions:
 - on_llm_new_token is NOT implemented -- only complete messages via on_llm_end
-- on_chat_model_start captures structured prompts as llm_request (OpenAI format)
+- on_chat_model_start captures structured prompts as llm_request (OpenAI format) and
+  extracts the first human message for run.input, because it is more reliable than
+  on_chain_start (fires on every node) — messages here are fully structured.
+- on_chain_start with parent_run_id=None emits a run.start trace marking root invocation.
 - on_llm_end emits llm_response in OpenAI Chat Completions format
 - Token usage accumulated in memory, written to RunRow on run completion
 - Caller identification via tags injection (lead_agent / subagent:{name} / middleware:{name})
@@ -18,10 +21,12 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import AnyMessage, BaseMessage, HumanMessage, ToolMessage
+from langgraph.types import Command
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
@@ -72,34 +77,39 @@ class RunJournal(BaseCallbackHandler):
         # LLM request/response tracking
         self._llm_call_index = 0
         self._cached_prompts: dict[str, list[dict]] = {}  # langchain run_id -> OpenAI messages
-        self._cached_models: dict[str, str] = {}  # langchain run_id -> model name
-
-        # Tool call ID cache
-        self._tool_call_ids: dict[str, str] = {}  # langchain run_id -> tool_call_id
 
     # -- Lifecycle callbacks --
 
-    def on_chain_start(self, serialized: dict, inputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        if kwargs.get("parent_run_id") is not None:
-            return
-        self._put(
-            event_type="run_start",
-            category="lifecycle",
-            metadata={"input_preview": str(inputs)[:500]},
-        )
+    def on_chain_start(
+        self,
+        serialized: dict[str, Any],
+        inputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        caller = self._identify_caller(tags)
+        if parent_run_id is None:
+            # Root graph invocation — emit a single trace event for the run start.
+            chain_name = (serialized or {}).get("name", "unknown")
+            self._put(
+                event_type="run.start",
+                category="trace",
+                content={"chain": chain_name},
+                metadata={"caller": caller, **(metadata or {})},
+            )
 
     def on_chain_end(self, outputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        if kwargs.get("parent_run_id") is not None:
-            return
-        self._put(event_type="run_end", category="lifecycle", metadata={"status": "success"})
+        self._put(event_type="run.end", category="outputs", content=outputs, metadata={"status": "success"})
         self._flush_sync()
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        if kwargs.get("parent_run_id") is not None:
-            return
         self._put(
-            event_type="run_error",
-            category="lifecycle",
+            event_type="run.error",
+            category="error",
             content=str(error),
             metadata={"error_type": type(error).__name__},
         )
@@ -107,266 +117,132 @@ class RunJournal(BaseCallbackHandler):
 
     # -- LLM callbacks --
 
-    def on_chat_model_start(self, serialized: dict, messages: list[list], *, run_id: UUID, **kwargs: Any) -> None:
-        """Capture structured prompt messages for llm_request event."""
-        from deerflow.runtime.converters import langchain_messages_to_openai
+    def on_chat_model_start(
+        self,
+        serialized: dict,
+        messages: list[list[BaseMessage]],
+        *,
+        run_id: UUID,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Capture structured prompt messages for llm_request event.
 
+        This is also the canonical place to extract the first human message:
+        messages are fully structured here, it fires only on real LLM calls,
+        and the content is never compressed by checkpoint trimming.
+        """
         rid = str(run_id)
         self._llm_start_times[rid] = time.monotonic()
         self._llm_call_index += 1
+        # Mark this run_id as seen so on_llm_end knows not to increment again.
+        self._cached_prompts[rid] = []
 
-        model_name = serialized.get("name", "")
-        self._cached_models[rid] = model_name
+        logger.info(f"on_chat_model_start {run_id}: tags={tags} serialized={serialized} messages={messages}")
 
-        # Convert the first message list (LangChain passes list-of-lists)
-        prompt_msgs = messages[0] if messages else []
-        openai_msgs = langchain_messages_to_openai(prompt_msgs)
-        self._cached_prompts[rid] = openai_msgs
+        # Capture the first human message sent to any LLM in this run.
+        if not self._first_human_msg:
+            for batch in messages.reversed():
+                for m in batch.reversed():
+                    if isinstance(m, HumanMessage) and m.name != "summary":
+                        caller = self._identify_caller(tags)
+                        self.set_first_human_message(m.text)
+                        self._put(
+                            event_type="llm.human.input",
+                            category="message",
+                            content=m.model_dump(),
+                            metadata={"caller": caller},
+                        )
+                        break
+                if self._first_human_msg:
+                    break
 
-        caller = self._identify_caller(kwargs)
-        self._put(
-            event_type="llm_request",
-            category="trace",
-            content={"model": model_name, "messages": openai_msgs},
-            metadata={"caller": caller, "llm_call_index": self._llm_call_index},
-        )
-
-    def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, **kwargs: Any) -> None:
+    def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, parent_run_id: UUID | None = None, tags: list[str] | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any) -> None:
         # Fallback: on_chat_model_start is preferred. This just tracks latency.
         self._llm_start_times[str(run_id)] = time.monotonic()
 
-    def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        from deerflow.runtime.converters import langchain_to_openai_completion
-
-        try:
-            message = response.generations[0][0].message
-        except (IndexError, AttributeError):
-            logger.debug("on_llm_end: could not extract message from response")
-            return
-
-        caller = self._identify_caller(kwargs)
-
-        # Latency
-        rid = str(run_id)
-        start = self._llm_start_times.pop(rid, None)
-        latency_ms = int((time.monotonic() - start) * 1000) if start else None
-
-        # Token usage from message
-        usage = getattr(message, "usage_metadata", None)
-        usage_dict = dict(usage) if usage else {}
-
-        # Resolve call index
-        call_index = self._llm_call_index
-        if rid not in self._cached_prompts:
-            # Fallback: on_chat_model_start was not called
-            self._llm_call_index += 1
-            call_index = self._llm_call_index
-
-        # Clean up caches
-        self._cached_prompts.pop(rid, None)
-        self._cached_models.pop(rid, None)
-
-        # Trace event: llm_response (OpenAI completion format)
-        content = getattr(message, "content", "")
-        self._put(
-            event_type="llm_response",
-            category="trace",
-            content=langchain_to_openai_completion(message),
-            metadata={
-                "caller": caller,
-                "usage": usage_dict,
-                "latency_ms": latency_ms,
-                "llm_call_index": call_index,
-            },
-        )
-
-        # Message events: only lead_agent gets message-category events.
-        # Content uses message.model_dump() to align with checkpoint format.
-        tool_calls = getattr(message, "tool_calls", None) or []
-        if caller == "lead_agent":
-            resp_meta = getattr(message, "response_metadata", None) or {}
-            model_name = resp_meta.get("model_name") if isinstance(resp_meta, dict) else None
-            if tool_calls:
-                # ai_tool_call: agent decided to use tools
-                self._put(
-                    event_type="ai_tool_call",
-                    category="message",
-                    content=message.model_dump(),
-                    metadata={"model_name": model_name, "finish_reason": "tool_calls"},
-                )
-            elif isinstance(content, str) and content:
-                # ai_message: final text reply
-                self._put(
-                    event_type="ai_message",
-                    category="message",
-                    content=message.model_dump(),
-                    metadata={"model_name": model_name, "finish_reason": "stop"},
-                )
-                self._last_ai_msg = content
-                self._msg_count += 1
-
-        # Token accumulation
-        if self._track_tokens:
-            input_tk = usage_dict.get("input_tokens", 0) or 0
-            output_tk = usage_dict.get("output_tokens", 0) or 0
-            total_tk = usage_dict.get("total_tokens", 0) or 0
-            if total_tk == 0:
-                total_tk = input_tk + output_tk
-            if total_tk > 0:
-                self._total_input_tokens += input_tk
-                self._total_output_tokens += output_tk
-                self._total_tokens += total_tk
-                self._llm_call_count += 1
-                if caller.startswith("subagent:"):
-                    self._subagent_tokens += total_tk
-                elif caller.startswith("middleware:"):
-                    self._middleware_tokens += total_tk
+    def on_llm_end(self, response, *, run_id, parent_run_id, tags, **kwargs) -> None:
+        messages: list[AnyMessage] = []
+        logger.info(f"on_llm_end {run_id}: response: {tags} {kwargs}")
+        for generation in response.generations:
+            for gen in generation:
+                if hasattr(gen, "message"):
+                    messages.append(gen.message)
                 else:
-                    self._lead_agent_tokens += total_tk
+                    logger.warning(f"on_llm_end {run_id}: generation has no message attribute: {gen}")
+
+        for message in messages:
+            caller = self._identify_caller(tags)
+
+            # Latency
+            rid = str(run_id)
+            start = self._llm_start_times.pop(rid, None)
+            latency_ms = int((time.monotonic() - start) * 1000) if start else None
+
+            # Token usage from message
+            usage = getattr(message, "usage_metadata", None)
+            usage_dict = dict(usage) if usage else {}
+
+            # Resolve call index
+            call_index = self._llm_call_index
+            if rid not in self._cached_prompts:
+                # Fallback: on_chat_model_start was not called
+                self._llm_call_index += 1
+                call_index = self._llm_call_index
+
+            # Trace event: llm_response (OpenAI completion format)
+            self._put(
+                event_type="llm.ai.response",
+                category="message",
+                content=message.model_dump(),
+                metadata={
+                    "caller": caller,
+                    "usage": usage_dict,
+                    "latency_ms": latency_ms,
+                    "llm_call_index": call_index,
+                },
+            )
+
+            # Token accumulation
+            if self._track_tokens:
+                input_tk = usage_dict.get("input_tokens", 0) or 0
+                output_tk = usage_dict.get("output_tokens", 0) or 0
+                total_tk = usage_dict.get("total_tokens", 0) or 0
+                if total_tk == 0:
+                    total_tk = input_tk + output_tk
+                if total_tk > 0:
+                    self._total_input_tokens += input_tk
+                    self._total_output_tokens += output_tk
+                    self._total_tokens += total_tk
+                    self._llm_call_count += 1
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._llm_start_times.pop(str(run_id), None)
-        self._put(event_type="llm_error", category="trace", content=str(error))
+        self._put(event_type="llm.error", category="trace", content=str(error))
 
-    # -- Tool callbacks --
+    def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
+        """Handle tool start event, cache tool call ID for later correlation"""
+        tool_call_id = str(run_id)
+        logger.info(f"Tool start for node {run_id}, tool_call_id={tool_call_id}, tags={tags}, metadata={metadata}")
 
-    def on_tool_start(self, serialized: dict, input_str: str, *, run_id: UUID, **kwargs: Any) -> None:
-        tool_call_id = kwargs.get("tool_call_id")
-        if tool_call_id:
-            self._tool_call_ids[str(run_id)] = tool_call_id
-        self._put(
-            event_type="tool_start",
-            category="trace",
-            metadata={
-                "tool_name": serialized.get("name", ""),
-                "tool_call_id": tool_call_id,
-                "args": str(input_str)[:2000],
-            },
-        )
-
-    def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        from langchain_core.messages import ToolMessage
-        from langgraph.types import Command
-
-        # Tools that update graph state return a ``Command`` (e.g.
-        # ``present_files``). LangGraph later unwraps the inner ToolMessage
-        # into checkpoint state, so to stay checkpoint-aligned we must
-        # extract it here rather than storing ``str(Command(...))``.
-        if isinstance(output, Command):
-            update = getattr(output, "update", None) or {}
-            inner_msgs = update.get("messages") if isinstance(update, dict) else None
-            if isinstance(inner_msgs, list):
-                inner_tool_msg = next((m for m in inner_msgs if isinstance(m, ToolMessage)), None)
-                if inner_tool_msg is not None:
-                    output = inner_tool_msg
-
-        # Extract fields from ToolMessage object when LangChain provides one.
-        # LangChain's _format_output wraps tool results into a ToolMessage
-        # with tool_call_id, name, status, and artifact — more complete than
-        # what kwargs alone provides.
-        if isinstance(output, ToolMessage):
-            tool_call_id = output.tool_call_id or kwargs.get("tool_call_id") or self._tool_call_ids.pop(str(run_id), None)
-            tool_name = output.name or kwargs.get("name", "")
-            status = getattr(output, "status", "success") or "success"
-            content_str = output.content if isinstance(output.content, str) else str(output.content)
-            # Use model_dump() for checkpoint-aligned message content.
-            # Override tool_call_id if it was resolved from cache.
-            msg_content = output.model_dump()
-            if msg_content.get("tool_call_id") != tool_call_id:
-                msg_content["tool_call_id"] = tool_call_id
-        else:
-            tool_call_id = kwargs.get("tool_call_id") or self._tool_call_ids.pop(str(run_id), None)
-            tool_name = kwargs.get("name", "")
-            status = "success"
-            content_str = str(output)
-            # Construct checkpoint-aligned dict when output is a plain string.
-            msg_content = ToolMessage(
-                content=content_str,
-                tool_call_id=tool_call_id or "",
-                name=tool_name,
-                status=status,
-            ).model_dump()
-
-        # Trace event (always)
-        self._put(
-            event_type="tool_end",
-            category="trace",
-            content=content_str,
-            metadata={
-                "tool_name": tool_name,
-                "tool_call_id": tool_call_id,
-                "status": status,
-            },
-        )
-
-        # Message event: tool_result (checkpoint-aligned model_dump format)
-        self._put(
-            event_type="tool_result",
-            category="message",
-            content=msg_content,
-            metadata={"tool_name": tool_name, "status": status},
-        )
-
-    def on_tool_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        from langchain_core.messages import ToolMessage
-
-        tool_call_id = kwargs.get("tool_call_id") or self._tool_call_ids.pop(str(run_id), None)
-        tool_name = kwargs.get("name", "")
-
-        # Trace event
-        self._put(
-            event_type="tool_error",
-            category="trace",
-            content=str(error),
-            metadata={
-                "tool_name": tool_name,
-                "tool_call_id": tool_call_id,
-            },
-        )
-
-        # Message event: tool_result with error status (checkpoint-aligned)
-        msg_content = ToolMessage(
-            content=str(error),
-            tool_call_id=tool_call_id or "",
-            name=tool_name,
-            status="error",
-        ).model_dump()
-        self._put(
-            event_type="tool_result",
-            category="message",
-            content=msg_content,
-            metadata={"tool_name": tool_name, "status": "error"},
-        )
-
-    # -- Custom event callback --
-
-    def on_custom_event(self, name: str, data: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        from deerflow.runtime.serialization import serialize_lc_object
-
-        if name == "summarization":
-            data_dict = data if isinstance(data, dict) else {}
-            self._put(
-                event_type="summarization",
-                category="trace",
-                content=data_dict.get("summary", ""),
-                metadata={
-                    "replaced_message_ids": data_dict.get("replaced_message_ids", []),
-                    "replaced_count": data_dict.get("replaced_count", 0),
-                },
-            )
-            self._put(
-                event_type="middleware:summarize",
-                category="middleware",
-                content={"role": "system", "content": data_dict.get("summary", "")},
-                metadata={"replaced_count": data_dict.get("replaced_count", 0)},
-            )
-        else:
-            event_data = serialize_lc_object(data) if not isinstance(data, dict) else data
-            self._put(
-                event_type=name,
-                category="trace",
-                metadata=event_data if isinstance(event_data, dict) else {"data": event_data},
-            )
+    def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
+        """Handle tool end event, append message and clear node data"""
+        try:
+            if isinstance(output, ToolMessage):
+                msg = cast(ToolMessage, output)
+                self._put(event_type="llm.tool.result", category="message", content=msg.model_dump())
+            elif isinstance(output, Command):
+                cmd = cast(Command, output)
+                messages = cmd.update.get("messages", [])
+                for message in messages:
+                    if isinstance(message, BaseMessage):
+                        self._put(event_type="llm.tool.result", category="message", content=message.model_dump())
+                    else:
+                        logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
+            else:
+                logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
+        finally:
+            logger.info(f"Tool end for node {run_id}")
 
     # -- Internal methods --
 
@@ -431,8 +307,9 @@ class RunJournal(BaseCallbackHandler):
         if exc:
             logger.warning("Journal flush task failed: %s", exc)
 
-    def _identify_caller(self, kwargs: dict) -> str:
-        for tag in kwargs.get("tags") or []:
+    def _identify_caller(self, tags: list[str] | None, **kwargs) -> str:
+        _tags = tags or kwargs.get("tags", [])
+        for tag in _tags:
             if isinstance(tag, str) and (tag.startswith("subagent:") or tag.startswith("middleware:") or tag == "lead_agent"):
                 return tag
         # Default to lead_agent: the main agent graph does not inject

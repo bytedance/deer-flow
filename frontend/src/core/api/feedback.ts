@@ -1,6 +1,6 @@
 import { getBackendBaseURL } from "../config";
 
-import { fetchWithAuth } from "./fetcher";
+import { fetch } from "./fetcher";
 
 export interface FeedbackData {
   feedback_id: string;
@@ -14,7 +14,7 @@ export async function upsertFeedback(
   rating: number,
   comment?: string,
 ): Promise<FeedbackData> {
-  const res = await fetchWithAuth(
+  const res = await fetch(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
     {
       method: "PUT",
@@ -32,7 +32,7 @@ export async function deleteFeedback(
   threadId: string,
   runId: string,
 ): Promise<void> {
-  const res = await fetchWithAuth(
+  const res = await fetch(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
     { method: "DELETE" },
   );

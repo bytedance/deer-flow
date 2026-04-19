@@ -54,7 +54,6 @@ class RunCreateRequest(BaseModel):
     after_seconds: float | None = Field(default=None, description="Delayed execution")
     if_not_exists: Literal["reject", "create"] = Field(default="create", description="Thread creation policy")
     feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
-    follow_up_to_run_id: str | None = Field(default=None, description="Run ID this message follows up on. Auto-detected from latest successful run if not provided.")
 
 
 class RunResponse(BaseModel):
@@ -312,11 +311,15 @@ async def list_thread_messages(
         if i in last_ai_indices:
             run_id = msg["run_id"]
             fb = feedback_map.get(run_id)
-            msg["feedback"] = {
-                "feedback_id": fb["feedback_id"],
-                "rating": fb["rating"],
-                "comment": fb.get("comment"),
-            } if fb else None
+            msg["feedback"] = (
+                {
+                    "feedback_id": fb["feedback_id"],
+                    "rating": fb["rating"],
+                    "comment": fb.get("comment"),
+                }
+                if fb
+                else None
+            )
         else:
             msg["feedback"] = None
 
@@ -339,7 +342,8 @@ async def list_run_messages(
     """
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
-        thread_id, run_id,
+        thread_id,
+        run_id,
         limit=limit + 1,
         before_seq=before_seq,
         after_seq=after_seq,

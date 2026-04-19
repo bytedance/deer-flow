@@ -1,4 +1,4 @@
-import { fetchWithAuth } from "@/core/api/fetcher";
+import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import type { Skill } from "./type";
@@ -10,7 +10,7 @@ export async function loadSkills() {
 }
 
 export async function enableSkill(skillName: string, enabled: boolean) {
-  const response = await fetchWithAuth(
+  const response = await fetch(
     `${getBackendBaseURL()}/api/skills/${skillName}`,
     {
       method: "PUT",
@@ -39,16 +39,13 @@ export interface InstallSkillResponse {
 export async function installSkill(
   request: InstallSkillRequest,
 ): Promise<InstallSkillResponse> {
-  const response = await fetchWithAuth(
-    `${getBackendBaseURL()}/api/skills/install`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(request),
+  const response = await fetch(`${getBackendBaseURL()}/api/skills/install`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
     },
-  );
+    body: JSON.stringify(request),
+  });
 
   if (!response.ok) {
     // Handle HTTP error responses (4xx, 5xx)

@@ -55,7 +55,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { fetchWithAuth } from "@/core/api/fetcher";
+import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -155,6 +155,7 @@ export function InputBox({
   const [followupsLoading, setFollowupsLoading] = useState(false);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
+  const messagesRef = useRef(thread.messages);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
@@ -355,6 +356,10 @@ export function InputBox({
   }, [showFollowups]);
 
   useEffect(() => {
+    messagesRef.current = thread.messages;
+  }, [thread.messages]);
+
+  useEffect(() => {
     return () => followupsVisibilityChangeRef.current?.(false);
   }, []);
 
@@ -370,14 +375,16 @@ export function InputBox({
       return;
     }
 
-    const lastAi = [...thread.messages].reverse().find((m) => m.type === "ai");
+    const lastAi = [...messagesRef.current]
+      .reverse()
+      .find((m) => m.type === "ai");
     const lastAiId = lastAi?.id ?? null;
     if (!lastAiId || lastAiId === lastGeneratedForAiIdRef.current) {
       return;
     }
     lastGeneratedForAiIdRef.current = lastAiId;
 
-    const recent = thread.messages
+    const recent = messagesRef.current
       .filter((m) => m.type === "human" || m.type === "ai")
       .map((m) => {
         const role = m.type === "human" ? "user" : "assistant";
@@ -396,19 +403,16 @@ export function InputBox({
     setFollowupsLoading(true);
     setFollowups([]);
 
-    fetchWithAuth(
-      `${getBackendBaseURL()}/api/threads/${threadId}/suggestions`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: recent,
-          n: 3,
-          model_name: context.model_name ?? undefined,
-        }),
-        signal: controller.signal,
-      },
-    )
+    fetch(`${getBackendBaseURL()}/api/threads/${threadId}/suggestions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: recent,
+        n: 3,
+        model_name: context.model_name ?? undefined,
+      }),
+      signal: controller.signal,
+    })
       .then(async (res) => {
         if (!res.ok) {
           return { suggestions: [] as string[] };
@@ -430,7 +434,7 @@ export function InputBox({
       });
 
     return () => controller.abort();
-  }, [context.model_name, disabled, isMock, status, thread.messages, threadId]);
+  }, [context.model_name, disabled, isMock, status, threadId]);
 
   return (
     <div ref={promptRootRef} className="relative flex flex-col gap-4">

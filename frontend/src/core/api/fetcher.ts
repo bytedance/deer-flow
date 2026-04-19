@@ -53,7 +53,7 @@ export function readCsrfCookie(): string | null {
  * preserved; the helper only ADDS the CSRF header when it isn't already
  * present, so explicit overrides win.
  */
-export async function fetchWithAuth(
+export async function fetch(
   input: RequestInfo | string,
   init?: RequestInit,
 ): Promise<Response> {
@@ -74,7 +74,7 @@ export async function fetchWithAuth(
     }
   }
 
-  const res = await fetch(url, {
+  const res = await globalThis.fetch(url, {
     ...init,
     headers,
     credentials: "include",

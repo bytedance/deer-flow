@@ -29,7 +29,6 @@ class RunStore(abc.ABC):
         kwargs: dict[str, Any] | None = None,
         error: str | None = None,
         created_at: str | None = None,
-        follow_up_to_run_id: str | None = None,
     ) -> None:
         pass
 

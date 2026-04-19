@@ -29,6 +29,7 @@ export const zhCN: Translations = {
     close: "关闭",
     more: "更多",
     search: "搜索",
+    loadMore: "加载更多",
     download: "下载",
     thinking: "思考",
     artifacts: "文件",

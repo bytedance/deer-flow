@@ -8,18 +8,25 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
+from langgraph.types import Checkpointer
 
-from deerflow.runtime import RunContext, RunManager
+from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.runtime import RunContext, RunManager, StreamBridge
+from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.runs.store.base import RunStore
 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
+
+
+T = TypeVar("T")
 
 
 @asynccontextmanager
@@ -84,25 +91,25 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
 # ---------------------------------------------------------------------------
 
 
-def _require(attr: str, label: str):
+def _require(attr: str, label: str) -> Callable[[Request], T]:
     """Create a FastAPI dependency that returns ``app.state.<attr>`` or 503."""
 
-    def dep(request: Request):
+    def dep(request: Request) -> T:
         val = getattr(request.app.state, attr, None)
         if val is None:
             raise HTTPException(status_code=503, detail=f"{label} not available")
-        return val
+        return cast(T, val)
 
     dep.__name__ = dep.__qualname__ = f"get_{attr}"
     return dep
 
 
-get_stream_bridge = _require("stream_bridge", "Stream bridge")
-get_run_manager = _require("run_manager", "Run manager")
-get_checkpointer = _require("checkpointer", "Checkpointer")
-get_run_event_store = _require("run_event_store", "Run event store")
-get_feedback_repo = _require("feedback_repo", "Feedback")
-get_run_store = _require("run_store", "Run store")
+get_stream_bridge: Callable[[Request], StreamBridge] = _require("stream_bridge", "Stream bridge")
+get_run_manager: Callable[[Request], RunManager] = _require("run_manager", "Run manager")
+get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "Checkpointer")
+get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
+get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
+get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 
 
 def get_store(request: Request):
@@ -121,10 +128,7 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
-    Returns a *base* context with infrastructure dependencies.  Callers that
-    need per-run fields (e.g. ``follow_up_to_run_id``) should use
-    ``dataclasses.replace(ctx, follow_up_to_run_id=...)`` before passing it
-    to :func:`run_agent`.
+    Returns a *base* context with infrastructure dependencies.
     """
     from deerflow.config import get_app_config
 
@@ -135,7 +139,6 @@ def get_run_context(request: Request) -> RunContext:
         run_events_config=getattr(get_app_config(), "run_events", None),
         thread_store=get_thread_store(request),
     )
-
 
 
 # ---------------------------------------------------------------------------

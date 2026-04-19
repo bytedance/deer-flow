@@ -51,7 +51,6 @@ class RunContext:
     event_store: Any | None = field(default=None)
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
-    follow_up_to_run_id: str | None = field(default=None)
 
 
 async def run_agent(
@@ -76,7 +75,6 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
-    follow_up_to_run_id = ctx.follow_up_to_run_id
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -112,22 +110,6 @@ async def run_agent(
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
             )
-
-            human_msg = _extract_human_message(graph_input)
-            if human_msg is not None:
-                msg_metadata = {}
-                if follow_up_to_run_id:
-                    msg_metadata["follow_up_to_run_id"] = follow_up_to_run_id
-                await event_store.put(
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    event_type="human_message",
-                    category="message",
-                    content=human_msg.model_dump(),
-                    metadata=msg_metadata or None,
-                )
-                content = human_msg.content
-                journal.set_first_human_message(content if isinstance(content, str) else str(content))
 
         # 1. Mark running
         await run_manager.set_status(run_id, RunStatus.running)
@@ -166,12 +148,13 @@ async def run_agent(
 
         # Inject runtime context so middlewares can access thread_id
         # (langgraph-cli does this automatically; we must do it manually)
-        runtime = Runtime(context={"thread_id": thread_id}, store=store)
+        runtime = Runtime(context={"thread_id": thread_id, "run_id": run_id}, store=store)
         # If the caller already set a ``context`` key (LangGraph >= 0.6.0
         # prefers it over ``configurable`` for thread-level data), make
         # sure ``thread_id`` is available there too.
         if "context" in config and isinstance(config["context"], dict):
             config["context"].setdefault("thread_id", thread_id)
+            config["context"].setdefault("run_id", run_id)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
         # Inject RunJournal as a LangChain callback handler.

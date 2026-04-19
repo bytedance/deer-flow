@@ -18,6 +18,7 @@ export interface Translations {
     close: string;
     more: string;
     search: string;
+    loadMore: string;
     download: string;
     thinking: string;
     artifacts: string;
