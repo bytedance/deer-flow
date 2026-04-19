@@ -1,8 +1,10 @@
 """Tests for ClarificationMiddleware, focusing on options type coercion."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
+from langgraph.graph.message import add_messages
 
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 
@@ -118,3 +120,60 @@ class TestFormatClarificationMessage:
         assert "2. 2" in result
         assert "3. True" in result
         assert "4. None" in result
+
+
+class TestClarificationCommandIdempotency:
+    """Clarification tool-call retries should not duplicate messages in state."""
+
+    def test_repeated_tool_call_uses_stable_message_id(self, middleware):
+        request = SimpleNamespace(
+            tool_call={
+                "name": "ask_clarification",
+                "id": "call-clarify-1",
+                "args": {
+                    "question": "Which environment should I use?",
+                    "clarification_type": "approach_choice",
+                    "options": ["dev", "prod"],
+                },
+            }
+        )
+
+        first = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+        second = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
+        first_message = first.update["messages"][0]
+        second_message = second.update["messages"][0]
+
+        assert first_message.id == "clarification:call-clarify-1"
+        assert second_message.id == first_message.id
+        assert second_message.tool_call_id == first_message.tool_call_id
+
+        merged = add_messages(add_messages([], [first_message]), [second_message])
+
+        assert len(merged) == 1
+        assert merged[0].id == "clarification:call-clarify-1"
+        assert merged[0].content == first_message.content
+
+    def test_missing_tool_call_id_still_gets_stable_message_id(self, middleware):
+        request = SimpleNamespace(
+            tool_call={
+                "name": "ask_clarification",
+                "args": {
+                    "question": "Which environment should I use?",
+                    "clarification_type": "missing_info",
+                },
+            }
+        )
+
+        first = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+        second = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
+        first_message = first.update["messages"][0]
+        second_message = second.update["messages"][0]
+
+        assert first_message.id.startswith("clarification:")
+        assert second_message.id == first_message.id
+
+        merged = add_messages(add_messages([], [first_message]), [second_message])
+
+        assert len(merged) == 1
