@@ -341,9 +341,7 @@ class TestBeforeAgent:
             }
         ]
 
-    def test_stored_filename_does_not_reappear_as_historical_and_still_loads_outline(
-        self, tmp_path
-    ):
+    def test_stored_filename_does_not_reappear_as_historical_and_still_loads_outline(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "draft_abc123.pdf").write_bytes(b"%PDF fake")
@@ -374,9 +372,7 @@ class TestBeforeAgent:
         assert "previous messages" not in content
         assert "Executive Summary" in content
 
-    def test_historical_files_keep_display_name_and_hide_generated_markdown_sidecars(
-        self, tmp_path
-    ):
+    def test_historical_files_keep_display_name_and_hide_generated_markdown_sidecars(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "draft_abc123.pdf").write_bytes(b"%PDF fake")

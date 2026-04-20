@@ -360,7 +360,10 @@ export function InputBox({
   const uploadAttachment = useCallback(
     async (attachmentId: string, file: File) => {
       const abortController = new AbortController();
-      const storageFilename = createDraftUploadFilename(attachmentId, file.name);
+      const storageFilename = createDraftUploadFilename(
+        attachmentId,
+        file.name,
+      );
       const uploadFile =
         file.name === storageFilename
           ? file
@@ -426,8 +429,7 @@ export function InputBox({
             progress: 0,
             error:
               error instanceof Error ? error.message : t.uploads.uploadFailed,
-            storedFilename:
-              current.upload?.storedFilename ?? storageFilename,
+            storedFilename: current.upload?.storedFilename ?? storageFilename,
           },
         }));
       } finally {
@@ -444,7 +446,9 @@ export function InputBox({
     const previousAttachmentFiles = previousAttachmentFilesRef.current;
     previousAttachmentFilesRef.current = attachmentFiles;
 
-    const currentAttachmentIds = new Set(attachmentFiles.map((file) => file.id));
+    const currentAttachmentIds = new Set(
+      attachmentFiles.map((file) => file.id),
+    );
     for (const previousAttachment of previousAttachmentFiles) {
       if (currentAttachmentIds.has(previousAttachment.id)) {
         continue;
@@ -705,7 +709,8 @@ export function InputBox({
     return () => controller.abort();
   }, [context.model_name, disabled, isMock, status, thread.messages, threadId]);
 
-  const showUploadingHint = isUploading || (!isMock && hasPendingAttachmentUploads);
+  const showUploadingHint =
+    isUploading || (!isMock && hasPendingAttachmentUploads);
   const submitDisabled = (disabled ?? false) || hasBlockingAttachmentUploads;
 
   return (
@@ -1234,7 +1239,9 @@ function AddAttachmentsButton({ className }: { className?: string }) {
   const attachments = usePromptInputAttachments();
   return (
     <Tooltip
-      content={isMock ? t.common.notAvailableInDemoMode : t.inputBox.addAttachments}
+      content={
+        isMock ? t.common.notAvailableInDemoMode : t.inputBox.addAttachments
+      }
     >
       <PromptInputButton
         className={cn("px-2!", className)}
