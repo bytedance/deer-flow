@@ -43,6 +43,7 @@ def test_get_skills_prompt_section_returns_skills(monkeypatch):
     assert "skill1" in result
     assert "skill2" not in result
     assert "[built-in]" in result
+    assert "User-selected skill scope" in result
 
 
 def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(monkeypatch):
@@ -141,4 +142,14 @@ def test_make_lead_agent_empty_skills_passed_correctly(monkeypatch):
     # Case 3: Some skills list
     monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=["skill1"]))
     lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
+    assert captured_skills[-1] == {"skill1"}
+
+    # Case 4: Runtime skill selection without agent skill restrictions
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=None))
+    lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test", "selected_skill_names": ["skill1", "skill2"]}})
+    assert captured_skills[-1] == {"skill1", "skill2"}
+
+    # Case 5: Runtime skill selection is intersected with agent skill restrictions
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=["skill1"]))
+    lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test", "selected_skill_names": ["skill1", "skill2"]}})
     assert captured_skills[-1] == {"skill1"}

@@ -554,6 +554,11 @@ def _get_cached_skills_prompt_section(
             for name, description, category, location in filtered
         )
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
+    selection_guidance = (
+        "\n**User-selected skill scope:** The user explicitly selected the skills listed in `<available_skills>`. Prefer these skills for this request and do not spend effort choosing among unlisted skills.\n"
+        if available_skills_key is not None and filtered
+        else ""
+    )
     return f"""<skill_system>
 You have access to skills that provide optimized workflows for specific tasks. Each skill contains best practices, frameworks, and references to additional resources.
 
@@ -566,6 +571,7 @@ You have access to skills that provide optimized workflows for specific tasks. E
 
 **Skills are located at:** {container_base_path}
 {skill_evolution_section}
+{selection_guidance}
 {skills_list}
 
 </skill_system>"""

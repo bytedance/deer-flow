@@ -26,6 +26,16 @@ from deerflow.models import create_chat_model
 logger = logging.getLogger(__name__)
 
 
+def _normalize_selected_skill_names(value: object) -> set[str] | None:
+    """Normalize optional per-run skill selection from configurable context."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        logger.warning("Ignoring invalid selected_skill_names value: %r", value)
+        return None
+    return {item.strip() for item in value if isinstance(item, str) and item.strip()}
+
+
 def _resolve_model_name(requested_model_name: str | None = None) -> str:
     """Resolve a runtime model name safely, falling back to default if invalid. Returns None if no models are configured."""
     app_config = get_app_config()
@@ -292,6 +302,7 @@ def make_lead_agent(config: RunnableConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
+    selected_skill_names = _normalize_selected_skill_names(cfg.get("selected_skill_names"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
@@ -346,13 +357,16 @@ def make_lead_agent(config: RunnableConfig):
             state_schema=ThreadState,
         )
 
-    # Default lead agent (unchanged behavior)
+    configured_agent_skills = set(agent_config.skills) if agent_config and agent_config.skills is not None else None
+    available_skills = selected_skill_names
+    if configured_agent_skills is not None:
+        available_skills = configured_agent_skills if available_skills is None else configured_agent_skills.intersection(available_skills)
+
+    # Default lead agent
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
-        system_prompt=apply_prompt_template(
-            subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
-        ),
+        system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=available_skills),
         state_schema=ThreadState,
     )

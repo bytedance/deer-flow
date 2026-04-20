@@ -211,6 +211,7 @@ def test_context_merges_into_configurable():
         "is_plan_mode": True,
         "subagent_enabled": True,
         "max_concurrent_subagents": 5,
+        "selected_skill_names": ["skill1", "skill2"],
         "thread_id": "should-be-ignored",
     }
 
@@ -222,6 +223,7 @@ def test_context_merges_into_configurable():
         "is_plan_mode",
         "subagent_enabled",
         "max_concurrent_subagents",
+        "selected_skill_names",
     }
     configurable = config.setdefault("configurable", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:
@@ -235,6 +237,7 @@ def test_context_merges_into_configurable():
     assert config["configurable"]["max_concurrent_subagents"] == 5
     assert config["configurable"]["reasoning_effort"] == "high"
     assert config["configurable"]["mode"] == "ultra"
+    assert config["configurable"]["selected_skill_names"] == ["skill1", "skill2"]
     # thread_id from context should NOT override the one from build_run_config
     assert config["configurable"]["thread_id"] == "thread-1"
     # Non-allowlisted keys should not appear

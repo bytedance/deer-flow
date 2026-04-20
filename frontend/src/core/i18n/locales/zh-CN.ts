@@ -82,6 +82,15 @@ export const zhCN: Translations = {
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
+    skillScope: "技能范围",
+    allSkills: "全部技能",
+    noSkills: "暂无启用技能",
+    selectedSkills: (count: number) => `${count} 个技能`,
+    skillCategories: "问题分类",
+    skillCategoryProgramming: "编程",
+    skillCategoryDataAnalysis: "数据分析",
+    skillCategoryPpt: "PPT 生成",
+    skillCategoryImage: "图像生成",
     mode: "模式",
     flashMode: "闪速",
     flashModeDescription: "快速且高效的完成任务，但可能不够精准",
@@ -151,7 +160,7 @@ export const zhCN: Translations = {
         type: "separator",
       },
       {
-        suggestion: "技能",
+        suggestion: "新建技能",
         prompt:
           "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
         icon: SparklesIcon,
@@ -413,6 +422,7 @@ export const zhCN: Translations = {
       title: "技能",
       description: "管理 Agent Skill 配置和启用状态。",
       createSkill: "新建技能",
+      bindCategory: "绑定分类",
       emptyTitle: "还没有技能",
       emptyDescription:
         "将你的 Agent Skill 文件夹放在 DeerFlow 根目录下的 `/skills/custom` 文件夹中。",
