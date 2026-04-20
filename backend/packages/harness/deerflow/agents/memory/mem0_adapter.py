@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -62,35 +61,53 @@ def _repo_local_storage_root() -> Path:
     return Path(__file__).resolve().parents[5] / ".deer-flow" / "mem0"
 
 
-@lru_cache(maxsize=1)
+_memory_instance: Any | None = None
+_memory_instance_lock = threading.Lock()
+
+
 def _get_memory_instance() -> Any:
     """Instantiate a Mem0 ``Memory`` with repo-local storage paths.
 
-    Cached — subsequent calls return the same instance. The import of
-    ``mem0`` is deferred to this function so the package is never
-    imported when the feature flag is off.
+    Returns a process-wide singleton guarded by a ``threading.Lock`` and
+    the double-checked-locking pattern. ``functools.lru_cache`` is
+    deliberately not used here: its locking does not serialize
+    concurrent cache-miss callers, which would let two threads each
+    instantiate Mem0 — and Qdrant's local (file-backed) mode refuses
+    concurrent access to the same path.
+
+    The ``mem0`` import is deferred to the first call so the package is
+    never imported when the feature flag is off.
     """
-    from mem0 import Memory  # local import — gated by is_mem0_enabled()
+    global _memory_instance
+    if _memory_instance is not None:
+        return _memory_instance
 
-    storage_root = _repo_local_storage_root()
-    qdrant_path = storage_root / "qdrant"
-    history_db_path = storage_root / "history.db"
+    with _memory_instance_lock:
+        if _memory_instance is not None:
+            return _memory_instance
 
-    storage_root.mkdir(parents=True, exist_ok=True)
-    qdrant_path.mkdir(parents=True, exist_ok=True)
+        from mem0 import Memory  # local import — gated by is_mem0_enabled()
 
-    config = {
-        "vector_store": {
-            "provider": "qdrant",
-            "config": {
-                "collection_name": "deerflow_mem0",
-                "path": str(qdrant_path),
+        storage_root = _repo_local_storage_root()
+        qdrant_path = storage_root / "qdrant"
+        history_db_path = storage_root / "history.db"
+
+        storage_root.mkdir(parents=True, exist_ok=True)
+        qdrant_path.mkdir(parents=True, exist_ok=True)
+
+        config = {
+            "vector_store": {
+                "provider": "qdrant",
+                "config": {
+                    "collection_name": "deerflow_mem0",
+                    "path": str(qdrant_path),
+                },
             },
-        },
-        "history_db_path": str(history_db_path),
-    }
+            "history_db_path": str(history_db_path),
+        }
 
-    return Memory.from_config(config)
+        _memory_instance = Memory.from_config(config)
+        return _memory_instance
 
 
 # ---------------------------------------------------------------------------
