@@ -99,7 +99,7 @@ setup-sandbox:
 	echo ""; \
 	if command -v container >/dev/null 2>&1 && [ "$$(uname)" = "Darwin" ]; then \
 		echo "Detected Apple Container on macOS, pulling image..."; \
-		container pull "$$IMAGE" || echo "⚠ Apple Container pull failed, will try Docker"; \
+		container image pull "$$IMAGE" || echo "⚠ Apple Container pull failed, will try Docker"; \
 	fi; \
 	if command -v docker >/dev/null 2>&1; then \
 		echo "Pulling image using Docker..."; \
