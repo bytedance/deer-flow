@@ -60,6 +60,18 @@ const config = {
         source: "/api/skills/:path*",
         destination: `${gatewayURL}/api/skills/:path*`,
       });
+
+      // Catch-all for remaining gateway API routes (models, threads, memory,
+      // mcp, artifacts, uploads, suggestions, runs, etc.) that don't have
+      // their own NEXT_PUBLIC_* env var toggle.
+      //
+      // NOTE: this must come AFTER the /api/langgraph rewrite above so that
+      // LangGraph routes are matched first when NEXT_PUBLIC_LANGGRAPH_BASE_URL
+      // is unset.
+      rewrites.push({
+        source: "/api/:path*",
+        destination: `${gatewayURL}/api/:path*`,
+      });
     }
 
     return rewrites;
