@@ -246,6 +246,13 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware(agent_name=agent_name))
 
+    # Additive: inject per-user Mem0 recall before the model call.
+    # Only appended when MEM0_ENABLED=1; chain is byte-for-byte identical when unset.
+    from deerflow.agents.memory.mem0_adapter import Mem0ReadMiddleware, is_mem0_enabled
+
+    if is_mem0_enabled():
+        middlewares.append(Mem0ReadMiddleware(agent_name=agent_name))
+
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
     app_config = get_app_config()

@@ -8,6 +8,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
+from deerflow.agents.memory import mem0_adapter
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.config.memory_config import get_memory_config
@@ -59,8 +60,11 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
         # Get thread ID from runtime context first, then fall back to LangGraph's configurable metadata
         thread_id = runtime.context.get("thread_id") if runtime.context else None
+        try:
+            config_data = get_config() or {}
+        except Exception:
+            config_data = {}
         if thread_id is None:
-            config_data = get_config()
             thread_id = config_data.get("configurable", {}).get("thread_id")
         if not thread_id:
             logger.debug("No thread_id in context, skipping memory update")
@@ -95,4 +99,38 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             reinforcement_detected=reinforcement_detected,
         )
 
+        # Additive: forward the same filtered conversation to Mem0 when enabled.
+        # The helper is a no-op when MEM0_ENABLED is unset/falsy.
+        mem0_adapter.maybe_write_to_mem0(
+            filtered_messages,
+            user_id=self._resolve_mem0_user_id(runtime, config_data),
+            agent_id=self._agent_name,
+            run_id=thread_id,
+        )
+
         return None
+
+    def _resolve_mem0_user_id(self, runtime: Runtime, config_data: dict) -> str:
+        """Resolve the Mem0 user_id using the documented precedence chain.
+
+        Precedence: ``runtime.context.mem0_user_id`` >
+        ``configurable.mem0_user_id`` > ``configurable.agent_name`` >
+        ``self._agent_name`` > ``"default"``.
+        """
+        runtime_context = getattr(runtime, "context", None) or {}
+        if isinstance(runtime_context, dict):
+            value = runtime_context.get("mem0_user_id")
+            if isinstance(value, str) and value:
+                return value
+
+        configurable = (config_data or {}).get("configurable", {}) or {}
+        value = configurable.get("mem0_user_id")
+        if isinstance(value, str) and value:
+            return value
+        value = configurable.get("agent_name")
+        if isinstance(value, str) and value:
+            return value
+
+        if self._agent_name:
+            return self._agent_name
+        return "default"
