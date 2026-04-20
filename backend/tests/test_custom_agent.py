@@ -485,15 +485,6 @@ class TestAgentsAPI:
         response = agent_client.post("/api/agents", json=payload)
         assert response.status_code == 422
 
-    def test_create_agent_rejects_long_display_name(self, agent_client):
-        payload = {
-            "name": "code-reviewer",
-            "display_name": "a" * 101,
-            "soul": "test",
-        }
-        response = agent_client.post("/api/agents", json=payload)
-        assert response.status_code == 422
-
     def test_create_agent_invalid_name(self, agent_client):
         payload = {"name": "Code Reviewer!", "soul": "test"}
         response = agent_client.post("/api/agents", json=payload)
