@@ -380,7 +380,12 @@ class MemoryUpdater:
             lines = response_text.split("\n")
             response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
 
-        update_data = json.loads(response_text)
+        try:
+            update_data = json.loads(response_text)
+        except json.JSONDecodeError:
+            # LLM may produce JSON with trailing commas - fix and retry
+            fixed = re.sub(r",(\s*[}\]])", r"\1", response_text)
+            update_data = json.loads(fixed)
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
         updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
