@@ -136,8 +136,14 @@ async def list_agents() -> AgentsListResponse:
         List of all custom agents with their metadata and soul content.
     """
 
+    _require_agents_api_enabled()
+
     try:
         agents = list_custom_agents()
+        return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True) for a in agents])
+    except Exception as e:
+        logger.error(f"Failed to list agents: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
 
 
 @router.get(
