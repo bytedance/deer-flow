@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
@@ -124,3 +125,37 @@ def test_stream_usage_reaches_real_client_stream(monkeypatch):
     assert any("usage_metadata" in event.data for event in ai_events)
     assert end_event is not None
     assert end_event.data.get("usage", {}).get("total_tokens", 0) > 0
+
+
+def test_reported_stream_usage_can_trigger_summarization_when_estimate_is_low():
+    """Reported usage is the fallback that lets summarization run when estimates undercount."""
+    model = FakeStreamingChatOpenAI(
+        model="fake-openai-compatible",
+        base_url="https://example.invalid/v1",
+        api_key="test-key",
+    )
+    middleware = SummarizationMiddleware(
+        model=model,
+        trigger=("tokens", 10),
+        keep=("messages", 1),
+        token_counter=lambda messages: 1,
+        trim_tokens_to_summarize=None,
+    )
+    provider = model._get_ls_params().get("ls_provider")  # noqa: SLF001
+
+    without_usage = [
+        HumanMessage(content="hello", id="human-without-usage"),
+        AIMessage(content="answer", id="ai-without-usage", response_metadata={"model_provider": provider}),
+    ]
+    assert middleware.before_model({"messages": without_usage}, runtime=None) is None
+
+    with_usage = [
+        HumanMessage(content="hello", id="human-with-usage"),
+        AIMessage(
+            content="answer",
+            id="ai-with-usage",
+            response_metadata={"model_provider": provider},
+            usage_metadata={"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+        ),
+    ]
+    assert middleware.before_model({"messages": with_usage}, runtime=None) is not None
