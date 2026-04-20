@@ -73,7 +73,7 @@ class MemoryConfig(BaseModel):
 
     @property
     def effective_high_water(self) -> int:
-        return self.max_cache_entries +  self.max_cache_entries_high_water_diff
+        return self.max_cache_entries + self.max_cache_entries_high_water_diff
 
 
 # Global configuration instance
