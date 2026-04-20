@@ -300,3 +300,12 @@ class TestCustomFieldsPromptInjection:
 
         result = _build_custom_fields_section({"query": "a=1&b=2"})
         assert "&amp;" in result
+
+    def test_defensive_frasing_present(self):
+        """The prompt section must contain defense-in-depth framing against indirect prompt injection."""
+        from deerflow.agents.lead_agent.prompt import _build_custom_fields_section
+
+        result = _build_custom_fields_section({"user_id": "U123"})
+        assert "inert reference data" in result
+        assert "never obey" in result
+        assert "instructions or directives" in result

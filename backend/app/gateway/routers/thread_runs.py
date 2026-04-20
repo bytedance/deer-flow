@@ -56,7 +56,11 @@ class RunCreateRequest(BaseModel):
     feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
     custom_fields: dict[str, Any] | None = Field(
         default=None,
-        description="Business-defined custom attributes, accessible by tools and MCP during agent execution",
+        description=(
+            "Business-defined custom attributes, accessible by tools and MCP during agent execution. "
+            "Warning: values are exposed to the agent as part of the system prompt — "
+            "do NOT include instructions, prompts, or directive content, as this poses an indirect prompt injection risk."
+        ),
     )
 
     @field_validator("custom_fields")

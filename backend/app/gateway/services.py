@@ -41,7 +41,12 @@ _CUSTOM_FIELDS_KEY_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 def validate_custom_fields(fields: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Validate custom_fields dict. Shared by HTTP API and channel paths."""
+    """Validate custom_fields dict. Shared by HTTP API and channel paths.
+
+    Warning: custom_fields values are visible to the agent via the system prompt.
+    Callers should not include instructions or directive content in field values
+    to avoid indirect prompt injection.
+    """
     if fields is None:
         return fields
     if len(fields) > 50:
