@@ -10,6 +10,7 @@ from deerflow.tools.builtins.setup_agent_tool import setup_agent
 
 # --- Helpers ---
 
+
 class _DummyRuntime(SimpleNamespace):
     context: dict
     tool_call_id: str
@@ -41,6 +42,7 @@ def _call_setup_agent(tmp_path: Path, soul: str, description: str, agent_name: s
 
 # --- Agent name validation tests ---
 
+
 def test_setup_agent_rejects_invalid_agent_name_before_writing(tmp_path, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     outside_dir = tmp_path.parent / "outside-target"
@@ -71,6 +73,7 @@ def test_setup_agent_rejects_absolute_agent_name_before_writing(tmp_path, monkey
 
 
 # --- Data loss prevention tests ---
+
 
 class TestSetupAgentNoDataLoss:
     """Ensure shutil.rmtree only removes directories created during the current call."""
