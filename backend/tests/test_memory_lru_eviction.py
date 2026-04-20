@@ -528,10 +528,11 @@ class TestLRUThreadSafety:
                 try:
                     mem = create_empty_memory()
                     mem["user"]["workContext"]["summary"] = f"{uid} context"
-                    storage.save(mem, user_id=uid)
+                    saved = storage.save(mem, user_id=uid)
+                    if not saved:
+                        errors.append(f"Save failed for {uid}")
                 except Exception as e:
-                    if not isinstance(e, OSError):
-                        errors.append(str(e))
+                    errors.append(str(e))
 
             threads = []
             for uid in [f"user{i}" for i in range(20)]:
