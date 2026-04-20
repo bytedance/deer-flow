@@ -4,6 +4,7 @@ import abc
 import json
 import logging
 import threading
+from collections import OrderedDict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -59,13 +60,58 @@ class MemoryStorage(abc.ABC):
 
 
 class FileMemoryStorage(MemoryStorage):
-    """File-based memory storage provider."""
+    """File-based memory storage provider with LRU eviction."""
 
     def __init__(self):
         """Initialize the file memory storage."""
         # Per-user/agent memory cache: keyed by (user_id, agent_name) tuple (None = global)
         # Value: (memory_data, file_mtime)
-        self._memory_cache: dict[tuple[str | None, str | None], tuple[dict[str, Any], float | None]] = {}
+        self._memory_cache: OrderedDict[tuple[str | None, str | None], tuple[dict[str, Any], float | None]] = OrderedDict()
+        self._cache_lock = threading.Lock()
+
+    @property
+    def _max_cache_entries(self) -> int:
+        return get_memory_config().max_cache_entries
+
+    @property
+    def _high_water_mark(self) -> int:
+        return get_memory_config().effective_high_water
+
+    def _evict_lru_user(self) -> None:
+        """Evict all cache entries belonging to the user whose most recent access is the oldest.
+
+        For each user, find their most-recently-touched key (last in OrderedDict).
+        The user with the *oldest* such key is the one to evict.
+        """
+        if not self._memory_cache:
+            return
+
+        # Build user -> latest position map.
+        # OrderedDict preserves insertion/access order, so later index = more recent.
+        user_latest_idx: dict[str | None, int] = {}
+        for idx, (uid, _) in enumerate(self._memory_cache):
+            user_latest_idx[uid] = idx  # last write wins -> latest position
+
+        # Pick user whose latest position is smallest (oldest)
+        lru_user_id = min(user_latest_idx, key=user_latest_idx.get)
+
+        evicted = [k for k in self._memory_cache if k[0] == lru_user_id]
+        for k in evicted:
+            del self._memory_cache[k]
+        logger.debug("LRU eviction: removed %d cache entry(ies) for user %s", len(evicted), lru_user_id)
+
+    def _touch_and_evict(self, cache_key: tuple[str | None, str | None]) -> None:
+        """Move *cache_key* to the end (most-recently-used) and evict if over high-water mark.
+
+        Must be called while holding ``_cache_lock``.
+        """
+        if cache_key in self._memory_cache:
+            self._memory_cache.move_to_end(cache_key)
+
+        # Only evict when exceeding high-water mark; drain down to max_cache_entries
+        if len(self._memory_cache) > self._high_water_mark:
+            while len(self._memory_cache) > self._max_cache_entries:
+                self._evict_lru_user()
 
     def _validate_agent_name(self, agent_name: str) -> None:
         """Validate that the agent name is safe to use in filesystem paths.
@@ -123,14 +169,24 @@ class FileMemoryStorage(MemoryStorage):
             current_mtime = None
 
         cache_key = (user_id, agent_name)
-        cached = self._memory_cache.get(cache_key)
 
-        if cached is None or cached[1] != current_mtime:
-            memory_data = self._load_memory_from_file(agent_name, user_id=user_id)
+        # Check cache under lock (pure memory operation)
+        with self._cache_lock:
+            cached = self._memory_cache.get(cache_key)
+            if cached is not None and cached[1] == current_mtime:
+                # Cache hit, mtime unchanged
+                self._memory_cache.move_to_end(cache_key)
+                return cached[0]
+
+        # Cache miss or stale — read file outside lock
+        memory_data = self._load_memory_from_file(agent_name, user_id=user_id)
+
+        # Update cache under lock (pure memory operation)
+        with self._cache_lock:
             self._memory_cache[cache_key] = (memory_data, current_mtime)
-            return memory_data
+            self._touch_and_evict(cache_key)
 
-        return cached[0]
+        return memory_data
 
     def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Reload memory data from file, forcing cache invalidation."""
@@ -143,7 +199,9 @@ class FileMemoryStorage(MemoryStorage):
             mtime = None
 
         cache_key = (user_id, agent_name)
-        self._memory_cache[cache_key] = (memory_data, mtime)
+        with self._cache_lock:
+            self._memory_cache[cache_key] = (memory_data, mtime)
+            self._touch_and_evict(cache_key)
         return memory_data
 
     def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
@@ -166,7 +224,9 @@ class FileMemoryStorage(MemoryStorage):
                 mtime = None
 
             cache_key = (user_id, agent_name)
-            self._memory_cache[cache_key] = (memory_data, mtime)
+            with self._cache_lock:
+                self._memory_cache[cache_key] = (memory_data, mtime)
+                self._touch_and_evict(cache_key)
             logger.info("Memory saved to %s", file_path)
             return True
         except OSError as e:

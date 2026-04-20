@@ -60,11 +60,24 @@ class MemoryConfig(BaseModel):
         le=8000,
         description="Maximum tokens to use for memory injection",
     )
+    max_cache_entries: int = Field(
+        default=100,
+        ge=1,
+        description="Target number of cache entries for memory storage; eviction brings size back to this level",
+    )
+    max_cache_entries_high_water_diff: int = Field(
+        default=20,
+        ge=0,
+        description="High-water difference mark that triggers LRU eviction (must be >= 0)",
+    )
+
+    @property
+    def effective_high_water(self) -> int:
+        return self.max_cache_entries +  self.max_cache_entries_high_water_diff
 
 
 # Global configuration instance
 _memory_config: MemoryConfig = MemoryConfig()
-
 
 def get_memory_config() -> MemoryConfig:
     """Get the current memory configuration."""

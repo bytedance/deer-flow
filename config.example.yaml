@@ -702,6 +702,8 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+  max_cache_entries: 100 # Maximum number of cache entries
+  max_cache_entries_high_water_diff: 20 # Maximum number difference of cache entries before eviction
 
 # ============================================================================
 # Skill Self-Evolution Configuration
