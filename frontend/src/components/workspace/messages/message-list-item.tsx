@@ -31,16 +31,16 @@ import {
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { useRehypeFadeInBlocks } from "@/core/rehype";
 import { humanMessagePlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CopyButton } from "../copy-button";
 
-import { MarkdownContent } from "./markdown-content";
+import { MarkdownContent, type MarkdownContentProps } from "./markdown-content";
 import { MessageTokenUsage } from "./message-token-usage";
 
-export function MessageListItem({
+function MessageListItem_({
   className,
   message,
   isLoading,
@@ -70,7 +70,12 @@ export function MessageListItem({
         <MessageToolbar
           className={cn(
             isHuman ? "-bottom-9 justify-end" : "-bottom-8",
-            "absolute right-0 left-0 z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100",
+            // On hover-capable pointers (desktop / mouse) the toolbar is
+            // hidden by default and only revealed on hover — matching the
+            // original design. Touch devices have no hover state, so on
+            // those the toolbar is always visible to remain reachable.
+            "absolute right-0 left-0 z-20 transition-opacity delay-200 duration-300",
+            "hoverable:opacity-0 hoverable:group-hover/conversation-message:opacity-100",
           )}
         >
           <div className="flex gap-1">
@@ -87,6 +92,14 @@ export function MessageListItem({
     </AIElementMessage>
   );
 }
+
+// Memoized to prevent re-renders from the post-stream event cascade (title
+// delta, query invalidation, suggestion fetch) from propagating through every
+// already-finalized message in the thread. Default shallow equality is
+// sufficient because all props are either primitives or come by reference
+// from the thread state (the `message` object changes identity only on the
+// single currently-streaming message, which is the correct behaviour).
+export const MessageListItem = memo(MessageListItem_);
 
 /**
  * Custom image component that handles artifact URLs
@@ -131,7 +144,18 @@ function MessageContent_({
   threadId: string;
   tokenUsageEnabled?: boolean;
 }) {
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  // Run the fade-in rehype plugin only on the final (non-streaming) render.
+  // During streaming it would fire on every token update and re-walk the AST
+  // on each chunk, which dominates the main-thread budget on long responses.
+  const rehypePlugins = useRehypeFadeInBlocks(!isLoading);
+  // Combined plugin list passed to MarkdownContent. Kept in useMemo so its
+  // reference stays stable across parent re-renders — MarkdownContent and
+  // MessageResponse rely on reference equality of this array to short-circuit
+  // their memo checks. An inline spread would defeat every downstream memo.
+  const combinedRehypePlugins = useMemo<MarkdownContentProps["rehypePlugins"]>(
+    () => [...rehypePlugins, [rehypeKatex, { output: "html" }]],
+    [rehypePlugins],
+  );
   const isHuman = message.type === "human";
   const components = useMemo(
     () => ({
@@ -245,7 +269,7 @@ function MessageContent_({
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}
-        rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
+        rehypePlugins={combinedRehypePlugins}
         className="my-3"
         components={components}
       />
