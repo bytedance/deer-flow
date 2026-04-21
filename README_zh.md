@@ -121,6 +121,13 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
 
+   > **自定义智能体 UI**：如果你想在 Web UI 中创建和管理自定义智能体，需要在 `config.yaml` 中启用受保护的 HTTP API：
+   >
+   > ```yaml
+   > agents_api:
+   >   enabled: true
+   > ```
+
 4. **为已配置的模型设置 API key**
 
    可任选以下一种方式：
