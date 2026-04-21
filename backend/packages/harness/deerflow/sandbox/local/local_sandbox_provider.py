@@ -11,6 +11,8 @@ _singleton: LocalSandbox | None = None
 
 
 class LocalSandboxProvider(SandboxProvider):
+    uses_thread_data_mounts = True
+
     def __init__(self):
         """Initialize the local sandbox provider with path mappings."""
         self._path_mappings = self._setup_path_mappings()

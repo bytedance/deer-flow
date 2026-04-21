@@ -23,7 +23,8 @@ def get_subagent_config(name: str) -> SubagentConfig | None:
     if config is None:
         return None
 
-    # Apply timeout override from config.yaml (lazy import to avoid circular deps)
+    # Apply runtime overrides (timeout, max_turns, model) from config.yaml
+    # Lazy import to avoid circular deps.
     from deerflow.config.subagents_config import get_subagents_app_config
 
     app_config = get_subagents_app_config()
@@ -47,6 +48,15 @@ def get_subagent_config(name: str) -> SubagentConfig | None:
             effective_max_turns,
         )
         overrides["max_turns"] = effective_max_turns
+    effective_model = app_config.get_model_for(name)
+    if effective_model is not None and effective_model != config.model:
+        logger.debug(
+            "Subagent '%s': model overridden by config.yaml (%s -> %s)",
+            name,
+            config.model,
+            effective_model,
+        )
+        overrides["model"] = effective_model
     if overrides:
         config = replace(config, **overrides)
 

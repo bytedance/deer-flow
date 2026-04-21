@@ -1,3 +1,4 @@
+import errno
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -162,6 +163,74 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         assert rollback_response.json()["description"] == "Demo skill"
         assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == original_content
         assert refresh_calls == ["refresh", "refresh"]
+
+
+def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    custom_dir = skills_root / "custom" / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
+    refresh_calls = []
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    def _readonly_history(*args, **kwargs):
+        raise OSError(errno.EROFS, "Read-only file system", str(skills_root / "custom" / ".history"))
+
+    monkeypatch.setattr("app.gateway.routers.skills.append_history", _readonly_history)
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
+
+    app = FastAPI()
+    app.include_router(skills_router.router)
+
+    with TestClient(app) as client:
+        delete_response = client.delete("/api/skills/custom/demo-skill")
+
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"success": True}
+    assert not custom_dir.exists()
+    assert refresh_calls == ["refresh"]
+
+
+def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    custom_dir = skills_root / "custom" / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
+    refresh_calls = []
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    def _fail_rmtree(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied", str(custom_dir))
+
+    monkeypatch.setattr("app.gateway.routers.skills.shutil.rmtree", _fail_rmtree)
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
+
+    app = FastAPI()
+    app.include_router(skills_router.router)
+
+    with TestClient(app) as client:
+        delete_response = client.delete("/api/skills/custom/demo-skill")
+
+    assert delete_response.status_code == 500
+    assert "Failed to delete custom skill" in delete_response.json()["detail"]
+    assert custom_dir.exists()
+    assert refresh_calls == []
 
 
 def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path):
