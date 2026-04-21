@@ -11,6 +11,12 @@ from deerflow.mcp.tools import get_mcp_tools
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 
+class MockCallToolResult:
+    content = []
+    isError = False
+    structuredContent = None
+
+
 class MockArgs(BaseModel):
     x: int = Field(..., description="test param")
 
@@ -34,7 +40,7 @@ def test_mcp_tool_sync_wrapper_generation():
     mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool])
 
     with (
-        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance) as mock_client,
         patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
         patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {}}),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
@@ -51,6 +57,110 @@ def test_mcp_tool_sync_wrapper_generation():
         # Verify it works (sync call)
         result = patched_tool.func(x=42)
         assert result == "result: 42"
+        assert mock_client.call_args.kwargs["tool_name_prefix"] is True
+
+
+def test_mcp_tools_restore_unique_original_names_after_session_wrapping():
+    """Unique MCP tool names are exposed without the adapter's server prefix."""
+
+    async def mock_coro(x: int):
+        return f"result: {x}"
+
+    mock_tool = StructuredTool(
+        name="test-server_test_tool",
+        description="test description",
+        args_schema=MockArgs,
+        func=None,
+        coroutine=mock_coro,
+    )
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool])
+
+    with (
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
+        patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {}}),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.get_session_pool", return_value=MagicMock()),
+    ):
+        tools = asyncio.run(get_mcp_tools())
+
+    assert [tool.name for tool in tools] == ["test_tool"]
+
+
+def test_mcp_session_wrapper_calls_original_tool_name():
+    """Restored tool names still call MCP sessions with the original tool name."""
+
+    async def mock_coro(x: int):
+        return f"result: {x}"
+
+    mock_tool = StructuredTool(
+        name="test-server_test_tool",
+        description="test description",
+        args_schema=MockArgs,
+        func=None,
+        coroutine=mock_coro,
+    )
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool])
+    mock_session = MagicMock()
+    mock_session.call_tool = AsyncMock(return_value=MockCallToolResult())
+    mock_pool = MagicMock()
+    mock_pool.get_session = AsyncMock(return_value=mock_session)
+
+    with (
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
+        patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {}}),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.get_session_pool", return_value=mock_pool),
+    ):
+        tools = asyncio.run(get_mcp_tools())
+        result = asyncio.run(tools[0].coroutine(x=42))
+
+    assert tools[0].name == "test_tool"
+    assert result == ([], None)
+    mock_session.call_tool.assert_awaited_once_with("test_tool", {"x": 42})
+
+
+def test_mcp_tools_keep_server_prefix_for_duplicate_original_names():
+    """Duplicate original MCP tool names keep prefixes to avoid collisions."""
+
+    async def mock_coro(x: int):
+        return f"result: {x}"
+
+    tools_from_client = [
+        StructuredTool(
+            name="server-a_search",
+            description="test description",
+            args_schema=MockArgs,
+            func=None,
+            coroutine=mock_coro,
+        ),
+        StructuredTool(
+            name="server-b_search",
+            description="test description",
+            args_schema=MockArgs,
+            func=None,
+            coroutine=mock_coro,
+        ),
+    ]
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.get_tools = AsyncMock(return_value=tools_from_client)
+
+    with (
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
+        patch("deerflow.mcp.tools.build_servers_config", return_value={"server-a": {}, "server-b": {}}),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.get_session_pool", return_value=MagicMock()),
+    ):
+        tools = asyncio.run(get_mcp_tools())
+
+    assert [tool.name for tool in tools] == ["server-a_search", "server-b_search"]
 
 
 def test_mcp_tool_sync_wrapper_in_running_loop():
