@@ -41,7 +41,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   const deleteAgent = useDeleteAgent();
   const [deleteOpen, setDeleteOpen] = useState(false);
   const displayName = getAgentDisplayName(agent);
-  const showAgentName = hasAgentDisplayName(agent);
+  const showAgentSlug = hasAgentDisplayName(agent);
 
   function handleChat() {
     router.push(`/workspace/agents/${agent.name}/chats/new`);
@@ -70,7 +70,7 @@ export function AgentCard({ agent }: AgentCardProps) {
                 <CardTitle className="truncate text-base">
                   {displayName}
                 </CardTitle>
-                {showAgentName && (
+                {showAgentSlug && (
                   <div className="text-muted-foreground truncate text-xs">
                     {t.agents.agentSlugLabel}: {agent.name}
                   </div>

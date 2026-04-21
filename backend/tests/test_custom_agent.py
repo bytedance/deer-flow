@@ -108,6 +108,15 @@ class TestAgentConfig:
         assert cfg.model == "gpt-4"
         assert cfg.tool_groups is None
 
+    def test_display_name_trims_before_length_validation(self):
+        from deerflow.config.agents_config import AgentConfig
+
+        cfg = AgentConfig(name="test-agent", display_name=f"  {'a' * 100}  ")
+        assert cfg.display_name == "a" * 100
+
+        with pytest.raises(ValueError):
+            AgentConfig(name="test-agent", display_name=f"  {'a' * 101}  ")
+
 
 # ===========================================================================
 # 3. load_agent_config
@@ -476,10 +485,20 @@ class TestAgentsAPI:
         blank_config = yaml.safe_load((tmp_path / "agents" / "blank-agent" / "config.yaml").read_text(encoding="utf-8"))
         assert "display_name" not in blank_config
 
-    def test_create_agent_rejects_long_display_name(self, agent_client):
+    def test_create_agent_accepts_display_name_with_extra_whitespace(self, agent_client):
         payload = {
             "name": "code-reviewer",
-            "display_name": "a" * 101,
+            "display_name": f"  {'a' * 100}  ",
+            "soul": "test",
+        }
+        response = agent_client.post("/api/agents", json=payload)
+        assert response.status_code == 201
+        assert response.json()["display_name"] == "a" * 100
+
+    def test_create_agent_rejects_long_display_name_after_trimming(self, agent_client):
+        payload = {
+            "name": "code-reviewer",
+            "display_name": f"  {'a' * 101}  ",
             "soul": "test",
         }
         response = agent_client.post("/api/agents", json=payload)
@@ -577,10 +596,37 @@ class TestAgentsAPI:
         assert "display_name" not in cleared_config
         assert cleared_config["description"] == "desc"
 
-    def test_update_agent_rejects_long_display_name(self, agent_client):
+    def test_update_agent_preserves_existing_skills_config(self, agent_client, tmp_path):
+        _write_agent(
+            tmp_path,
+            "skilled-agent",
+            {
+                "name": "skilled-agent",
+                "description": "old",
+                "skills": ["research", "coding"],
+            },
+        )
+
+        response = agent_client.put("/api/agents/skilled-agent", json={"description": "new"})
+        assert response.status_code == 200
+        assert response.json()["description"] == "new"
+
+        config_path = tmp_path / "agents" / "skilled-agent" / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["description"] == "new"
+        assert config["skills"] == ["research", "coding"]
+
+    def test_update_agent_accepts_display_name_with_extra_whitespace(self, agent_client):
         agent_client.post("/api/agents", json={"name": "update-me", "soul": "original"})
 
-        response = agent_client.put("/api/agents/update-me", json={"display_name": "a" * 101})
+        response = agent_client.put("/api/agents/update-me", json={"display_name": f"  {'a' * 100}  "})
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "a" * 100
+
+    def test_update_agent_rejects_long_display_name_after_trimming(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "update-me", "soul": "original"})
+
+        response = agent_client.put("/api/agents/update-me", json={"display_name": f"  {'a' * 101}  "})
         assert response.status_code == 422
 
     def test_update_missing_agent_404(self, agent_client):

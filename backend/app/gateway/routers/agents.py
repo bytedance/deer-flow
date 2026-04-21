@@ -9,14 +9,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from deerflow.config.agents_config import AGENT_DISPLAY_NAME_MAX_LENGTH, AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
-AGENT_DISPLAY_NAME_MAX_LENGTH = 100
 
 
 class AgentResponse(BaseModel):
@@ -47,7 +46,6 @@ class AgentCreateRequest(BaseModel):
     display_name: str | None = Field(
         default=None,
         description="Optional human-friendly agent display name",
-        max_length=AGENT_DISPLAY_NAME_MAX_LENGTH,
     )
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
@@ -61,7 +59,6 @@ class AgentUpdateRequest(BaseModel):
     display_name: str | None = Field(
         default=None,
         description="Updated display name",
-        max_length=AGENT_DISPLAY_NAME_MAX_LENGTH,
     )
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
@@ -96,6 +93,15 @@ def _normalize_display_name(display_name: str | None) -> str | None:
         return None
     normalized = display_name.strip()
     return normalized or None
+
+
+def _validate_display_name_length(display_name: str | None) -> None:
+    """Validate the normalized display name length."""
+    if display_name is not None and len(display_name) > AGENT_DISPLAY_NAME_MAX_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"display_name must be at most {AGENT_DISPLAY_NAME_MAX_LENGTH} characters after trimming",
+        )
 
 
 def _require_agents_api_enabled() -> None:
@@ -236,6 +242,7 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         # Write config.yaml
         config_data: dict = {"name": normalized_name}
         normalized_display_name = _normalize_display_name(request.display_name)
+        _validate_display_name_length(normalized_display_name)
         if normalized_display_name is not None:
             config_data["display_name"] = normalized_display_name
         if request.description:
@@ -304,23 +311,24 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         config_changed = display_name_provided or any(v is not None for v in [request.description, request.model, request.tool_groups])
 
         if config_changed:
-            updated: dict = {
-                "name": agent_cfg.name,
-                "description": request.description if request.description is not None else agent_cfg.description,
-            }
+            updated = agent_cfg.model_dump(exclude_none=True)
+            updated["name"] = agent_cfg.name
+            if request.description is not None:
+                updated["description"] = request.description
+
             new_display_name = agent_cfg.display_name
             if display_name_provided:
                 new_display_name = _normalize_display_name(request.display_name)
+                _validate_display_name_length(new_display_name)
             if new_display_name is not None:
                 updated["display_name"] = new_display_name
+            else:
+                updated.pop("display_name", None)
 
-            new_model = request.model if request.model is not None else agent_cfg.model
-            if new_model is not None:
-                updated["model"] = new_model
-
-            new_tool_groups = request.tool_groups if request.tool_groups is not None else agent_cfg.tool_groups
-            if new_tool_groups is not None:
-                updated["tool_groups"] = new_tool_groups
+            if request.model is not None:
+                updated["model"] = request.model
+            if request.tool_groups is not None:
+                updated["tool_groups"] = request.tool_groups
 
             config_file = agent_dir / "config.yaml"
             with open(config_file, "w", encoding="utf-8") as f:
