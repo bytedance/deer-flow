@@ -33,13 +33,13 @@
 
 曾经考虑过三种复用方案，都被否决：
 
-1. **让 `client.stream()` 变成 `async def client.astream()`**  
+1. **让 `client.stream()` 变成 `async def client.astream()`**
    breaking change。用户用不上的 `async for` / `asyncio.run()` 要硬塞进 Jupyter notebook 和同步脚本。DeerFlowClient 的一大卖点（"把 agent 当普通函数调用"）直接消失。
 
-2. **在 `client.stream()` 内部起一个独立事件循环线程，用 `StreamBridge` 在 sync/async 之间做桥接**  
+2. **在 `client.stream()` 内部起一个独立事件循环线程，用 `StreamBridge` 在 sync/async 之间做桥接**
    引入线程池、队列、信号量。为了"消除重复"，把**复杂度**代替代码行数引进来。是典型的"wrong abstraction"——开销高于复用收益。
 
-3. **让 `run_agent` 自己兼容 sync mode**  
+3. **让 `run_agent` 自己兼容 sync mode**
    给 Gateway 加一条用不到的死分支，污染 worker.py 的焦点。
 
 所以两条路径的事件处理逻辑会**相似但不共享**。这是刻意设计，不是疏忽。
