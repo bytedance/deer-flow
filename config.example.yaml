@@ -21,10 +21,11 @@ config_version: 7
 log_level: info
 
 # ============================================================================
-# Token Usage Tracking
+# Token Usage
 # ============================================================================
-# Track LLM token usage per model call (input/output/total tokens)
-# Logs at info level via TokenUsageMiddleware
+# Enable token usage collection and display.
+# When enabled, DeerFlow records input/output/total tokens per model call
+# and shows usage metadata in the workspace UI when providers return it.
 token_usage:
   enabled: false
 
@@ -479,7 +480,13 @@ tool_search:
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
 uploads:
-  # PDF-to-Markdown converter used when a PDF is uploaded.
+  # Automatic Office/PDF conversion runs on the backend host before sandbox
+  # isolation applies. Keep this disabled unless uploads come from a fully
+  # trusted source and you intentionally accept host-side parser risk.
+  auto_convert_documents: false
+  # Controls which PDF-to-Markdown converter is used whenever PDF conversion
+  # runs. Automatic upload conversion is gated separately by
+  # auto_convert_documents.
   # auto        — prefer pymupdf4llm when installed; fall back to MarkItDown for
   #               image-based or encrypted PDFs (recommended default).
   # pymupdf4llm — always use pymupdf4llm (must be installed: uv add pymupdf4llm).

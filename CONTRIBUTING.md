@@ -300,9 +300,13 @@ Nginx (port 2026) ← Unified entry point
 cd backend
 make test
 
-# Frontend tests
+# Frontend unit tests
 cd frontend
 make test
+
+# Frontend E2E tests (requires Chromium; builds and auto-starts the Next.js production server)
+cd frontend
+make test-e2e
 ```
 
 ### PR Regression Checks
@@ -311,6 +315,7 @@ Every pull request triggers the following CI workflows:
 
 - **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
+- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
 
 ## Code Style
 

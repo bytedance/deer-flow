@@ -8,7 +8,7 @@ dependencies = [
     "deerflow-harness",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
-    "python-multipart>=0.0.20",
+    "python-multipart>=0.0.26",
     "sse-starlette>=2.1.0",
     "uvicorn[standard]>=0.34.0",
     "lark-oapi>=1.4.0",
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0.0", "ruff>=0.14.11"]
+dev = ["pytest>=9.0.3", "ruff>=0.14.11"]
 
 [tool.uv.workspace]
 members = ["packages/harness"]
