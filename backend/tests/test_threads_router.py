@@ -159,10 +159,7 @@ async def test_update_thread_state_creates_new_checkpoint_each_call():
         await threads.update_thread_state(thread_id, body2, fake_request)
 
     # Collect all checkpoints for this thread.
-    history = [
-        cp
-        async for cp in checkpointer.alist({"configurable": {"thread_id": thread_id}})
-    ]
+    history = [cp async for cp in checkpointer.alist({"configurable": {"thread_id": thread_id}})]
 
     # There must be at least 3 entries: the initial one + one per update call.
     # This is the key invariant: each update_thread_state call must INSERT a new
@@ -173,21 +170,13 @@ async def test_update_thread_state_creates_new_checkpoint_each_call():
     # channel_values in blobs — only the checkpoint count is meaningful here.
     # In production (SQLite/Postgres) the full checkpoint dict is serialised as a
     # single blob so channel_values are preserved correctly.
-    assert len(history) >= 3, (
-        f"Expected at least 3 checkpoint entries but got {len(history)}. "
-        "update_thread_state may be overwriting the existing checkpoint instead of inserting a new one."
-    )
+    assert len(history) >= 3, f"Expected at least 3 checkpoint entries but got {len(history)}. update_thread_state may be overwriting the existing checkpoint instead of inserting a new one."
 
     # Each checkpoint must have a distinct ID.
     checkpoint_ids = [cp.config["configurable"]["checkpoint_id"] for cp in history]
-    assert len(checkpoint_ids) == len(set(checkpoint_ids)), (
-        f"Duplicate checkpoint IDs found: {checkpoint_ids}"
-    )
+    assert len(checkpoint_ids) == len(set(checkpoint_ids)), f"Duplicate checkpoint IDs found: {checkpoint_ids}"
 
     # Checkpoint IDs must be time-ordered (uuid6): later writes must sort after
     # earlier writes.  alist() returns newest-first, so checkpoint_ids[0] must
     # be lexicographically greater than checkpoint_ids[-1].
-    assert checkpoint_ids[0] > checkpoint_ids[-1], (
-        f"Expected newest checkpoint ID > oldest, but got {checkpoint_ids[0]} <= {checkpoint_ids[-1]}. "
-        "update_thread_state may be using uuid4 (random) instead of uuid6 (time-ordered)."
-    )
+    assert checkpoint_ids[0] > checkpoint_ids[-1], f"Expected newest checkpoint ID > oldest, but got {checkpoint_ids[0]} <= {checkpoint_ids[-1]}. update_thread_state may be using uuid4 (random) instead of uuid6 (time-ordered)."
