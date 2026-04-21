@@ -28,6 +28,7 @@ import { useThreadSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
+import { useVisualViewport } from "@/hooks/use-visual-viewport";
 import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
@@ -39,6 +40,12 @@ export default function ChatPage() {
   const [mounted, setMounted] = useState(false);
   const { tokenUsageEnabled } = useModels();
   useSpecificChatMode();
+  // Mirrors window.visualViewport.height → --keyboard-inset-js on <html>.
+  // That CSS variable is read by ``.bottom-keyboard`` / ``.pb-keyboard``
+  // (see globals.css) so the InputBox rides up with the on-screen
+  // keyboard on iOS Safari, which does not honour the VirtualKeyboard
+  // API or the interactive-widget meta directive.
+  useVisualViewport();
 
   useEffect(() => {
     setMounted(true);
@@ -123,7 +130,7 @@ export default function ChatPage() {
                 tokenUsageEnabled={tokenUsageEnabled}
               />
             </div>
-            <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">
+            <div className="bottom-keyboard px-safe absolute right-0 left-0 z-30 flex justify-center px-4">
               <div
                 className={cn(
                   "relative w-full",

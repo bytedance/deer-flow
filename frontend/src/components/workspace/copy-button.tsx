@@ -26,6 +26,7 @@ export function CopyButton({
         type="button"
         variant="ghost"
         onClick={handleCopy}
+        className="touch-target"
         {...props}
       >
         {copied ? (
