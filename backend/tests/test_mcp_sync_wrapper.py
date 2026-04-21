@@ -31,7 +31,7 @@ def test_mcp_tool_sync_wrapper_generation():
     mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool])
 
     with (
-        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance) as mock_client,
         patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
         patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {}}),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
@@ -48,6 +48,7 @@ def test_mcp_tool_sync_wrapper_generation():
         # Verify it works (sync call)
         result = patched_tool.func(x=42)
         assert result == "result: 42"
+        assert mock_client.call_args.kwargs["tool_name_prefix"] is False
 
 
 def test_mcp_tool_sync_wrapper_in_running_loop():
