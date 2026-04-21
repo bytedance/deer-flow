@@ -424,6 +424,11 @@ def disabled_agent_client(tmp_path):
 
 
 class TestAgentsAPI:
+    def test_agents_api_status_returns_enabled(self, agent_client):
+        response = agent_client.get("/api/agents/status")
+        assert response.status_code == 200
+        assert response.json() == {"enabled": True}
+
     def test_list_agents_empty(self, agent_client):
         response = agent_client.get("/api/agents")
         assert response.status_code == 200
@@ -589,6 +594,11 @@ class TestUserProfileAPI:
 
 
 class TestAgentsApiDisabled:
+    def test_agents_api_status_returns_disabled(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents/status")
+        assert response.status_code == 200
+        assert response.json() == {"enabled": False}
+
     def test_agents_list_returns_403(self, disabled_agent_client):
         response = disabled_agent_client.get("/api/agents")
         assert response.status_code == 403
