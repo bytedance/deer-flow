@@ -343,11 +343,14 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 
 **Components**:
-- `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), and atomic file I/O
-- `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)
+- `updater.py` - LLM-based memory updates with fact extraction and whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing)
+- `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time) that hands batched work to the SQLite writer queue when `SQLiteMemoryStorage` is configured
+- `writer_queue.py` - Shared SQLite single-writer queue + lease/heartbeat logic for multi-worker-safe memory updates
+- `sqlite_storage.py` - SQLite-backed memory storage with monotonic `seq` guard to reject stale overwrites
+- `storage.py` - File-backed fallback storage plus storage factory / safety warnings
 - `prompt.py` - Prompt templates for memory updates
 
-**Data Structure** (stored in `backend/.deer-flow/memory.json`):
+**Data Structure** (stored in either `backend/.deer-flow/memory.json` or `memory.db`, depending on `memory.storage_class`):
 - **User Context**: `workContext`, `personalContext`, `topOfMind` (1-3 sentence summaries)
 - **History**: `recentMonths`, `earlierContext`, `longTermBackground`
 - **Facts**: Discrete facts with `id`, `content`, `category` (preference/knowledge/context/behavior/goal), `confidence` (0-1), `createdAt`, `source`
@@ -355,16 +358,18 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 **Workflow**:
 1. `MemoryMiddleware` filters messages (user inputs + final AI responses) and queues conversation
 2. Queue debounces (30s default), batches updates, deduplicates per-thread
-3. Background thread invokes LLM to extract context updates and facts
-4. Applies updates atomically (temp file + rename) with cache invalidation, skipping duplicate fact content before append
+3. With `FileMemoryStorage`, a background thread invokes the LLM and writes the updated memory JSON atomically (temp file + rename)
+4. With `SQLiteMemoryStorage`, all workers enqueue work into `writer_queue.py`; exactly one process holds the writer lease and runs the full `load → LLM → save` cycle, while `sqlite_storage.py` rejects stale writes via the `seq` guard
 5. Next interaction injects top 15 facts + context into `<memory>` tags in system prompt
 
 Focused regression coverage for the updater lives in `backend/tests/test_memory_updater.py`.
 
 **Configuration** (`config.yaml` → `memory`):
 - `enabled` / `injection_enabled` - Master switches
-- `storage_path` - Path to memory.json
+- `storage_path` - Path to the JSON memory file when using `FileMemoryStorage`
+- `storage_class` - Storage backend (`FileMemoryStorage` by default, `SQLiteMemoryStorage` for multi-worker-safe updates)
 - `debounce_seconds` - Wait time before processing (default: 30)
+- `lock_stale_seconds` / `heartbeat_interval_seconds` / `processing_timeout_seconds` - SQLite writer-queue timings
 - `model_name` - LLM for updates (null = default model)
 - `max_facts` / `fact_confidence_threshold` - Fact storage limits (100 / 0.7)
 - `max_injection_tokens` - Token limit for prompt injection (2000)

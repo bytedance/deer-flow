@@ -111,17 +111,13 @@ def _get_timings() -> tuple[int, int, int]:
 
     Reads overrides from :class:`MemoryConfig`; falls back to module defaults
     when a field is absent (older configs that pre-date these knobs).
-    Enforces ``heartbeat_interval < lock_stale / 2`` to preserve the
-    three-missed-heartbeats safety margin from the RFC.
+    Enforces ``heartbeat_interval < lock_stale / 2`` to preserve a
+    stale-lease safety margin.
     """
     cfg = get_memory_config()
     lock_stale = int(getattr(cfg, "lock_stale_seconds", DEFAULT_LOCK_STALE_SECONDS))
-    heartbeat = int(
-        getattr(cfg, "heartbeat_interval_seconds", DEFAULT_HEARTBEAT_INTERVAL_SECONDS)
-    )
-    processing_timeout = int(
-        getattr(cfg, "processing_timeout_seconds", DEFAULT_PROCESSING_TIMEOUT_SECONDS)
-    )
+    heartbeat = int(getattr(cfg, "heartbeat_interval_seconds", DEFAULT_HEARTBEAT_INTERVAL_SECONDS))
+    processing_timeout = int(getattr(cfg, "processing_timeout_seconds", DEFAULT_PROCESSING_TIMEOUT_SECONDS))
 
     if heartbeat <= 0 or lock_stale <= 0 or processing_timeout <= 0:
         logger.warning(
@@ -138,8 +134,7 @@ def _get_timings() -> tuple[int, int, int]:
 
     if heartbeat * 2 >= lock_stale:
         logger.warning(
-            "heartbeat_interval_seconds=%d is not < lock_stale_seconds=%d / 2; "
-            "clamping heartbeat to keep a safety margin",
+            "heartbeat_interval_seconds=%d is not < lock_stale_seconds=%d / 2; clamping heartbeat to keep a safety margin",
             heartbeat,
             lock_stale,
         )
@@ -204,8 +199,7 @@ class _HeartbeatThread(threading.Thread):
                 conn = connect(self._db_path)
                 try:
                     conn.execute(
-                        "UPDATE memory_writer_lock "
-                        "SET heartbeat_at = ? WHERE id = 1 AND worker_id = ?",
+                        "UPDATE memory_writer_lock SET heartbeat_at = ? WHERE id = 1 AND worker_id = ?",
                         (utc_now_iso_z(), self._worker_id),
                     )
                     conn.commit()
@@ -295,9 +289,7 @@ def try_acquire_writer(db_path: Path, worker_id: str) -> bool:
     conn = connect(db_path)
     try:
         conn.execute("BEGIN EXCLUSIVE")
-        row = conn.execute(
-            "SELECT worker_id, heartbeat_at FROM memory_writer_lock WHERE id = 1"
-        ).fetchone()
+        row = conn.execute("SELECT worker_id, heartbeat_at FROM memory_writer_lock WHERE id = 1").fetchone()
 
         if row is not None:
             held_by = row["worker_id"]
@@ -395,8 +387,7 @@ def run_writer_loop(db_path: Path, worker_id: str) -> None:
                         "reinforcement_detected": bool(row["reinforcement_detected"]),
                     }
                     conn.execute(
-                        "UPDATE memory_update_queue "
-                        "SET status = 'processing', started_at = ? WHERE id = ?",
+                        "UPDATE memory_update_queue SET status = 'processing', started_at = ? WHERE id = ?",
                         (utc_now_iso_z(), task["id"]),
                     )
                     conn.commit()
@@ -405,17 +396,13 @@ def run_writer_loop(db_path: Path, worker_id: str) -> None:
                         conn.rollback()
                     except sqlite3.Error:
                         pass
-                    logger.exception(
-                        "Failed to claim next queue item; stopping writer loop"
-                    )
+                    logger.exception("Failed to claim next queue item; stopping writer loop")
                     break
 
                 # Run the load → LLM → save cycle with NO db lock held.
                 try:
                     agent_name: str | None
-                    agent_name = (
-                        None if task["agent_name"] == "__global__" else task["agent_name"]
-                    )
+                    agent_name = None if task["agent_name"] == "__global__" else task["agent_name"]
                     messages = messages_from_dict(json.loads(task["messages"]))
                     success = update_memory_from_conversation(
                         messages=messages,
@@ -426,15 +413,12 @@ def run_writer_loop(db_path: Path, worker_id: str) -> None:
                     )
                     final_status = "done" if success else "failed"
                 except Exception:
-                    logger.exception(
-                        "Memory update failed for queue item %d", task["id"]
-                    )
+                    logger.exception("Memory update failed for queue item %d", task["id"])
                     final_status = "failed"
 
                 try:
                     conn.execute(
-                        "UPDATE memory_update_queue "
-                        "SET status = ?, completed_at = ? WHERE id = ?",
+                        "UPDATE memory_update_queue SET status = ?, completed_at = ? WHERE id = ?",
                         (final_status, utc_now_iso_z(), task["id"]),
                     )
                     conn.commit()
@@ -551,9 +535,7 @@ def trim_queue(db_path: Path, keep_days: int = 7) -> int:
     conn = connect(db_path)
     try:
         cursor = conn.execute(
-            "DELETE FROM memory_update_queue "
-            "WHERE status IN ('done', 'failed') "
-            "AND completed_at IS NOT NULL AND completed_at < ?",
+            "DELETE FROM memory_update_queue WHERE status IN ('done', 'failed') AND completed_at IS NOT NULL AND completed_at < ?",
             (cutoff,),
         )
         deleted = cursor.rowcount or 0
@@ -581,9 +563,7 @@ def migrate_json_to_sqlite(
 
     storage = SQLiteMemoryStorage(db_path)
     if not storage.save(data, agent_name=agent_name):
-        raise RuntimeError(
-            f"Migration failed for {json_path}; original file unchanged"
-        )
+        raise RuntimeError(f"Migration failed for {json_path}; original file unchanged")
     logger.info(
         "Migrated %s into %s (agent=%s); original file preserved",
         json_path,
