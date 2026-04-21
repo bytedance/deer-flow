@@ -88,6 +88,7 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
+    metadata: dict = {}
 
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
@@ -107,8 +108,11 @@ async def task_tool(
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
 
+    # Inherit parent agent's tool_groups so subagents respect the same restrictions
+    parent_tool_groups = metadata.get("tool_groups")
+
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    tools = get_available_tools(model_name=parent_model, subagent_enabled=False)
+    tools = get_available_tools(model_name=parent_model, groups=parent_tool_groups, subagent_enabled=False)
 
     # Create executor
     executor = SubagentExecutor(

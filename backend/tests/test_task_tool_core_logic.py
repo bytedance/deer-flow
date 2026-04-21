@@ -167,14 +167,140 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert captured["executor_kwargs"]["config"].max_turns == 7
     assert "Skills Appendix" in captured["executor_kwargs"]["config"].system_prompt
 
-    get_available_tools.assert_called_once_with(model_name="ark-model", subagent_enabled=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False)
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
     assert events[-1]["result"] == "all done"
 
 
-def test_task_tool_returns_failed_message(monkeypatch):
+def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
+    """Verify tool_groups from parent metadata are passed to get_available_tools(groups=...)."""
+    config = _make_subagent_config()
+    parent_tool_groups = ["file:read", "file:write", "bash"]
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": "local"},
+            "thread_data": {"workspace_path": "/tmp/workspace"},
+        },
+        context={"thread_id": "thread-1"},
+        config={"metadata": {"model_name": "ark-model", "trace_id": "trace-1", "tool_groups": parent_tool_groups}},
+    )
+    events = []
+    get_available_tools = MagicMock(return_value=["tool-a"])
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="执行任务",
+        prompt="file work only",
+        subagent_type="general-purpose",
+        tool_call_id="tc-groups",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    # The key assertion: groups should be propagated from parent metadata
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False)
+
+
+def test_task_tool_no_tool_groups_passes_none(monkeypatch):
+    """Verify that when metadata has no tool_groups, groups=None is passed (backward compat)."""
+    config = _make_subagent_config()
+    # Default _make_runtime() has no tool_groups in metadata
+    runtime = _make_runtime()
+    events = []
+    get_available_tools = MagicMock(return_value=[])
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="ok"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="执行任务",
+        prompt="normal work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-no-groups",
+    )
+
+    assert output == "Task Succeeded. Result: ok"
+    # No tool_groups in metadata → groups=None (default behavior preserved)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False)
+
+
+def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
+    """Verify that when runtime is None, groups=None is passed (e.g., unknown subagent path exits early, but tools still load correctly)."""
+    config = _make_subagent_config()
+    events = []
+    get_available_tools = MagicMock(return_value=[])
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="ok"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=None,
+        description="执行任务",
+        prompt="no runtime",
+        subagent_type="general-purpose",
+        tool_call_id="tc-no-runtime",
+    )
+
+    assert output == "Task Succeeded. Result: ok"
+    # runtime is None → metadata is empty dict → groups=None
+    get_available_tools.assert_called_once_with(model_name=None, groups=None, subagent_enabled=False)
+
     config = _make_subagent_config()
     events = []
 
