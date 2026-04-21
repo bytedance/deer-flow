@@ -603,10 +603,13 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         metadata["writes"] = {body.as_node: body.values}
 
     # Assign a new checkpoint ID so aput performs an INSERT rather than an
-    # in-place REPLACE of the existing row.  Without this, the checkpointer
-    # reuses the old checkpoint["id"] as the storage key and the thread
-    # history stays at exactly 1 entry.
-    checkpoint["id"] = str(uuid.uuid4())
+    # in-place REPLACE of the existing row.  Use uuid6 (time-ordered) rather
+    # than uuid4 (random) so the new ID is always lexicographically greater
+    # than the previous one — LangGraph's checkpointers determine the "latest"
+    # checkpoint by max(checkpoint_ids) string order, matching the uuid6 epoch.
+    from langgraph.checkpoint.base.id import uuid6
+
+    checkpoint["id"] = str(uuid6())
 
     # aput requires checkpoint_ns in the config — use the same config used for the
     # read (which always includes checkpoint_ns="").  Do NOT include checkpoint_id

@@ -183,3 +183,11 @@ async def test_update_thread_state_creates_new_checkpoint_each_call():
     assert len(checkpoint_ids) == len(set(checkpoint_ids)), (
         f"Duplicate checkpoint IDs found: {checkpoint_ids}"
     )
+
+    # Checkpoint IDs must be time-ordered (uuid6): later writes must sort after
+    # earlier writes.  alist() returns newest-first, so checkpoint_ids[0] must
+    # be lexicographically greater than checkpoint_ids[-1].
+    assert checkpoint_ids[0] > checkpoint_ids[-1], (
+        f"Expected newest checkpoint ID > oldest, but got {checkpoint_ids[0]} <= {checkpoint_ids[-1]}. "
+        "update_thread_state may be using uuid4 (random) instead of uuid6 (time-ordered)."
+    )
