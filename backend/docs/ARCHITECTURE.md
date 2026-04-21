@@ -199,7 +199,7 @@ class ThreadState(AgentState):
 │   Built-in Tools    │  │  Configured Tools   │  │     MCP Tools       │
 │  (packages/harness/deerflow/tools/)       │  │  (config.yaml)      │  │  (extensions.json)  │
 ├─────────────────────┤  ├─────────────────────┤  ├─────────────────────┤
-│ - present_file      │  │ - web_search        │  │ - github            │
+│ - present_files     │  │ - web_search        │  │ - github            │
 │ - ask_clarification │  │ - web_fetch         │  │ - filesystem        │
 │ - view_image        │  │ - bash              │  │ - postgres          │
 │                     │  │ - read_file         │  │ - brave-search      │
