@@ -707,8 +707,18 @@ summarization:
 # Stores user context and conversation history for personalized responses
 memory:
   enabled: true
-  storage_path: memory.json # Path relative to backend directory
+  storage_path: memory.json # Path relative to backend directory (used by FileMemoryStorage only)
+  # Storage backend class path. The default file backend is single-writer only
+  # and silently loses updates under multi-worker deployments. For
+  # WEB_CONCURRENCY > 1, switch to the SQLite backend which is backed by the
+  # single-writer queue (RFC #2283):
+  #   storage_class: "deerflow.agents.memory.sqlite_storage.SQLiteMemoryStorage"
+  storage_class: "deerflow.agents.memory.storage.FileMemoryStorage"
   debounce_seconds: 30 # Wait time before processing queued updates
+  # Single-writer queue tunables (SQLite backend only):
+  lock_stale_seconds: 90          # Lease considered dead after this many seconds without a heartbeat
+  heartbeat_interval_seconds: 30  # Must be < lock_stale_seconds / 2
+  processing_timeout_seconds: 300 # Stuck 'processing' tasks are reset to 'pending' after this
   model_name: null # Use default model
   max_facts: 100 # Maximum number of facts to store
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
