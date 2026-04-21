@@ -48,6 +48,10 @@ class CodexChatModel(BaseChatModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    @classmethod
+    def is_lc_serializable(cls) -> bool:
+        return True
+
     @property
     def _llm_type(self) -> str:
         return "codex-responses"

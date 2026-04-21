@@ -68,6 +68,15 @@ done
 
 # ── Stop helper ──────────────────────────────────────────────────────────────
 
+_kill_port() {
+    local port=$1
+    local pid
+    pid=$(lsof -ti :"$port" 2>/dev/null) || true
+    if [ -n "$pid" ]; then
+        kill -9 $pid 2>/dev/null || true
+    fi
+}
+
 stop_all() {
     echo "Stopping all services..."
     pkill -f "langgraph dev" 2>/dev/null || true
@@ -78,6 +87,10 @@ stop_all() {
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
     pkill -9 nginx 2>/dev/null || true
+    # Force-kill any survivors still holding the service ports
+    _kill_port 2024
+    _kill_port 8001
+    _kill_port 3000
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -155,7 +168,7 @@ if ! { \
         [ -f config.yaml ]; \
     }; then
     echo "✗ No DeerFlow config file found."
-    echo "  Run 'make config' to generate config.yaml."
+    echo "  Run 'make setup' (recommended) or 'make config' to generate config.yaml."
     exit 1
 fi
 
@@ -266,7 +279,7 @@ if ! $GATEWAY_MODE; then
         LANGGRAPH_ALLOW_BLOCKING_FLAG="--allow-blocking"
     fi
     run_service "LangGraph" \
-        "cd backend && NO_COLOR=1 uv run langgraph dev --no-browser $LANGGRAPH_ALLOW_BLOCKING_FLAG --n-jobs-per-worker $LANGGRAPH_JOBS_PER_WORKER --server-log-level $LANGGRAPH_LOG_LEVEL $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1" \
+        "cd backend && NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 PY_COLORS=0 TERM=dumb uv run langgraph dev --no-browser $LANGGRAPH_ALLOW_BLOCKING_FLAG --n-jobs-per-worker $LANGGRAPH_JOBS_PER_WORKER --server-log-level $LANGGRAPH_LOG_LEVEL $LANGGRAPH_EXTRA_FLAGS 2>&1 | LC_ALL=C LC_CTYPE=C LANG=C perl -pe 's/\e\[[0-9;]*[[:alpha:]]//g' > ../logs/langgraph.log" \
         2024 60
 else
     echo "⏩ Skipping LangGraph (Gateway mode — runtime embedded in Gateway)"

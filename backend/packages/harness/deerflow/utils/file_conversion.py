@@ -23,11 +23,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from deerflow.config.app_config import get_app_config
+
 logger = logging.getLogger(__name__)
 
 
 class LegacyDocConversionError(RuntimeError):
     """Raised when a legacy ``.doc`` file cannot be converted safely."""
+
 
 # File extensions that should be converted to markdown
 CONVERTIBLE_EXTENSIONS = {
@@ -189,19 +192,13 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
 def ensure_legacy_doc_conversion_supported() -> None:
     """Raise a clear error when legacy ``.doc`` conversion is unavailable."""
     if _find_legacy_doc_converter() is None:
-        raise LegacyDocConversionError(
-            "Legacy .doc uploads require LibreOffice (`soffice`) or macOS "
-            "`textutil` to convert them to .docx before Markdown extraction."
-        )
+        raise LegacyDocConversionError("Legacy .doc uploads require LibreOffice (`soffice`) or macOS `textutil` to convert them to .docx before Markdown extraction.")
 
 
 def _convert_legacy_doc_to_docx(file_path: Path, output_dir: Path) -> Path:
     converter = _find_legacy_doc_converter()
     if converter is None:
-        raise LegacyDocConversionError(
-            f"Legacy Word file '{file_path.name}' is not supported in this environment. "
-            "Install LibreOffice (`soffice`) or use macOS `textutil`."
-        )
+        raise LegacyDocConversionError(f"Legacy Word file '{file_path.name}' is not supported in this environment. Install LibreOffice (`soffice`) or use macOS `textutil`.")
 
     tool, executable = converter
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -240,14 +237,10 @@ def _convert_legacy_doc_to_docx(file_path: Path, output_dir: Path) -> Path:
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or exc.stdout or "").strip()
         detail = f": {stderr}" if stderr else ""
-        raise LegacyDocConversionError(
-            f"Failed to convert legacy Word file '{file_path.name}' to .docx{detail}"
-        ) from exc
+        raise LegacyDocConversionError(f"Failed to convert legacy Word file '{file_path.name}' to .docx{detail}") from exc
 
     if not output_path.exists():
-        raise LegacyDocConversionError(
-            f"Legacy Word file '{file_path.name}' did not produce a .docx output."
-        )
+        raise LegacyDocConversionError(f"Legacy Word file '{file_path.name}' did not produce a .docx output.")
 
     return output_path
 
@@ -391,6 +384,15 @@ def extract_outline(md_path: Path) -> list[dict]:
     return outline
 
 
+def _get_uploads_config_value(key: str, default: object) -> object:
+    """Read a value from the uploads config, supporting dict and attribute access."""
+    cfg = get_app_config()
+    uploads_cfg = getattr(cfg, "uploads", None)
+    if isinstance(uploads_cfg, dict):
+        return uploads_cfg.get(key, default)
+    return getattr(uploads_cfg, key, default)
+
+
 def _get_pdf_converter() -> str:
     """Read pdf_converter setting from app config, defaulting to 'auto'.
 
@@ -399,16 +401,11 @@ def _get_pdf_converter() -> str:
     fall through to unexpected behaviour.
     """
     try:
-        from deerflow.config.app_config import get_app_config
-
-        cfg = get_app_config()
-        uploads_cfg = getattr(cfg, "uploads", None)
-        if uploads_cfg is not None:
-            raw = str(getattr(uploads_cfg, "pdf_converter", "auto")).strip().lower()
-            if raw not in _ALLOWED_PDF_CONVERTERS:
-                logger.warning("Invalid pdf_converter value %r; falling back to 'auto'", raw)
-                return "auto"
-            return raw
+        raw = str(_get_uploads_config_value("pdf_converter", "auto")).strip().lower()
+        if raw not in _ALLOWED_PDF_CONVERTERS:
+            logger.warning("Invalid pdf_converter value %r; falling back to 'auto'", raw)
+            return "auto"
+        return raw
     except Exception:
         pass
     return "auto"
