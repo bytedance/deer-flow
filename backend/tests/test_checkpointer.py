@@ -1,6 +1,9 @@
 """Unit tests for checkpointer config and singleton factory."""
 
+import json
+import re
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +28,33 @@ def reset_state():
     app_config_module._app_config = None
     set_checkpointer_config(None)
     reset_checkpointer()
+
+
+# ---------------------------------------------------------------------------
+# Checkpointer path configuration tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointerPathConfig:
+    """Verify files referenced in checkpointer config actually exist on disk."""
+
+    BACKEND_ROOT = Path(__file__).resolve().parent.parent
+
+    def test_langgraph_json_checkpointer_file_exists(self):
+        """langgraph.json checkpointer.path 中引用的文件必须真实存在。"""
+        data = json.loads((self.BACKEND_ROOT / "langgraph.json").read_text(encoding="utf-8"))
+        file_part = data["checkpointer"]["path"].split(":")[0]
+        resolved = (self.BACKEND_ROOT / file_part).resolve()
+        assert resolved.exists(), f"File referenced in langgraph.json does not exist: {resolved}"
+
+    def test_harness_app_split_md_checkpointer_file_exists(self):
+        """HARNESS_APP_SPLIT.md 代码块中引用的 checkpointer 文件必须真实存在。"""
+        content = (self.BACKEND_ROOT / "docs" / "HARNESS_APP_SPLIT.md").read_text(encoding="utf-8")
+        match = re.search(r'"path":\s*"([^"]+async_provider\.py[^"]*)"', content)
+        assert match, "No checkpointer path found in HARNESS_APP_SPLIT.md"
+        file_part = match.group(1).split(":")[0]
+        resolved = (self.BACKEND_ROOT / file_part).resolve()
+        assert resolved.exists(), f"File referenced in HARNESS_APP_SPLIT.md does not exist: {resolved}"
 
 
 # ---------------------------------------------------------------------------
