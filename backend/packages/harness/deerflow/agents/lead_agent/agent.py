@@ -242,6 +242,19 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 
             middlewares.append(GemmaThoughtCleanupMiddleware())
 
+    # Tool-args normalization is registered unconditionally because it is a
+    # model-agnostic safety net. It only mutates tool calls that ship with
+    # known quirks (``file_path`` alias for ``path``, missing ``description``);
+    # for correctly-formed tool calls it is a no-op. Observed originally on
+    # Magistral and Gemma 4 27B, but the pattern — training conventions from
+    # other schemas leaking into tool arguments — can surface on any local
+    # or third-party model, so gating it per-family would just delay the
+    # fix for the next model that ships with the same quirk. Every actual
+    # mutation is logged at INFO level for discovery.
+    from deerflow.agents.middlewares.tool_args_normalization_middleware import ToolArgsNormalizationMiddleware
+
+    middlewares.append(ToolArgsNormalizationMiddleware())
+
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
