@@ -36,6 +36,7 @@ import {
   checkAgentName,
   createAgent,
   getAgent,
+  isAgentsApiDisabledError,
 } from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreadStream } from "@/core/threads/hooks";
@@ -73,15 +74,19 @@ async function getAgentWithRetry(agentName: string) {
 function getCreateAgentErrorMessage(
   error: unknown,
   networkErrorMessage: string,
+  apiDisabledMessage: string,
   fallbackMessage: string,
 ) {
   if (error instanceof TypeError && error.message === "Failed to fetch") {
     return networkErrorMessage;
   }
-  if (error instanceof Error && error.message) {
-    return error.message;
+  if (isAgentsApiDisabledError(error)) {
+    return apiDisabledMessage;
   }
-  return fallbackMessage;
+  if (error instanceof Error && error.message) {
+    return fallbackMessage.replace("{message}", error.message);
+  }
+  return fallbackMessage.replace("{message}", "");
 }
 
 export default function NewAgentPage() {
@@ -154,11 +159,14 @@ export default function NewAgentPage() {
         return;
       }
     } catch (err) {
-      if (
-        err instanceof AgentNameCheckError &&
-        err.reason === "backend_unreachable"
-      ) {
-        setNameError(t.agents.nameStepNetworkError);
+      if (err instanceof AgentNameCheckError) {
+        setNameError(
+          err.reason === "backend_unreachable"
+            ? t.agents.nameStepNetworkError
+            : err.reason === "api_disabled"
+              ? t.agents.nameStepApiDisabledError
+              : err.message || t.agents.nameStepCheckError,
+        );
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
@@ -179,7 +187,8 @@ export default function NewAgentPage() {
         getCreateAgentErrorMessage(
           err,
           t.agents.nameStepNetworkError,
-          t.agents.nameStepCheckError,
+          t.agents.nameStepApiDisabledError,
+          t.agents.nameStepCreateError,
         ),
       );
       return;
@@ -198,8 +207,10 @@ export default function NewAgentPage() {
     sendMessage,
     t.agents.nameStepAlreadyExistsError,
     t.agents.nameStepNetworkError,
+    t.agents.nameStepApiDisabledError,
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
+    t.agents.nameStepCreateError,
     t.agents.nameStepInvalidError,
     threadId,
   ]);

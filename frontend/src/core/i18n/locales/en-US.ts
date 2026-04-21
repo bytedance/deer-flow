@@ -203,6 +203,10 @@ export const enUS: Translations = {
     nameStepNetworkError:
       "Network request failed — check your network or backend connection",
     nameStepCheckError: "Could not verify name availability — please try again",
+    nameStepApiDisabledError:
+      "Custom agent creation is disabled. Set agents_api.enabled: true in config.yaml, restart DeerFlow, and try again.",
+    nameStepCreateError:
+      "Could not create the agent. Backend response: {message}",
     nameStepBootstrapMessage:
       "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
     save: "Save agent",

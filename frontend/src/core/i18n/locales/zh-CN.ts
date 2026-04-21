@@ -191,6 +191,9 @@ export const zhCN: Translations = {
     nameStepAlreadyExistsError: "已存在同名智能体",
     nameStepNetworkError: "网络请求失败，请检查网络或后端连接",
     nameStepCheckError: "无法验证名称可用性，请稍后重试",
+    nameStepApiDisabledError:
+      "自定义智能体创建功能当前未启用。请在 config.yaml 中设置 agents_api.enabled: true，重启 DeerFlow 后再试。",
+    nameStepCreateError: "创建智能体失败。后端返回：{message}",
     nameStepBootstrapMessage:
       "新智能体的名称是 {name}，现在开始为它生成 **SOUL**。",
     save: "保存智能体",
