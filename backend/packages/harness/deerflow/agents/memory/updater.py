@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 import concurrent.futures
+import copy
 import json
 import logging
 import math
@@ -380,7 +381,9 @@ class MemoryUpdater:
             response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
 
         update_data = json.loads(response_text)
-        updated_memory = self._apply_updates(current_memory, update_data, thread_id)
+        # Deep-copy before in-place mutation so a subsequent save() failure
+        # cannot corrupt the still-cached original object reference.
+        updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
         return get_memory_storage().save(updated_memory, agent_name)
 
@@ -394,7 +397,8 @@ class MemoryUpdater:
     ) -> bool:
         """Update memory asynchronously based on conversation messages."""
         try:
-            prepared = self._prepare_update_prompt(
+            prepared = await asyncio.to_thread(
+                self._prepare_update_prompt,
                 messages=messages,
                 agent_name=agent_name,
                 correction_detected=correction_detected,
@@ -406,7 +410,8 @@ class MemoryUpdater:
             current_memory, prompt = prepared
             model = self._get_model()
             response = await model.ainvoke(prompt)
-            return self._finalize_update(
+            return await asyncio.to_thread(
+                self._finalize_update,
                 current_memory=current_memory,
                 response_content=response.content,
                 thread_id=thread_id,

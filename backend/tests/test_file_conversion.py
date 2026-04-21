@@ -12,6 +12,7 @@ from deerflow.utils.file_conversion import (
     _MIN_CHARS_PER_PAGE,
     MAX_OUTLINE_ENTRIES,
     _do_convert,
+    _get_pdf_converter,
     _pymupdf_output_too_sparse,
     convert_file_to_markdown,
     extract_outline,
@@ -214,9 +215,27 @@ class TestDoConvert:
         assert result == "MarkItDown fallback"
 
 
-# ---------------------------------------------------------------------------
-# convert_file_to_markdown — async + file writing
-# ---------------------------------------------------------------------------
+class TestGetPdfConverter:
+    def test_reads_dict_backed_uploads_config(self):
+        cfg = MagicMock()
+        cfg.uploads = {"pdf_converter": "markitdown"}
+
+        with patch("deerflow.utils.file_conversion.get_app_config", return_value=cfg):
+            assert _get_pdf_converter() == "markitdown"
+
+    def test_reads_attribute_backed_uploads_config(self):
+        cfg = MagicMock()
+        cfg.uploads = MagicMock(pdf_converter="pymupdf4llm")
+
+        with patch("deerflow.utils.file_conversion.get_app_config", return_value=cfg):
+            assert _get_pdf_converter() == "pymupdf4llm"
+
+    def test_invalid_value_falls_back_to_auto(self):
+        cfg = MagicMock()
+        cfg.uploads = {"pdf_converter": "not-a-real-converter"}
+
+        with patch("deerflow.utils.file_conversion.get_app_config", return_value=cfg):
+            assert _get_pdf_converter() == "auto"
 
 
 class TestConvertFileToMarkdown:
