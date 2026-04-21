@@ -145,8 +145,7 @@ class SQLiteMemoryStorage(MemoryStorage):
             conn = _connect(self._db_path)
             try:
                 row = conn.execute(
-                    "SELECT data, seq FROM agent_memory "
-                    "WHERE agent_name = ? AND user_id = ?",
+                    "SELECT data, seq FROM agent_memory WHERE agent_name = ? AND user_id = ?",
                     (key, _DEFAULT_USER),
                 ).fetchone()
             finally:
@@ -191,8 +190,7 @@ class SQLiteMemoryStorage(MemoryStorage):
         try:
             conn.execute("BEGIN EXCLUSIVE")
             row = conn.execute(
-                "SELECT seq FROM agent_memory "
-                "WHERE agent_name = ? AND user_id = ?",
+                "SELECT seq FROM agent_memory WHERE agent_name = ? AND user_id = ?",
                 (key, _DEFAULT_USER),
             ).fetchone()
             current_seq = int(row["seq"]) if row is not None else 0
@@ -202,8 +200,7 @@ class SQLiteMemoryStorage(MemoryStorage):
 
             if last_seen is not None and current_seq != last_seen:
                 logger.error(
-                    "Single-writer invariant violated for agent %s: "
-                    "expected seq=%d, found seq=%d. Aborting write.",
+                    "Single-writer invariant violated for agent %s: expected seq=%d, found seq=%d. Aborting write.",
                     key,
                     last_seen,
                     current_seq,

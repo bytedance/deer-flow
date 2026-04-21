@@ -68,9 +68,7 @@ class TestEnqueue:
         enqueue(db_path, agent_name=None, messages=[], thread_id="t1")
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT agent_name, status, thread_id FROM memory_update_queue"
-            ).fetchone()
+            row = conn.execute("SELECT agent_name, status, thread_id FROM memory_update_queue").fetchone()
         assert row["agent_name"] == "__global__"
         assert row["status"] == "pending"
         assert row["thread_id"] == "t1"
@@ -79,11 +77,7 @@ class TestEnqueue:
         enqueue(db_path, agent_name=None, messages=[], thread_id=None)
         enqueue(db_path, agent_name="researcher", messages=[], thread_id=None)
         with sqlite3.connect(str(db_path)) as conn:
-            names = sorted(
-                r[0] for r in conn.execute(
-                    "SELECT agent_name FROM memory_update_queue"
-                ).fetchall()
-            )
+            names = sorted(r[0] for r in conn.execute("SELECT agent_name FROM memory_update_queue").fetchall())
         assert names == ["__global__", "researcher"]
 
     def test_serialises_messages_via_langchain(self, db_path):
@@ -97,9 +91,7 @@ class TestEnqueue:
         )
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT messages FROM memory_update_queue"
-            ).fetchone()
+            row = conn.execute("SELECT messages FROM memory_update_queue").fetchone()
         parsed = json.loads(row["messages"])
         assert parsed[0]["type"] == "human"
 
@@ -124,9 +116,7 @@ class TestWriterLease:
         assert try_acquire_writer(db_path, "worker-A") is True
         # Age out the heartbeat beyond the default lock_stale window (90s).
         with sqlite3.connect(str(db_path)) as conn:
-            conn.execute(
-                "UPDATE memory_writer_lock SET heartbeat_at='2000-01-01T00:00:00Z'"
-            )
+            conn.execute("UPDATE memory_writer_lock SET heartbeat_at='2000-01-01T00:00:00Z'")
             conn.commit()
         assert try_acquire_writer(db_path, "worker-B") is True
 
@@ -138,17 +128,12 @@ class TestMaintenance:
     def test_reset_stuck_tasks(self, db_path):
         enqueue(db_path, agent_name=None, messages=[], thread_id="t")
         with sqlite3.connect(str(db_path)) as conn:
-            conn.execute(
-                "UPDATE memory_update_queue "
-                "SET status='processing', started_at='2000-01-01T00:00:00Z'"
-            )
+            conn.execute("UPDATE memory_update_queue SET status='processing', started_at='2000-01-01T00:00:00Z'")
             conn.commit()
         assert reset_stuck_tasks(db_path) == 1
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT status, started_at FROM memory_update_queue"
-            ).fetchone()
+            row = conn.execute("SELECT status, started_at FROM memory_update_queue").fetchone()
         assert row["status"] == "pending"
         assert row["started_at"] is None
 
@@ -156,21 +141,13 @@ class TestMaintenance:
         enqueue(db_path, agent_name=None, messages=[], thread_id="done")
         enqueue(db_path, agent_name=None, messages=[], thread_id="pending")
         with sqlite3.connect(str(db_path)) as conn:
-            conn.execute(
-                "UPDATE memory_update_queue "
-                "SET status='done', completed_at='2000-01-01T00:00:00Z' "
-                "WHERE thread_id='done'"
-            )
+            conn.execute("UPDATE memory_update_queue SET status='done', completed_at='2000-01-01T00:00:00Z' WHERE thread_id='done'")
             conn.commit()
 
         deleted = trim_queue(db_path, keep_days=1)
         assert deleted == 1
         with sqlite3.connect(str(db_path)) as conn:
-            remaining = [
-                r[0] for r in conn.execute(
-                    "SELECT thread_id FROM memory_update_queue"
-                ).fetchall()
-            ]
+            remaining = [r[0] for r in conn.execute("SELECT thread_id FROM memory_update_queue").fetchall()]
         assert remaining == ["pending"]
 
     def test_trim_queue_rejects_negative_keep_days(self, db_path):
@@ -204,11 +181,7 @@ class TestRunWriterLoop:
 
         assert calls == ["t0", "t1", "t2"]
         with sqlite3.connect(str(db_path)) as conn:
-            statuses = [
-                r[0] for r in conn.execute(
-                    "SELECT status FROM memory_update_queue ORDER BY id"
-                ).fetchall()
-            ]
+            statuses = [r[0] for r in conn.execute("SELECT status FROM memory_update_queue ORDER BY id").fetchall()]
         assert statuses == ["done", "done", "done"]
 
         # Lease released.
@@ -231,9 +204,7 @@ class TestRunWriterLoop:
             run_writer_loop(db_path, "worker-1")
 
         with sqlite3.connect(str(db_path)) as conn:
-            status = conn.execute(
-                "SELECT status FROM memory_update_queue"
-            ).fetchone()[0]
+            status = conn.execute("SELECT status FROM memory_update_queue").fetchone()[0]
         assert status == "failed"
 
     def test_exception_in_update_is_caught(self, db_path):
@@ -251,9 +222,7 @@ class TestRunWriterLoop:
             run_writer_loop(db_path, "worker-1")
 
         with sqlite3.connect(str(db_path)) as conn:
-            status = conn.execute(
-                "SELECT status FROM memory_update_queue"
-            ).fetchone()[0]
+            status = conn.execute("SELECT status FROM memory_update_queue").fetchone()[0]
         assert status == "failed"
 
     def test_agent_name_sentinel_round_trip(self, db_path):
@@ -301,9 +270,7 @@ class TestScheduleMemoryUpdate:
             # schedule_memory_update spawns a daemon thread; give it a moment.
             for _ in range(50):
                 with sqlite3.connect(str(db_path)) as conn:
-                    row = conn.execute(
-                        "SELECT status FROM memory_update_queue WHERE thread_id='t-1'"
-                    ).fetchone()
+                    row = conn.execute("SELECT status FROM memory_update_queue WHERE thread_id='t-1'").fetchone()
                 if row is not None and row[0] in {"done", "failed"}:
                     break
                 time.sleep(0.05)

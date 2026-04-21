@@ -78,13 +78,8 @@ def _worker_entry(db_path_str: str, label: str, num_tasks: int) -> None:
     while time.monotonic() < deadline:
         conn = sqlite3.connect(str(db_path), timeout=5)
         try:
-            pending = conn.execute(
-                "SELECT COUNT(*) FROM memory_update_queue "
-                "WHERE status IN ('pending', 'processing')"
-            ).fetchone()[0]
-            held = conn.execute(
-                "SELECT COUNT(*) FROM memory_writer_lock"
-            ).fetchone()[0]
+            pending = conn.execute("SELECT COUNT(*) FROM memory_update_queue WHERE status IN ('pending', 'processing')").fetchone()[0]
+            held = conn.execute("SELECT COUNT(*) FROM memory_writer_lock").fetchone()[0]
         finally:
             conn.close()
         if pending == 0 and held == 0:
@@ -183,13 +178,9 @@ def test_two_processes_do_not_lose_writes(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path), timeout=5)
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            "SELECT status, COUNT(*) AS n FROM memory_update_queue GROUP BY status"
-        ).fetchall()
+        rows = conn.execute("SELECT status, COUNT(*) AS n FROM memory_update_queue GROUP BY status").fetchall()
         status_counts = {r["status"]: r["n"] for r in rows}
-        seq_row = conn.execute(
-            "SELECT seq, data FROM agent_memory WHERE agent_name = '__global__'"
-        ).fetchone()
+        seq_row = conn.execute("SELECT seq, data FROM agent_memory WHERE agent_name = '__global__'").fetchone()
     finally:
         conn.close()
 
@@ -212,12 +203,7 @@ def test_two_processes_do_not_lose_writes(tmp_path: Path) -> None:
     assert len(data["facts"]) == total
     # All worker-labelled thread ids must appear in the final memory.
     contents = {fact["content"] for fact in data["facts"]}
-    expected = {
-        f"{processor}:{task_label}-{i}"
-        for processor in ("w1", "w2", "parent")
-        for task_label in ("w1", "w2")
-        for i in range(tasks_per_worker)
-    }
+    expected = {f"{processor}:{task_label}-{i}" for processor in ("w1", "w2", "parent") for task_label in ("w1", "w2") for i in range(tasks_per_worker)}
     # Each enqueued task appears exactly once; its content prefix is whichever
     # worker (w1/w2/parent) ended up processing it.  So each ``label-i`` key
     # must contribute exactly one of the three possible prefixes.

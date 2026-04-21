@@ -63,9 +63,7 @@ class TestSQLiteMemoryStorageBasics:
 
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT seq FROM agent_memory WHERE agent_name='__global__'"
-            ).fetchone()
+            row = conn.execute("SELECT seq FROM agent_memory WHERE agent_name='__global__'").fetchone()
         assert row["seq"] == 2
 
     def test_seq_guard_blocks_concurrent_overwrite(self, db_path):
@@ -144,9 +142,7 @@ class TestSQLiteMemoryStorageBasics:
         SQLiteMemoryStorage(db_path)
 
         with sqlite3.connect(str(db_path)) as conn:
-            row = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_memory'"
-            ).fetchone()
+            row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_memory'").fetchone()
         assert row is not None
 
     def test_payload_written_as_json(self, db_path):
@@ -155,8 +151,6 @@ class TestSQLiteMemoryStorageBasics:
         storage.save({"version": "1.0", "facts": [{"content": "中文"}]})
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT data FROM agent_memory WHERE agent_name='__global__'"
-            ).fetchone()
+            row = conn.execute("SELECT data FROM agent_memory WHERE agent_name='__global__'").fetchone()
         parsed = json.loads(row["data"])
         assert parsed["facts"] == [{"content": "中文"}]
