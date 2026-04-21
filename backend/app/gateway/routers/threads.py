@@ -602,6 +602,12 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         metadata["step"] = metadata.get("step", 0) + 1
         metadata["writes"] = {body.as_node: body.values}
 
+    # Assign a new checkpoint ID so aput performs an INSERT rather than an
+    # in-place REPLACE of the existing row.  Without this, the checkpointer
+    # reuses the old checkpoint["id"] as the storage key and the thread
+    # history stays at exactly 1 entry.
+    checkpoint["id"] = str(uuid.uuid4())
+
     # aput requires checkpoint_ns in the config — use the same config used for the
     # read (which always includes checkpoint_ns="").  Do NOT include checkpoint_id
     # so that aput generates a fresh checkpoint ID for the new snapshot.
