@@ -41,6 +41,12 @@ def _resolve_model_name(requested_model_name: str | None = None) -> str:
     return default_model_name
 
 
+def _apply_model_system_prompt_override(system_prompt: str, override: str | None) -> str:
+    if not override:
+        return system_prompt
+    return f"{system_prompt}\n\n<model_system_prompt_override>\n{override}\n</model_system_prompt_override>"
+
+
 def _create_summarization_middleware() -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
     config = get_summarization_config()
@@ -337,22 +343,24 @@ def make_lead_agent(config: RunnableConfig):
     )
 
     if is_bootstrap:
+        system_prompt = apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"]))
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
             middleware=_build_middlewares(config, model_name=model_name),
-            system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
+            system_prompt=_apply_model_system_prompt_override(system_prompt, model_config.system_prompt),
             state_schema=ThreadState,
         )
 
+    system_prompt = apply_prompt_template(
+        subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
+    )
     # Default lead agent (unchanged behavior)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
-        system_prompt=apply_prompt_template(
-            subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
-        ),
+        system_prompt=_apply_model_system_prompt_override(system_prompt, model_config.system_prompt),
         state_schema=ThreadState,
     )

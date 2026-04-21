@@ -254,6 +254,7 @@ export interface Translations {
     description: string;
     sections: {
       appearance: string;
+      models: string;
       memory: string;
       tools: string;
       skills: string;
@@ -348,6 +349,48 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+    };
+    models: {
+      title: string;
+      description: string;
+      baseUrlPlaceholder: string;
+      apiKeyPlaceholder: string;
+      detect: string;
+      detecting: string;
+      detectSuccess: (count: number) => string;
+      add: string;
+      edit: string;
+      clear: string;
+      manualModel: string;
+      editModel: string;
+      name: string;
+      modelId: string;
+      displayName: string;
+      baseUrl: string;
+      apiKey: string;
+      keepApiKey: string;
+      contextLength: string;
+      temperature: string;
+      topP: string;
+      frequencyPenalty: string;
+      modalities: string;
+      descriptionLabel: string;
+      systemPrompt: string;
+      supportsThinking: string;
+      supportsReasoningEffort: string;
+      supportsVision: string;
+      save: string;
+      saveChanges: string;
+      saving: string;
+      configuredModels: string;
+      empty: string;
+      thinking: string;
+      vision: string;
+      createSuccess: string;
+      updateSuccess: string;
+      deleteSuccess: string;
+      deleteConfirm: (name: string) => string;
+      requiredFieldsMissing: (fields: string) => string;
     };
     skills: {
       title: string;
