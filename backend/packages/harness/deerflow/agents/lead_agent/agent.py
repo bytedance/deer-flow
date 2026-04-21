@@ -225,6 +225,23 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     """
     middlewares = build_lead_runtime_middlewares(lazy_init=True)
 
+    # Middlewares that behave differently per model family must be gated —
+    # applying them to unrelated models would actively degrade quality.
+    # Currently only the Gemma 4 thought-channel cleanup falls into this
+    # category: the ``<|channel>…<channel|>`` block format is Gemma-specific,
+    # and stripping it from another model's history would mangle output.
+    # Registration order matters here: this must run before
+    # Summarization/Memory/Title so they see the pruned history.
+    app_config = get_app_config()
+    model_config_for_gating = app_config.get_model_config(model_name) if model_name else None
+    if model_config_for_gating is not None:
+        from deerflow.models.factory import is_gemma4
+
+        if is_gemma4(model_config_for_gating):
+            from deerflow.agents.middlewares.gemma_thought_cleanup_middleware import GemmaThoughtCleanupMiddleware
+
+            middlewares.append(GemmaThoughtCleanupMiddleware())
+
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
@@ -342,7 +359,12 @@ def make_lead_agent(config: RunnableConfig):
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
             middleware=_build_middlewares(config, model_name=model_name),
-            system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
+            system_prompt=apply_prompt_template(
+                subagent_enabled=subagent_enabled,
+                max_concurrent_subagents=max_concurrent_subagents,
+                available_skills=set(["bootstrap"]),
+                model_name=model_name,
+            ),
             state_schema=ThreadState,
         )
 
@@ -352,7 +374,11 @@ def make_lead_agent(config: RunnableConfig):
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
         system_prompt=apply_prompt_template(
-            subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
+            subagent_enabled=subagent_enabled,
+            max_concurrent_subagents=max_concurrent_subagents,
+            agent_name=agent_name,
+            available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
+            model_name=model_name,
         ),
         state_schema=ThreadState,
     )

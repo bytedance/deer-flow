@@ -20,6 +20,38 @@ def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
     return merged
 
 
+def is_gemma4(model_config) -> bool:
+    """Return True when the given ModelConfig represents a Gemma 4 family model.
+
+    Detection is dual: an explicit ``family: gemma4`` field in the config takes
+    precedence, otherwise the model name prefix ``gemma4-`` is matched. Keeping
+    both paths lets users rename models freely while still opting in via the
+    explicit flag.
+    """
+    if model_config is None:
+        return False
+    extra = getattr(model_config, "model_extra", None) or {}
+    if extra.get("family") == "gemma4":
+        return True
+    name = getattr(model_config, "name", None) or ""
+    return name.lower().startswith("gemma4")
+
+
+def is_gemma4_by_name(name: str | None) -> bool:
+    """Resolve a model name through the app config and check the Gemma 4 gate."""
+    if not name:
+        return False
+    try:
+        from deerflow.config import get_app_config
+
+        model_config = get_app_config().get_model_config(name)
+    except Exception:
+        model_config = None
+    if model_config is not None:
+        return is_gemma4(model_config)
+    return name.lower().startswith("gemma4")
+
+
 def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     """Build the disable payload for vLLM/Qwen chat template kwargs."""
     disable_kwargs: dict[str, bool] = {}
@@ -75,6 +107,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_disabled",
             "thinking",
             "supports_vision",
+            "family",
         },
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
@@ -113,7 +146,21 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
 
+    # Upstream (c99865f, 2026-04): enable stream_usage by default for
+    # OpenAI-compatible providers so token-usage deltas arrive with streaming
+    # chunks. Applied before the Gemma override so a potential
+    # ``stream_usage`` knob set by this call is still visible to later
+    # model-family overrides if they ever need to touch it.
     _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
+
+    # Gemma 4 family: apply Google's recommended sampling envelope. Temperature
+    # is hard-overridden to 0.9 (user choice, between Google's 1.0 default and
+    # the previous project default of 0.7). top_p / top_k use setdefault so
+    # explicit per-model values in config.yaml still win.
+    if is_gemma4(model_config):
+        model_settings_from_config["temperature"] = 0.9
+        model_settings_from_config.setdefault("top_p", 0.95)
+        model_settings_from_config.setdefault("top_k", 64)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     from deerflow.models.openai_codex_provider import CodexChatModel

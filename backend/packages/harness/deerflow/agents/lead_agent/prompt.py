@@ -8,8 +8,35 @@ from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
 from deerflow.skills.types import Skill
 from deerflow.subagents import get_available_subagent_names
+from deerflow.utils.text_sanitize import strip_symbols_and_invisibles
 
 logger = logging.getLogger(__name__)
+
+
+UI_STYLE_RULES_SECTION = """
+
+<gemma_output_rules>
+This rule overrides any general output-style guidance above.
+
+NO EMOJI — EVER.
+- Do NOT emit any emoji, pictograph, or decorative symbol in your output.
+  This applies to ALL output: chat replies, summaries, reports, code, UI
+  deliverables, thread titles, explanations, headings, bullets, everything.
+- Forbidden character ranges include (not exhaustive):
+  U+1F300-U+1FAFF (emoji & pictographs), U+2600-U+27BF (misc symbols /
+  dingbats), U+2B00-U+2BFF (arrows / misc symbols), U+1F1E6-U+1F1FF
+  (regional-indicator flags), U+E000-U+F8FF (Nerdfont / FontAwesome /
+  Material Icon Private-Use Area).
+- Also avoid ASCII substitutes that carry the same decorative intent:
+  no leading "►", "✓", "✦", "★", "◆", "→", etc. as bullet or heading
+  ornaments. Use plain text and standard Markdown syntax only.
+- For icons in frontend/UI deliverables: emit inline SVG only
+  (Heroicons, Lucide, Tabler, Phosphor). Never icon fonts, never PUA
+  characters. Prefer stroke="currentColor" with explicit width/height.
+- If a literal emoji appears inside content you are quoting or citing
+  (e.g. a forum post), paraphrase it in words — do not pass it through.
+</gemma_output_rules>
+"""
 
 _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
 _enabled_skills_lock = threading.Lock()
@@ -653,7 +680,13 @@ def _build_acp_section() -> str:
 
 
 def _build_custom_mounts_section() -> str:
-    """Build a prompt section for explicitly configured sandbox mounts."""
+    """Build a prompt section for explicitly configured sandbox mounts.
+
+    Detects a full-host mount (``host_path: /``) and, if present, adds an
+    explicit capability statement so the model knows it can roam the host
+    freely. Individual mounts are still listed so the model sees which
+    container paths map to what.
+    """
     try:
         from deerflow.config import get_app_config
 
@@ -666,15 +699,48 @@ def _build_custom_mounts_section() -> str:
         return ""
 
     lines = []
+    full_host_mount = None
     for mount in mounts:
         access = "read-only" if mount.read_only else "read-write"
         lines.append(f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})")
+        if getattr(mount, "host_path", None) == "/" and not mount.read_only and full_host_mount is None:
+            full_host_mount = mount
 
     mounts_list = "\n".join(lines)
-    return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
+    section = f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
+
+    if full_host_mount is not None:
+        prefix = full_host_mount.container_path.rstrip("/")
+        section += (
+            "\n\n**Full Host Access (enabled):**"
+            f"\n- The entire host filesystem is mounted read-write at `{prefix}`. "
+            f"Any real path `/foo/bar` on the host is reachable at `{prefix}/foo/bar`."
+            "\n- You also have `bash` with host execution enabled; absolute host paths"
+            " (e.g. `/home/atlas/...`, `/etc/...`, `/var/log/...`) can be used directly"
+            " inside `bash` commands without any prefix."
+            "\n- There are no directory whitelists or path restrictions — you can roam,"
+            " inspect, edit, create, or delete anything the operating-system user has"
+            " permission for. Use this responsibly:"
+            "\n  - Read the user's real intent before touching system files."
+            "\n  - Prefer least-invasive actions: dry-run, `ls`, `cat` before mutation."
+            "\n  - Destructive commands (`rm -rf`, overwrite configs, kill processes,"
+            " package removal) require clear user intent — ask via `ask_clarification`"
+            " when in doubt."
+            "\n  - Never exfiltrate credentials, SSH keys, tokens, or browser profiles"
+            " to external services or tool results."
+        )
+
+    return section
 
 
-def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
+def apply_prompt_template(
+    subagent_enabled: bool = False,
+    max_concurrent_subagents: int = 3,
+    *,
+    agent_name: str | None = None,
+    available_skills: set[str] | None = None,
+    model_name: str | None = None,
+) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
 
@@ -723,5 +789,15 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
     )
+
+    # Gemma 4: keep all DeerFlow instructions verbatim, but strip decorative
+    # emoji/pictograph characters (they cost tokens and bias Gemma toward
+    # emoji-laden UI output) and append the stricter UI style contract.
+    if model_name:
+        from deerflow.models.factory import is_gemma4_by_name
+
+        if is_gemma4_by_name(model_name):
+            prompt = strip_symbols_and_invisibles(prompt)
+            prompt += UI_STYLE_RULES_SECTION
 
     return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"

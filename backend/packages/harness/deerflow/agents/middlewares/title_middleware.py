@@ -88,8 +88,15 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return prompt, user_msg
 
     def _strip_think_tags(self, text: str) -> str:
-        """Remove <think>...</think> blocks emitted by reasoning models (e.g. minimax, DeepSeek-R1)."""
-        return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+        """Remove reasoning-model scratchpad blocks before scoring a title.
+
+        Covers ``<think>...</think>`` (minimax, DeepSeek-R1) and the Gemma 4
+        channel form ``<|channel>...<channel|>``. Non-matching models pass
+        through unchanged.
+        """
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"<\|?channel\|?>[\s\S]*?<\|?channel\|?>", "", text)
+        return text.strip()
 
     def _parse_title(self, content: object) -> str:
         """Normalize model output into a clean title string."""
