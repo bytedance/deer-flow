@@ -730,6 +730,7 @@ agents_api:
 skill_evolution:
   enabled: false                # Set to true to allow agent-managed writes under skills/custom
   moderation_model_name: null  # Model for LLM-based security scanning (null = use default model)
+  creation_nudge_interval: 10  # Tool-call iterations before triggering a background skill review
 
 # ============================================================================
 # Checkpointer Configuration

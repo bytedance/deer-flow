@@ -9,6 +9,7 @@ from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.skill_review_middleware import SkillReviewMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
@@ -246,9 +247,20 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware(agent_name=agent_name))
 
+    # Resolve app_config once for feature-gated middlewares below
+    app_config = get_app_config()
+
+    # Add SkillReviewMiddleware if skill_evolution is enabled (after MemoryMiddleware)
+    skill_evolution_config = getattr(app_config, "skill_evolution", None)
+    skill_evolution_enabled = getattr(skill_evolution_config, "enabled", False)
+    logger.info("SkillReviewMiddleware check: skill_evolution_config=%s, enabled=%s", skill_evolution_config, skill_evolution_enabled)
+    if skill_evolution_enabled:
+        mw = SkillReviewMiddleware(config=app_config)
+        middlewares.append(mw)
+        logger.info("SkillReviewMiddleware appended to middleware chain (total: %d)", len(middlewares))
+
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
-    app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
