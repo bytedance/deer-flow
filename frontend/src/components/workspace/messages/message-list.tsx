@@ -1,9 +1,11 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   Conversation,
   ConversationContent,
 } from "@/components/ai-elements/conversation";
+import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -14,6 +16,7 @@ import {
   hasPresentFiles,
   hasReasoning,
   hasToolCalls,
+  isHiddenFromUIMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
@@ -34,6 +37,59 @@ import { SubtaskCard } from "./subtask-card";
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 160;
 export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
 
+type ThreadMessagesResponse = {
+  messages?: AgentThreadState["messages"];
+};
+
+function messageFingerprint(message: AgentThreadState["messages"][number]) {
+  const content =
+    typeof message.content === "string"
+      ? message.content
+      : JSON.stringify(message.content);
+  const toolCallId =
+    "tool_call_id" in message && typeof message.tool_call_id === "string"
+      ? message.tool_call_id
+      : "";
+  return `${message.type}:${message.name ?? ""}:${toolCallId}:${content}`;
+}
+
+function mergeTranscriptWithLiveMessages(
+  transcriptMessages: AgentThreadState["messages"],
+  liveMessages: AgentThreadState["messages"],
+) {
+  if (transcriptMessages.length === 0) {
+    return liveMessages;
+  }
+
+  const merged = [...transcriptMessages];
+  const seenIds = new Set(
+    transcriptMessages
+      .map((message) => message.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+  );
+  const seenFingerprints = new Set(transcriptMessages.map(messageFingerprint));
+
+  for (const message of liveMessages) {
+    if (isHiddenFromUIMessage(message)) {
+      continue;
+    }
+    if (message.id && seenIds.has(message.id)) {
+      continue;
+    }
+    const fingerprint = messageFingerprint(message);
+    if (seenFingerprints.has(fingerprint)) {
+      continue;
+    }
+    if (message.id) {
+      seenIds.add(message.id);
+    }
+    seenFingerprints.add(fingerprint);
+    merged.push(message);
+  }
+
+  return merged;
+}
+
 export function MessageList({
   className,
   threadId,
@@ -50,7 +106,65 @@ export function MessageList({
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  const messages = thread.messages;
+  const [transcriptMessages, setTranscriptMessages] = useState<
+    AgentThreadState["messages"]
+  >([]);
+  const [transcriptLoadedForThread, setTranscriptLoadedForThread] = useState<
+    string | null
+  >(null);
+  const messages = useMemo(() => {
+    if (transcriptLoadedForThread !== threadId) {
+      return thread.messages;
+    }
+    return mergeTranscriptWithLiveMessages(transcriptMessages, thread.messages);
+  }, [
+    thread.messages,
+    threadId,
+    transcriptLoadedForThread,
+    transcriptMessages,
+  ]);
+
+  useEffect(() => {
+    setTranscriptMessages([]);
+    setTranscriptLoadedForThread(null);
+  }, [threadId]);
+
+  useEffect(() => {
+    if (!threadId || thread.isThreadLoading || thread.isLoading) {
+      return;
+    }
+
+    const controller = new AbortController();
+
+    const loadTranscript = async () => {
+      const response = await fetch(
+        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/messages`,
+        {
+          signal: controller.signal,
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to load thread messages: ${response.status}`);
+      }
+
+      const payload = (await response.json()) as ThreadMessagesResponse;
+      setTranscriptMessages(payload.messages ?? []);
+      setTranscriptLoadedForThread(threadId);
+    };
+
+    void loadTranscript().catch((error: unknown) => {
+      if (controller.signal.aborted) {
+        return;
+      }
+      console.error("Failed to load canonical thread transcript", error);
+      setTranscriptMessages([]);
+      setTranscriptLoadedForThread(threadId);
+    });
+
+    return () => controller.abort();
+  }, [thread.isLoading, thread.isThreadLoading, threadId]);
+
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }

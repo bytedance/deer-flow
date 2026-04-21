@@ -15,6 +15,8 @@ from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
 
+SUMMARY_MESSAGE_KWARG = "deerflow_conversation_summary"
+
 
 @dataclass(frozen=True)
 class SummarizationEvent:
@@ -75,6 +77,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return await self._amaybe_summarize(state, runtime)
+
+    def _build_new_messages(self, summary) -> list[AnyMessage]:
+        messages = super()._build_new_messages(summary)
+        for message in messages:
+            additional_kwargs = dict(getattr(message, "additional_kwargs", {}) or {})
+            additional_kwargs["hide_from_ui"] = True
+            additional_kwargs[SUMMARY_MESSAGE_KWARG] = True
+            message.additional_kwargs = additional_kwargs
+        return messages
 
     def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
         messages = state["messages"]

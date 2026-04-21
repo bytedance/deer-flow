@@ -18,6 +18,7 @@ from fastapi import HTTPException, Request
 from langchain_core.messages import HumanMessage
 
 from app.gateway.deps import get_checkpointer, get_run_manager, get_store, get_stream_bridge
+from app.gateway.transcripts import append_thread_transcript_messages
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -220,6 +221,11 @@ async def _sync_thread_title_after_run(
 
         channel_values = ckpt_tuple.checkpoint.get("channel_values", {})
         title = channel_values.get("title")
+
+        messages = channel_values.get("messages")
+        if isinstance(messages, list):
+            await append_thread_transcript_messages(store, thread_id, messages)
+
         if not title:
             return
 
@@ -283,6 +289,14 @@ async def start_run(
     agent_factory = resolve_agent_factory(body.assistant_id)
     graph_input = normalize_input(body.input)
     config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+
+    if store is not None:
+        try:
+            input_messages = graph_input.get("messages")
+            if isinstance(input_messages, list):
+                await append_thread_transcript_messages(store, thread_id, input_messages)
+        except Exception:
+            logger.debug("Failed to append submitted messages for thread %s (non-fatal)", thread_id, exc_info=True)
 
     # Merge DeerFlow-specific context overrides into configurable.
     # The ``context`` field is a custom extension for the langgraph-compat layer

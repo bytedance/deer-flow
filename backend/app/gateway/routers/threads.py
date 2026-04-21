@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_checkpointer, get_store
+from app.gateway.transcripts import delete_thread_transcript, get_thread_transcript
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
 
@@ -119,6 +120,12 @@ class ThreadHistoryRequest(BaseModel):
 
     limit: int = Field(default=10, ge=1, le=100, description="Maximum entries")
     before: str | None = Field(default=None, description="Cursor for pagination")
+
+
+class ThreadMessagesResponse(BaseModel):
+    """Canonical UI transcript for a thread."""
+
+    messages: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +236,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     if store is not None:
         try:
             await store.adelete(THREADS_NS, thread_id)
+            await delete_thread_transcript(store, thread_id)
         except Exception:
             logger.debug("Could not delete store record for thread %s (not critical)", thread_id)
 
@@ -242,6 +250,24 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
             logger.debug("Could not delete checkpoints for thread %s (not critical)", thread_id)
 
     return response
+
+
+@router.get("/{thread_id}/messages", response_model=ThreadMessagesResponse)
+async def get_thread_messages(thread_id: str, request: Request) -> ThreadMessagesResponse:
+    """Return the canonical UI transcript for a thread.
+
+    Unlike checkpoint state, this transcript is not rewritten by model-context
+    summarization and is therefore the preferred source for chat rendering.
+    """
+    store = get_store(request)
+    if store is None:
+        return ThreadMessagesResponse(messages=[])
+
+    try:
+        return ThreadMessagesResponse(messages=await get_thread_transcript(store, thread_id))
+    except Exception:
+        logger.exception("Failed to get transcript for thread %s", thread_id)
+        raise HTTPException(status_code=500, detail="Failed to get thread messages")
 
 
 @router.post("", response_model=ThreadResponse)
