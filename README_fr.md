@@ -140,6 +140,13 @@ Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt s
 
    OpenRouter et les passerelles compatibles OpenAI similaires doivent être configurés avec `langchain_openai:ChatOpenAI` et `base_url`. Si vous préférez utiliser un nom de variable d'environnement propre au fournisseur, pointez `api_key` vers cette variable explicitement (par exemple `api_key: $OPENROUTER_API_KEY`).
 
+   > **Interface des agents personnalisés** : si vous souhaitez créer et gérer des agents personnalisés depuis l’interface Web, activez l’API HTTP protégée dans `config.yaml` :
+   >
+   > ```yaml
+   > agents_api:
+   >   enabled: true
+   > ```
+
    Pour router les modèles OpenAI via `/v1/responses`, continuez d'utiliser `langchain_openai:ChatOpenAI` et définissez `use_responses_api: true` avec `output_version: responses/v1`.
 
    Exemples de providers basés sur un CLI :

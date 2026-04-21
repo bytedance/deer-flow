@@ -132,6 +132,13 @@ DeerFlow がまだ clone されていなければ先に clone してから、htt
 
    OpenRouterやOpenAI互換のゲートウェイは、`langchain_openai:ChatOpenAI`と`base_url`で設定します。プロバイダー固有の環境変数名を使用したい場合は、`api_key`でその変数を明示的に指定してください（例：`api_key: $OPENROUTER_API_KEY`）。
 
+   > **カスタムエージェント UI**：Web UI からカスタムエージェントを作成・管理するには、`config.yaml` で保護された HTTP API を有効にしてください：
+   >
+   > ```yaml
+   > agents_api:
+   >   enabled: true
+   > ```
+
 4. **設定したモデルのAPIキーを設定**
 
    以下のいずれかの方法を選択してください：
