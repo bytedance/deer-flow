@@ -126,6 +126,11 @@ export interface Translations {
     newAgent: string;
     emptyTitle: string;
     emptyDescription: string;
+    apiDisabledTitle: string;
+    apiDisabledDescription: string;
+    apiDisabledConfigHint: string;
+    apiStatusErrorTitle: string;
+    apiStatusErrorDescription: string;
     chat: string;
     delete: string;
     deleteConfirm: string;

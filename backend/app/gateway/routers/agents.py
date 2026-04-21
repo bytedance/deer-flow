@@ -36,6 +36,12 @@ class AgentsListResponse(BaseModel):
     agents: list[AgentResponse]
 
 
+class AgentsApiStatusResponse(BaseModel):
+    """Response model for the custom-agent management API status."""
+
+    enabled: bool = Field(..., description="Whether the HTTP custom-agent management API is enabled")
+
+
 class AgentCreateRequest(BaseModel):
     """Request body for creating a custom agent."""
 
@@ -153,6 +159,17 @@ async def check_agent_name(name: str) -> dict:
     # legacy agent would shadow the legacy entry once migration runs.
     available = not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
     return {"available": available, "name": normalized}
+
+
+@router.get(
+    "/agents/status",
+    response_model=AgentsApiStatusResponse,
+    summary="Get Agents API Status",
+    description="Return whether the protected custom-agent management API is enabled.",
+)
+async def get_agents_api_status() -> AgentsApiStatusResponse:
+    """Return the current custom-agent management API exposure status."""
+    return AgentsApiStatusResponse(enabled=get_agents_api_config().enabled)
 
 
 @router.get(

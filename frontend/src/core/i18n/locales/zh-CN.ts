@@ -176,6 +176,14 @@ export const zhCN: Translations = {
     newAgent: "新建智能体",
     emptyTitle: "还没有自定义智能体",
     emptyDescription: "创建你的第一个自定义智能体，设置专属系统提示词。",
+    apiDisabledTitle: "自定义智能体管理已禁用",
+    apiDisabledDescription:
+      "请在 config.yaml 中将 agents_api.enabled 设为 true，才能通过 HTTP 创建、编辑和列出自定义智能体。",
+    apiDisabledConfigHint:
+      "请将下面这段内容加入 config.yaml，等待 DeerFlow 重新加载配置后再刷新页面：",
+    apiStatusErrorTitle: "无法加载智能体设置",
+    apiStatusErrorDescription:
+      "DeerFlow 当前无法判断自定义智能体管理 API 是否可用。",
     chat: "对话",
     delete: "删除",
     deleteConfirm: "确定要删除该智能体吗？此操作不可撤销。",
