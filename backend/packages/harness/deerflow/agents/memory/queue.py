@@ -116,8 +116,13 @@ class MemoryUpdateQueue:
 
         with self._lock:
             if self._processing:
-                # Already processing, reschedule
-                self._reset_timer()
+                # Already processing, reschedule immediately so queued work is
+                # retried as soon as the current processor releases the lock.
+                if self._timer is not None:
+                    self._timer.cancel()
+                self._timer = threading.Timer(0, self._process_queue)
+                self._timer.daemon = True
+                self._timer.start()
                 return
 
             if not self._queue:
@@ -170,6 +175,52 @@ class MemoryUpdateQueue:
                 self._timer = None
 
         self._process_queue()
+
+    def flush_nowait(self) -> None:
+        """Schedule immediate processing without blocking the caller."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(0, self._process_queue)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def add_nowait(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        agent_name: str | None = None,
+        user_id: str | None = None,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+    ) -> None:
+        """Add a conversation and trigger immediate non-blocking processing."""
+        config = get_memory_config()
+        if not config.enabled:
+            return
+
+        with self._lock:
+            existing_context = next(
+                (context for context in self._queue if context.thread_id == thread_id),
+                None,
+            )
+            merged_correction_detected = correction_detected or (existing_context.correction_detected if existing_context is not None else False)
+            merged_reinforcement_detected = reinforcement_detected or (existing_context.reinforcement_detected if existing_context is not None else False)
+            context = ConversationContext(
+                thread_id=thread_id,
+                messages=messages,
+                agent_name=agent_name,
+                user_id=user_id,
+                correction_detected=merged_correction_detected,
+                reinforcement_detected=merged_reinforcement_detected,
+            )
+            self._queue = [c for c in self._queue if c.thread_id != thread_id]
+            self._queue.append(context)
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(0, self._process_queue)
+            self._timer.daemon = True
+            self._timer.start()
 
     def clear(self) -> None:
         """Clear the queue without processing.

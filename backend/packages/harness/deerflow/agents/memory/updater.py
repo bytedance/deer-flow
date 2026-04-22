@@ -1,5 +1,7 @@
 """Memory updater for reading, writing, and updating memory data."""
 
+import asyncio
+import concurrent.futures
 import json
 import logging
 import math
@@ -20,6 +22,8 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
+
+_SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 
 def _create_empty_memory() -> dict[str, Any]:
@@ -68,6 +72,16 @@ def clear_memory_data(agent_name: str | None = None, *, user_id: str | None = No
     if not _save_memory_to_file(cleared_memory, agent_name, user_id=user_id):
         raise OSError("Failed to save cleared memory data")
     return cleared_memory
+
+
+def delete_all_memory_for_user(user_id: str) -> None:
+    """Delete all persisted memory for a user across the active storage backend."""
+    get_memory_storage().delete_all_memory_for_user(user_id)
+
+
+def delete_user_thread_memory(user_id: str, thread_id: str) -> None:
+    """Delete thread-scoped persisted memory artifacts for a user."""
+    get_memory_storage().delete_user_thread_storage(user_id, thread_id)
 
 
 def _validate_confidence(confidence: float) -> float:
@@ -285,6 +299,32 @@ class MemoryUpdater:
     ) -> bool:
         """Update memory based on conversation messages.
 
+        Synchronous wrapper around :meth:`aupdate_memory` for compatibility with
+        legacy callers and tests.
+        """
+
+        return _run_async_update_sync(
+            self.aupdate_memory(
+                messages,
+                thread_id,
+                agent_name,
+                correction_detected,
+                reinforcement_detected,
+                user_id=user_id,
+            )
+        )
+
+    async def aupdate_memory(
+        self,
+        messages: list[Any],
+        thread_id: str | None = None,
+        agent_name: str | None = None,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+        user_id: str | None = None,
+    ) -> bool:
+        """Async memory update path used by current tests and runtimes.
+
         Args:
             messages: List of conversation messages.
             thread_id: Optional thread ID for tracking source.
@@ -339,7 +379,7 @@ class MemoryUpdater:
 
             # Call LLM
             model = self._get_model()
-            response = model.invoke(prompt)
+            response = await model.ainvoke(prompt)
             response_text = _extract_text(response.content).strip()
 
             # Parse response
@@ -454,6 +494,36 @@ class MemoryUpdater:
             )[: config.max_facts]
 
         return current_memory
+
+
+def _run_async_update_sync(coro):
+    """Run an async memory-update coroutine from sync contexts.
+
+    Backward-compatible helper kept for existing tests and legacy callers.
+    If an event loop is already running, schedule the coroutine and return the
+    task; otherwise run it to completion and return the final result.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    def _runner():
+        return asyncio.run(coro)
+
+    try:
+        future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(_runner)
+    except Exception:
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        return False
+
+    try:
+        return future.result()
+    except Exception:
+        return False
 
 
 def update_memory_from_conversation(
