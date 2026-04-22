@@ -95,6 +95,21 @@ async def get_mcp_tools() -> list[BaseTool]:
         if oauth_interceptor is not None:
             tool_interceptors.append(oauth_interceptor)
 
+        # Load custom interceptors declared in extensions_config.json
+        # Format: "mcpInterceptors": ["pkg.module:builder_func", ...]
+        mcp_interceptor_paths = (extensions_config.model_extra or {}).get("mcpInterceptors", [])
+        for interceptor_path in mcp_interceptor_paths:
+            try:
+                from deerflow.reflection import resolve_variable
+
+                builder = resolve_variable(interceptor_path)
+                interceptor = builder()
+                if interceptor is not None:
+                    tool_interceptors.append(interceptor)
+                    logger.info(f"Loaded MCP interceptor: {interceptor_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load MCP interceptor {interceptor_path}: {e}")
+
         client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors, tool_name_prefix=True)
 
         # Get all tools from all servers
