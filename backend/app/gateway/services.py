@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from langchain_core.messages import HumanMessage
 
-from app.gateway.deps import get_run_context, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_current_user, get_run_context, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.utils import sanitize_log_param
 from deerflow.runtime import (
     END_SENTINEL,
@@ -197,6 +197,7 @@ async def start_run(
 
     try:
         record = await run_mgr.create_or_reject(
+            await get_current_user(request),
             thread_id,
             body.assistant_id,
             on_disconnect=disconnect,
