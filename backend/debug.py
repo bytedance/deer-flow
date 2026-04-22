@@ -53,7 +53,7 @@ async def main():
         }
     }
 
-    runtime = Runtime(context={"thread_id": "debug-thread-001"})
+    runtime = Runtime(context={"thread_id": config["configurable"]["thread_id"]})
     config["configurable"]["__pregel_runtime"] = runtime
 
     agent = make_lead_agent(config)
