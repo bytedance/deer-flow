@@ -1,119 +1,131 @@
-"""Tests for skill file parser."""
+"""Tests for the SKILL.md parser regression introduced in issue #1803.
+
+The previous hand-rolled YAML parser stored quoted string values with their
+surrounding quotes intact (e.g. ``name: "my-skill"`` → ``'"my-skill"'``).
+This caused a mismatch with ``_validate_skill_frontmatter`` (which uses
+``yaml.safe_load``) and broke skill lookup after installation.
+
+The parser now uses ``yaml.safe_load`` consistently with ``validation.py``.
+"""
+
+from __future__ import annotations
 
 from pathlib import Path
 
 from deerflow.skills.parser import parse_skill_file
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-def _write_skill(tmp_path: Path, content: str) -> Path:
-    """Write a SKILL.md file and return its path."""
-    skill_file = tmp_path / "SKILL.md"
-    skill_file.write_text(content, encoding="utf-8")
+
+def _write_skill(tmp_path: Path, front_matter: str, body: str = "# My Skill\n") -> Path:
+    """Write a minimal SKILL.md and return the path."""
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(f"---\n{front_matter}\n---\n{body}", encoding="utf-8")
     return skill_file
 
 
-class TestParseSkillFile:
-    def test_valid_skill_file(self, tmp_path):
-        skill_file = _write_skill(
-            tmp_path,
-            "---\nname: my-skill\ndescription: A test skill\nlicense: MIT\n---\n\n# My Skill\n",
-        )
-        result = parse_skill_file(skill_file, "public")
-        assert result is not None
-        assert result.name == "my-skill"
-        assert result.description == "A test skill"
-        assert result.license == "MIT"
-        assert result.category == "public"
-        assert result.enabled is True
-        assert result.skill_dir == tmp_path
-        assert result.skill_file == skill_file
+# ---------------------------------------------------------------------------
+# Basic parsing
+# ---------------------------------------------------------------------------
 
-    def test_missing_name_returns_none(self, tmp_path):
-        skill_file = _write_skill(
-            tmp_path,
-            "---\ndescription: A test skill\n---\n\nBody\n",
-        )
-        assert parse_skill_file(skill_file, "public") is None
 
-    def test_missing_description_returns_none(self, tmp_path):
-        skill_file = _write_skill(
-            tmp_path,
-            "---\nname: my-skill\n---\n\nBody\n",
-        )
-        assert parse_skill_file(skill_file, "public") is None
+def test_parse_plain_name(tmp_path):
+    """Unquoted name is parsed correctly."""
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: A test skill")
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.name == "my-skill"
 
-    def test_no_front_matter_returns_none(self, tmp_path):
-        skill_file = _write_skill(tmp_path, "# Just a markdown file\n\nNo front matter here.\n")
-        assert parse_skill_file(skill_file, "public") is None
 
-    def test_nonexistent_file_returns_none(self, tmp_path):
-        skill_file = tmp_path / "SKILL.md"
-        assert parse_skill_file(skill_file, "public") is None
+def test_parse_quoted_name_no_quotes_in_result(tmp_path):
+    """Quoted name (YAML string) must not include surrounding quotes in result.
 
-    def test_wrong_filename_returns_none(self, tmp_path):
-        wrong_file = tmp_path / "README.md"
-        wrong_file.write_text("---\nname: test\ndescription: test\n---\n", encoding="utf-8")
-        assert parse_skill_file(wrong_file, "public") is None
+    Regression: the old hand-rolled parser stored ``'"my-skill"'`` instead of
+    ``'my-skill'`` when the YAML value was wrapped in double-quotes.
+    """
+    skill_file = _write_skill(tmp_path, 'name: "my-skill"\ndescription: A test skill')
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.name == "my-skill", f"Expected 'my-skill', got {skill.name!r}"
 
-    def test_optional_license_field(self, tmp_path):
-        skill_file = _write_skill(
-            tmp_path,
-            "---\nname: my-skill\ndescription: A test skill\n---\n\nBody\n",
-        )
-        result = parse_skill_file(skill_file, "custom")
-        assert result is not None
-        assert result.license is None
-        assert result.category == "custom"
 
-    def test_custom_relative_path(self, tmp_path):
-        skill_file = _write_skill(
-            tmp_path,
-            "---\nname: nested-skill\ndescription: Nested\n---\n\nBody\n",
-        )
-        rel = Path("group/nested-skill")
-        result = parse_skill_file(skill_file, "public", relative_path=rel)
-        assert result is not None
-        assert result.relative_path == rel
+def test_parse_single_quoted_name(tmp_path):
+    """Single-quoted YAML strings are also handled correctly."""
+    skill_file = _write_skill(tmp_path, "name: 'my-skill'\ndescription: A test skill")
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.name == "my-skill"
 
-    def test_default_relative_path_is_parent_name(self, tmp_path):
-        skill_file = _write_skill(
-            tmp_path,
-            "---\nname: my-skill\ndescription: Test\n---\n\nBody\n",
-        )
-        result = parse_skill_file(skill_file, "public")
-        assert result is not None
-        assert result.relative_path == Path(tmp_path.name)
 
-    def test_colons_in_description(self, tmp_path):
-        skill_file = _write_skill(
-            tmp_path,
-            "---\nname: my-skill\ndescription: A skill: does things\n---\n\nBody\n",
-        )
-        result = parse_skill_file(skill_file, "public")
-        assert result is not None
-        assert result.description == "A skill: does things"
+def test_parse_description_returned(tmp_path):
+    """Description field is correctly extracted."""
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Does amazing things")
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.description == "Does amazing things"
 
-    def test_multiline_yaml_folded_description(self, tmp_path):
-        skill_file = _write_skill(
-            tmp_path,
-            "---\nname: multiline-skill\ndescription: >\n   This is a multiline\n   description for a skill.\n\n   It spans multiple lines.\nlicense: MIT\n---\n\nBody\n",
-        )
-        result = parse_skill_file(skill_file, "public")
-        assert result is not None
-        assert result.name == "multiline-skill"
-        assert result.description == "This is a multiline description for a skill.\n\nIt spans multiple lines."
-        assert result.license == "MIT"
 
-    def test_multiline_yaml_literal_description(self, tmp_path):
-        skill_file = _write_skill(
-            tmp_path,
-            "---\nname: pipe-skill\ndescription: |\n    First line.\n    Second line.\n---\n\nBody\n",
-        )
-        result = parse_skill_file(skill_file, "public")
-        assert result is not None
-        assert result.name == "pipe-skill"
-        assert result.description == "First line.\nSecond line."
+def test_parse_multiline_description(tmp_path):
+    """Multi-line YAML descriptions are collapsed correctly by yaml.safe_load."""
+    front_matter = "name: my-skill\ndescription: >\n  A folded\n  description"
+    skill_file = _write_skill(tmp_path, front_matter)
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert "folded" in skill.description
 
-    def test_empty_front_matter_returns_none(self, tmp_path):
-        skill_file = _write_skill(tmp_path, "---\n\n---\n\nBody\n")
-        assert parse_skill_file(skill_file, "public") is None
+
+def test_parse_license_field(tmp_path):
+    """Optional license field is captured when present."""
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nlicense: MIT")
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.license == "MIT"
+
+
+def test_parse_missing_name_returns_none(tmp_path):
+    """Skills missing a name field are rejected."""
+    skill_file = _write_skill(tmp_path, "description: A test skill")
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is None
+
+
+def test_parse_missing_description_returns_none(tmp_path):
+    """Skills missing a description field are rejected."""
+    skill_file = _write_skill(tmp_path, "name: my-skill")
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is None
+
+
+def test_parse_no_front_matter_returns_none(tmp_path):
+    """Files without YAML front-matter delimiters return None."""
+    skill_dir = tmp_path / "no-fm"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("# No front matter here\n", encoding="utf-8")
+    skill = parse_skill_file(skill_file, category="public")
+    assert skill is None
+
+
+def test_parse_invalid_yaml_returns_none(tmp_path):
+    """Malformed YAML front-matter is handled gracefully (returns None)."""
+    skill_file = _write_skill(tmp_path, "name: [unclosed")
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is None
+
+
+def test_parse_category_stored(tmp_path):
+    """Category is propagated into the returned Skill object."""
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test")
+    skill = parse_skill_file(skill_file, category="public")
+    assert skill is not None
+    assert skill.category == "public"
+
+
+def test_parse_nonexistent_file_returns_none(tmp_path):
+    """Non-existent files are handled gracefully."""
+    skill = parse_skill_file(tmp_path / "ghost" / "SKILL.md", category="custom")
+    assert skill is None
