@@ -182,6 +182,18 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   void page.route("**/api/langgraph/runs/stream", handleRunStream);
   void page.route("**/api/langgraph/threads/*/runs/stream", handleRunStream);
 
+  // Agents API status — custom-agent UI gating
+  void page.route("**/api/agents/status", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: true }),
+      });
+    }
+    return route.fallback();
+  });
+
   // Agents list — sidebar & gallery page
   void page.route("**/api/agents", (route) => {
     if (route.request().method() === "GET") {
