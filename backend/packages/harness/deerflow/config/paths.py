@@ -16,6 +16,11 @@ def _default_local_base_dir() -> Path:
     return backend_dir / ".deer-flow"
 
 
+def _repo_root() -> Path:
+    """Parent of backend/; used to resolve relative ``base_dir`` in config."""
+    return Path(__file__).resolve().parents[5]
+
+
 def _validate_thread_id(thread_id: str) -> str:
     """Validate a thread ID before using it in filesystem paths."""
     if not _SAFE_THREAD_ID_RE.match(thread_id):
@@ -124,23 +129,74 @@ class Paths:
         """Path to the persisted memory file: `{base_dir}/memory.json`."""
         return self.base_dir / "memory.json"
 
+    def user_md_file(self, user_id: str | None = None) -> Path:
+        """Return the USER.md path.
+
+        - ``user_md_file()`` → global profile file: ``{base_dir}/USER.md``
+        - ``user_md_file(user_id=...)`` → per-user profile file:
+          ``{base_dir}/users/{user_id}/USER.md``
+        """
+
+        if user_id is None:
+            return self.base_dir / "USER.md"
+        return self.user_dir(user_id) / "USER.md"
+
     @property
-    def user_md_file(self) -> Path:
-        """Path to the global user profile file: `{base_dir}/USER.md`."""
-        return self.base_dir / "USER.md"
+    def memorys_dir(self) -> Path:
+        """Root directory for all custom agents: `{base_dir}/agents/`."""
+        return self.base_dir / "memory"
+
+    def memory_dir(self, user: str | None = None, thread_id: str | None = None) -> Path:
+        """Directory for a specific agent: `{base_dir}/agents/{name}/`."""
+        if user is None and thread_id is None:
+            return self.memorys_dir
+        if user is None:
+            return self.memorys_dir / thread_id.lower()
+        if thread_id is None:
+            return self.memorys_dir / user.lower()
+        return self.memorys_dir / user.lower() / thread_id.lower()
 
     @property
     def agents_dir(self) -> Path:
         """Root directory for all custom agents: `{base_dir}/agents/`."""
         return self.base_dir / "agents"
 
-    def agent_dir(self, name: str) -> Path:
-        """Directory for a specific agent: `{base_dir}/agents/{name}/`."""
-        return self.agents_dir / name.lower()
+    def agent_dir(self, user_id_or_name: str, name: str | None = None) -> Path:
+        """Return an agent directory path.
 
-    def agent_memory_file(self, name: str) -> Path:
-        """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
-        return self.agent_dir(name) / "memory.json"
+        Supported call patterns:
+
+        - ``agent_dir(name)`` → legacy shared agent path:
+          ``{base_dir}/agents/{name}/``
+        - ``agent_dir(user_id, name)`` → user-scoped agent path:
+          ``{base_dir}/agents/{user_id}/{name}/``
+        """
+
+        if name is None:
+            return self.agents_dir / user_id_or_name.lower()
+        return self.agents_dir / user_id_or_name.lower() / name.lower()
+
+    def agent_memory_file(self, user_id_or_agent_name: str, thread_id: str | None = None) -> Path:
+        """Backward-compatible agent memory path helper.
+
+        Supported call patterns:
+
+        - ``agent_memory_file(agent_name)`` → legacy global agent path
+          ``{base_dir}/agents/{agent_name}/memory.json``
+        - ``agent_memory_file(user_id, thread_id)`` → legacy thread-scoped user path
+          ``{base_dir}/agents/{user_id}/{thread_id}_memory.json``
+
+        New user-scoped per-agent storage should prefer
+        :meth:`user_agent_memory_file`.
+        """
+
+        if thread_id is None:
+            return self.agent_dir(user_id_or_agent_name) / "memory.json"
+        return self.agent_dir(user_id_or_agent_name) / f"{thread_id}_memory.json"
+
+    def user_memory_file(self, user_id: str, thread_id: str) -> Path:
+        """User-thread memory file: `{base_dir}/threads/{user_id}/{thread_id}/memory.json`."""
+        return self.memory_dir(user_id, thread_id) / "memory.json"
 
     def user_dir(self, user_id: str) -> Path:
         """Directory for a specific user: `{base_dir}/users/{user_id}/`."""
@@ -314,6 +370,31 @@ class Paths:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _paths: Paths | None = None
+
+
+def configure_paths(base_dir: str | Path | None) -> None:
+    """Set the process-wide Paths singleton from application config.
+
+    When *base_dir* is empty or whitespace-only, reset to default resolution:
+    ``DEER_FLOW_HOME`` if set, otherwise `{backend}/.deer-flow`.
+    Relative paths are resolved against the repository root (parent of ``backend/``).
+    Non-empty values are created on disk (mkdir parents).
+    """
+    global _paths
+    if isinstance(base_dir, Path):
+        resolved = base_dir.expanduser().resolve()
+        resolved.mkdir(parents=True, exist_ok=True)
+        _paths = Paths(resolved)
+        return
+    if base_dir is None or not str(base_dir).strip():
+        _paths = None
+        return
+    p = Path(str(base_dir).strip()).expanduser()
+    if not p.is_absolute():
+        p = _repo_root() / p
+    p = p.resolve()
+    p.mkdir(parents=True, exist_ok=True)
+    _paths = Paths(p)
 
 
 def get_paths() -> Paths:

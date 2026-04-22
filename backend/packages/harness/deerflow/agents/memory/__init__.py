@@ -20,13 +20,17 @@ from deerflow.agents.memory.queue import (
 )
 from deerflow.agents.memory.storage import (
     FileMemoryStorage,
+    MongoMemoryStorage,
+    PostgresMemoryStorage,
     MemoryStorage,
     get_memory_storage,
 )
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
     clear_memory_data,
+    delete_all_memory_for_user,
     delete_memory_fact,
+    delete_user_thread_memory,
     get_memory_data,
     reload_memory_data,
     update_memory_from_conversation,
@@ -46,6 +50,8 @@ __all__ = [
     # Storage
     "MemoryStorage",
     "FileMemoryStorage",
+    "MongoMemoryStorage",
+    "PostgresMemoryStorage",
     "get_memory_storage",
     # Updater
     "MemoryUpdater",
@@ -54,4 +60,6 @@ __all__ = [
     "get_memory_data",
     "reload_memory_data",
     "update_memory_from_conversation",
+    "delete_all_memory_for_user",
+    "delete_user_thread_memory",
 ]
