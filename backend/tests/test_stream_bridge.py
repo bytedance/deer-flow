@@ -6,7 +6,8 @@ import re
 import anyio
 import pytest
 
-from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, make_stream_bridge
+from deerflow.config.stream_bridge_config import StreamBridgeConfig
+from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, RedisStreamBridge, make_stream_bridge
 
 # ---------------------------------------------------------------------------
 # Unit tests for MemoryStreamBridge
@@ -334,3 +335,25 @@ async def test_make_stream_bridge_defaults():
     """make_stream_bridge() with no config yields a MemoryStreamBridge."""
     async with make_stream_bridge() as bridge:
         assert isinstance(bridge, MemoryStreamBridge)
+
+
+@pytest.mark.anyio
+async def test_make_stream_bridge_redis_config(monkeypatch):
+    """Redis config should construct the RedisStreamBridge class from the new module path."""
+
+    async def _fake_close(self):
+        self._redis = None
+
+    monkeypatch.setattr(RedisStreamBridge, "close", _fake_close)
+
+    cfg = StreamBridgeConfig(type="redis", redis_url="redis://localhost:6379/0", redis_key_prefix="deerflow:sse")
+    async with make_stream_bridge(cfg) as bridge:
+        assert isinstance(bridge, RedisStreamBridge)
+
+
+@pytest.mark.anyio
+async def test_make_stream_bridge_redis_requires_url():
+    cfg = StreamBridgeConfig(type="redis", redis_url="   ")
+    with pytest.raises(ValueError, match="stream_bridge\.redis_url is required"):
+        async with make_stream_bridge(cfg):
+            raise AssertionError("context manager should not yield when redis_url is missing")

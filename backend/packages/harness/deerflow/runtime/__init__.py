@@ -9,7 +9,7 @@ from .checkpointer import checkpointer_context, get_checkpointer, make_checkpoin
 from .runs import ConflictError, DisconnectMode, RunContext, RunManager, RunRecord, RunStatus, UnsupportedStrategyError, run_agent
 from .serialization import serialize, serialize_channel_values, serialize_lc_object, serialize_messages_tuple
 from .store import get_store, make_store, reset_store, store_context
-from .stream_bridge import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamBridge, StreamEvent, make_stream_bridge
+from .stream_bridge import END_SENTINEL, HEARTBEAT_SENTINEL, _END_EVENT, MemoryStreamBridge, RedisStreamBridge, StreamBridge, StreamEvent, make_stream_bridge
 
 __all__ = [
     # checkpointer
@@ -39,7 +39,9 @@ __all__ = [
     # stream_bridge
     "END_SENTINEL",
     "HEARTBEAT_SENTINEL",
+    "_END_EVENT",
     "MemoryStreamBridge",
+    "RedisStreamBridge",
     "StreamBridge",
     "StreamEvent",
     "make_stream_bridge",

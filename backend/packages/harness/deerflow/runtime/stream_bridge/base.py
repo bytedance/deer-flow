@@ -32,6 +32,7 @@ class StreamEvent:
 
 HEARTBEAT_SENTINEL = StreamEvent(id="", event="__heartbeat__", data=None)
 END_SENTINEL = StreamEvent(id="", event="__end__", data=None)
+_END_EVENT = "__end__"
 
 
 class StreamBridge(abc.ABC):
