@@ -14,6 +14,7 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
+from deerflow.config.model_feedback_config import ModelFeedbackConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.sandbox_config import SandboxConfig
@@ -62,6 +63,10 @@ class AppConfig(BaseModel):
     run_events: RunEventsConfig = Field(default_factory=RunEventsConfig, description="Run event storage configuration")
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
+    model_feedback: ModelFeedbackConfig | None = Field(
+        default=None,
+        description="Per-model run and client feedback counters (optional; see model_feedback in config).",
+    )
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
