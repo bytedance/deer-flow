@@ -1,6 +1,7 @@
 from typing import Annotated, NotRequired, TypedDict
 
 from langchain.agents import AgentState
+from langchain_core.messages import AnyMessage
 
 
 class SandboxState(TypedDict):
@@ -45,11 +46,31 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     return {**existing, **new}
 
 
+def merge_display_messages(existing: list[AnyMessage] | None, new: list[AnyMessage] | None) -> list[AnyMessage]:
+    """Reducer for UI-only messages archived before model-context summarization."""
+    if existing is None:
+        existing = []
+    if new is None:
+        return existing
+
+    merged: list[AnyMessage] = []
+    seen_ids: set[str] = set()
+    for message in [*existing, *new]:
+        message_id = getattr(message, "id", None)
+        if message_id:
+            if message_id in seen_ids:
+                continue
+            seen_ids.add(message_id)
+        merged.append(message)
+    return merged
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
     title: NotRequired[str | None]
     artifacts: Annotated[list[str], merge_artifacts]
+    display_messages: Annotated[list[AnyMessage], merge_display_messages]
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}

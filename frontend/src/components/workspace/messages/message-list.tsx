@@ -50,7 +50,10 @@ export function MessageList({
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  const messages = thread.messages;
+  const messages = [
+    ...(thread.values.display_messages ?? []),
+    ...thread.messages,
+  ];
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
