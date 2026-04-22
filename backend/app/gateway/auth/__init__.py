@@ -6,18 +6,26 @@ This module provides:
 - UserRepository interface for storage backends (SQLite)
 """
 
-from app.gateway.auth.config import AuthConfig, get_auth_config, set_auth_config
+from app.gateway.auth.config import AuthConfig, TrustedHeaderProviderConfig, get_auth_config, set_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
 from app.gateway.auth.jwt import TokenPayload, create_access_token, decode_token
 from app.gateway.auth.local_provider import LocalAuthProvider
 from app.gateway.auth.models import User, UserResponse
 from app.gateway.auth.password import hash_password, verify_password
-from app.gateway.auth.providers import AuthProvider
+from app.gateway.auth.providers import AuthProvider, TrustedHeaderAuthProvider
 from app.gateway.auth.repositories.base import UserRepository
+
+
+def resolve_auth_provider(config: AuthConfig, repository: UserRepository) -> AuthProvider:
+    """Resolve the configured auth provider instance."""
+    if config.provider == "trusted_header":
+        return TrustedHeaderAuthProvider(repository, config.trusted_header)
+    return LocalAuthProvider(repository)
 
 __all__ = [
     # Config
     "AuthConfig",
+    "TrustedHeaderProviderConfig",
     "get_auth_config",
     "set_auth_config",
     # Errors
@@ -37,6 +45,8 @@ __all__ = [
     # Providers
     "AuthProvider",
     "LocalAuthProvider",
+    "TrustedHeaderAuthProvider",
+    "resolve_auth_provider",
     # Repository
     "UserRepository",
 ]
