@@ -16,6 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
+from app.gateway.auth import get_auth_config, resolve_auth_provider
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -71,9 +72,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
 
+    async def _try_request_provider_auth(self, request: Request):
+        cfg = get_auth_config()
+        if cfg.provider == "local":
+            return None
+
+        from app.gateway.deps import get_user_repository
+
+        provider = resolve_auth_provider(cfg, get_user_repository())
+        return await provider.authenticate_request(request)
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         if _is_public(request.url.path):
             return await call_next(request)
+
+        trusted_user = await self._try_request_provider_auth(request)
+        if trusted_user is not None:
+            request.state.user = trusted_user
+            request.state.auth = AuthContext(user=trusted_user, permissions=_ALL_PERMISSIONS)
+            token = set_current_user(trusted_user)
+            try:
+                return await call_next(request)
+            finally:
+                reset_current_user(token)
 
         # Non-public path: require session cookie
         if not request.cookies.get("access_token"):

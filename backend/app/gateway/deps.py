@@ -172,6 +172,15 @@ def get_local_provider() -> LocalAuthProvider:
     return _cached_local_provider
 
 
+def get_user_repository() -> SQLiteUserRepository:
+    """Get or create the cached user repository singleton."""
+    global _cached_repo
+    if _cached_repo is None:
+        get_local_provider()
+    assert _cached_repo is not None
+    return _cached_repo
+
+
 async def get_current_user_from_request(request: Request):
     """Get the current authenticated user from the request cookie.
 
