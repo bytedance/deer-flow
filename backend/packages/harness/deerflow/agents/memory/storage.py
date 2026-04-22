@@ -1,8 +1,11 @@
 """Memory storage providers."""
 
+from __future__ import annotations
+
 import abc
 import json
 import logging
+import re
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +16,18 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
+
+_COLL_OK = re.compile(r"^[A-Za-z0-9_-]{1,120}$")
+_PG_IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+
+
+def validate_postgres_identifier(value: str | None, *, kind: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        raise ValueError(f"memory.{kind} must be a non-empty identifier")
+    if not _PG_IDENT_OK.match(normalized):
+        raise ValueError(f"Invalid PostgreSQL {kind} {normalized!r}")
+    return normalized
 
 
 def utc_now_iso_z() -> str:
@@ -171,6 +186,181 @@ class FileMemoryStorage(MemoryStorage):
             return True
         except OSError as e:
             logger.error("Failed to save memory file: %s", e)
+            return False
+
+
+class MongoMemoryStorage(MemoryStorage):
+    """Persist memory JSON as one document per (user_id, agent_name)."""
+
+    def __init__(self):
+        try:
+            from pymongo import MongoClient
+        except ImportError as e:
+            raise ImportError(
+                "MongoMemoryStorage requires pymongo. Install with: uv add pymongo "
+                "or use optional dependency deerflow-harness[memory-db]."
+            ) from e
+
+        cfg = get_memory_config()
+        if not cfg.connection_string or not str(cfg.connection_string).strip():
+            raise ValueError("memory.connection_string is required when storage_class is MongoMemoryStorage")
+
+        db_name = str(cfg.mongo_database).strip() or "deerflow"
+        collection = str(cfg.mongo_collection).strip() or "agent_memory"
+        if not _COLL_OK.match(collection):
+            raise ValueError(f"Invalid memory.mongo_collection {collection!r}")
+
+        self._client = MongoClient(str(cfg.connection_string).strip(), serverSelectionTimeoutMS=10_000)
+        self._coll = self._client[db_name][collection]
+        self._lock = threading.Lock()
+        self._cache: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+
+    def _agent_key(self, agent_name: str | None) -> str:
+        return agent_name or ""
+
+    def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        if user_id is None:
+            return create_empty_memory()
+        cache_key = (user_id, agent_name)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        with self._lock:
+            doc = self._coll.find_one({"user_id": user_id, "agent_name": self._agent_key(agent_name)}, projection={"payload": 1})
+            data = (doc or {}).get("payload") or create_empty_memory()
+            self._cache[cache_key] = data
+            return data
+
+    def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        if user_id is None:
+            return create_empty_memory()
+        with self._lock:
+            doc = self._coll.find_one({"user_id": user_id, "agent_name": self._agent_key(agent_name)}, projection={"payload": 1})
+            data = (doc or {}).get("payload") or create_empty_memory()
+            self._cache[(user_id, agent_name)] = data
+            return data
+
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
+        if user_id is None:
+            logger.warning("MongoMemoryStorage.save skipped: user_id is None")
+            return False
+        payload = dict(memory_data)
+        payload["lastUpdated"] = utc_now_iso_z()
+        try:
+            with self._lock:
+                self._coll.replace_one(
+                    {"user_id": user_id, "agent_name": self._agent_key(agent_name)},
+                    {"user_id": user_id, "agent_name": self._agent_key(agent_name), "payload": payload},
+                    upsert=True,
+                )
+                self._cache[(user_id, agent_name)] = payload
+            return True
+        except Exception:
+            logger.exception("MongoMemoryStorage.save failed")
+            return False
+
+
+class PostgresMemoryStorage(MemoryStorage):
+    """Persist memory JSON in a single table keyed by (user_id, agent_name)."""
+
+    def __init__(self):
+        try:
+            import psycopg
+            from psycopg import sql
+            from psycopg.types.json import Json
+        except ImportError as e:
+            raise ImportError(
+                "PostgresMemoryStorage requires psycopg. Install with: uv add 'psycopg[binary]' "
+                "or use optional dependency deerflow-harness[memory-db]."
+            ) from e
+
+        cfg = get_memory_config()
+        if not cfg.connection_string or not str(cfg.connection_string).strip():
+            raise ValueError("memory.connection_string is required when storage_class is PostgresMemoryStorage")
+
+        self._psycopg = psycopg
+        self._sql = sql
+        self._Json = Json
+        self._dsn = str(cfg.connection_string).strip()
+        self._schema = validate_postgres_identifier(cfg.postgres_schema, kind="postgres_schema") if cfg.postgres_schema else None
+        self._table = validate_postgres_identifier(cfg.table, kind="table")
+        self._lock = threading.Lock()
+        self._cache: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+
+    def _table_ident(self):
+        if self._schema:
+            return self._sql.SQL("{}.{}").format(self._sql.Identifier(self._schema), self._sql.Identifier(self._table))
+        return self._sql.Identifier(self._table)
+
+    def _connect(self):
+        return self._psycopg.connect(self._dsn, autocommit=True)
+
+    def _ensure_table(self, conn) -> None:
+        ddl = self._sql.SQL(
+            "CREATE TABLE IF NOT EXISTS {} ("
+            " user_id TEXT NOT NULL,"
+            " agent_name TEXT NOT NULL DEFAULT '',"
+            " payload JSONB NOT NULL,"
+            " updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+            " PRIMARY KEY (user_id, agent_name)"
+            ")"
+        ).format(self._table_ident())
+        with conn.cursor() as cur:
+            cur.execute(ddl)
+
+    def _agent_key(self, agent_name: str | None) -> str:
+        return agent_name or ""
+
+    def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        if user_id is None:
+            return create_empty_memory()
+        cache_key = (user_id, agent_name)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        query = self._sql.SQL("SELECT payload FROM {} WHERE user_id = %s AND agent_name = %s").format(self._table_ident())
+        with self._lock:
+            with self._connect() as conn:
+                self._ensure_table(conn)
+                with conn.cursor() as cur:
+                    cur.execute(query, (user_id, self._agent_key(agent_name)))
+                    row = cur.fetchone()
+            data = row[0] if row else create_empty_memory()
+            self._cache[cache_key] = data
+            return data
+
+    def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        if user_id is None:
+            return create_empty_memory()
+        query = self._sql.SQL("SELECT payload FROM {} WHERE user_id = %s AND agent_name = %s").format(self._table_ident())
+        with self._lock:
+            with self._connect() as conn:
+                self._ensure_table(conn)
+                with conn.cursor() as cur:
+                    cur.execute(query, (user_id, self._agent_key(agent_name)))
+                    row = cur.fetchone()
+            data = row[0] if row else create_empty_memory()
+            self._cache[(user_id, agent_name)] = data
+            return data
+
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
+        if user_id is None:
+            logger.warning("PostgresMemoryStorage.save skipped: user_id is None")
+            return False
+        payload = dict(memory_data)
+        payload["lastUpdated"] = utc_now_iso_z()
+        query = self._sql.SQL(
+            "INSERT INTO {} (user_id, agent_name, payload) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id, agent_name) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()"
+        ).format(self._table_ident())
+        try:
+            with self._lock:
+                with self._connect() as conn:
+                    self._ensure_table(conn)
+                    with conn.cursor() as cur:
+                        cur.execute(query, (user_id, self._agent_key(agent_name), self._Json(payload)))
+                self._cache[(user_id, agent_name)] = payload
+            return True
+        except Exception:
+            logger.exception("PostgresMemoryStorage.save failed")
             return False
 
 

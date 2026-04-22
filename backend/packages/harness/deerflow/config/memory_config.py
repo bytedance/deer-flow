@@ -26,7 +26,32 @@ class MemoryConfig(BaseModel):
     )
     storage_class: str = Field(
         default="deerflow.agents.memory.storage.FileMemoryStorage",
-        description="The class path for memory storage provider",
+        description=(
+            "The class path for memory storage provider. "
+            "Examples: deerflow.agents.memory.storage.FileMemoryStorage, "
+            "deerflow.agents.memory.storage.PostgresMemoryStorage, "
+            "deerflow.agents.memory.storage.MongoMemoryStorage"
+        ),
+    )
+    connection_string: str | None = Field(
+        default=None,
+        description="Database connection string for PostgresMemoryStorage or MongoMemoryStorage.",
+    )
+    postgres_schema: str = Field(
+        default="public",
+        description="PostgreSQL schema for PostgresMemoryStorage.",
+    )
+    table: str = Field(
+        default="agent_memory",
+        description="Table name for PostgresMemoryStorage.",
+    )
+    mongo_collection: str = Field(
+        default="agent_memory",
+        description="MongoDB collection name for MongoMemoryStorage.",
+    )
+    mongo_database: str = Field(
+        default="deerflow",
+        description="MongoDB database name for MongoMemoryStorage.",
     )
     debounce_seconds: int = Field(
         default=30,
