@@ -40,6 +40,11 @@ dependencies = [
 
 [project.optional-dependencies]
 ollama = ["langchain-ollama>=0.3.0"]
+memory-db = [
+    "psycopg[binary]>=3.3.3",
+    "psycopg-pool>=3.3.0",
+    "pymongo>=4.8",
+]
 postgres = [
     "asyncpg>=0.29",
     "langgraph-checkpoint-postgres>=3.0.5",

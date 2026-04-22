@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.agents.memory import MongoMemoryStorage, PostgresMemoryStorage
 from deerflow.agents.memory.storage import FileMemoryStorage, get_memory_storage
 from deerflow.config.memory_config import MemoryConfig
 
@@ -47,3 +48,8 @@ def test_get_memory_storage_mongo_backend_falls_back_when_dependency_missing():
 def test_memory_config_exposes_backend_fields(field: str, value: str):
     cfg = MemoryConfig(**{field: value})
     assert getattr(cfg, field) == value
+
+
+def test_memory_module_exports_storage_backends():
+    assert PostgresMemoryStorage.__name__ == "PostgresMemoryStorage"
+    assert MongoMemoryStorage.__name__ == "MongoMemoryStorage"
