@@ -33,7 +33,7 @@ def _get_work_dir(thread_id: str | None) -> str:
         An absolute physical filesystem path to use as the working directory.
     """
     from deerflow.config.paths import get_paths
-    from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.runtime.actor_context import get_effective_user_id
 
     paths = get_paths()
     if thread_id:

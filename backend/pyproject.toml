@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "deerflow-harness",
+    "deerflow-storage",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "python-multipart>=0.0.20",
@@ -20,6 +21,7 @@ dependencies = [
     "bcrypt>=4.0.0",
     "pyjwt>=2.9.0",
     "email-validator>=2.0.0",
+    "scalar-fastapi>=1.8.2",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +36,8 @@ markers = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/harness"]
+members = ["packages/harness", "packages/storage"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
+deerflow-storage = { workspace = true }

@@ -1,21 +1,47 @@
-"""Stream bridge — decouples agent workers from SSE endpoints.
+"""Stream bridge public surface.
 
-A ``StreamBridge`` sits between the background task that runs an agent
-(producer) and the HTTP endpoint that pushes Server-Sent Events to
-the client (consumer).  This package provides an abstract protocol
-(:class:`StreamBridge`) plus a default in-memory implementation backed
-by :mod:`asyncio.Queue`.
+The harness package owns the stream abstraction and event semantics.
+Concrete backends are intentionally not part of the public API here so
+applications can inject infra-specific implementations.
 """
 
-from .async_provider import make_stream_bridge
-from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent
-from .memory import MemoryStreamBridge
+from .contract import (
+    CANCELLED_SENTINEL,
+    END_SENTINEL,
+    HEARTBEAT_SENTINEL,
+    JSONScalar,
+    JSONValue,
+    TERMINAL_STATES,
+    ResumeResult,
+    StreamBridge,
+    StreamEvent,
+    StreamStatus,
+)
+from .exceptions import (
+    BridgeClosedError,
+    StreamBridgeError,
+    StreamCapacityExceededError,
+    StreamNotFoundError,
+    StreamTerminatedError,
+)
 
 __all__ = [
+    # Sentinels
+    "CANCELLED_SENTINEL",
     "END_SENTINEL",
     "HEARTBEAT_SENTINEL",
-    "MemoryStreamBridge",
+    # Types
+    "JSONScalar",
+    "JSONValue",
+    "ResumeResult",
     "StreamBridge",
     "StreamEvent",
-    "make_stream_bridge",
+    "StreamStatus",
+    "TERMINAL_STATES",
+    # Exceptions
+    "BridgeClosedError",
+    "StreamBridgeError",
+    "StreamCapacityExceededError",
+    "StreamNotFoundError",
+    "StreamTerminatedError",
 ]

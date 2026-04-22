@@ -4,8 +4,8 @@ Provides a single source of truth for converting LangChain message
 objects, Pydantic models, and LangGraph state dicts into plain
 JSON-serialisable Python structures.
 
-Consumers: ``deerflow.runtime.runs.worker`` (SSE publishing) and
-``app.gateway.routers.threads`` (REST responses).
+Consumers: runs execution internals (SSE publishing) and
+gateway thread state/history responses.
 """
 
 from __future__ import annotations

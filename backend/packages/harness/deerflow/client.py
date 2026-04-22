@@ -26,6 +26,7 @@ from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+from typing_extensions import TypedDict
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -40,7 +41,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.actor_context import get_effective_user_id
 from deerflow.skills.installer import install_skill_from_archive
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -57,6 +58,14 @@ logger = logging.getLogger(__name__)
 
 
 StreamEventType = Literal["values", "messages-tuple", "custom", "end"]
+
+
+class AgentContext(TypedDict, total=False):
+    """Typed runtime context passed into LangGraph agent execution."""
+
+    thread_id: str
+    agent_name: str
+    sandbox_id: str
 
 
 @dataclass
@@ -143,12 +152,17 @@ class DeerFlowClient:
         """
         if config_path is not None:
             reload_app_config(config_path)
+            from store.config.app_config import reload_app_config as reload_storage_app_config
+
+            reload_storage_app_config(config_path)
         self._app_config = get_app_config()
 
         if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
 
         self._checkpointer = checkpointer
+        self._default_checkpointer = None
+        self._default_checkpointer_resource = None
         self._model_name = model_name
         self._thinking_enabled = thinking_enabled
         self._subagent_enabled = subagent_enabled
@@ -207,6 +221,97 @@ class DeerFlowClient:
             recursion_limit=overrides.get("recursion_limit", 100),
         )
 
+    @staticmethod
+    def _resolve_sqlite_conn_str(connection_string: str) -> str:
+        """Normalize sqlite connection strings to a filesystem path string."""
+        if connection_string == ":memory:":
+            return connection_string
+        return str(Path(connection_string).expanduser())
+
+    @staticmethod
+    def _ensure_sqlite_parent_dir(connection_string: str) -> None:
+        """Create parent directory for a sqlite file if needed."""
+        if connection_string == ":memory:":
+            return
+        Path(connection_string).expanduser().parent.mkdir(parents=True, exist_ok=True)
+
+    def _get_configured_checkpointer(self):
+        """Build or reuse the client fallback checkpointer from storage config."""
+        if self._default_checkpointer is not None:
+            return self._default_checkpointer
+
+        config = self._resolve_checkpointer_config()
+        self._default_checkpointer = self._build_configured_checkpointer(config)
+        return self._default_checkpointer
+
+    @staticmethod
+    def _resolve_checkpointer_config() -> dict[str, str]:
+        """Resolve checkpointer backend from the unified storage config entry."""
+        from store.config.app_config import get_app_config as get_storage_app_config
+
+        storage = get_storage_app_config().storage
+        driver = storage.driver
+
+        if driver == "sqlite":
+            return {"backend": "sqlite", "connection_string": storage.sqlite_storage_path}
+        if driver == "postgres":
+            return {
+                "backend": "postgres",
+                "connection_string": (
+                    f"postgresql://{storage.username}:{storage.password}@{storage.host}:{storage.port}/{storage.db_name}"
+                ),
+            }
+        if driver == "mysql":
+            raise ValueError("DeerFlowClient does not support a MySQL checkpointer")
+
+        raise ValueError(f"Unsupported storage driver for checkpointer: {driver}")
+
+    def _build_configured_checkpointer(self, config: dict[str, str]):
+        """Build a sync checkpointer using the embedded client's config."""
+        backend = config["backend"]
+        connection_string = config.get("connection_string", "")
+
+        if backend == "memory":
+            from langgraph.checkpoint.memory import InMemorySaver
+
+            return InMemorySaver()
+
+        if backend == "sqlite":
+            try:
+                from langgraph.checkpoint.sqlite import SqliteSaver
+            except ImportError as exc:
+                raise ImportError("SQLite checkpointer requires langgraph-checkpoint-sqlite") from exc
+            if not connection_string:
+                raise ValueError("connection_string is required for sqlite checkpointer")
+            conn_str = self._resolve_sqlite_conn_str(connection_string)
+            self._ensure_sqlite_parent_dir(conn_str)
+            resource = SqliteSaver.from_conn_string(conn_str)
+            saver = resource.__enter__()
+            saver.setup()
+            self._default_checkpointer_resource = resource
+            return saver
+
+        if backend == "postgres":
+            try:
+                from langgraph.checkpoint.postgres import PostgresSaver
+            except ImportError as exc:
+                raise ImportError("Postgres checkpointer requires langgraph-checkpoint-postgres") from exc
+            if not connection_string:
+                raise ValueError("connection_string is required for postgres checkpointer")
+            resource = PostgresSaver.from_conn_string(connection_string)
+            saver = resource.__enter__()
+            saver.setup()
+            self._default_checkpointer_resource = resource
+            return saver
+
+        raise ValueError(f"Unsupported checkpointer type: {backend}")
+
+    def _get_active_checkpointer(self):
+        """Return the explicitly injected or config-derived checkpointer."""
+        if self._checkpointer is not None:
+            return self._checkpointer
+        return self._get_configured_checkpointer()
+
     def _ensure_agent(self, config: RunnableConfig):
         """Create (or recreate) the agent when config-dependent params change."""
         cfg = config.get("configurable", {})
@@ -238,12 +343,9 @@ class DeerFlowClient:
                 available_skills=self._available_skills,
             ),
             "state_schema": ThreadState,
+            "context_schema": AgentContext,
         }
-        checkpointer = self._checkpointer
-        if checkpointer is None:
-            from deerflow.runtime.checkpointer import get_checkpointer
-
-            checkpointer = get_checkpointer()
+        checkpointer = self._get_active_checkpointer()
         if checkpointer is not None:
             kwargs["checkpointer"] = checkpointer
 
@@ -373,11 +475,9 @@ class DeerFlowClient:
             Dict with "thread_list" key containing list of thread info dicts,
             sorted by thread creation time descending.
         """
-        checkpointer = self._checkpointer
+        checkpointer = self._get_active_checkpointer()
         if checkpointer is None:
-            from deerflow.runtime.checkpointer.provider import get_checkpointer
-
-            checkpointer = get_checkpointer()
+            return {"thread_list": []}
 
         thread_info_map = {}
 
@@ -428,11 +528,9 @@ class DeerFlowClient:
         Returns:
             Dict containing the thread's full checkpoint history.
         """
-        checkpointer = self._checkpointer
+        checkpointer = self._get_active_checkpointer()
         if checkpointer is None:
-            from deerflow.runtime.checkpointer.provider import get_checkpointer
-
-            checkpointer = get_checkpointer()
+            return {"thread_id": thread_id, "checkpoints": []}
 
         config = {"configurable": {"thread_id": thread_id}}
         checkpoints = []

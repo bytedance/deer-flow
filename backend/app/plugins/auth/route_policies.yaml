@@ -1,0 +1,204 @@
+public:
+  - method: POST
+    path: /api/v1/auth/login/local
+  - method: POST
+    path: /api/v1/auth/register
+  - method: POST
+    path: /api/v1/auth/logout
+  - method: GET
+    path: /api/v1/auth/setup-status
+  - method: POST
+    path: /api/v1/auth/initialize
+  - method: GET
+    path: /api/v1/auth/oauth/{provider}
+  - method: GET
+    path: /api/v1/auth/callback/{provider}
+  - method: GET
+    path: /docs
+
+auth:
+  - method: POST
+    path: /api/v1/auth/change-password
+  - method: GET
+    path: /api/v1/auth/me
+
+threads:
+  - method: POST
+    path: /api/threads
+    capability: threads:write
+  - method: POST
+    path: /api/threads/search
+    capability: threads:read
+  - method: DELETE
+    path: /api/threads/{thread_id}
+    capability: threads:delete
+    policies: [owner:thread]
+    require_existing: false
+  - method: GET
+    path: /api/threads/{thread_id}/state
+    capability: threads:read
+    policies: [owner:thread]
+  - method: POST
+    path: /api/threads/{thread_id}/state
+    capability: threads:write
+    policies: [owner:thread]
+  - method: POST
+    path: /api/threads/{thread_id}/history
+    capability: threads:read
+    policies: [owner:thread]
+
+runs:
+  - method: GET
+    path: /api/threads/{thread_id}/runs
+    capability: runs:read
+    policies: [owner:thread]
+  - method: GET
+    path: /api/threads/{thread_id}/runs/{run_id}
+    capability: runs:read
+    policies: [owner:run]
+  - method: GET
+    path: /api/threads/{thread_id}/runs/{run_id}/messages
+    capability: runs:read
+    policies: [owner:run]
+  - method: POST
+    path: /api/threads/{thread_id}/runs
+    capability: runs:create
+    policies: [owner:thread]
+  - method: POST
+    path: /api/threads/{thread_id}/runs/stream
+    capability: runs:create
+    policies: [owner:thread]
+  - method: POST
+    path: /api/threads/{thread_id}/runs/wait
+    capability: runs:create
+    policies: [owner:thread]
+  - method: POST
+    path: /api/threads/runs
+    capability: runs:create
+  - method: POST
+    path: /api/threads/runs/stream
+    capability: runs:create
+  - method: POST
+    path: /api/threads/runs/wait
+    capability: runs:create
+  - methods: [GET, POST]
+    path: /api/threads/{thread_id}/runs/{run_id}/stream
+    capability: runs:read
+    policies: [owner:run]
+  - method: GET
+    path: /api/threads/{thread_id}/runs/{run_id}/join
+    capability: runs:read
+    policies: [owner:run]
+  - method: POST
+    path: /api/threads/{thread_id}/runs/{run_id}/cancel
+    capability: runs:cancel
+    policies: [owner:run]
+  - method: DELETE
+    path: /api/threads/{thread_id}/runs/{run_id}
+    capability: runs:cancel
+    policies: [owner:run]
+
+feedback:
+  - method: PUT
+    path: /api/threads/{thread_id}/runs/{run_id}/feedback
+    policies: [owner:run]
+  - method: POST
+    path: /api/threads/{thread_id}/runs/{run_id}/feedback
+    policies: [owner:run]
+  - method: GET
+    path: /api/threads/{thread_id}/runs/{run_id}/feedback
+    policies: [owner:run]
+  - method: GET
+    path: /api/threads/{thread_id}/runs/{run_id}/feedback/stats
+    policies: [owner:run]
+  - method: DELETE
+    path: /api/threads/{thread_id}/runs/{run_id}/feedback
+    policies: [owner:run]
+  - method: DELETE
+    path: /api/threads/{thread_id}/runs/{run_id}/feedback/{feedback_id}
+    policies: [owner:run]
+
+suggestions:
+  - method: POST
+    path: /api/threads/{thread_id}/suggestions
+    capability: threads:read
+    policies: [owner:thread]
+
+uploads:
+  - method: POST
+    path: /api/threads/{thread_id}/uploads
+    capability: threads:write
+    policies: [owner:thread]
+    require_existing: false
+  - method: GET
+    path: /api/threads/{thread_id}/uploads/list
+    capability: threads:read
+    policies: [owner:thread]
+  - method: DELETE
+    path: /api/threads/{thread_id}/uploads/{filename}
+    capability: threads:delete
+    policies: [owner:thread]
+
+artifacts:
+  - method: GET
+    path: /api/threads/{thread_id}/artifacts/{path:path}
+    capability: threads:read
+    policies: [owner:thread]
+
+agents:
+  - method: GET
+    path: /api/agents
+  - method: GET
+    path: /api/agents/check
+  - method: GET
+    path: /api/agents/{name}
+  - method: POST
+    path: /api/agents
+  - method: PUT
+    path: /api/agents/{name}
+  - method: GET
+    path: /api/user-profile
+  - method: PUT
+    path: /api/user-profile
+  - method: DELETE
+    path: /api/agents/{name}
+
+channels:
+  - method: GET
+    path: /api/channels/
+  - method: POST
+    path: /api/channels/{name}/restart
+
+mcp:
+  - method: GET
+    path: /api/mcp/config
+  - method: PUT
+    path: /api/mcp/config
+
+models:
+  - method: GET
+    path: /api/models
+  - method: GET
+    path: /api/models/{model_name}
+
+skills:
+  - method: GET
+    path: /api/skills
+  - method: POST
+    path: /api/skills/install
+  - method: GET
+    path: /api/skills/custom
+  - method: GET
+    path: /api/skills/custom/{skill_name}
+  - method: PUT
+    path: /api/skills/custom/{skill_name}
+  - method: DELETE
+    path: /api/skills/custom/{skill_name}
+  - method: GET
+    path: /api/skills/custom/{skill_name}/history
+  - method: POST
+    path: /api/skills/custom/{skill_name}/rollback
+  - method: GET
+    path: /api/skills/{skill_name}
+  - method: PUT
+    path: /api/skills/{skill_name}

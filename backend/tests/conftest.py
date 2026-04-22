@@ -1,4 +1,4 @@
-"""Test configuration for the backend test suite.
+"""Test configuration shared by unit and end-to-end tests.
 
 Sets up sys.path and pre-mocks modules that would cause circular import
 issues when unit-testing lightweight config/registry code in isolation.
@@ -6,8 +6,8 @@ issues when unit-testing lightweight config/registry code in isolation.
 
 import importlib.util
 import sys
+import warnings
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -38,14 +38,51 @@ _executor_mock.get_background_task_result = MagicMock()
 sys.modules["deerflow.subagents.executor"] = _executor_mock
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "no_auto_user: disable the conftest autouse contextvar fixture for this test",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Pydantic serializer warnings:.*field_name='context'.*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"pkg_resources is deprecated as an API.*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Deprecated call to `pkg_resources\.declare_namespace\(.*",
+        category=DeprecationWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"datetime\.datetime\.utcfromtimestamp\(\) is deprecated.*",
+        category=DeprecationWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"websockets\.InvalidStatusCode is deprecated",
+        category=DeprecationWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"websockets\.legacy is deprecated.*",
+        category=DeprecationWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"websockets\.client\.WebSocketClientProtocol is deprecated",
+        category=DeprecationWarning,
+    )
+
+
 @pytest.fixture()
 def provisioner_module():
-    """Load docker/provisioner/app.py as an importable test module.
-
-    Shared by test_provisioner_kubeconfig and test_provisioner_pvc_volumes so
-    that any change to the provisioner entry-point path or module name only
-    needs to be updated in one place.
-    """
+    """Load docker/provisioner/app.py as an importable test module."""
     repo_root = Path(__file__).resolve().parents[2]
     module_path = repo_root / "docker" / "provisioner" / "app.py"
     spec = importlib.util.spec_from_file_location("provisioner_app_test", module_path)
@@ -56,42 +93,25 @@ def provisioner_module():
     return module
 
 
-# ---------------------------------------------------------------------------
-# Auto-set user context for every test unless marked no_auto_user
-# ---------------------------------------------------------------------------
-#
-# Repository methods read ``user_id`` from a contextvar by default
-# (see ``deerflow.runtime.user_context``). Without this fixture, every
-# pre-existing persistence test would raise RuntimeError because the
-# contextvar is unset. The fixture sets a default test user on every
-# test; tests that explicitly want to verify behaviour *without* a user
-# context should mark themselves ``@pytest.mark.no_auto_user``.
-
-
 @pytest.fixture(autouse=True)
 def _auto_user_context(request):
-    """Inject a default ``test-user-autouse`` into the contextvar.
-
-    Opt-out via ``@pytest.mark.no_auto_user``. Uses lazy import so that
-    tests which don't touch the persistence layer never pay the cost
-    of importing runtime.user_context.
-    """
+    """Inject a default ``test-user-autouse`` into the contextvar."""
     if request.node.get_closest_marker("no_auto_user"):
         yield
         return
 
     try:
-        from deerflow.runtime.user_context import (
-            reset_current_user,
-            set_current_user,
+        from deerflow.runtime.actor_context import (
+            ActorContext,
+            bind_actor_context,
+            reset_actor_context,
         )
     except ImportError:
         yield
         return
 
-    user = SimpleNamespace(id="test-user-autouse", email="test@local")
-    token = set_current_user(user)
+    token = bind_actor_context(ActorContext(user_id="test-user-autouse"))
     try:
         yield
     finally:
-        reset_current_user(token)
+        reset_actor_context(token)

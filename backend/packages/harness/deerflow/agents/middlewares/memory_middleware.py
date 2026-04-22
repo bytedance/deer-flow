@@ -11,7 +11,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.config.memory_config import get_memory_config
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.actor_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 

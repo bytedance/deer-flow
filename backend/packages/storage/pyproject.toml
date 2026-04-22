@@ -1,0 +1,35 @@
+[project]
+name = "deerflow-storage"
+version = "0.1.0"
+description = "DeerFlow storage framework"
+requires-python = ">=3.12"
+dependencies = [
+    "dotenv>=0.9.9",
+    "pydantic>=2.12.5",
+    "pyyaml>=6.0.3",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
+    "alembic>=1.13",
+    "langgraph>=1.0.6,<1.0.10",
+]
+[project.optional-dependencies]
+postgres = [
+    "asyncpg>=0.29",
+    "langgraph-checkpoint-postgres>=3.0.5",
+    "psycopg[binary]>=3.3.3",
+    "psycopg-pool>=3.3.0",
+]
+mysql = [
+    "aiomysql>=0.2",
+    "langgraph-checkpoint-mysql>=3.0.0",
+]
+sqlite = [
+    "aiosqlite>=0.22.1",
+    "langgraph-checkpoint-sqlite>=3.0.3"
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["store"]

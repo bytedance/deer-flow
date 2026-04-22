@@ -7,10 +7,10 @@ import stat
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from app.gateway.authz import require_permission
-from deerflow.config.paths import get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from app.plugins.auth.security.actor_context import bind_request_actor_context
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.config.paths import get_paths
+from deerflow.runtime.actor_context import get_effective_user_id
 from deerflow.uploads.manager import (
     PathTraversalError,
     delete_file_safe,
@@ -56,7 +56,6 @@ def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
 
 
 @router.post("", response_model=UploadResponse)
-@require_permission("threads", "write", owner_check=True, require_existing=False)
 async def upload_files(
     thread_id: str,
     request: Request,
@@ -66,68 +65,69 @@ async def upload_files(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    try:
-        uploads_dir = ensure_uploads_dir(thread_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
-    uploaded_files = []
-
-    sandbox_provider = get_sandbox_provider()
-    sandbox_id = sandbox_provider.acquire(thread_id)
-    sandbox = sandbox_provider.get(sandbox_id)
-
-    for file in files:
-        if not file.filename:
-            continue
-
+    with bind_request_actor_context(request):
         try:
-            safe_filename = normalize_filename(file.filename)
-        except ValueError:
-            logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
-            continue
+            uploads_dir = ensure_uploads_dir(thread_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+        uploaded_files = []
 
-        try:
-            content = await file.read()
-            file_path = uploads_dir / safe_filename
-            file_path.write_bytes(content)
+        sandbox_provider = get_sandbox_provider()
+        sandbox_id = sandbox_provider.acquire(thread_id)
+        sandbox = sandbox_provider.get(sandbox_id)
 
-            virtual_path = upload_virtual_path(safe_filename)
+        for file in files:
+            if not file.filename:
+                continue
 
-            if sandbox_id != "local":
-                _make_file_sandbox_writable(file_path)
-                sandbox.update_file(virtual_path, content)
+            try:
+                safe_filename = normalize_filename(file.filename)
+            except ValueError:
+                logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+                continue
 
-            file_info = {
-                "filename": safe_filename,
-                "size": str(len(content)),
-                "path": str(sandbox_uploads / safe_filename),
-                "virtual_path": virtual_path,
-                "artifact_url": upload_artifact_url(thread_id, safe_filename),
-            }
+            try:
+                content = await file.read()
+                file_path = uploads_dir / safe_filename
+                file_path.write_bytes(content)
 
-            logger.info(f"Saved file: {safe_filename} ({len(content)} bytes) to {file_info['path']}")
+                virtual_path = upload_virtual_path(safe_filename)
 
-            file_ext = file_path.suffix.lower()
-            if file_ext in CONVERTIBLE_EXTENSIONS:
-                md_path = await convert_file_to_markdown(file_path)
-                if md_path:
-                    md_virtual_path = upload_virtual_path(md_path.name)
+                if sandbox_id != "local":
+                    _make_file_sandbox_writable(file_path)
+                    sandbox.update_file(virtual_path, content)
 
-                    if sandbox_id != "local":
-                        _make_file_sandbox_writable(md_path)
-                        sandbox.update_file(md_virtual_path, md_path.read_bytes())
+                file_info = {
+                    "filename": safe_filename,
+                    "size": str(len(content)),
+                    "path": str(sandbox_uploads / safe_filename),
+                    "virtual_path": virtual_path,
+                    "artifact_url": upload_artifact_url(thread_id, safe_filename),
+                }
 
-                    file_info["markdown_file"] = md_path.name
-                    file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
-                    file_info["markdown_virtual_path"] = md_virtual_path
-                    file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                logger.info(f"Saved file: {safe_filename} ({len(content)} bytes) to {file_info['path']}")
 
-            uploaded_files.append(file_info)
+                file_ext = file_path.suffix.lower()
+                if file_ext in CONVERTIBLE_EXTENSIONS:
+                    md_path = await convert_file_to_markdown(file_path)
+                    if md_path:
+                        md_virtual_path = upload_virtual_path(md_path.name)
 
-        except Exception as e:
-            logger.error(f"Failed to upload {file.filename}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+                        if sandbox_id != "local":
+                            _make_file_sandbox_writable(md_path)
+                            sandbox.update_file(md_virtual_path, md_path.read_bytes())
+
+                        file_info["markdown_file"] = md_path.name
+                        file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
+                        file_info["markdown_virtual_path"] = md_virtual_path
+                        file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+
+                uploaded_files.append(file_info)
+
+            except Exception as e:
+                logger.error(f"Failed to upload {file.filename}: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
 
     return UploadResponse(
         success=True,
@@ -137,26 +137,25 @@ async def upload_files(
 
 
 @router.get("/list", response_model=dict)
-@require_permission("threads", "read", owner_check=True)
 async def list_uploaded_files(thread_id: str, request: Request) -> dict:
     """List all files in a thread's uploads directory."""
-    try:
-        uploads_dir = get_uploads_dir(thread_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    result = list_files_in_dir(uploads_dir)
-    enrich_file_listing(result, thread_id)
+    with bind_request_actor_context(request):
+        try:
+            uploads_dir = get_uploads_dir(thread_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        result = list_files_in_dir(uploads_dir)
+        enrich_file_listing(result, thread_id)
 
-    # Gateway additionally includes the sandbox-relative path.
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
-    for f in result["files"]:
-        f["path"] = str(sandbox_uploads / f["filename"])
+        # Gateway additionally includes the sandbox-relative path.
+        sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+        for f in result["files"]:
+            f["path"] = str(sandbox_uploads / f["filename"])
 
-    return result
+        return result
 
 
 @router.delete("/{filename}")
-@require_permission("threads", "delete", owner_check=True, require_existing=True)
 async def delete_uploaded_file(thread_id: str, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:

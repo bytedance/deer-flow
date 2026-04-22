@@ -1,6 +1,6 @@
 """Pure functions to convert LangChain message objects to OpenAI Chat Completions format.
 
-Used by RunJournal to build content dicts for event storage.
+Used by run callbacks to build content dicts for event storage.
 """
 
 from __future__ import annotations

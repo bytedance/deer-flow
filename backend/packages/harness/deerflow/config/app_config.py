@@ -9,8 +9,6 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.acp_config import load_acp_config_from_dict
-from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
-from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
@@ -58,9 +56,7 @@ class AppConfig(BaseModel):
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     model_config = ConfigDict(extra="allow", frozen=False)
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig, description="Unified database backend configuration")
     run_events: RunEventsConfig = Field(default_factory=RunEventsConfig, description="Run event storage configuration")
-    checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
 
     @classmethod
@@ -132,10 +128,6 @@ class AppConfig(BaseModel):
         # Load guardrails config if present
         if "guardrails" in config_data:
             load_guardrails_config_from_dict(config_data["guardrails"])
-
-        # Load checkpointer config if present
-        if "checkpointer" in config_data:
-            load_checkpointer_config_from_dict(config_data["checkpointer"])
 
         # Load stream bridge config if present
         if "stream_bridge" in config_data:

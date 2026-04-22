@@ -1,0 +1,18 @@
+[plugin]
+name = "auth"
+summary = "Cookie-based authentication and authorization"
+version = "0.1.0"
+description = "Owns DeerFlow authentication, authorization adapters, and auth storage definitions while reusing shared persistence infrastructure."
+author = "DeerFlow"
+tags = ["auth", "gateway", "session"]
+
+[capabilities]
+router = true
+middleware = true
+dependencies = true
+langgraph_adapter = true
+storage = true
+
+[storage]
+mode = "shared_infrastructure"
+notes = "This plugin owns its storage definitions and repositories but uses the application's shared engine and session factory."

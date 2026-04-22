@@ -364,6 +364,27 @@ export function useThreadStream({
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
       try {
+        if (!isMock && threadId) {
+          await fetch(`${getBackendBaseURL()}/api/threads`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            credentials: "include",
+            body: JSON.stringify({
+              thread_id: threadId,
+              assistant_id:
+                typeof extraContext?.agent_name === "string"
+                  ? extraContext.agent_name
+                  : undefined,
+              metadata:
+                typeof extraContext?.agent_name === "string"
+                  ? { agent_name: extraContext.agent_name }
+                  : {},
+            }),
+          });
+        }
+
         // Upload files first if any
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
@@ -493,7 +514,7 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [thread, t.uploads.uploadingFiles, context, queryClient],
+    [thread, t.uploads.uploadingFiles, context, queryClient, isMock],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,

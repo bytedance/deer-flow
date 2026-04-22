@@ -10,7 +10,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.actor_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 

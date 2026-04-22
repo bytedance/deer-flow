@@ -9,11 +9,12 @@ import re
 import threading
 from typing import Any, Literal
 
+from app.plugins.auth.security.actor_context import bind_user_actor_context
 from app.channels.base import Channel
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.actor_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
@@ -298,15 +299,35 @@ class FeishuChannel(Channel):
         text = msg.text
         for file in files:
             if file.get("image_key"):
-                virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id)
+                virtual_path = await self._receive_single_file(
+                    msg.thread_ts,
+                    file["image_key"],
+                    "image",
+                    thread_id,
+                    user_id=msg.user_id,
+                )
                 text = text.replace("[image]", virtual_path, 1)
             elif file.get("file_key"):
-                virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id)
+                virtual_path = await self._receive_single_file(
+                    msg.thread_ts,
+                    file["file_key"],
+                    "file",
+                    thread_id,
+                    user_id=msg.user_id,
+                )
                 text = text.replace("[file]", virtual_path, 1)
         msg.text = text
         return msg
 
-    async def _receive_single_file(self, message_id: str, file_key: str, type: Literal["image", "file"], thread_id: str) -> str:
+    async def _receive_single_file(
+        self,
+        message_id: str,
+        file_key: str,
+        type: Literal["image", "file"],
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> str:
         request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(type).build()
 
         def inner():
@@ -345,50 +366,51 @@ class FeishuChannel(Channel):
             return f"Failed to obtain the [{type}]"
 
         paths = get_paths()
-        user_id = get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=user_id)
-        uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=user_id).resolve()
+        with bind_user_actor_context(user_id):
+            effective_user_id = get_effective_user_id()
+            paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+            uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
 
-        ext = "png" if type == "image" else "bin"
-        raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"
+            ext = "png" if type == "image" else "bin"
+            raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"
 
-        # Sanitize filename: preserve extension, replace path chars in name part
-        if "." in raw_filename:
-            name_part, ext = raw_filename.rsplit(".", 1)
-            name_part = re.sub(r"[./\\]", "_", name_part)
-            filename = f"{name_part}.{ext}"
-        else:
-            filename = re.sub(r"[./\\]", "_", raw_filename)
-        resolved_target = uploads_dir / filename
+            # Sanitize filename: preserve extension, replace path chars in name part
+            if "." in raw_filename:
+                name_part, ext = raw_filename.rsplit(".", 1)
+                name_part = re.sub(r"[./\\]", "_", name_part)
+                filename = f"{name_part}.{ext}"
+            else:
+                filename = re.sub(r"[./\\]", "_", raw_filename)
+            resolved_target = uploads_dir / filename
 
-        def down_load():
-            # use thread_lock to avoid filename conflicts when writing
-            with self._thread_lock:
-                resolved_target.write_bytes(content)
+            def down_load():
+                # use thread_lock to avoid filename conflicts when writing
+                with self._thread_lock:
+                    resolved_target.write_bytes(content)
 
-        try:
-            await asyncio.to_thread(down_load)
-        except Exception:
-            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", resolved_target, type)
-            return f"Failed to obtain the [{type}]"
+            try:
+                await asyncio.to_thread(down_load)
+            except Exception:
+                logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", resolved_target, type)
+                return f"Failed to obtain the [{type}]"
 
-        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
+            virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
 
-        try:
-            sandbox_provider = get_sandbox_provider()
-            sandbox_id = sandbox_provider.acquire(thread_id)
-            if sandbox_id != "local":
-                sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is None:
-                    logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
-                    return f"Failed to obtain the [{type}]"
-                sandbox.update_file(virtual_path, content)
-        except Exception:
-            logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
-            return f"Failed to obtain the [{type}]"
+            try:
+                sandbox_provider = get_sandbox_provider()
+                sandbox_id = sandbox_provider.acquire(thread_id)
+                if sandbox_id != "local":
+                    sandbox = sandbox_provider.get(sandbox_id)
+                    if sandbox is None:
+                        logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
+                        return f"Failed to obtain the [{type}]"
+                    sandbox.update_file(virtual_path, content)
+            except Exception:
+                logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
+                return f"Failed to obtain the [{type}]"
 
-        logger.info("[Feishu] downloaded resource mapped: file_key=%s -> %s", file_key, virtual_path)
-        return virtual_path
+            logger.info("[Feishu] downloaded resource mapped: file_key=%s -> %s", file_key, virtual_path)
+            return virtual_path
 
     # -- message formatting ------------------------------------------------
 

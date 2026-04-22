@@ -519,7 +519,7 @@ def _get_memory_context(agent_name: str | None = None) -> str:
     try:
         from deerflow.agents.memory import format_memory_for_injection, get_memory_data
         from deerflow.config.memory_config import get_memory_config
-        from deerflow.runtime.user_context import get_effective_user_id
+        from deerflow.runtime.actor_context import get_effective_user_id
 
         config = get_memory_config()
         if not config.enabled or not config.injection_enabled:

@@ -14,10 +14,11 @@ from typing import Any
 import httpx
 from langgraph_sdk.errors import ConflictError
 
+from app.plugins.auth.security.actor_context import bind_user_actor_context
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.actor_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,7 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
-def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedAttachment]:
+def _resolve_attachments(thread_id: str, artifacts: list[str], *, user_id: str | None = None) -> list[ResolvedAttachment]:
     """Resolve virtual artifact paths to host filesystem paths with metadata.
 
     Only paths under ``/mnt/user-data/outputs/`` are accepted; any other
@@ -342,39 +343,40 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
-    user_id = get_effective_user_id()
-    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve()
-    for virtual_path in artifacts:
-        # Security: only allow files from the agent outputs directory
-        if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
-            logger.warning("[Manager] rejected non-outputs artifact path: %s", virtual_path)
-            continue
-        try:
-            actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=user_id)
-            # Verify the resolved path is actually under the outputs directory
-            # (guards against path-traversal even after prefix check)
+    with bind_user_actor_context(user_id):
+        effective_user_id = get_effective_user_id()
+        outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id).resolve()
+        for virtual_path in artifacts:
+            # Security: only allow files from the agent outputs directory
+            if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+                logger.warning("[Manager] rejected non-outputs artifact path: %s", virtual_path)
+                continue
             try:
-                actual.resolve().relative_to(outputs_dir)
-            except ValueError:
-                logger.warning("[Manager] artifact path escapes outputs dir: %s -> %s", virtual_path, actual)
-                continue
-            if not actual.is_file():
-                logger.warning("[Manager] artifact not found on disk: %s -> %s", virtual_path, actual)
-                continue
-            mime, _ = mimetypes.guess_type(str(actual))
-            mime = mime or "application/octet-stream"
-            attachments.append(
-                ResolvedAttachment(
-                    virtual_path=virtual_path,
-                    actual_path=actual,
-                    filename=actual.name,
-                    mime_type=mime,
-                    size=actual.stat().st_size,
-                    is_image=mime.startswith("image/"),
+                actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=effective_user_id)
+                # Verify the resolved path is actually under the outputs directory
+                # (guards against path-traversal even after prefix check)
+                try:
+                    actual.resolve().relative_to(outputs_dir)
+                except ValueError:
+                    logger.warning("[Manager] artifact path escapes outputs dir: %s -> %s", virtual_path, actual)
+                    continue
+                if not actual.is_file():
+                    logger.warning("[Manager] artifact not found on disk: %s -> %s", virtual_path, actual)
+                    continue
+                mime, _ = mimetypes.guess_type(str(actual))
+                mime = mime or "application/octet-stream"
+                attachments.append(
+                    ResolvedAttachment(
+                        virtual_path=virtual_path,
+                        actual_path=actual,
+                        filename=actual.name,
+                        mime_type=mime,
+                        size=actual.stat().st_size,
+                        is_image=mime.startswith("image/"),
+                    )
                 )
-            )
-        except (ValueError, OSError) as exc:
-            logger.warning("[Manager] failed to resolve artifact %s: %s", virtual_path, exc)
+            except (ValueError, OSError) as exc:
+                logger.warning("[Manager] failed to resolve artifact %s: %s", virtual_path, exc)
     return attachments
 
 
@@ -382,13 +384,15 @@ def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
+    *,
+    user_id: str | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response."""
     attachments: list[ResolvedAttachment] = []
     if not artifacts:
         return response_text, attachments
 
-    attachments = _resolve_attachments(thread_id, artifacts)
+    attachments = _resolve_attachments(thread_id, artifacts, user_id=user_id)
     resolved_virtuals = {attachment.virtual_path for attachment in attachments}
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
@@ -411,7 +415,8 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
 
     from deerflow.uploads.manager import claim_unique_filename, ensure_uploads_dir, normalize_filename
 
-    uploads_dir = ensure_uploads_dir(thread_id)
+    with bind_user_actor_context(msg.user_id):
+        uploads_dir = ensure_uploads_dir(thread_id)
     seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
 
     created: list[dict[str, Any]] = []
@@ -745,7 +750,12 @@ class ChannelManager:
             len(artifacts),
         )
 
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+        response_text, attachments = _prepare_artifact_delivery(
+            thread_id,
+            response_text,
+            artifacts,
+            user_id=msg.user_id,
+        )
 
         if not response_text:
             if attachments:
@@ -836,7 +846,12 @@ class ChannelManager:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
             artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            response_text, attachments = _prepare_artifact_delivery(
+                thread_id,
+                response_text,
+                artifacts,
+                user_id=msg.user_id,
+            )
 
             if not response_text:
                 if attachments:

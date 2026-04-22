@@ -55,10 +55,6 @@ export default function ChatPage() {
     threadId: isNewThread ? undefined : threadId,
     context: settings.context,
     isMock,
-    onSend: (_threadId) => {
-      setThreadId(_threadId);
-      setIsNewThread(false);
-    },
     onStart: (createdThreadId) => {
       setThreadId(createdThreadId);
       setIsNewThread(false);
