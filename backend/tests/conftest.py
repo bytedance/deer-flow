@@ -95,3 +95,29 @@ def _auto_user_context(request):
         yield
     finally:
         reset_current_user(token)
+
+
+@pytest.fixture(autouse=True)
+def _reset_auth_singletons():
+    """Reset auth config/provider caches between tests.
+
+    Auth tests mutate global config and cached provider/repository singletons.
+    Reset them per test so middleware/provider assertions cannot leak state
+    across cases.
+    """
+    import app.gateway.auth.config as auth_config_module
+    import app.gateway.deps as deps_module
+
+    old_auth_config = auth_config_module._auth_config
+    old_local_provider = deps_module._cached_local_provider
+    old_repo = deps_module._cached_repo
+
+    auth_config_module._auth_config = None
+    deps_module._cached_local_provider = None
+    deps_module._cached_repo = None
+    try:
+        yield
+    finally:
+        auth_config_module._auth_config = old_auth_config
+        deps_module._cached_local_provider = old_local_provider
+        deps_module._cached_repo = old_repo

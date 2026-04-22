@@ -541,14 +541,69 @@ All APIs return errors in a consistent format:
 
 ## Authentication
 
-Currently, DeerFlow does not implement authentication. All APIs are accessible without credentials.
+Authentication is enforced by `backend/app/gateway/auth_middleware.py`.
 
-Note: This is about DeerFlow API authentication. MCP outbound connections can still use OAuth for configured HTTP/SSE MCP servers.
+### Public Paths
 
-For production deployments, it is recommended to:
-1. Use Nginx for basic auth or OAuth integration
-2. Deploy behind a VPN or private network
-3. Implement custom authentication middleware
+The following paths are public:
+
+- `/health`
+- `/docs`
+- `/redoc`
+- `/openapi.json`
+
+The following auth endpoints are also public:
+
+- `POST /api/v1/auth/login/local`
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/logout`
+- `GET /api/v1/auth/setup-status`
+- `POST /api/v1/auth/initialize`
+
+All other endpoints require a valid authenticated user.
+
+### Authentication Modes
+
+#### Session Cookie Mode
+
+Used for browser-style or user-session access:
+
+1. Call `POST /api/v1/auth/login/local`
+2. Receive `access_token` cookie
+3. Receive `csrf_token` cookie
+4. Include `X-CSRF-Token` for state-changing requests
+
+#### Trusted Header Mode
+
+Recommended for server-to-server integration and reverse proxy environments:
+
+- Primary header: `X-Forwarded-User`
+- Legacy headers: configurable via `legacy_user_id_headers` (empty by default)
+
+### CSRF Protection
+
+CSRF protection is enforced by `backend/app/gateway/csrf_middleware.py`.
+
+It applies to:
+
+- `POST`
+- `PUT`
+- `PATCH`
+- `DELETE`
+
+Except for the initial auth endpoints:
+
+- `POST /api/v1/auth/login/local`
+- `POST /api/v1/auth/logout`
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/initialize`
+
+The gateway uses the Double Submit Cookie pattern:
+
+- Cookie: `csrf_token`
+- Header: `X-CSRF-Token`
+
+Typical CSRF failures return `403`.
 
 ---
 
