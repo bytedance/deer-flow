@@ -96,8 +96,8 @@ async def main():
                 last_message = result["messages"][-1]
                 print(f"\nAgent: {last_message.content}")
 
-        except KeyboardInterrupt:
-            print("\nInterrupted. Goodbye!")
+        except (KeyboardInterrupt, EOFError):
+            print("\nGoodbye!")
             break
         except Exception as e:
             print(f"\nError: {e}")
