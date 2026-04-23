@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import requests
 
@@ -177,6 +179,77 @@ def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
     info = backend.create(None, "anon123")
     assert info.sandbox_id == "anon123"
     assert info.sandbox_url == "http://k3s:31002"
+
+
+def test_provisioner_create_sends_configured_mounts(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002/",
+        config_mounts=[
+            SimpleNamespace(
+                host_path="/host/shared",
+                container_path="/mnt/shared",
+                read_only=True,
+            )
+        ],
+    )
+
+    def mock_post(url: str, json: dict, timeout: int):
+        assert url == "http://provisioner:8002/api/sandboxes"
+        assert json == {
+            "sandbox_id": "sandbox-1",
+            "thread_id": "thread-1",
+            "user_id": "test-user-autouse",
+            "extra_mounts": [
+                {
+                    "host_path": "/host/shared",
+                    "container_path": "/mnt/shared",
+                    "read_only": True,
+                }
+            ],
+        }
+        assert timeout == 30
+        return _StubResponse(payload={"sandbox_id": "sandbox-1", "sandbox_url": "http://sandbox.local"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    info = backend.create("thread-1", "sandbox-1")
+    assert info.sandbox_id == "sandbox-1"
+    assert info.sandbox_url == "http://sandbox.local"
+
+
+def test_provisioner_create_sends_runtime_mounts_not_already_created_by_provisioner(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_post(url: str, json: dict, timeout: int):
+        assert url == "http://provisioner:8002/api/sandboxes"
+        assert json == {
+            "sandbox_id": "sandbox-1",
+            "thread_id": "thread-1",
+            "user_id": "test-user-autouse",
+            "extra_mounts": [
+                {
+                    "host_path": "/host/acp",
+                    "container_path": "/mnt/acp-workspace",
+                    "read_only": True,
+                }
+            ],
+        }
+        assert timeout == 30
+        return _StubResponse(payload={"sandbox_id": "sandbox-1", "sandbox_url": "http://sandbox.local"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    info = backend.create(
+        "thread-1",
+        "sandbox-1",
+        extra_mounts=[
+            ("/host/thread/workspace", "/mnt/user-data/workspace", False),
+            ("/host/skills", "/mnt/skills", True),
+            ("/host/acp", "/mnt/acp-workspace", True),
+        ],
+    )
+    assert info.sandbox_id == "sandbox-1"
+    assert info.sandbox_url == "http://sandbox.local"
 
 
 def test_provisioner_create_raises_runtime_error_on_request_exception(monkeypatch):
