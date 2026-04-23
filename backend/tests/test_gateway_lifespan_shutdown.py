@@ -52,9 +52,7 @@ async def _run_lifespan_with_hanging_stop() -> float:
             pass
         elapsed = loop.time() - start
 
-    assert _SHUTDOWN_HOOK_TIMEOUT_SECONDS < 30.0, (
-        "Timeout constant must stay modest"
-    )
+    assert _SHUTDOWN_HOOK_TIMEOUT_SECONDS < 30.0, "Timeout constant must stay modest"
     return elapsed
 
 
@@ -65,12 +63,6 @@ def test_shutdown_is_bounded_when_channel_stop_hangs():
     elapsed = asyncio.run(_run_lifespan_with_hanging_stop())
 
     # Generous upper bound: timeout + 2s slack for scheduling overhead.
-    assert elapsed < _SHUTDOWN_HOOK_TIMEOUT_SECONDS + 2.0, (
-        f"Lifespan shutdown took {elapsed:.2f}s; expected <="
-        f" {_SHUTDOWN_HOOK_TIMEOUT_SECONDS + 2.0:.1f}s"
-    )
+    assert elapsed < _SHUTDOWN_HOOK_TIMEOUT_SECONDS + 2.0, f"Lifespan shutdown took {elapsed:.2f}s; expected <= {_SHUTDOWN_HOOK_TIMEOUT_SECONDS + 2.0:.1f}s"
     # Lower bound: the wait_for should actually have waited.
-    assert elapsed >= _SHUTDOWN_HOOK_TIMEOUT_SECONDS - 0.5, (
-        f"Lifespan exited too quickly ({elapsed:.2f}s); wait_for may not"
-        " have been invoked."
-    )
+    assert elapsed >= _SHUTDOWN_HOOK_TIMEOUT_SECONDS - 0.5, f"Lifespan exited too quickly ({elapsed:.2f}s); wait_for may not have been invoked."
