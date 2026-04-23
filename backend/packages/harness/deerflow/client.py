@@ -380,7 +380,7 @@ class DeerFlowClient:
 
         thread_info_map = {}
 
-        for cp in checkpointer.list(config=None, limit=limit):
+        for cp in checkpointer.list(config=None):
             cfg = cp.config.get("configurable", {})
             thread_id = cfg.get("thread_id")
             if not thread_id:
