@@ -999,6 +999,13 @@ sandbox:
 #   provisioner_url: http://provisioner:8002
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
+#
+#   # Optional: Additional hostPath mounts for sandbox Pods.
+#   # host_path must be an absolute path accessible by the Kubernetes node.
+#   # mounts:
+#   #   - host_path: /path/on/host
+#   #     container_path: /home/user/shared
+#   #     read_only: false
 
 # ============================================================================
 # Subagents Configuration
