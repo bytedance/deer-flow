@@ -363,6 +363,8 @@ export const zhCN: Translations = {
       filterFacts: "事实",
       filterSummaries: "摘要",
       noMatches: "没有找到匹配的记忆。",
+      needChatThreadForMemory:
+        "请先打开一个聊天会话，才能查看或编辑该会话的记忆。",
       markdown: {
         overview: "概览",
         userContext: "用户上下文",

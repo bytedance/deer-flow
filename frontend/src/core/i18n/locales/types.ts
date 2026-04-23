@@ -304,6 +304,7 @@ export interface Translations {
       filterFacts: string;
       filterSummaries: string;
       noMatches: string;
+      needChatThreadForMemory: string;
       markdown: {
         overview: string;
         userContext: string;

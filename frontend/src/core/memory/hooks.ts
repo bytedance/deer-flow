@@ -14,59 +14,88 @@ import type {
   UserMemory,
 } from "./types";
 
-export function useMemory() {
+export function useMemory(threadId: string | null) {
   const { data, isLoading, error } = useQuery({
-    queryKey: ["memory"],
-    queryFn: () => loadMemory(),
+    queryKey: ["memory", threadId],
+    queryFn: () => loadMemory(threadId!),
+    enabled: Boolean(threadId),
   });
   return { memory: data ?? null, isLoading, error };
 }
 
-export function useClearMemory() {
+export function useClearMemory(threadId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: () => clearMemory(),
+    mutationFn: () => {
+      if (!threadId) {
+        throw new Error("Missing thread id");
+      }
+      return clearMemory(threadId);
+    },
     onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+      if (threadId) {
+        queryClient.setQueryData<UserMemory>(["memory", threadId], memory);
+      }
     },
   });
 }
 
-export function useDeleteMemoryFact() {
+export function useDeleteMemoryFact(threadId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (factId: string) => deleteMemoryFact(factId),
+    mutationFn: (factId: string) => {
+      if (!threadId) {
+        throw new Error("Missing thread id");
+      }
+      return deleteMemoryFact(threadId, factId);
+    },
     onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+      if (threadId) {
+        queryClient.setQueryData<UserMemory>(["memory", threadId], memory);
+      }
     },
   });
 }
 
-export function useImportMemory() {
+export function useImportMemory(threadId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (memory: UserMemory) => importMemory(memory),
+    mutationFn: (memory: UserMemory) => {
+      if (!threadId) {
+        throw new Error("Missing thread id");
+      }
+      return importMemory(threadId, memory);
+    },
     onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+      if (threadId) {
+        queryClient.setQueryData<UserMemory>(["memory", threadId], memory);
+      }
     },
   });
 }
 
-export function useCreateMemoryFact() {
+export function useCreateMemoryFact(threadId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (input: MemoryFactInput) => createMemoryFact(input),
+    mutationFn: (input: MemoryFactInput) => {
+      if (!threadId) {
+        throw new Error("Missing thread id");
+      }
+      return createMemoryFact(threadId, input);
+    },
     onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+      if (threadId) {
+        queryClient.setQueryData<UserMemory>(["memory", threadId], memory);
+      }
     },
   });
 }
 
-export function useUpdateMemoryFact() {
+export function useUpdateMemoryFact(threadId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -76,9 +105,16 @@ export function useUpdateMemoryFact() {
     }: {
       factId: string;
       input: MemoryFactPatchInput;
-    }) => updateMemoryFact(factId, input),
+    }) => {
+      if (!threadId) {
+        throw new Error("Missing thread id");
+      }
+      return updateMemoryFact(threadId, factId, input);
+    },
     onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+      if (threadId) {
+        queryClient.setQueryData<UserMemory>(["memory", threadId], memory);
+      }
     },
   });
 }

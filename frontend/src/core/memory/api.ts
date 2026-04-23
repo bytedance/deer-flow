@@ -1,4 +1,5 @@
-import { fetch } from "../api/fetcher";
+import { gatewayFetch } from "@/core/api/gateway-fetch";
+
 import { getBackendBaseURL } from "../config";
 
 import type {
@@ -6,6 +7,11 @@ import type {
   MemoryFactPatchInput,
   UserMemory,
 } from "./types";
+
+function withThreadQuery(url: string, threadId: string): string {
+  const joiner = url.includes("?") ? "&" : "?";
+  return `${url}${joiner}thread_id=${encodeURIComponent(threadId)}`;
+}
 
 async function readMemoryResponse(
   response: Response,
@@ -80,21 +86,32 @@ async function readMemoryResponse(
   return response.json() as Promise<UserMemory>;
 }
 
-export async function loadMemory(): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory`);
+export async function loadMemory(threadId: string): Promise<UserMemory> {
+  const response = await gatewayFetch(
+    withThreadQuery(`${getBackendBaseURL()}/api/memory`, threadId),
+  );
   return readMemoryResponse(response, "Failed to fetch memory");
 }
 
-export async function clearMemory(): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory`, {
-    method: "DELETE",
-  });
+export async function clearMemory(threadId: string): Promise<UserMemory> {
+  const response = await gatewayFetch(
+    withThreadQuery(`${getBackendBaseURL()}/api/memory`, threadId),
+    {
+      method: "DELETE",
+    },
+  );
   return readMemoryResponse(response, "Failed to clear memory");
 }
 
-export async function deleteMemoryFact(factId: string): Promise<UserMemory> {
-  const response = await fetch(
-    `${getBackendBaseURL()}/api/memory/facts/${encodeURIComponent(factId)}`,
+export async function deleteMemoryFact(
+  threadId: string,
+  factId: string,
+): Promise<UserMemory> {
+  const response = await gatewayFetch(
+    withThreadQuery(
+      `${getBackendBaseURL()}/api/memory/facts/${encodeURIComponent(factId)}`,
+      threadId,
+    ),
     {
       method: "DELETE",
     },
@@ -102,41 +119,57 @@ export async function deleteMemoryFact(factId: string): Promise<UserMemory> {
   return readMemoryResponse(response, "Failed to delete memory fact");
 }
 
-export async function exportMemory(): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory/export`);
+export async function exportMemory(threadId: string): Promise<UserMemory> {
+  const response = await gatewayFetch(
+    withThreadQuery(`${getBackendBaseURL()}/api/memory/export`, threadId),
+  );
   return readMemoryResponse(response, "Failed to export memory");
 }
 
-export async function importMemory(memory: UserMemory): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory/import`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+export async function importMemory(
+  threadId: string,
+  memory: UserMemory,
+): Promise<UserMemory> {
+  const response = await gatewayFetch(
+    withThreadQuery(`${getBackendBaseURL()}/api/memory/import`, threadId),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(memory),
     },
-    body: JSON.stringify(memory),
-  });
+  );
   return readMemoryResponse(response, "Failed to import memory");
 }
 
 export async function createMemoryFact(
+  threadId: string,
   input: MemoryFactInput,
 ): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory/facts`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  const response = await gatewayFetch(
+    `${getBackendBaseURL()}/api/memory/facts`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ thread_id: threadId, ...input }),
     },
-    body: JSON.stringify(input),
-  });
+  );
   return readMemoryResponse(response, "Failed to create memory fact");
 }
 
 export async function updateMemoryFact(
+  threadId: string,
   factId: string,
   input: MemoryFactPatchInput,
 ): Promise<UserMemory> {
-  const response = await fetch(
-    `${getBackendBaseURL()}/api/memory/facts/${encodeURIComponent(factId)}`,
+  const response = await gatewayFetch(
+    withThreadQuery(
+      `${getBackendBaseURL()}/api/memory/facts/${encodeURIComponent(factId)}`,
+      threadId,
+    ),
     {
       method: "PATCH",
       headers: {

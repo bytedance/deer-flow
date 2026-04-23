@@ -36,6 +36,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   const router = useRouter();
   const deleteAgent = useDeleteAgent();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const canDelete = agent.owner !== "public";
 
   function handleChat() {
     router.push(`/workspace/agents/${agent.name}/chats/new`);
@@ -96,45 +97,48 @@ export function AgentCard({ agent }: AgentCardProps) {
             <MessageSquareIcon className="mr-1.5 h-3.5 w-3.5" />
             {t.agents.chat}
           </Button>
-          <div className="flex gap-1">
-            <Button
-              size="icon"
-              variant="ghost"
-              className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
-              onClick={() => setDeleteOpen(true)}
-              title={t.agents.delete}
-            >
-              <Trash2Icon className="h-3.5 w-3.5" />
-            </Button>
-          </div>
+          {canDelete && (
+            <div className="flex gap-1">
+              <Button
+                size="icon"
+                variant="ghost"
+                className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
+                onClick={() => setDeleteOpen(true)}
+                title={t.agents.delete}
+              >
+                <Trash2Icon className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          )}
         </CardFooter>
       </Card>
 
-      {/* Delete Confirm */}
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t.agents.delete}</DialogTitle>
-            <DialogDescription>{t.agents.deleteConfirm}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setDeleteOpen(false)}
-              disabled={deleteAgent.isPending}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={handleDelete}
-              disabled={deleteAgent.isPending}
-            >
-              {deleteAgent.isPending ? t.common.loading : t.common.delete}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {canDelete && (
+        <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t.agents.delete}</DialogTitle>
+              <DialogDescription>{t.agents.deleteConfirm}</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setDeleteOpen(false)}
+                disabled={deleteAgent.isPending}
+              >
+                {t.common.cancel}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={handleDelete}
+                disabled={deleteAgent.isPending}
+              >
+                {deleteAgent.isPending ? t.common.loading : t.common.delete}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }

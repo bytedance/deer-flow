@@ -9,6 +9,12 @@ export interface AgentThreadState extends Record<string, unknown> {
   todos?: Todo[];
 }
 
+/** Enabled MCP servers and skills, attached at send time from workspace settings. */
+export type WorkspaceToolsSelection = {
+  mcp_servers: string[];
+  skills: string[];
+};
+
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;
   model_name: string | undefined;
@@ -17,6 +23,7 @@ export interface AgentThreadContext extends Record<string, unknown> {
   subagent_enabled: boolean;
   reasoning_effort?: "minimal" | "low" | "medium" | "high";
   agent_name?: string;
+  workspace_tools?: WorkspaceToolsSelection;
 }
 
 export interface AgentThread extends Thread<AgentThreadState> {

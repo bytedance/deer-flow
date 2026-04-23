@@ -380,6 +380,8 @@ export const enUS: Translations = {
       filterFacts: "Facts",
       filterSummaries: "Summaries",
       noMatches: "No matching memory found.",
+      needChatThreadForMemory:
+        "Open a chat thread to load and edit memory for that conversation.",
       markdown: {
         overview: "Overview",
         userContext: "User context",

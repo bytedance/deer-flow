@@ -39,6 +39,7 @@ import type {
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
+import { useMemoryThreadId } from "@/core/memory/use-memory-thread-id";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
@@ -275,13 +276,14 @@ function upperFirst(str: string) {
 
 export function MemorySettingsPage() {
   const { t } = useI18n();
-  const { memory, isLoading, error } = useMemory();
-  const clearMemory = useClearMemory();
-  const createMemoryFact = useCreateMemoryFact();
-  const deleteMemoryFact = useDeleteMemoryFact();
-  const importMemoryMutation = useImportMemory();
+  const memoryThreadId = useMemoryThreadId();
+  const { memory, isLoading, error } = useMemory(memoryThreadId);
+  const clearMemory = useClearMemory(memoryThreadId);
+  const createMemoryFact = useCreateMemoryFact(memoryThreadId);
+  const deleteMemoryFact = useDeleteMemoryFact(memoryThreadId);
+  const importMemoryMutation = useImportMemory(memoryThreadId);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const updateMemoryFact = useUpdateMemoryFact();
+  const updateMemoryFact = useUpdateMemoryFact(memoryThreadId);
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
   const [factToDelete, setFactToDelete] = useState<MemoryFact | null>(null);
   const [factToEdit, setFactToEdit] = useState<MemoryFact | null>(null);
@@ -343,6 +345,9 @@ export function MemorySettingsPage() {
   const filterFacts = t.settings.memory.filterFacts ?? "Facts";
   const filterSummaries = t.settings.memory.filterSummaries ?? "Summaries";
   const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
+  const needChatThreadForMemory =
+    t.settings.memory.needChatThreadForMemory ??
+    "Open a chat thread to load and edit memory for that conversation.";
   const exportButton = t.settings.memory.exportButton ?? t.common.export;
   const exportSuccess =
     t.settings.memory.exportSuccess ?? t.common.exportSuccess;
@@ -386,9 +391,13 @@ export function MemorySettingsPage() {
     (showFacts && filteredFacts.length > 0);
 
   async function handleExportMemory() {
+    if (!memoryThreadId) {
+      toast.error(needChatThreadForMemory);
+      return;
+    }
     try {
       setIsExporting(true);
-      const exportedMemory = await exportMemory();
+      const exportedMemory = await exportMemory(memoryThreadId);
       const fileName = `deerflow-memory-${(exportedMemory.lastUpdated || new Date().toISOString()).replace(/[:.]/g, "-")}.json`;
       const blob = new Blob([JSON.stringify(exportedMemory, null, 2)], {
         type: "application/json",
@@ -537,7 +546,11 @@ export function MemorySettingsPage() {
         title={t.settings.memory.title}
         description={t.settings.memory.description}
       >
-        {isLoading ? (
+        {!memoryThreadId ? (
+          <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+            {needChatThreadForMemory}
+          </div>
+        ) : isLoading ? (
           <div className="text-muted-foreground text-sm">
             {t.common.loading}
           </div>

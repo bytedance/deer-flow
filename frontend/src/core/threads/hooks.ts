@@ -2,41 +2,29 @@ import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { gatewayFetch } from "@/core/api/gateway-fetch";
 
 import { getAPIClient } from "../api";
-import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
+import type { MCPConfig } from "../mcp/types";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
+import type { Skill } from "../skills/type";
 import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
-import type { AgentThread, AgentThreadState, RunMessage } from "./types";
-
-export type ToolEndEvent = {
-  name: string;
-  data: unknown;
-};
-
-export type ThreadStreamOptions = {
-  threadId?: string | null | undefined;
-  context: LocalSettings["context"];
-  isMock?: boolean;
-  onSend?: (threadId: string) => void;
-  onStart?: (threadId: string, runId: string) => void;
-  onFinish?: (state: AgentThreadState) => void;
-  onToolEnd?: (event: ToolEndEvent) => void;
-};
-
-type SendMessageOptions = {
-  additionalKwargs?: Record<string, unknown>;
-};
+import type {
+  AgentThread,
+  AgentThreadState,
+  RunMessage,
+  WorkspaceToolsSelection,
+} from "./types";
 
 function mergeMessages(
   historyMessages: Message[],
@@ -49,9 +37,6 @@ function mergeMessages(
       .filter(Boolean),
   );
 
-  // The overlap is a contiguous suffix of historyMessages (newest history == oldest thread).
-  // Scan from the end: shrink cutoff while messages are already in thread, stop as soon as
-  // we hit one that isn't — everything before that point is non-overlapping.
   let cutoff = historyMessages.length;
   for (let i = historyMessages.length - 1; i >= 0; i--) {
     const msg = historyMessages[i];
@@ -59,7 +44,7 @@ function mergeMessages(
       continue;
     }
     if (
-      (msg?.id && threadMessageIds.has(msg.id)) ||
+      (msg.id && threadMessageIds.has(msg.id)) ||
       ("tool_call_id" in msg && threadMessageIds.has(msg.tool_call_id))
     ) {
       cutoff = i;
@@ -73,6 +58,119 @@ function mergeMessages(
     ...threadMessages,
     ...optimisticMessages,
   ];
+}
+
+function readWorkspaceToolsSelection(
+  queryClient: ReturnType<typeof useQueryClient>,
+): WorkspaceToolsSelection | undefined {
+  const mcp = queryClient.getQueryData<MCPConfig>(["mcpConfig"]);
+  const skills = queryClient.getQueryData<Skill[]>(["skills"]) ?? [];
+  const mcp_servers = mcp?.mcp_servers
+    ? Object.entries(mcp.mcp_servers)
+        .filter(([, cfg]) => cfg.enabled)
+        .map(([name]) => name)
+    : [];
+  const skillNames = skills
+    .filter((skill) => skill.enabled)
+    .map((skill) => skill.name);
+  if (mcp_servers.length === 0 && skillNames.length === 0) {
+    return undefined;
+  }
+  return { mcp_servers, skills: skillNames };
+}
+
+export type ToolEndEvent = {
+  name: string;
+  data: unknown;
+};
+
+export type ThreadStreamOptions = {
+  threadId?: string | null | undefined;
+  context: LocalSettings["context"];
+  isMock?: boolean;
+  onSend?: (threadId: string) => void;
+  onStart?: (threadId: string) => void;
+  onFinish?: (state: AgentThreadState) => void;
+  onToolEnd?: (event: ToolEndEvent) => void;
+};
+
+type SendMessageOptions = {
+  additionalKwargs?: Record<string, unknown>;
+};
+
+function normalizeStoredRunId(runId: string | null): string | null {
+  if (!runId) {
+    return null;
+  }
+
+  const trimmed = runId.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const queryIndex = trimmed.indexOf("?");
+  if (queryIndex >= 0) {
+    const params = new URLSearchParams(trimmed.slice(queryIndex + 1));
+    const queryRunId = params.get("run_id")?.trim();
+    if (queryRunId) {
+      return queryRunId;
+    }
+  }
+
+  const pathWithoutQueryOrHash = trimmed.split(/[?#]/, 1)[0]?.trim() ?? "";
+  if (!pathWithoutQueryOrHash) {
+    return null;
+  }
+
+  const runsMarker = "/runs/";
+  const runsIndex = pathWithoutQueryOrHash.lastIndexOf(runsMarker);
+  if (runsIndex >= 0) {
+    const runIdAfterMarker = pathWithoutQueryOrHash
+      .slice(runsIndex + runsMarker.length)
+      .split("/", 1)[0]
+      ?.trim();
+    if (runIdAfterMarker) {
+      return runIdAfterMarker;
+    }
+    return null;
+  }
+
+  const segments = pathWithoutQueryOrHash
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  return segments.at(-1) ?? null;
+}
+
+function getRunMetadataStorage(): {
+  getItem(key: `lg:stream:${string}`): string | null;
+  setItem(key: `lg:stream:${string}`, value: string): void;
+  removeItem(key: `lg:stream:${string}`): void;
+} {
+  return {
+    getItem(key) {
+      const normalized = normalizeStoredRunId(
+        window.sessionStorage.getItem(key),
+      );
+      if (normalized) {
+        window.sessionStorage.setItem(key, normalized);
+        return normalized;
+      }
+      window.sessionStorage.removeItem(key);
+      return null;
+    },
+    setItem(key, value) {
+      const normalized = normalizeStoredRunId(value);
+      if (normalized) {
+        window.sessionStorage.setItem(key, normalized);
+        return;
+      }
+      window.sessionStorage.removeItem(key);
+    },
+    removeItem(key) {
+      window.sessionStorage.removeItem(key);
+    },
+  };
 }
 
 function getStreamErrorMessage(error: unknown): string {
@@ -114,6 +212,7 @@ export function useThreadStream({
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
+
   const listeners = useRef({
     onSend,
     onStart,
@@ -126,7 +225,6 @@ export function useThreadStream({
     hasMore: hasMoreHistory,
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
-    appendMessages,
   } = useThreadHistory(onStreamThreadId ?? "");
 
   // Keep listeners ref updated with latest callbacks
@@ -146,26 +244,45 @@ export function useThreadStream({
     threadIdRef.current = normalizedThreadId;
   }, [threadId]);
 
-  const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
-    threadIdRef.current = _threadId;
+  const _handleOnStart = useCallback((id: string) => {
     if (!startedRef.current) {
-      listeners.current.onStart?.(_threadId, _runId);
+      listeners.current.onStart?.(id);
       startedRef.current = true;
     }
-    setOnStreamThreadId(_threadId);
   }, []);
+
+  const handleStreamStart = useCallback(
+    (_threadId: string, _runId: string) => {
+      threadIdRef.current = _threadId;
+      _handleOnStart(_threadId);
+    },
+    [_handleOnStart],
+  );
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const runMetadataStorageRef = useRef<
+    ReturnType<typeof getRunMetadataStorage> | undefined
+  >(undefined);
+
+  if (
+    typeof window !== "undefined" &&
+    runMetadataStorageRef.current === undefined
+  ) {
+    runMetadataStorageRef.current = getRunMetadataStorage();
+  }
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
-    reconnectOnMount: true,
+    reconnectOnMount: runMetadataStorageRef.current
+      ? () => runMetadataStorageRef.current!
+      : false,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
+      setOnStreamThreadId(meta.thread_id);
       if (context.agent_name && !isMock) {
         void getAPIClient()
           .threads.update(meta.thread_id, {
@@ -183,34 +300,6 @@ export function useThreadStream({
       }
     },
     onUpdateEvent(data) {
-      if (data["SummarizationMiddleware.before_model"]) {
-        const _messages = [
-          ...(data["SummarizationMiddleware.before_model"].messages ?? []),
-        ];
-
-        if (_messages.length < 2) {
-          return;
-        }
-        for (const m of _messages) {
-          if (m.name === "summary" && m.type === "human") {
-            summarizedRef.current?.add(m.id ?? "");
-          }
-        }
-        const _lastKeepMessage = _messages[2];
-        const _currentMessages = [...messagesRef.current];
-        const _movedMessages: Message[] = [];
-        for (const m of _currentMessages) {
-          if (m.id !== undefined && m.id === _lastKeepMessage?.id) {
-            break;
-          }
-          if (!summarizedRef.current?.has(m.id ?? "")) {
-            _movedMessages.push(m);
-          }
-        }
-        appendMessages(_movedMessages);
-        messagesRef.current = [];
-      }
-
       const updates: Array<Partial<AgentThreadState> | null> = Object.values(
         data || {},
       );
@@ -282,18 +371,17 @@ export function useThreadStream({
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const sendInFlightRef = useRef(false);
-  const messagesRef = useRef<Message[]>([]);
-  const summarizedRef = useRef<Set<string>>(null);
   // Track message count before sending so we know when server has responded
   const prevMsgCountRef = useRef(thread.messages.length);
-
-  summarizedRef.current ??= new Set<string>();
 
   // Reset thread-local pending UI state when switching between threads so
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
+    prevMsgCountRef.current = 0;
+    setOptimisticMessages([]);
+    setIsUploading(false);
   }, [threadId]);
 
   // Clear optimistic when server messages arrive (count increases)
@@ -319,6 +407,7 @@ export function useThreadStream({
       sendInFlightRef.current = true;
 
       const text = message.text.trim();
+      const workspaceTools = readWorkspaceToolsSelection(queryClient);
 
       // Capture current count before showing optimistic messages
       prevMsgCountRef.current = thread.messages.length;
@@ -335,6 +424,9 @@ export function useThreadStream({
       const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
       const optimisticAdditionalKwargs = {
         ...options?.additionalKwargs,
+        ...(workspaceTools && !hideFromUI
+          ? { workspace_tools: workspaceTools }
+          : {}),
         ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
       };
 
@@ -360,6 +452,13 @@ export function useThreadStream({
       setOptimisticMessages(newOptimistic);
 
       listeners.current.onSend?.(threadId);
+
+      // Only fire onStart immediately for an existing persisted thread.
+      // Brand-new chats should wait for onCreated(meta.thread_id) so URL sync
+      // uses the real server-generated thread id.
+      if (threadIdRef.current) {
+        _handleOnStart(threadId);
+      }
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
@@ -407,7 +506,10 @@ export function useThreadStream({
                   return [
                     {
                       ...humanMessage,
-                      additional_kwargs: { files: uploadedFiles },
+                      additional_kwargs: {
+                        ...(humanMessage.additional_kwargs ?? {}),
+                        files: uploadedFiles,
+                      },
                     },
                     ...messages.slice(1),
                   ];
@@ -451,6 +553,9 @@ export function useThreadStream({
                 ],
                 additional_kwargs: {
                   ...options?.additionalKwargs,
+                  ...(workspaceTools && !hideFromUI
+                    ? { workspace_tools: workspaceTools }
+                    : {}),
                   ...(filesForSubmit.length > 0
                     ? { files: filesForSubmit }
                     : {}),
@@ -468,6 +573,9 @@ export function useThreadStream({
             context: {
               ...extraContext,
               ...context,
+              ...(workspaceTools && !hideFromUI
+                ? { workspace_tools: workspaceTools }
+                : {}),
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
               subagent_enabled: context.mode === "ultra",
@@ -493,14 +601,8 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [thread, t.uploads.uploadingFiles, context, queryClient],
+    [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
   );
-
-  // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
-  // and to allow access to the full message list in onUpdateEvent without causing re-renders.
-  if (thread.messages.length >= messagesRef.current.length) {
-    messagesRef.current = thread.messages;
-  }
 
   const mergedMessages = mergeMessages(
     history,
@@ -508,8 +610,6 @@ export function useThreadStream({
     optimisticMessages,
   );
 
-  // Merge history, live stream, and optimistic messages for display
-  // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
     messages: mergedMessages,
@@ -545,22 +645,21 @@ export function useThreadHistory(threadId: string) {
     }
     try {
       setLoading(true);
-      const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
-        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadIdRef.current)}/runs/${encodeURIComponent(run.run_id)}/messages`,
-        {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
+      const result: { data: RunMessage[]; hasMore: boolean } =
+        await gatewayFetch(
+          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadIdRef.current)}/runs/${encodeURIComponent(run.run_id)}/messages`,
+          {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            credentials: "include",
           },
-          credentials: "include",
-        },
-      ).then((res) => {
-        return res.json();
-      });
-      const _messages = result.data
+        ).then((res) => res.json());
+      const nextMessages = result.data
         .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
         .map((m) => m.content);
-      setMessages((prev) => [..._messages, ...prev]);
+      setMessages((prev) => [...nextMessages, ...prev]);
       indexRef.current -= 1;
     } catch (err) {
       console.error(err);
@@ -568,10 +667,11 @@ export function useThreadHistory(threadId: string) {
       setLoading(false);
     }
   }, []);
+
   useEffect(() => {
     threadIdRef.current = threadId;
     if (runs.data && runs.data.length > 0) {
-      runsRef.current = runs.data ?? [];
+      runsRef.current = runs.data;
       indexRef.current = runs.data.length - 1;
     }
     loadMessages().catch(() => {
@@ -579,20 +679,28 @@ export function useThreadHistory(threadId: string) {
     });
   }, [threadId, runs.data, loadMessages]);
 
-  const appendMessages = useCallback((_messages: Message[]) => {
-    setMessages((prev) => {
-      return [...prev, ..._messages];
-    });
-  }, []);
   const hasMore = indexRef.current >= 0 || !runs.data;
   return {
     runs: runs.data,
     messages,
     loading,
-    appendMessages,
     hasMore,
     loadMore: loadMessages,
   };
+}
+
+export function useThreadRuns(threadId?: string) {
+  const apiClient = getAPIClient();
+  return useQuery<Run[]>({
+    queryKey: ["thread", threadId],
+    queryFn: async () => {
+      if (!threadId) {
+        return [];
+      }
+      return apiClient.runs.list(threadId);
+    },
+    refetchOnWindowFocus: false,
+  });
 }
 
 export function useThreads(
@@ -662,33 +770,6 @@ export function useThreads(
   });
 }
 
-export function useThreadRuns(threadId?: string) {
-  const apiClient = getAPIClient();
-  return useQuery<Run[]>({
-    queryKey: ["thread", threadId],
-    queryFn: async () => {
-      if (!threadId) {
-        return [];
-      }
-      const response = await apiClient.runs.list(threadId);
-      return response;
-    },
-    refetchOnWindowFocus: false,
-  });
-}
-
-export function useRunDetail(threadId: string, runId: string) {
-  const apiClient = getAPIClient();
-  return useQuery<Run>({
-    queryKey: ["thread", threadId, "run", runId],
-    queryFn: async () => {
-      const response = await apiClient.runs.get(threadId, runId);
-      return response;
-    },
-    refetchOnWindowFocus: false,
-  });
-}
-
 export function useDeleteThread() {
   const queryClient = useQueryClient();
   const apiClient = getAPIClient();
@@ -696,7 +777,7 @@ export function useDeleteThread() {
     mutationFn: async ({ threadId }: { threadId: string }) => {
       await apiClient.threads.delete(threadId);
 
-      const response = await fetch(
+      const response = await gatewayFetch(
         `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
         {
           method: "DELETE",
