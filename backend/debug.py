@@ -24,6 +24,14 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents import make_lead_agent
 
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import InMemoryHistory
+
+    _HAS_PROMPT_TOOLKIT = True
+except ImportError:
+    _HAS_PROMPT_TOOLKIT = False
+
 load_dotenv()
 
 logging.basicConfig(
@@ -58,14 +66,21 @@ async def main():
 
     agent = make_lead_agent(config)
 
+    session = PromptSession(history=InMemoryHistory()) if _HAS_PROMPT_TOOLKIT else None
+
     print("=" * 50)
     print("Lead Agent Debug Mode")
     print("Type 'quit' or 'exit' to stop")
+    if not _HAS_PROMPT_TOOLKIT:
+        print("Tip: `uv sync --group dev` to enable arrow-key & history support")
     print("=" * 50)
 
     while True:
         try:
-            user_input = input("\nYou: ").strip()
+            if session:
+                user_input = (await session.prompt_async("\nYou: ")).strip()
+            else:
+                user_input = input("\nYou: ").strip()
             if not user_input:
                 continue
             if user_input.lower() in ("quit", "exit"):
@@ -81,8 +96,8 @@ async def main():
                 last_message = result["messages"][-1]
                 print(f"\nAgent: {last_message.content}")
 
-        except KeyboardInterrupt:
-            print("\nInterrupted. Goodbye!")
+        except (KeyboardInterrupt, EOFError):
+            print("\nGoodbye!")
             break
         except Exception as e:
             print(f"\nError: {e}")
