@@ -108,7 +108,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                     tool_interceptors.append(interceptor)
                     logger.info(f"Loaded MCP interceptor: {interceptor_path}")
             except Exception as e:
-                logger.warning(f"Failed to load MCP interceptor {interceptor_path}: {e}")
+                logger.warning(f"Failed to load MCP interceptor {interceptor_path}: {e}", exc_info=True)
 
         client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors, tool_name_prefix=True)
 
