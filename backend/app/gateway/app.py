@@ -19,6 +19,7 @@ from app.gateway.routers import (
     feedback,
     mcp,
     memory,
+    model_feedback,
     models,
     runs,
     skills,
@@ -302,6 +303,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
             )
 
     # Include routers
+    # Model feedback routes must register before /api/models so the static
+    # ``feedback`` segment is not captured as a model name by /api/models/{model_name}.
+    app.include_router(model_feedback.router)
+
     # Models API is mounted at /api/models
     app.include_router(models.router)
 
