@@ -1,5 +1,7 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
+import { gatewayFetch } from "@/core/api/gateway-fetch";
+
 import type { AgentThreadState } from "../threads";
 
 import { urlOfArtifact } from "./utils";
@@ -18,7 +20,7 @@ export async function loadArtifactContent({
     enhancedFilepath = filepath + "/SKILL.md";
   }
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
-  const response = await fetch(url);
+  const response = await gatewayFetch(url);
   const text = await response.text();
   return { content: text, url };
 }

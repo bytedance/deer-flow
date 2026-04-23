@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import { enableSkill } from "./api";
 
@@ -26,6 +27,9 @@ export function useEnableSkill() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["skills"] });
+    },
+    onError: (e) => {
+      toast.error(e instanceof Error ? e.message : "Failed to update skill");
     },
   });
 }

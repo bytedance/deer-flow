@@ -1,16 +1,16 @@
-import { fetch } from "@/core/api/fetcher";
+import { gatewayFetch } from "@/core/api/gateway-fetch";
 import { getBackendBaseURL } from "@/core/config";
 
 import type { Skill } from "./type";
 
 export async function loadSkills() {
-  const skills = await fetch(`${getBackendBaseURL()}/api/skills`);
+  const skills = await gatewayFetch(`${getBackendBaseURL()}/api/skills`);
   const json = await skills.json();
   return json.skills as Skill[];
 }
 
 export async function enableSkill(skillName: string, enabled: boolean) {
-  const response = await fetch(
+  const response = await gatewayFetch(
     `${getBackendBaseURL()}/api/skills/${skillName}`,
     {
       method: "PUT",
@@ -22,6 +22,14 @@ export async function enableSkill(skillName: string, enabled: boolean) {
       }),
     },
   );
+  if (!response.ok) {
+    const err = (await response.json().catch(() => ({}))) as {
+      detail?: string;
+    };
+    throw new Error(
+      typeof err.detail === "string" ? err.detail : `HTTP ${response.status}`,
+    );
+  }
   return response.json();
 }
 
@@ -39,13 +47,16 @@ export interface InstallSkillResponse {
 export async function installSkill(
   request: InstallSkillRequest,
 ): Promise<InstallSkillResponse> {
-  const response = await fetch(`${getBackendBaseURL()}/api/skills/install`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  const response = await gatewayFetch(
+    `${getBackendBaseURL()}/api/skills/install`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
     },
-    body: JSON.stringify(request),
-  });
+  );
 
   if (!response.ok) {
     // Handle HTTP error responses (4xx, 5xx)
