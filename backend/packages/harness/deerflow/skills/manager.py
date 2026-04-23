@@ -28,8 +28,8 @@ def get_public_skills_dir() -> Path:
     return get_skills_root_dir() / "public"
 
 
-def get_custom_skills_dir() -> Path:
-    path = get_skills_root_dir() / "custom"
+def get_custom_skills_dir(user_id: str) -> Path:
+    path = get_skills_root_dir() / "custom" / user_id
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -43,46 +43,52 @@ def validate_skill_name(name: str) -> str:
     return normalized
 
 
-def get_custom_skill_dir(name: str) -> Path:
-    return get_custom_skills_dir() / validate_skill_name(name)
+def get_custom_skill_dir(name: str, user_id: str = "public") -> Path:
+    return get_custom_skills_dir(user_id) / validate_skill_name(name)
 
 
-def get_custom_skill_file(name: str) -> Path:
-    return get_custom_skill_dir(name) / SKILL_FILE_NAME
+def get_custom_skill_file(name: str, user_id: str = "public") -> Path:
+    return get_custom_skill_dir(name,user_id) / SKILL_FILE_NAME
 
 
-def get_custom_skill_history_dir() -> Path:
-    path = get_custom_skills_dir() / HISTORY_DIR_NAME
+def get_custom_skill_history_dir(user_id: str = "public") -> Path:
+    path = get_custom_skills_dir(user_id) / HISTORY_DIR_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def get_skill_history_file(name: str) -> Path:
-    return get_custom_skill_history_dir() / f"{validate_skill_name(name)}.jsonl"
+def get_skill_history_file(name: str, user_id: str = "public") -> Path:
+    return get_custom_skill_history_dir(user_id) / f"{validate_skill_name(name)}.jsonl"
 
 
 def get_public_skill_dir(name: str) -> Path:
     return get_public_skills_dir() / validate_skill_name(name)
 
 
-def custom_skill_exists(name: str) -> bool:
-    return get_custom_skill_file(name).exists()
+def custom_skill_exists(name: str, user_id: str = "public") -> bool:
+    return get_custom_skill_file(name,user_id).exists()
 
 
 def public_skill_exists(name: str) -> bool:
     return (get_public_skill_dir(name) / SKILL_FILE_NAME).exists()
 
 
-def ensure_custom_skill_is_editable(name: str) -> None:
-    if custom_skill_exists(name):
+def ensure_custom_skill_is_editable(name: str, user_id: str = "public") -> None:
+    if custom_skill_exists(name,user_id):
         return
     if public_skill_exists(name):
         raise ValueError(f"'{name}' is a built-in skill. To customise it, create a new skill with the same name under skills/custom/.")
     raise FileNotFoundError(f"Custom skill '{name}' not found.")
 
 
-def ensure_safe_support_path(name: str, relative_path: str) -> Path:
-    skill_dir = get_custom_skill_dir(name).resolve()
+def ensure_safe_support_path(name: str, user_id: str = "public", relative_path: str = "") -> Path:
+    # Backward compatibility: historical call pattern was
+    # ensure_safe_support_path(name, relative_path)
+    if relative_path == "" and user_id != "public":
+        relative_path = user_id
+        user_id = "public"
+
+    skill_dir = get_custom_skill_dir(name, user_id).resolve()
     if not relative_path or relative_path.endswith("/"):
         raise ValueError("Supporting file path must include a filename.")
     relative = Path(relative_path)
@@ -124,8 +130,11 @@ def atomic_write(path: Path, content: str) -> None:
     tmp_path.replace(path)
 
 
-def append_history(name: str, record: dict[str, Any]) -> None:
-    history_path = get_skill_history_file(name)
+def append_history(name: str, user_id: str | dict[str, Any], record: dict[str, Any] | None = None) -> None:
+    if record is None:
+        record = user_id
+        user_id = "public"
+    history_path = get_skill_history_file(name, user_id)
     history_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "ts": datetime.now(UTC).isoformat(),
@@ -136,8 +145,8 @@ def append_history(name: str, record: dict[str, Any]) -> None:
         f.write("\n")
 
 
-def read_history(name: str) -> list[dict[str, Any]]:
-    history_path = get_skill_history_file(name)
+def read_history(name: str, user_id: str = "public") -> list[dict[str, Any]]:
+    history_path = get_skill_history_file(name, user_id)
     if not history_path.exists():
         return []
     records: list[dict[str, Any]] = []
@@ -148,12 +157,12 @@ def read_history(name: str) -> list[dict[str, Any]]:
     return records
 
 
-def list_custom_skills() -> list:
-    return [skill for skill in load_skills(enabled_only=False) if skill.category == "custom"]
+def list_custom_skills(user_id: str | None = None) -> list:
+    return [skill for skill in load_skills(enabled_only=False, user_id=user_id) if skill.category == "custom"]
 
 
-def read_custom_skill_content(name: str) -> str:
-    skill_file = get_custom_skill_file(name)
+def read_custom_skill_content(name: str, user_id: str = "public") -> str:
+    skill_file = get_custom_skill_file(name, user_id)
     if not skill_file.exists():
         raise FileNotFoundError(f"Custom skill '{name}' not found.")
     return skill_file.read_text(encoding="utf-8")

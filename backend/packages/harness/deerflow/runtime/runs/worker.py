@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from langchain_core.messages import HumanMessage
 
+from deerflow.runtime.model_feedback.lifecycle import reset_model_feedback_event_context, set_model_feedback_event_context
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 
@@ -75,7 +76,7 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
-
+    user_id = record.user_id
     run_id = record.run_id
     thread_id = record.thread_id
     requested_modes: set[str] = set(stream_modes or ["values"])
@@ -84,6 +85,7 @@ async def run_agent(
     snapshot_capture_failed = False
 
     journal = None
+    model_feedback_event_token = None
 
     journal = None
 
@@ -111,13 +113,20 @@ async def run_agent(
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
             )
 
+        model_feedback_event_token = set_model_feedback_event_context(
+            thread_id=thread_id,
+            run_id=run_id,
+            user_id=user_id,
+            event_store=event_store,
+        )
+
         # 1. Mark running
         await run_manager.set_status(run_id, RunStatus.running)
 
         # Snapshot the latest pre-run checkpoint so rollback can restore it.
         if checkpointer is not None:
             try:
-                config_for_check = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+                config_for_check = {"configurable": {"user_id": user_id, "thread_id": thread_id, "checkpoint_ns": ""}}
                 ckpt_tuple = await checkpointer.aget_tuple(config_for_check)
                 if ckpt_tuple is not None:
                     ckpt_config = getattr(ckpt_tuple, "config", {}).get("configurable", {})
@@ -139,6 +148,7 @@ async def run_agent(
             {
                 "run_id": run_id,
                 "thread_id": thread_id,
+                "user_id": user_id,
             },
         )
 
@@ -149,12 +159,15 @@ async def run_agent(
         # Inject runtime context so middlewares can access thread_id
         # (langgraph-cli does this automatically; we must do it manually)
         runtime = Runtime(context={"thread_id": thread_id, "run_id": run_id}, store=store)
+        runtime = Runtime(context={"thread_id": thread_id, "run_id": run_id, "user_id": user_id}, store=store)
         # If the caller already set a ``context`` key (LangGraph >= 0.6.0
         # prefers it over ``configurable`` for thread-level data), make
         # sure ``thread_id`` is available there too.
         if "context" in config and isinstance(config["context"], dict):
             config["context"].setdefault("thread_id", thread_id)
             config["context"].setdefault("run_id", run_id)
+            config["context"].setdefault("run_id", run_id)
+            config["context"].setdefault("user_id", user_id)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
         # Inject RunJournal as a LangChain callback handler.
@@ -239,6 +252,7 @@ async def run_agent(
                 await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
                 try:
                     await _rollback_to_pre_run_checkpoint(
+                        user_id=user_id,
                         checkpointer=checkpointer,
                         thread_id=thread_id,
                         run_id=run_id,
@@ -260,6 +274,7 @@ async def run_agent(
             await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
             try:
                 await _rollback_to_pre_run_checkpoint(
+                    user_id=user_id,
                     checkpointer=checkpointer,
                     thread_id=thread_id,
                     run_id=run_id,
@@ -288,6 +303,9 @@ async def run_agent(
         )
 
     finally:
+        if model_feedback_event_token is not None:
+            reset_model_feedback_event_context(model_feedback_event_token)
+
         # Flush any buffered journal events and persist completion data
         if journal is not None:
             try:
@@ -344,13 +362,14 @@ async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_nam
 
 
 async def _rollback_to_pre_run_checkpoint(
-    *,
-    checkpointer: Any,
-    thread_id: str,
-    run_id: str,
-    pre_run_checkpoint_id: str | None,
-    pre_run_snapshot: dict[str, Any] | None,
-    snapshot_capture_failed: bool,
+        *,
+        user_id: str = "public",
+        checkpointer: Any,
+        thread_id: str,
+        run_id: str,
+        pre_run_checkpoint_id: str | None,
+        pre_run_snapshot: dict[str, Any] | None,
+        snapshot_capture_failed: bool,
 ) -> None:
     """Restore thread state to the checkpoint snapshot captured before run start."""
     if checkpointer is None:
@@ -387,7 +406,7 @@ async def _rollback_to_pre_run_checkpoint(
     channel_versions = checkpoint_to_restore.get("channel_versions")
     new_versions = dict(channel_versions) if isinstance(channel_versions, dict) else {}
 
-    restore_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
+    restore_config = {"configurable": {"user_id": user_id, "thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
     restored_config = await _call_checkpointer_method(
         checkpointer,
         "aput",

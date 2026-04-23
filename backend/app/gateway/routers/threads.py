@@ -374,6 +374,12 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     if record is None and checkpoint_tuple is None:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    effective_user_id = get_effective_user_id()
+    if checkpoint_tuple is not None:
+        checkpoint_owner = (getattr(checkpoint_tuple, "config", {}) or {}).get("configurable", {}).get("user_id")
+        if checkpoint_owner is not None and checkpoint_owner != effective_user_id:
+            checkpoint_tuple = None
+
     # If the thread exists in the checkpointer but not in thread_meta (e.g.
     # legacy data created before thread_meta adoption), synthesize a minimal
     # record from the checkpoint metadata.
@@ -493,6 +499,11 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     if checkpoint_tuple is None:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    effective_user_id = get_effective_user_id()
+    checkpoint_owner = (getattr(checkpoint_tuple, "config", {}) or {}).get("configurable", {}).get("user_id")
+    if checkpoint_owner is not None and checkpoint_owner != effective_user_id:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
     # Work on mutable copies so we don't accidentally mutate cached objects.
     checkpoint: dict[str, Any] = dict(getattr(checkpoint_tuple, "checkpoint", {}) or {})
     metadata: dict[str, Any] = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
@@ -559,16 +570,33 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
     avoid duplicating them across every entry.
     """
     checkpointer = get_checkpointer(request)
+    effective_user_id = get_effective_user_id()
 
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    # List by thread only — never put ``before`` into this config: LangGraph interprets
+    # ``configurable.checkpoint_id`` as an exact match for ``alist``, not as a cursor.
+    # Match ``/state``: include ``checkpoint_ns`` so listing hits the same namespace.
+    list_config: dict[str, Any] = {
+        "configurable": {"thread_id": thread_id, "user_id": effective_user_id, "checkpoint_ns": ""},
+    }
+    before_config: dict[str, Any] | None = None
     if body.before:
-        config["configurable"]["checkpoint_id"] = body.before
+        before_config = {
+            "configurable": {
+                "user_id": effective_user_id,
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": body.before,
+            }
+        }
 
     entries: list[HistoryEntry] = []
     is_latest_checkpoint = True
     try:
-        async for checkpoint_tuple in checkpointer.alist(config, limit=body.limit):
+        async for checkpoint_tuple in checkpointer.alist(list_config, before=before_config, limit=body.limit):
             ckpt_config = getattr(checkpoint_tuple, "config", {})
+            checkpoint_owner = ckpt_config.get("configurable", {}).get("user_id")
+            if checkpoint_owner is not None and checkpoint_owner != effective_user_id:
+                continue
             parent_config = getattr(checkpoint_tuple, "parent_config", None)
             metadata = getattr(checkpoint_tuple, "metadata", {}) or {}
             checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}

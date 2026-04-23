@@ -19,6 +19,7 @@ from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, Skil
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import PathTraversalError
 
 # ---------------------------------------------------------------------------
@@ -1214,7 +1215,7 @@ class TestSkillsManagement:
 
             assert result["success"] is True
             assert result["skill_name"] == "my-skill"
-            assert (skills_root / "custom" / "my-skill").exists()
+            assert (skills_root / "custom" / get_effective_user_id() / "my-skill").exists()
 
     def test_install_skill_not_found(self, client):
         with pytest.raises(FileNotFoundError):
@@ -2051,7 +2052,7 @@ class TestScenarioSkillInstallAndUse:
             with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
                 result = client.install_skill(archive)
             assert result["success"] is True
-            assert (skills_root / "custom" / "my-analyzer" / "SKILL.md").exists()
+            assert (skills_root / "custom" / get_effective_user_id() / "my-analyzer" / "SKILL.md").exists()
 
             # Step 2: List and find it
             installed_skill = MagicMock()
@@ -2494,7 +2495,7 @@ class TestInstallSkillSecurity:
                 result = client.install_skill(archive)
 
             assert result["success"] is True
-            installed = skills_root / "custom" / "sym-skill"
+            installed = skills_root / "custom" / get_effective_user_id() / "sym-skill"
             assert (installed / "SKILL.md").exists()
             assert not (installed / "sneaky_link").exists()
 
@@ -2535,7 +2536,7 @@ class TestInstallSkillSecurity:
                 zf.write(skill_dir / "SKILL.md", "dupe-skill/SKILL.md")
 
             skills_root = tmp_path / "skills"
-            (skills_root / "custom" / "dupe-skill").mkdir(parents=True)
+            (skills_root / "custom" / get_effective_user_id() / "dupe-skill").mkdir(parents=True)
 
             with (
                 patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),

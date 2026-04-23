@@ -943,7 +943,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        return install_skill_from_archive(skill_path)
+        return install_skill_from_archive(get_effective_user_id(), skill_path)
 
     # ------------------------------------------------------------------
     # Public API — memory management

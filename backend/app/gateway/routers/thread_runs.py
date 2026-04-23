@@ -22,7 +22,8 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
-from deerflow.runtime import RunRecord, serialize_channel_values
+from deerflow.runtime import DisconnectMode, RunRecord, serialize_channel_values
+from deerflow.runtime.runs.schemas import RunStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -219,6 +220,24 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     record = run_mgr.get(run_id)
+    if record is None:
+        run_store = get_run_store(request)
+        persisted = await run_store.get(run_id)
+        if persisted is not None and persisted.get("thread_id") == thread_id:
+            record = RunRecord(
+                user_id=persisted.get("user_id") or "public",
+                run_id=persisted["run_id"],
+                thread_id=persisted["thread_id"],
+                assistant_id=persisted.get("assistant_id"),
+                status=RunStatus(persisted.get("status", "pending")),
+                on_disconnect=DisconnectMode.continue_,
+                multitask_strategy=persisted.get("multitask_strategy", "reject"),
+                metadata=persisted.get("metadata") or {},
+                kwargs=persisted.get("kwargs") or {},
+                created_at=persisted.get("created_at") or "",
+                updated_at=persisted.get("updated_at") or "",
+                error=persisted.get("error"),
+            )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -251,6 +270,24 @@ async def stream_existing_run(
     """
     run_mgr = get_run_manager(request)
     record = run_mgr.get(run_id)
+    if record is None:
+        run_store = get_run_store(request)
+        persisted = await run_store.get(run_id)
+        if persisted is not None and persisted.get("thread_id") == thread_id:
+            record = RunRecord(
+                user_id=persisted.get("user_id") or "public",
+                run_id=persisted["run_id"],
+                thread_id=persisted["thread_id"],
+                assistant_id=persisted.get("assistant_id"),
+                status=RunStatus(persisted.get("status", "pending")),
+                on_disconnect=DisconnectMode.continue_,
+                multitask_strategy=persisted.get("multitask_strategy", "reject"),
+                metadata=persisted.get("metadata") or {},
+                kwargs=persisted.get("kwargs") or {},
+                created_at=persisted.get("created_at") or "",
+                updated_at=persisted.get("updated_at") or "",
+                error=persisted.get("error"),
+            )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 

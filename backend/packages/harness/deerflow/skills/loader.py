@@ -22,7 +22,7 @@ def get_skills_root_path() -> Path:
     return skills_dir
 
 
-def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False) -> list[Skill]:
+def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False, user_id: str | None = None) -> list[Skill]:
     """
     Load all skills from the skills directory.
 
@@ -52,7 +52,10 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
         else:
             skills_path = get_skills_root_path()
 
+    logger.info("Loading skills from %s (user_id=%s)", skills_path, user_id or "<global>")
+
     if not skills_path.exists():
+        logger.error(f"Skills path {skills_path} does not exist")
         return []
 
     skills_by_name: dict[str, Skill] = {}
@@ -60,23 +63,35 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
     # Scan public and custom directories
     for category in ["public", "custom"]:
         category_path = skills_path / category
+        if category == "custom" and user_id:
+            category_path = category_path / user_id
         if not category_path.exists() or not category_path.is_dir():
+            logger.error(f"Category path {category_path} does not exist")
             continue
-
+        logger.debug("Category path %s exists (user_id=%s)", category_path, user_id or "<global>")
         for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
-            # Keep traversal deterministic and skip hidden directories.
+            # Keep traversal deterministic and skip hidden directories. 
+            logger.debug(
+                "Current root: %s, dir names: %s, file names: %s, user_id=%s",
+                current_root,
+                dir_names,
+                file_names,
+                user_id or "<global>",
+            )
             dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
             if "SKILL.md" not in file_names:
                 continue
-
             skill_file = Path(current_root) / "SKILL.md"
             relative_path = skill_file.parent.relative_to(category_path)
 
             skill = parse_skill_file(skill_file, category=category, relative_path=relative_path)
+            logger.debug("Skill: %s (user_id=%s)", skill, user_id or "<global>")
             if skill:
                 skills_by_name[skill.name] = skill
 
     skills = list(skills_by_name.values())
+
+    logger.info("Loaded %d skills (user_id=%s)", len(skills), user_id or "<global>")
 
     # Load skills state configuration and update enabled status
     # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
@@ -90,8 +105,10 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
         for skill in skills:
             skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
     except Exception as e:
-        # If config loading fails, default to all enabled
+        # If config loading fails, treat every skill as disabled (safe default).
         logger.warning("Failed to load extensions config: %s", e)
+        for skill in skills:
+            skill.enabled = False
 
     # Filter by enabled status if requested
     if enabled_only:

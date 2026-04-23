@@ -57,7 +57,7 @@ def test_skill_manage_create_and_patch(monkeypatch, tmp_path):
         1,
     )
     assert "Patched custom skill" in patch_result
-    assert "Patched skill" in (skills_root / "custom" / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
+    assert "Patched skill" in (skills_root / "custom" / "public" / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
     assert refresh_calls == ["refresh", "refresh"]
 
 
@@ -92,7 +92,7 @@ def test_skill_manage_patch_replaces_single_occurrence_by_default(monkeypatch, t
         "Patched skill",
     )
 
-    skill_text = (skills_root / "custom" / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
+    skill_text = (skills_root / "custom" / "public" / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
     assert "1 replacement(s) applied, 2 match(es) found" in patch_result
     assert skill_text.count("Patched skill") == 1
     assert skill_text.count("Demo skill") == 1

@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["deerflow-harness[postgres]"]
+memory-db = ["deerflow-harness[memory-db]"]
 
 [dependency-groups]
 dev = ["pytest>=8.0.0", "ruff>=0.14.11"]

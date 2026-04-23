@@ -74,8 +74,11 @@ async def upload_files(
     uploaded_files = []
 
     sandbox_provider = get_sandbox_provider()
-    sandbox_id = sandbox_provider.acquire(thread_id)
-    sandbox = sandbox_provider.get(sandbox_id)
+    sandbox_id = "local"
+    sandbox = None
+    if not sandbox_provider.uses_thread_data_mounts:
+        sandbox_id = sandbox_provider.acquire(thread_id)
+        sandbox = sandbox_provider.get(sandbox_id)
 
     for file in files:
         if not file.filename:
@@ -94,7 +97,7 @@ async def upload_files(
 
             virtual_path = upload_virtual_path(safe_filename)
 
-            if sandbox_id != "local":
+            if sandbox_id != "local" and sandbox is not None:
                 _make_file_sandbox_writable(file_path)
                 sandbox.update_file(virtual_path, content)
 
@@ -114,7 +117,7 @@ async def upload_files(
                 if md_path:
                     md_virtual_path = upload_virtual_path(md_path.name)
 
-                    if sandbox_id != "local":
+                    if sandbox_id != "local" and sandbox is not None:
                         _make_file_sandbox_writable(md_path)
                         sandbox.update_file(md_virtual_path, md_path.read_bytes())
 

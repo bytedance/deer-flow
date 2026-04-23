@@ -1,11 +1,13 @@
+import errno
 import json
 import logging
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+from app.gateway.deps import get_current_user
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
@@ -28,6 +30,12 @@ from deerflow.skills.security_scanner import scan_skill_content
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["skills"])
+
+
+def _require_current_user_id(user_id: str | None) -> str:
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required")
+    return user_id
 
 
 class SkillResponse(BaseModel):
@@ -100,9 +108,10 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
     summary="List All Skills",
     description="Retrieve a list of all available skills from both public and custom directories.",
 )
-async def list_skills() -> SkillsListResponse:
+async def list_skills(user_id: str | None = Depends(get_current_user)) -> SkillsListResponse:
     try:
-        skills = load_skills(enabled_only=False)
+        user_id = _require_current_user_id(user_id)
+        skills = load_skills(enabled_only=False, user_id=user_id)
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
@@ -115,11 +124,13 @@ async def list_skills() -> SkillsListResponse:
     summary="Install Skill",
     description="Install a skill from a .skill file (ZIP archive) located in the thread's user-data directory.",
 )
-async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
+async def install_skill(request: SkillInstallRequest, user_id: str | None = Depends(get_current_user)) -> SkillInstallResponse:
     try:
+        user_id = _require_current_user_id(user_id)
         skill_file_path = resolve_thread_virtual_path(request.thread_id, request.path)
-        result = install_skill_from_archive(skill_file_path)
+        result = install_skill_from_archive(user_id, skill_file_path)
         await refresh_skills_system_prompt_cache_async()
+        logger.info(f"Installing skill from path: {skill_file_path} successfully: {result}")
         return SkillInstallResponse(**result)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -135,9 +146,10 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
 
 
 @router.get("/skills/custom", response_model=SkillsListResponse, summary="List Custom Skills")
-async def list_custom_skills() -> SkillsListResponse:
+async def list_custom_skills(user_id: str | None = Depends(get_current_user)) -> SkillsListResponse:
     try:
-        skills = [skill for skill in load_skills(enabled_only=False) if skill.category == "custom"]
+        user_id = _require_current_user_id(user_id)
+        skills = [skill for skill in load_skills(enabled_only=False, user_id=user_id) if skill.category == "custom"]
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
@@ -145,13 +157,14 @@ async def list_custom_skills() -> SkillsListResponse:
 
 
 @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
-async def get_custom_skill(skill_name: str) -> CustomSkillContentResponse:
+async def get_custom_skill(skill_name: str, user_id: str | None = Depends(get_current_user)) -> CustomSkillContentResponse:
     try:
-        skills = load_skills(enabled_only=False)
+        user_id = _require_current_user_id(user_id)
+        skills = load_skills(enabled_only=False, user_id=user_id)
         skill = next((s for s in skills if s.name == skill_name and s.category == "custom"), None)
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=read_custom_skill_content(skill_name))
+        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=read_custom_skill_content(skill_name, user_id))
     except HTTPException:
         raise
     except Exception as e:
@@ -160,18 +173,20 @@ async def get_custom_skill(skill_name: str) -> CustomSkillContentResponse:
 
 
 @router.put("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Edit Custom Skill")
-async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest) -> CustomSkillContentResponse:
+async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest, user_id: str | None = Depends(get_current_user)) -> CustomSkillContentResponse:
     try:
-        ensure_custom_skill_is_editable(skill_name)
+        user_id = _require_current_user_id(user_id)
+        ensure_custom_skill_is_editable(skill_name, user_id)
         validate_skill_markdown_content(skill_name, request.content)
         scan = await scan_skill_content(request.content, executable=False, location=f"{skill_name}/SKILL.md")
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        skill_file = get_custom_skill_dir(skill_name) / "SKILL.md"
+        skill_file = get_custom_skill_dir(skill_name, user_id) / "SKILL.md"
         prev_content = skill_file.read_text(encoding="utf-8")
         atomic_write(skill_file, request.content)
         append_history(
             skill_name,
+            user_id,
             {
                 "action": "human_edit",
                 "author": "human",
@@ -183,7 +198,7 @@ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest
             },
         )
         await refresh_skills_system_prompt_cache_async()
-        return await get_custom_skill(skill_name)
+        return await get_custom_skill(skill_name, user_id)
     except HTTPException:
         raise
     except FileNotFoundError as e:
@@ -196,23 +211,30 @@ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest
 
 
 @router.delete("/skills/custom/{skill_name}", summary="Delete Custom Skill")
-async def delete_custom_skill(skill_name: str) -> dict[str, bool]:
+async def delete_custom_skill(skill_name: str, user_id: str | None = Depends(get_current_user)) -> dict[str, bool]:
     try:
-        ensure_custom_skill_is_editable(skill_name)
-        skill_dir = get_custom_skill_dir(skill_name)
-        prev_content = read_custom_skill_content(skill_name)
-        append_history(
-            skill_name,
-            {
-                "action": "human_delete",
-                "author": "human",
-                "thread_id": None,
-                "file_path": "SKILL.md",
-                "prev_content": prev_content,
-                "new_content": None,
-                "scanner": {"decision": "allow", "reason": "Deletion requested."},
-            },
-        )
+        user_id = _require_current_user_id(user_id)
+        ensure_custom_skill_is_editable(skill_name, user_id)
+        skill_dir = get_custom_skill_dir(skill_name, user_id)
+        prev_content = read_custom_skill_content(skill_name, user_id)
+        try:
+            append_history(
+                skill_name,
+                user_id,
+                {
+                    "action": "human_delete",
+                    "author": "human",
+                    "thread_id": None,
+                    "file_path": "SKILL.md",
+                    "prev_content": prev_content,
+                    "new_content": None,
+                    "scanner": {"decision": "allow", "reason": "Deletion requested."},
+                },
+            )
+        except OSError as e:
+            if not isinstance(e, PermissionError) and e.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
+                raise
+            logger.warning("Skipping delete history write for custom skill %s due to readonly/permission failure; continuing with skill directory removal: %s", skill_name, e)
         shutil.rmtree(skill_dir)
         await refresh_skills_system_prompt_cache_async()
         return {"success": True}
@@ -226,11 +248,12 @@ async def delete_custom_skill(skill_name: str) -> dict[str, bool]:
 
 
 @router.get("/skills/custom/{skill_name}/history", response_model=CustomSkillHistoryResponse, summary="Get Custom Skill History")
-async def get_custom_skill_history(skill_name: str) -> CustomSkillHistoryResponse:
+async def get_custom_skill_history(skill_name: str, user_id: str | None = Depends(get_current_user)) -> CustomSkillHistoryResponse:
     try:
-        if not custom_skill_exists(skill_name) and not get_skill_history_file(skill_name).exists():
+        user_id = _require_current_user_id(user_id)
+        if not custom_skill_exists(skill_name, user_id) and not get_skill_history_file(skill_name, user_id).exists():
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillHistoryResponse(history=read_history(skill_name))
+        return CustomSkillHistoryResponse(history=read_history(skill_name, user_id))
     except HTTPException:
         raise
     except Exception as e:
@@ -239,11 +262,12 @@ async def get_custom_skill_history(skill_name: str) -> CustomSkillHistoryRespons
 
 
 @router.post("/skills/custom/{skill_name}/rollback", response_model=CustomSkillContentResponse, summary="Rollback Custom Skill")
-async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest) -> CustomSkillContentResponse:
+async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest, user_id: str | None = Depends(get_current_user)) -> CustomSkillContentResponse:
     try:
-        if not custom_skill_exists(skill_name) and not get_skill_history_file(skill_name).exists():
+        user_id = _require_current_user_id(user_id)
+        if not custom_skill_exists(skill_name, user_id) and not get_skill_history_file(skill_name, user_id).exists():
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        history = read_history(skill_name)
+        history = read_history(skill_name, user_id)
         if not history:
             raise HTTPException(status_code=400, detail=f"Custom skill '{skill_name}' has no history")
         record = history[request.history_index]
@@ -252,7 +276,7 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest) 
             raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
         validate_skill_markdown_content(skill_name, target_content)
         scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/SKILL.md")
-        skill_file = get_custom_skill_file(skill_name)
+        skill_file = get_custom_skill_file(skill_name, user_id)
         current_content = skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
         history_entry = {
             "action": "rollback",
@@ -265,12 +289,12 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest) 
             "scanner": {"decision": scan.decision, "reason": scan.reason},
         }
         if scan.decision == "block":
-            append_history(skill_name, history_entry)
+            append_history(skill_name, user_id, history_entry)
             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
         atomic_write(skill_file, target_content)
-        append_history(skill_name, history_entry)
+        append_history(skill_name, user_id, history_entry)
         await refresh_skills_system_prompt_cache_async()
-        return await get_custom_skill(skill_name)
+        return await get_custom_skill(skill_name, user_id)
     except HTTPException:
         raise
     except IndexError:
@@ -312,9 +336,11 @@ async def get_skill(skill_name: str) -> SkillResponse:
     summary="Update Skill",
     description="Update a skill's enabled status by modifying the extensions_config.json file.",
 )
-async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillResponse:
+async def update_skill(skill_name: str, request: SkillUpdateRequest,
+                       user_id: str | None = Depends(get_current_user), ) -> SkillResponse:
     try:
-        skills = load_skills(enabled_only=False)
+        user_id = _require_current_user_id(user_id)
+        skills = load_skills(use_config=True, enabled_only=False, user_id=user_id)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -326,7 +352,9 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
             logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
         extensions_config = get_extensions_config()
-        extensions_config.skills[skill_name] = SkillStateConfig(enabled=request.enabled)
+        extensions_config.skills[skill_name] = SkillStateConfig(
+            enabled=request.enabled,
+        )
 
         config_data = {
             "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
@@ -340,7 +368,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
         reload_extensions_config()
         await refresh_skills_system_prompt_cache_async()
 
-        skills = load_skills(enabled_only=False)
+        skills = load_skills(enabled_only=False, user_id=user_id)
         updated_skill = next((s for s in skills if s.name == skill_name), None)
 
         if updated_skill is None:

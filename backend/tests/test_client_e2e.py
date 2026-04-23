@@ -25,6 +25,7 @@ from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.runtime.user_context import get_effective_user_id
 
 # Load .env from project root (for OPENAI_API_KEY etc.)
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -557,7 +558,7 @@ class TestSkillInstallation:
         result = c.install_skill(archive)
         assert result["success"] is True
         assert result["skill_name"] == "test-e2e-skill"
-        assert (self._skills_root / "custom" / "test-e2e-skill" / "SKILL.md").exists()
+        assert (self._skills_root / "custom" / get_effective_user_id() / "test-e2e-skill" / "SKILL.md").exists()
 
     def test_install_skill_duplicate_rejected(self, e2e_env, tmp_path):
         """Installing the same skill twice raises ValueError."""

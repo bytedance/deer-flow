@@ -115,14 +115,16 @@ def safe_extract_skill_archive(
 
 
 def install_skill_from_archive(
-    zip_path: str | Path,
-    *,
-    skills_root: Path | None = None,
+        user_id: str | Path | None = None,
+        zip_path: str | Path | None = None,
+        *,
+        skills_root: Path | None = None,
 ) -> dict:
     """Install a skill from a .skill archive (ZIP).
 
     Args:
-        zip_path: Path to the .skill file.
+        user_id: Either the user id.
+        zip_path: Path to the .skill file when the first positional argument is user_id.
         skills_root: Override the skills root directory. If None, uses
             the default from config.
 
@@ -134,6 +136,13 @@ def install_skill_from_archive(
         ValueError: If the file is invalid (wrong extension, bad ZIP,
             invalid frontmatter, duplicate name).
     """
+    # Backward compatibility:
+    # - install_skill_from_archive(zip_path, skills_root=...)
+    # - install_skill_from_archive(user_id, zip_path, skills_root=...)
+    if zip_path is None:
+        zip_path = user_id
+        user_id = "public"
+
     logger.info("Installing skill from %s", zip_path)
     path = Path(zip_path)
     if not path.is_file():
@@ -146,6 +155,8 @@ def install_skill_from_archive(
     if skills_root is None:
         skills_root = get_skills_root_path()
     custom_dir = skills_root / "custom"
+    if user_id:
+        custom_dir = custom_dir / str(user_id)
     custom_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmp:

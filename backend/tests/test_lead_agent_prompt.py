@@ -44,7 +44,7 @@ def test_apply_prompt_template_includes_custom_mounts(monkeypatch):
     monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None: "")
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
 
-    prompt = prompt_module.apply_prompt_template()
+    prompt = prompt_module.apply_prompt_template("user-1", "thread-1")
 
     assert "`/home/user/shared`" in prompt
     assert "Custom Mounted Directories" in prompt
@@ -62,7 +62,7 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None: "")
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
 
-    prompt = prompt_module.apply_prompt_template()
+    prompt = prompt_module.apply_prompt_template("user-1", "thread-1")
 
     assert "Treat `/mnt/user-data/workspace` as your default current working directory" in prompt
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt

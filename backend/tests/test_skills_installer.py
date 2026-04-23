@@ -186,12 +186,12 @@ class TestInstallSkillFromArchive:
         result = install_skill_from_archive(zip_path, skills_root=skills_root)
         assert result["success"] is True
         assert result["skill_name"] == "test-skill"
-        assert (skills_root / "custom" / "test-skill" / "SKILL.md").exists()
+        assert (skills_root / "custom" / "public" / "test-skill" / "SKILL.md").exists()
 
     def test_duplicate_raises(self, tmp_path):
         zip_path = self._make_skill_zip(tmp_path)
         skills_root = tmp_path / "skills"
-        (skills_root / "custom" / "test-skill").mkdir(parents=True)
+        (skills_root / "custom" / "public" / "test-skill").mkdir(parents=True)
         with pytest.raises(ValueError, match="already exists"):
             install_skill_from_archive(zip_path, skills_root=skills_root)
 

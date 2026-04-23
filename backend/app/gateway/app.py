@@ -35,6 +35,11 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+_log_dir = os.environ.get("DEER_FLOW_GATEWAY_LOG_DIR", "").strip()
+if _log_dir:
+    from deerflow.utils.daily_log import attach_daily_file_logging
+
+    attach_daily_file_logging(_log_dir, "gateway")
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +260,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
             {
                 "name": "suggestions",
                 "description": "Generate follow-up question suggestions for conversations",
+            },
+            {
+                "name": "user-threads",
+                "description": "Per-user thread history storage (list/detail/complete under /api/user/threads)",
             },
             {
                 "name": "channels",

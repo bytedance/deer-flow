@@ -24,7 +24,7 @@ def _now_iso() -> str:
 @dataclass
 class RunRecord:
     """Mutable record for a single run."""
-
+    user_id: str
     run_id: str
     thread_id: str
     assistant_id: str | None
@@ -81,20 +81,27 @@ class RunManager:
                 logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
 
     async def create(
-        self,
-        thread_id: str,
-        assistant_id: str | None = None,
-        *,
-        on_disconnect: DisconnectMode = DisconnectMode.cancel,
-        metadata: dict | None = None,
-        kwargs: dict | None = None,
-        multitask_strategy: str = "reject",
+            self,
+            thread_id: str,
+            assistant_id: str | None = None,
+            *,
+            on_disconnect: DisconnectMode = DisconnectMode.cancel,
+            metadata: dict | None = None,
+            kwargs: dict | None = None,
+            multitask_strategy: str = "reject",
+            user_id: str = "public",
     ) -> RunRecord:
-        """Create a new pending run and register it."""
+        """Create a new pending run and register it.
+
+        Backward-compatible helper used by tests and simple in-memory callers.
+        Production request paths should prefer ``create_or_reject(...)`` which
+        explicitly scopes runs by ``user_id`` and ``thread_id``.
+        """
         run_id = str(uuid.uuid4())
         now = _now_iso()
         record = RunRecord(
             run_id=run_id,
+            user_id=user_id,
             thread_id=thread_id,
             assistant_id=assistant_id,
             status=RunStatus.pending,
@@ -115,12 +122,26 @@ class RunManager:
         """Return a run record by ID, or ``None``."""
         return self._runs.get(run_id)
 
-    async def list_by_thread(self, thread_id: str) -> list[RunRecord]:
-        """Return all runs for a given thread, newest first."""
+    async def list_by_thread(self, user_id_or_thread_id: str, thread_id: str | None = None) -> list[RunRecord]:
+        """Return all runs for a given thread.
+
+        Backward-compatible forms:
+
+        - ``list_by_thread(thread_id)`` → legacy public-scope behavior
+        - ``list_by_thread(user_id, thread_id)`` → explicit user-scoped behavior
+        """
+        if thread_id is None:
+            user_id = "public"
+            thread_id = user_id_or_thread_id
+        else:
+            user_id = user_id_or_thread_id
+
         async with self._lock:
-            # Dict insertion order matches creation order, so reversing it gives
-            # us deterministic newest-first results even when timestamps tie.
-            return [r for r in self._runs.values() if r.thread_id == thread_id]
+            return [
+                r
+                for r in self._runs.values()
+                if r.thread_id == thread_id and r.user_id == user_id
+            ]
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
@@ -166,14 +187,15 @@ class RunManager:
         return True
 
     async def create_or_reject(
-        self,
-        thread_id: str,
-        assistant_id: str | None = None,
-        *,
-        on_disconnect: DisconnectMode = DisconnectMode.cancel,
-        metadata: dict | None = None,
-        kwargs: dict | None = None,
-        multitask_strategy: str = "reject",
+            self,
+            user_id: str,
+            thread_id: str,
+            assistant_id: str | None = None,
+            *,
+            on_disconnect: DisconnectMode = DisconnectMode.cancel,
+            metadata: dict | None = None,
+            kwargs: dict | None = None,
+            multitask_strategy: str = "reject",
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -193,10 +215,10 @@ class RunManager:
             if multitask_strategy not in _supported_strategies:
                 raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-            inflight = [r for r in self._runs.values() if r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running)]
+            inflight = [r for r in self._runs.values() if r.thread_id == thread_id and r.user_id == user_id and r.status in (RunStatus.pending, RunStatus.running)]
 
             if multitask_strategy == "reject" and inflight:
-                raise ConflictError(f"Thread {thread_id} already has an active run")
+                raise ConflictError(f"User {user_id} Thread {thread_id} already has an active run")
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
                 for r in inflight:
@@ -215,6 +237,7 @@ class RunManager:
 
             record = RunRecord(
                 run_id=run_id,
+                user_id=user_id,
                 thread_id=thread_id,
                 assistant_id=assistant_id,
                 status=RunStatus.pending,
@@ -231,10 +254,27 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    async def has_inflight(self, thread_id: str) -> bool:
-        """Return ``True`` if *thread_id* has a pending or running run."""
+    async def has_inflight(self, user_id_or_thread_id: str, thread_id: str | None = None) -> bool:
+        """Return ``True`` if the thread has a pending or running run.
+
+        Backward-compatible forms:
+
+        - ``has_inflight(thread_id)`` → legacy public-scope behavior
+        - ``has_inflight(user_id, thread_id)`` → explicit user-scoped behavior
+        """
+        if thread_id is None:
+            user_id = "public"
+            thread_id = user_id_or_thread_id
+        else:
+            user_id = user_id_or_thread_id
+
         async with self._lock:
-            return any(r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running) for r in self._runs.values())
+            return any(
+                r.thread_id == thread_id
+                and r.user_id == user_id
+                and r.status in (RunStatus.pending, RunStatus.running)
+                for r in self._runs.values()
+            )
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay."""
@@ -243,6 +283,42 @@ class RunManager:
         async with self._lock:
             self._runs.pop(run_id, None)
         logger.debug("Run record %s cleaned up", run_id)
+
+    async def discard_runs_for_thread(self, user_id: str, thread_id: str) -> int:
+        """Cancel in-flight runs for *user_id* / *thread_id* and drop their registry entries."""
+        async with self._lock:
+            to_pop: list[str] = []
+            for rid, r in self._runs.items():
+                if r.user_id != user_id or r.thread_id != thread_id:
+                    continue
+                if r.status in (RunStatus.pending, RunStatus.running):
+                    r.abort_event.set()
+                    if r.task is not None and not r.task.done():
+                        r.task.cancel()
+                    r.status = RunStatus.interrupted
+                    r.updated_at = _now_iso()
+                to_pop.append(rid)
+            for rid in to_pop:
+                self._runs.pop(rid, None)
+            return len(to_pop)
+
+    async def discard_runs_for_user(self, user_id: str) -> int:
+        """Cancel in-flight runs for *user_id* and remove all their registry entries."""
+        async with self._lock:
+            to_pop: list[str] = []
+            for rid, r in self._runs.items():
+                if r.user_id != user_id:
+                    continue
+                if r.status in (RunStatus.pending, RunStatus.running):
+                    r.abort_event.set()
+                    if r.task is not None and not r.task.done():
+                        r.task.cancel()
+                    r.status = RunStatus.interrupted
+                    r.updated_at = _now_iso()
+                to_pop.append(rid)
+            for rid in to_pop:
+                self._runs.pop(rid, None)
+            return len(to_pop)
 
 
 class ConflictError(Exception):
