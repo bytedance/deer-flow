@@ -69,7 +69,7 @@ def test_custom_interceptor_loaded_and_appended():
         p["build_servers"],
         p["oauth_headers"],
         p["oauth_interceptor"],
-        patch("deerflow.reflection.resolve_variable", return_value=fake_builder),
+        patch("deerflow.mcp.tools.resolve_variable", return_value=fake_builder),
     ):
         asyncio.run(get_mcp_tools())
 
@@ -100,7 +100,7 @@ def test_multiple_custom_interceptors():
         p["build_servers"],
         p["oauth_headers"],
         p["oauth_interceptor"],
-        patch("deerflow.reflection.resolve_variable", side_effect=lambda path: builders[path]),
+        patch("deerflow.mcp.tools.resolve_variable", side_effect=lambda path: builders[path]),
     ):
         asyncio.run(get_mcp_tools())
 
@@ -120,7 +120,7 @@ def test_custom_interceptor_builder_returning_none_is_skipped():
         p["build_servers"],
         p["oauth_headers"],
         p["oauth_interceptor"],
-        patch("deerflow.reflection.resolve_variable", return_value=lambda: None),
+        patch("deerflow.mcp.tools.resolve_variable", return_value=lambda: None),
     ):
         asyncio.run(get_mcp_tools())
 
@@ -137,7 +137,7 @@ def test_custom_interceptor_resolve_error_logs_warning_and_continues():
         p["build_servers"],
         p["oauth_headers"],
         p["oauth_interceptor"],
-        patch("deerflow.reflection.resolve_variable", side_effect=ImportError("no such module")),
+        patch("deerflow.mcp.tools.resolve_variable", side_effect=ImportError("no such module")),
         patch("deerflow.mcp.tools.logger.warning") as mock_warn,
     ):
         tools = asyncio.run(get_mcp_tools())
@@ -161,7 +161,7 @@ def test_custom_interceptor_builder_exception_logs_warning_and_continues():
         p["build_servers"],
         p["oauth_headers"],
         p["oauth_interceptor"],
-        patch("deerflow.reflection.resolve_variable", return_value=exploding_builder),
+        patch("deerflow.mcp.tools.resolve_variable", return_value=exploding_builder),
         patch("deerflow.mcp.tools.logger.warning") as mock_warn,
     ):
         tools = asyncio.run(get_mcp_tools())
@@ -204,7 +204,7 @@ def test_custom_interceptor_coexists_with_oauth_interceptor():
         p["build_servers"],
         p["oauth_headers"],
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=oauth_fn),
-        patch("deerflow.reflection.resolve_variable", return_value=lambda: custom_fn),
+        patch("deerflow.mcp.tools.resolve_variable", return_value=lambda: custom_fn),
     ):
         asyncio.run(get_mcp_tools())
 
@@ -228,7 +228,7 @@ def test_mcp_interceptors_single_string_is_normalized():
         p["build_servers"],
         p["oauth_headers"],
         p["oauth_interceptor"],
-        patch("deerflow.reflection.resolve_variable", return_value=lambda: fake_interceptor),
+        patch("deerflow.mcp.tools.resolve_variable", return_value=lambda: fake_interceptor),
     ):
         asyncio.run(get_mcp_tools())
 
@@ -252,3 +252,23 @@ def test_mcp_interceptors_invalid_type_logs_warning():
         assert len(_get_interceptors(mock_cls)) == 0
         mock_warn.assert_called_once()
         assert "must be a list" in mock_warn.call_args[0][0]
+
+
+def test_custom_interceptor_non_callable_return_logs_warning():
+    """If a builder returns a non-callable value, it is skipped with a warning."""
+    p = _make_patches(interceptor_paths=["pkg.bad:returns_string"])
+
+    with (
+        p["client_cls"] as mock_cls,
+        p["from_file"],
+        p["build_servers"],
+        p["oauth_headers"],
+        p["oauth_interceptor"],
+        patch("deerflow.mcp.tools.resolve_variable", return_value=lambda: "not_a_callable"),
+        patch("deerflow.mcp.tools.logger.warning") as mock_warn,
+    ):
+        asyncio.run(get_mcp_tools())
+
+        assert len(_get_interceptors(mock_cls)) == 0
+        mock_warn.assert_called_once()
+        assert "non-callable" in mock_warn.call_args[0][0]

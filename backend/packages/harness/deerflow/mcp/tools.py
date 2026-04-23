@@ -12,6 +12,7 @@ from langchain_core.tools import BaseTool
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
+from deerflow.reflection import resolve_variable
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +107,13 @@ async def get_mcp_tools() -> list[BaseTool]:
             raw_interceptor_paths = []
         for interceptor_path in raw_interceptor_paths:
             try:
-                from deerflow.reflection import resolve_variable
-
                 builder = resolve_variable(interceptor_path)
                 interceptor = builder()
-                if interceptor is not None:
+                if callable(interceptor):
                     tool_interceptors.append(interceptor)
                     logger.info(f"Loaded MCP interceptor: {interceptor_path}")
+                elif interceptor is not None:
+                    logger.warning(f"Builder {interceptor_path} returned non-callable {type(interceptor).__name__}; skipping")
             except Exception as e:
                 logger.warning(f"Failed to load MCP interceptor {interceptor_path}: {e}", exc_info=True)
 
