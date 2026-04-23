@@ -160,6 +160,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             "APITimeoutError",
             "APIConnectionError",
             "InternalServerError",
+            "ReadError",  # httpx.ReadError: connection dropped mid-stream
+            "RemoteProtocolError",  # httpx: server closed connection unexpectedly
         }:
             return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:

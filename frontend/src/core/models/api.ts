@@ -1,9 +1,12 @@
 import { getBackendBaseURL } from "../config";
 
-import type { Model } from "./types";
+import type { ModelsResponse } from "./types";
 
-export async function loadModels() {
+export async function loadModels(): Promise<ModelsResponse> {
   const res = await fetch(`${getBackendBaseURL()}/api/models`);
-  const { models } = (await res.json()) as { models: Model[] };
-  return models;
+  const data = (await res.json()) as Partial<ModelsResponse>;
+  return {
+    models: data.models ?? [],
+    token_usage: data.token_usage ?? { enabled: false },
+  };
 }
