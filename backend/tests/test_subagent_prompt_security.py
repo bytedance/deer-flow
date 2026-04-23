@@ -25,7 +25,9 @@ def test_build_subagent_section_hides_bash_examples_when_unavailable(monkeypatch
 
     section = prompt_module._build_subagent_section(3)
 
-    assert "Not available in the current sandbox configuration" in section
+    # When bash is not available, it should not appear at all (aligned with Codex:
+    # unavailable roles are omitted, not listed as disabled)
+    assert "**bash**" not in section
     assert 'bash("npm test")' not in section
     assert 'read_file("/mnt/user-data/workspace/README.md")' in section
     assert "available tools (ls, read_file, web_search, etc.)" in section

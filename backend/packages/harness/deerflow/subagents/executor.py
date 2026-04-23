@@ -13,7 +13,7 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
@@ -184,7 +184,63 @@ class SubagentExecutor:
             state_schema=ThreadState,
         )
 
-    def _build_initial_state(self, task: str) -> dict[str, Any]:
+    async def _load_skill_messages(self) -> list[SystemMessage]:
+        """Load skill content as conversation items based on config.skills.
+
+        Aligned with Codex's pattern: each subagent loads its own skills
+        per-session and injects them as conversation items (developer messages),
+        not as system prompt text. The config.skills whitelist controls which
+        skills are loaded:
+        - None: load all enabled skills
+        - []: no skills
+        - ["skill-a", "skill-b"]: only these skills
+
+        Returns:
+            List of SystemMessages containing skill content.
+        """
+        if self.config.skills is not None and len(self.config.skills) == 0:
+            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading")
+            return []
+
+        try:
+            from deerflow.skills.loader import load_skills
+
+            # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
+            all_skills = await asyncio.to_thread(load_skills, enabled_only=True)
+            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
+        except Exception:
+            logger.warning(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}", exc_info=True)
+            return []
+
+        if not all_skills:
+            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found")
+            return []
+
+        # Filter by config.skills whitelist
+        if self.config.skills is not None:
+            allowed = set(self.config.skills)
+            skills = [s for s in all_skills if s.name in allowed]
+        else:
+            skills = all_skills
+
+        if not skills:
+            return []
+
+        # Read each skill's SKILL.md content and create conversation items
+        messages = []
+        for skill in skills:
+            try:
+                content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
+                content = content.strip()
+                if content:
+                    messages.append(SystemMessage(content=f'<skill name="{skill.name}">\n{content}\n</skill>'))
+                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
+            except Exception:
+                logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)
+
+        return messages
+
+    async def _build_initial_state(self, task: str) -> dict[str, Any]:
         """Build the initial state for agent execution.
 
         Args:
@@ -193,8 +249,17 @@ class SubagentExecutor:
         Returns:
             Initial state dictionary.
         """
+        # Load skills as conversation items (Codex pattern)
+        skill_messages = await self._load_skill_messages()
+
+        messages: list = []
+        # Skill content injected as developer/system messages before the task
+        messages.extend(skill_messages)
+        # Then the actual task
+        messages.append(HumanMessage(content=task))
+
         state: dict[str, Any] = {
-            "messages": [HumanMessage(content=task)],
+            "messages": messages,
         }
 
         # Pass through sandbox and thread data from parent
@@ -230,7 +295,7 @@ class SubagentExecutor:
 
         try:
             agent = self._create_agent()
-            state = self._build_initial_state(task)
+            state = await self._build_initial_state(task)
 
             # Build config with thread_id for sandbox access and recursion limit
             run_config: RunnableConfig = {

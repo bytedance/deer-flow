@@ -577,15 +577,41 @@ sandbox:
 #   # Optional global max-turn override for all subagents
 #   # max_turns: 120
 #
-#   # Optional per-agent overrides
+#   # Optional per-agent overrides (applies to both built-in and custom agents)
 #   agents:
 #     general-purpose:
 #       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
 #       max_turns: 160
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
+#       # skills:               # Skill whitelist (default: inherit all enabled skills)
+#       #   - web-search
+#       #   - data-analysis
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 #       max_turns: 80
+#       # skills: []            # No skills for bash agent
+#
+#   # Custom subagent types: define specialized agents with their own prompts,
+#   # tools, skills, and model configuration. Custom agents are available via
+#   # the `task` tool alongside built-in types (general-purpose, bash).
+#   # custom_agents:
+#   #   analysis:
+#   #     description: "Data analysis specialist for processing datasets and generating insights"
+#   #     system_prompt: |
+#   #       You are a data analysis subagent. Focus on:
+#   #       - Processing and analyzing datasets
+#   #       - Generating visualizations
+#   #       - Providing statistical insights
+#   #     tools:                  # Tool whitelist (null = inherit all)
+#   #       - bash
+#   #       - read_file
+#   #       - write_file
+#   #     skills:                 # Skill whitelist (null = inherit all, [] = none)
+#   #       - data-analysis
+#   #       - visualization
+#   #     model: inherit          # 'inherit' uses parent's model
+#   #     max_turns: 80
+#   #     timeout_seconds: 600
 #
 #   # Model override: by default, subagents inherit the lead agent's model.
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
