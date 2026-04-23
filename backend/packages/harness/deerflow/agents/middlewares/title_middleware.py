@@ -1,6 +1,7 @@
 """Middleware for automatic thread title generation."""
 
 import logging
+import re
 from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
@@ -12,6 +13,7 @@ from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 class TitleMiddlewareState(AgentState):
@@ -25,9 +27,12 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     state_schema = TitleMiddlewareState
 
+    def _strip_think_tags(self, text: str) -> str:
+        return _THINK_BLOCK_RE.sub("", text)
+
     def _normalize_content(self, content: object) -> str:
         if isinstance(content, str):
-            return content
+            return self._strip_think_tags(content)
 
         if isinstance(content, list):
             parts = [self._normalize_content(item) for item in content]
@@ -90,7 +95,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
     def _parse_title(self, content: object) -> str:
         """Normalize model output into a clean title string."""
         config = get_title_config()
-        title_content = self._normalize_content(content)
+        title_content = self._strip_think_tags(self._normalize_content(content))
         title = title_content.strip().strip('"').strip("'")
         return title[: config.max_chars] if len(title) > config.max_chars else title
 
