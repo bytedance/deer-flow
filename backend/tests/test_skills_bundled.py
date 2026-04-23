@@ -13,15 +13,14 @@ import pytest
 from deerflow.skills.validation import _validate_skill_frontmatter
 
 SKILLS_PUBLIC_DIR = Path(__file__).resolve().parents[2] / "skills" / "public"
-
-
-def _bundled_skill_dirs() -> list[Path]:
-    return sorted(p.parent for p in SKILLS_PUBLIC_DIR.rglob("SKILL.md"))
+BUNDLED_SKILL_DIRS = sorted(
+    p.parent for p in SKILLS_PUBLIC_DIR.rglob("SKILL.md")
+)
 
 
 @pytest.mark.parametrize(
     "skill_dir",
-    _bundled_skill_dirs(),
+    BUNDLED_SKILL_DIRS,
     ids=lambda p: str(p.relative_to(SKILLS_PUBLIC_DIR)),
 )
 def test_bundled_skill_frontmatter_is_valid(skill_dir: Path) -> None:
@@ -31,4 +30,4 @@ def test_bundled_skill_frontmatter_is_valid(skill_dir: Path) -> None:
 
 
 def test_skills_public_dir_has_skills() -> None:
-    assert _bundled_skill_dirs(), f"no SKILL.md found under {SKILLS_PUBLIC_DIR}"
+    assert BUNDLED_SKILL_DIRS, f"no SKILL.md found under {SKILLS_PUBLIC_DIR}"
