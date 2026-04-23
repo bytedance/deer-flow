@@ -2046,6 +2046,11 @@ class TestSlackSendRetry:
 
 
 class TestSlackAllowedUsers:
+    @staticmethod
+    def _submit_coro(coro, loop):
+        coro.close()
+        return MagicMock()
+
     def test_numeric_allowed_users_match_string_event_user_id(self):
         from app.channels.slack import SlackChannel
 
@@ -2067,13 +2072,9 @@ class TestSlackAllowedUsers:
             "ts": "1710000000.000100",
         }
 
-        def submit_coro(coro, loop):
-            coro.close()
-            return MagicMock()
-
         with patch(
             "app.channels.slack.asyncio.run_coroutine_threadsafe",
-            side_effect=submit_coro,
+            side_effect=self._submit_coro,
         ) as submit:
             channel._handle_message_event(event)
 
@@ -2106,13 +2107,9 @@ class TestSlackAllowedUsers:
             "ts": "1710000000.000100",
         }
 
-        def submit_coro(coro, loop):
-            coro.close()
-            return MagicMock()
-
         with patch(
             "app.channels.slack.asyncio.run_coroutine_threadsafe",
-            side_effect=submit_coro,
+            side_effect=self._submit_coro,
         ) as submit:
             channel._handle_message_event(event)
 

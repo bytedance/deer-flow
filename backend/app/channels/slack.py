@@ -22,7 +22,8 @@ class SlackChannel(Channel):
     Configuration keys (in ``config.yaml`` under ``channels.slack``):
         - ``bot_token``: Slack Bot User OAuth Token (xoxb-...).
         - ``app_token``: Slack App-Level Token (xapp-...) for Socket Mode.
-        - ``allowed_users``: (optional) List of allowed Slack user IDs. Empty = allow all.
+        - ``allowed_users``: (optional) List of allowed Slack user IDs, or a
+          single Slack user ID string as shorthand. Empty = allow all.
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
