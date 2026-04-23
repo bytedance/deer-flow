@@ -5,16 +5,23 @@ import re
 import shutil
 
 import yaml
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-
+from app.gateway.deps import get_current_user
+from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+def _require_current_user_id(user_id: str | None) -> str:
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required")
+    return user_id
 
 
 class AgentResponse(BaseModel):
@@ -25,6 +32,7 @@ class AgentResponse(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     soul: str | None = Field(default=None, description="SOUL.md content")
+    owner: str | None = Field(default=None, description="belong user")
 
 
 class AgentsListResponse(BaseModel):
@@ -73,11 +81,20 @@ def _normalize_agent_name(name: str) -> str:
     return name.lower()
 
 
-def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False) -> AgentResponse:
+def _require_agents_api_enabled() -> None:
+    """Reject access unless the custom-agent management API is explicitly enabled."""
+    if not get_agents_api_config().enabled:
+        raise HTTPException(
+            status_code=403,
+            detail=("Custom-agent management API is disabled. Set agents_api.enabled=true to expose agent and user-profile routes over HTTP."),
+        )
+
+
+def _agent_config_to_response(user_id: str, agent_cfg: AgentConfig, include_soul: bool = False) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
     if include_soul:
-        soul = load_agent_soul(agent_cfg.name) or ""
+        soul = load_agent_soul(user_id, agent_cfg.name) or ""
 
     return AgentResponse(
         name=agent_cfg.name,
@@ -85,6 +102,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
         soul=soul,
+        owner=agent_cfg.owner,
     )
 
 
@@ -94,15 +112,18 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
     summary="List Custom Agents",
     description="List all custom agents available in the agents directory, including their soul content.",
 )
-async def list_agents() -> AgentsListResponse:
+async def list_agents(user_id: str | None = Depends(get_current_user)) -> AgentsListResponse:
     """List all custom agents.
 
     Returns:
         List of all custom agents with their metadata and soul content.
     """
+    _require_agents_api_enabled()
+    user_id = _require_current_user_id(user_id)
+
     try:
-        agents = list_custom_agents()
-        return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True) for a in agents])
+        agents = list_custom_agents(user_id)
+        return AgentsListResponse(agents=[_agent_config_to_response(user_id, a, include_soul=True) for a in agents])
     except Exception as e:
         logger.error(f"Failed to list agents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
@@ -113,7 +134,7 @@ async def list_agents() -> AgentsListResponse:
     summary="Check Agent Name",
     description="Validate an agent name and check if it is available (case-insensitive).",
 )
-async def check_agent_name(name: str) -> dict:
+async def check_agent_name(name: str, user_id: str | None = Depends(get_current_user)) -> dict:
     """Check whether an agent name is valid and not yet taken.
 
     Args:
@@ -125,9 +146,13 @@ async def check_agent_name(name: str) -> dict:
     Raises:
         HTTPException: 422 if the name is invalid.
     """
+    _require_agents_api_enabled()
+    user_id = _require_current_user_id(user_id)
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
-    available = not get_paths().agent_dir(normalized).exists()
+    custom_available = not get_paths().agent_dir(user_id, normalized).exists()
+    public_available = not get_paths().agent_dir("public", normalized).exists()
+    available = custom_available & public_available
     return {"available": available, "name": normalized}
 
 
@@ -137,7 +162,7 @@ async def check_agent_name(name: str) -> dict:
     summary="Get Custom Agent",
     description="Retrieve details and SOUL.md content for a specific custom agent.",
 )
-async def get_agent(name: str) -> AgentResponse:
+async def get_agent(name: str, user_id: str | None = Depends(get_current_user)) -> AgentResponse:
     """Get a specific custom agent by name.
 
     Args:
@@ -149,12 +174,14 @@ async def get_agent(name: str) -> AgentResponse:
     Raises:
         HTTPException: 404 if agent not found.
     """
+    _require_agents_api_enabled()
+    user_id = _require_current_user_id(user_id)
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
 
     try:
-        agent_cfg = load_agent_config(name)
-        return _agent_config_to_response(agent_cfg, include_soul=True)
+        agent_cfg = load_agent_config(user_id,name)
+        return _agent_config_to_response(user_id, agent_cfg, include_soul=True)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
@@ -169,7 +196,7 @@ async def get_agent(name: str) -> AgentResponse:
     summary="Create Custom Agent",
     description="Create a new custom agent with its config and SOUL.md.",
 )
-async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
+async def create_agent_endpoint(request: AgentCreateRequest, user_id: str | None = Depends(get_current_user)) -> AgentResponse:
     """Create a new custom agent.
 
     Args:
@@ -181,10 +208,12 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     Raises:
         HTTPException: 409 if agent already exists, 422 if name is invalid.
     """
+    _require_agents_api_enabled()
+    user_id = _require_current_user_id(user_id)
     _validate_agent_name(request.name)
     normalized_name = _normalize_agent_name(request.name)
 
-    agent_dir = get_paths().agent_dir(normalized_name)
+    agent_dir = get_paths().agent_dir(user_id, normalized_name)
 
     if agent_dir.exists():
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
@@ -211,8 +240,8 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
 
         logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
 
-        agent_cfg = load_agent_config(normalized_name)
-        return _agent_config_to_response(agent_cfg, include_soul=True)
+        agent_cfg = load_agent_config(user_id, normalized_name)
+        return _agent_config_to_response(user_id, agent_cfg, include_soul=True)
 
     except HTTPException:
         raise
@@ -230,7 +259,7 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     summary="Update Custom Agent",
     description="Update an existing custom agent's config and/or SOUL.md.",
 )
-async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
+async def update_agent(name: str, request: AgentUpdateRequest, user_id: str | None = Depends(get_current_user)) -> AgentResponse:
     """Update an existing custom agent.
 
     Args:
@@ -243,15 +272,17 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     Raises:
         HTTPException: 404 if agent not found.
     """
+    _require_agents_api_enabled()
+    user_id = _require_current_user_id(user_id)
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
 
     try:
-        agent_cfg = load_agent_config(name)
+        agent_cfg = load_agent_config(user_id,name)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    agent_dir = get_paths().agent_dir(name)
+    agent_dir = get_paths().agent_dir(user_id, name)
 
     try:
         # Update config if any config fields changed
@@ -281,8 +312,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
         logger.info(f"Updated agent '{name}'")
 
-        refreshed_cfg = load_agent_config(name)
-        return _agent_config_to_response(refreshed_cfg, include_soul=True)
+        refreshed_cfg = load_agent_config(user_id,name)
+        return _agent_config_to_response(user_id, refreshed_cfg, include_soul=True)
 
     except HTTPException:
         raise
@@ -309,14 +340,17 @@ class UserProfileUpdateRequest(BaseModel):
     summary="Get User Profile",
     description="Read the global USER.md file that is injected into all custom agents.",
 )
-async def get_user_profile() -> UserProfileResponse:
+async def get_user_profile(user_id: str | None = Depends(get_current_user)) -> UserProfileResponse:
     """Return the current USER.md content.
 
     Returns:
         UserProfileResponse with content=None if USER.md does not exist yet.
     """
+    _require_agents_api_enabled()
+    user_id = _require_current_user_id(user_id)
+
     try:
-        user_md_path = get_paths().user_md_file
+        user_md_path = get_paths().user_md_file(user_id=user_id)
         if not user_md_path.exists():
             return UserProfileResponse(content=None)
         raw = user_md_path.read_text(encoding="utf-8").strip()
@@ -332,7 +366,7 @@ async def get_user_profile() -> UserProfileResponse:
     summary="Update User Profile",
     description="Write the global USER.md file that is injected into all custom agents.",
 )
-async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileResponse:
+async def update_user_profile(request: UserProfileUpdateRequest, user_id: str | None = Depends(get_current_user)) -> UserProfileResponse:
     """Create or overwrite the global USER.md.
 
     Args:
@@ -341,11 +375,15 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     Returns:
         UserProfileResponse with the saved content.
     """
+    _require_agents_api_enabled()
+    user_id = _require_current_user_id(user_id)
+
     try:
         paths = get_paths()
-        paths.base_dir.mkdir(parents=True, exist_ok=True)
-        paths.user_md_file.write_text(request.content, encoding="utf-8")
-        logger.info(f"Updated USER.md at {paths.user_md_file}")
+        user_md_path = paths.user_md_file(user_id=user_id)
+        user_md_path.parent.mkdir(parents=True, exist_ok=True)
+        user_md_path.write_text(request.content, encoding="utf-8")
+        logger.info("Updated USER.md at %s", user_md_path)
         return UserProfileResponse(content=request.content or None)
     except Exception as e:
         logger.error(f"Failed to update user profile: {e}", exc_info=True)
@@ -358,7 +396,7 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     summary="Delete Custom Agent",
     description="Delete a custom agent and all its files (config, SOUL.md, memory).",
 )
-async def delete_agent(name: str) -> None:
+async def delete_agent(name: str, user_id: str | None = Depends(get_current_user)) -> None:
     """Delete a custom agent.
 
     Args:
@@ -367,10 +405,12 @@ async def delete_agent(name: str) -> None:
     Raises:
         HTTPException: 404 if agent not found.
     """
+    _require_agents_api_enabled()
+    user_id = _require_current_user_id(user_id)
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
 
-    agent_dir = get_paths().agent_dir(name)
+    agent_dir = get_paths().agent_dir(user_id, name)
 
     if not agent_dir.exists():
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
