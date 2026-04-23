@@ -20,6 +20,7 @@ import logging
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
+from langgraph.runtime import Runtime
 
 from deerflow.agents import make_lead_agent
 
@@ -52,6 +53,9 @@ async def main():
         }
     }
 
+    runtime = Runtime(context={"thread_id": config["configurable"]["thread_id"]})
+    config["configurable"]["__pregel_runtime"] = runtime
+
     agent = make_lead_agent(config)
 
     print("=" * 50)
@@ -70,7 +74,7 @@ async def main():
 
             # Invoke the agent
             state = {"messages": [HumanMessage(content=user_input)]}
-            result = await agent.ainvoke(state, config=config, context={"thread_id": "debug-thread-001"})
+            result = await agent.ainvoke(state, config=config)
 
             # Print the response
             if result.get("messages"):
