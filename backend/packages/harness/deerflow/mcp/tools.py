@@ -97,8 +97,14 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         # Load custom interceptors declared in extensions_config.json
         # Format: "mcpInterceptors": ["pkg.module:builder_func", ...]
-        mcp_interceptor_paths = (extensions_config.model_extra or {}).get("mcpInterceptors", [])
-        for interceptor_path in mcp_interceptor_paths:
+        raw_interceptor_paths = (extensions_config.model_extra or {}).get("mcpInterceptors")
+        if isinstance(raw_interceptor_paths, str):
+            raw_interceptor_paths = [raw_interceptor_paths]
+        elif not isinstance(raw_interceptor_paths, list):
+            if raw_interceptor_paths is not None:
+                logger.warning(f"mcpInterceptors must be a list of strings, got {type(raw_interceptor_paths).__name__}; skipping")
+            raw_interceptor_paths = []
+        for interceptor_path in raw_interceptor_paths:
             try:
                 from deerflow.reflection import resolve_variable
 
