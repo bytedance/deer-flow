@@ -190,7 +190,7 @@ class ClaudeChatModel(ChatAnthropic):
             )
 
     def _apply_prompt_caching(self, payload: dict) -> None:
-        """Apply ephemeral cache_control to system and recent messages.
+        """Apply ephemeral cache_control to system, recent messages, and last tool definition.
 
         Uses a budget of MAX_CACHE_BREAKPOINTS (4) breakpoints — the hard limit
         enforced by both the Anthropic API and AWS Bedrock.  Breakpoints are
