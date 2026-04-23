@@ -55,19 +55,32 @@ def _setup_logging(log_level: str) -> None:
     root.setLevel(level)
 
     file_handler = logging.FileHandler("debug.log", mode="a", encoding="utf-8")
+    file_handler.setLevel(level)
     file_handler.setFormatter(logging.Formatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
     root.addHandler(file_handler)
 
 
+def _update_logging_level(log_level: str) -> None:
+    """Update the root logger and existing handlers to *log_level*."""
+    level = _logging_level_from_config(log_level)
+    root = logging.root
+    root.setLevel(level)
+    for handler in root.handlers:
+        handler.setLevel(level)
+
+
 async def main():
-    # Imported first so we can read ``log_level`` before installing handlers.
+    # Install file logging first so warnings emitted while loading config do not
+    # leak onto the interactive terminal via Python's lastResort handler.
+    _setup_logging("info")
+
     from deerflow.config import get_app_config
 
     app_config = get_app_config()
-    _setup_logging(app_config.log_level)
+    _update_logging_level(app_config.log_level)
 
-    # Delay the rest of the deerflow imports until *after* _setup_logging() so
-    # that any import-time side effects (e.g. deerflow.agents starts a
+    # Delay the rest of the deerflow imports until *after* logging is installed
+    # so that any import-time side effects (e.g. deerflow.agents starts a
     # background skill-loader thread on import) emit logs to debug.log instead
     # of leaking onto the interactive terminal via Python's lastResort handler.
     from langchain_core.messages import HumanMessage
