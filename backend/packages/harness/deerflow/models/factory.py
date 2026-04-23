@@ -4,6 +4,7 @@ from langchain.chat_models import BaseChatModel
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
+from deerflow.runtime.model_feedback import record_model_feedback, record_model_feedback_sync
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,112 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     if "enable_thinking" in chat_template_kwargs:
         disable_kwargs["enable_thinking"] = False
     return disable_kwargs
+
+
+def _wrap_model_feedback_hooks(model_instance: BaseChatModel, model_name: str) -> None:
+    """Count every concrete provider call made through this model instance."""
+    _wrap_sync_model_method(model_instance, "_generate", model_name)
+    _wrap_async_model_method(model_instance, "_agenerate", model_name, skip_if_base=BaseChatModel._agenerate)
+    _wrap_sync_stream_method(model_instance, "_stream", model_name, skip_if_base=BaseChatModel._stream)
+    _wrap_async_stream_method(model_instance, "_astream", model_name, skip_if_base=BaseChatModel._astream)
+
+
+def _resolved_model_method(model_instance: BaseChatModel, attr: str):
+    return getattr(type(model_instance), attr, None)
+
+
+def _wrap_sync_model_method(model_instance: BaseChatModel, attr: str, model_name: str) -> None:
+    raw = _resolved_model_method(model_instance, attr)
+    if raw is None or raw is getattr(BaseChatModel, attr, None):
+        return
+    original = getattr(model_instance, attr, None)
+    if original is None:
+        return
+
+    def wrapped(*args, **kwargs):
+        try:
+            result = original(*args, **kwargs)
+        except Exception:
+            record_model_feedback_sync(model_name, success=False)
+            raise
+        record_model_feedback_sync(model_name, success=True)
+        return result
+
+    object.__setattr__(model_instance, attr, wrapped)
+
+
+def _wrap_async_model_method(model_instance: BaseChatModel, attr: str, model_name: str, *, skip_if_base) -> None:
+    raw = _resolved_model_method(model_instance, attr)
+    if raw is None or raw is skip_if_base:
+        return
+    original = getattr(model_instance, attr, None)
+    if original is None:
+        return
+
+    async def wrapped(*args, **kwargs):
+        try:
+            result = await original(*args, **kwargs)
+        except Exception:
+            await record_model_feedback(model_name, success=False)
+            raise
+        await record_model_feedback(model_name, success=True)
+        return result
+
+    object.__setattr__(model_instance, attr, wrapped)
+
+
+def _wrap_sync_stream_method(model_instance: BaseChatModel, attr: str, model_name: str, *, skip_if_base) -> None:
+    raw = _resolved_model_method(model_instance, attr)
+    if raw is None or raw is skip_if_base:
+        return
+    original = getattr(model_instance, attr, None)
+    if original is None:
+        return
+
+    def wrapped(*args, **kwargs):
+        try:
+            iterator = iter(original(*args, **kwargs))
+        except Exception:
+            record_model_feedback_sync(model_name, success=False)
+            raise
+
+        def _iter():
+            try:
+                for chunk in iterator:
+                    yield chunk
+            except Exception:
+                record_model_feedback_sync(model_name, success=False)
+                raise
+            record_model_feedback_sync(model_name, success=True)
+
+        return _iter()
+
+    object.__setattr__(model_instance, attr, wrapped)
+
+
+def _wrap_async_stream_method(model_instance: BaseChatModel, attr: str, model_name: str, *, skip_if_base) -> None:
+    raw = _resolved_model_method(model_instance, attr)
+    if raw is None or raw is skip_if_base:
+        return
+    original = getattr(model_instance, attr, None)
+    if original is None:
+        return
+
+    def wrapped(*args, **kwargs):
+        iterator = original(*args, **kwargs)
+
+        async def _aiter():
+            try:
+                async for chunk in iterator:
+                    yield chunk
+            except Exception:
+                await record_model_feedback(model_name, success=False)
+                raise
+            await record_model_feedback(model_name, success=True)
+
+        return _aiter()
+
+    object.__setattr__(model_instance, attr, wrapped)
 
 
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, **kwargs) -> BaseChatModel:
@@ -123,6 +230,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             model_settings_from_config["stream_usage"] = True
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
+
+    _wrap_model_feedback_hooks(model_instance, name)
+
+    _wrap_model_feedback_hooks(model_instance, name)
 
     callbacks = build_tracing_callbacks()
     if callbacks:
