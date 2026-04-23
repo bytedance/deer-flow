@@ -103,6 +103,10 @@ def _validate_thread_id(thread_id: str) -> str:
     return thread_id
 
 
+def _is_absolute_host_path(path: str) -> bool:
+    return path.startswith("/") or bool(re.match(r"^[A-Za-z]:[\\/]", path)) or path.startswith("\\\\")
+
+
 # ── K8s client setup ────────────────────────────────────────────────────
 
 core_v1: k8s_client.CoreV1Api | None = None
@@ -218,9 +222,16 @@ app = FastAPI(title="DeerFlow Sandbox Provisioner", lifespan=lifespan)
 # ── Request / Response models ───────────────────────────────────────────
 
 
+class ExtraMountRequest(BaseModel):
+    host_path: str
+    container_path: str
+    read_only: bool = False
+
+
 class CreateSandboxRequest(BaseModel):
     sandbox_id: str
     thread_id: str = Field(pattern=SAFE_THREAD_ID_PATTERN)
+    extra_mounts: list[ExtraMountRequest] = Field(default_factory=list)
 
 
 class SandboxResponse(BaseModel):
@@ -245,7 +256,39 @@ def _sandbox_url(node_port: int) -> str:
     return f"http://{NODE_HOST}:{node_port}"
 
 
-def _build_volumes(thread_id: str) -> list[k8s_client.V1Volume]:
+def _normalize_extra_mounts(extra_mounts: list[ExtraMountRequest] | None) -> list[ExtraMountRequest]:
+    """Validate and normalize caller-provided hostPath mounts."""
+    normalized: list[ExtraMountRequest] = []
+    seen_container_paths = {"/mnt/skills", "/mnt/user-data"}
+
+    for mount in extra_mounts or []:
+        host_path = mount.host_path
+        container_path = mount.container_path.rstrip("/") or "/"
+
+        if not host_path:
+            raise ValueError("extra_mounts.host_path must not be empty")
+        if not _is_absolute_host_path(host_path):
+            raise ValueError(f"extra_mounts.host_path must be absolute: {host_path}")
+        if not container_path.startswith("/"):
+            raise ValueError(f"extra_mounts.container_path must be absolute: {mount.container_path}")
+        if container_path == "/":
+            raise ValueError("extra_mounts.container_path must not be the filesystem root")
+        if container_path in seen_container_paths:
+            raise ValueError(f"duplicate or reserved extra_mounts.container_path: {container_path}")
+        seen_container_paths.add(container_path)
+
+        normalized.append(
+            ExtraMountRequest(
+                host_path=host_path,
+                container_path=container_path,
+                read_only=mount.read_only,
+            )
+        )
+
+    return normalized
+
+
+def _build_volumes(thread_id: str, extra_mounts: list[ExtraMountRequest] | None = None) -> list[k8s_client.V1Volume]:
     """Build volume list: PVC when configured, otherwise hostPath."""
     if SKILLS_PVC_NAME:
         skills_vol = k8s_client.V1Volume(
@@ -280,10 +323,22 @@ def _build_volumes(thread_id: str) -> list[k8s_client.V1Volume]:
             ),
         )
 
-    return [skills_vol, userdata_vol]
+    volumes = [skills_vol, userdata_vol]
+    for index, mount in enumerate(_normalize_extra_mounts(extra_mounts)):
+        volumes.append(
+            k8s_client.V1Volume(
+                name=f"extra-mount-{index}",
+                host_path=k8s_client.V1HostPathVolumeSource(
+                    path=mount.host_path,
+                    type="Directory",
+                ),
+            )
+        )
+
+    return volumes
 
 
-def _build_volume_mounts(thread_id: str) -> list[k8s_client.V1VolumeMount]:
+def _build_volume_mounts(thread_id: str, extra_mounts: list[ExtraMountRequest] | None = None) -> list[k8s_client.V1VolumeMount]:
     """Build volume mount list, using subPath for PVC user-data."""
     userdata_mount = k8s_client.V1VolumeMount(
         name="user-data",
@@ -293,7 +348,7 @@ def _build_volume_mounts(thread_id: str) -> list[k8s_client.V1VolumeMount]:
     if USERDATA_PVC_NAME:
         userdata_mount.sub_path = f"threads/{thread_id}/user-data"
 
-    return [
+    mounts = [
         k8s_client.V1VolumeMount(
             name="skills",
             mount_path="/mnt/skills",
@@ -302,10 +357,22 @@ def _build_volume_mounts(thread_id: str) -> list[k8s_client.V1VolumeMount]:
         userdata_mount,
     ]
 
+    for index, mount in enumerate(_normalize_extra_mounts(extra_mounts)):
+        mounts.append(
+            k8s_client.V1VolumeMount(
+                name=f"extra-mount-{index}",
+                mount_path=mount.container_path,
+                read_only=mount.read_only,
+            )
+        )
 
-def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
+    return mounts
+
+
+def _build_pod(sandbox_id: str, thread_id: str, extra_mounts: list[ExtraMountRequest] | None = None) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     thread_id = _validate_thread_id(thread_id)
+    extra_mounts = _normalize_extra_mounts(extra_mounts)
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
@@ -362,14 +429,14 @@ def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
                             "ephemeral-storage": "500Mi",
                         },
                     ),
-                    volume_mounts=_build_volume_mounts(thread_id),
+                    volume_mounts=_build_volume_mounts(thread_id, extra_mounts),
                     security_context=k8s_client.V1SecurityContext(
                         privileged=False,
                         allow_privilege_escalation=True,
                     ),
                 )
             ],
-            volumes=_build_volumes(thread_id),
+            volumes=_build_volumes(thread_id, extra_mounts),
             restart_policy="Always",
         ),
     )
@@ -445,6 +512,10 @@ async def create_sandbox(req: CreateSandboxRequest):
     """
     sandbox_id = req.sandbox_id
     thread_id = req.thread_id
+    try:
+        extra_mounts = _normalize_extra_mounts(req.extra_mounts)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     logger.info(
         f"Received request to create sandbox '{sandbox_id}' for thread '{thread_id}'"
@@ -461,7 +532,7 @@ async def create_sandbox(req: CreateSandboxRequest):
 
     # ── Create Pod ───────────────────────────────────────────────────
     try:
-        core_v1.create_namespaced_pod(K8S_NAMESPACE, _build_pod(sandbox_id, thread_id))
+        core_v1.create_namespaced_pod(K8S_NAMESPACE, _build_pod(sandbox_id, thread_id, extra_mounts))
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:  # 409 = AlreadyExists

@@ -215,6 +215,11 @@ docker exec deer-flow-provisioner curl -X POST http://localhost:8002/api/sandbox
   -H "Content-Type: application/json" \
   -d '{"sandbox_id":"test-001","thread_id":"thread-001"}'
 
+# Create a sandbox with an additional hostPath mount
+docker exec deer-flow-provisioner curl -X POST http://localhost:8002/api/sandboxes \
+  -H "Content-Type: application/json" \
+  -d '{"sandbox_id":"test-002","thread_id":"thread-002","extra_mounts":[{"host_path":"/absolute/host/path","container_path":"/mnt/shared","read_only":true}]}'
+
 # Check sandbox status
 docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes/test-001
 

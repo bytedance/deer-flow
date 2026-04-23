@@ -144,7 +144,7 @@ class AioSandboxProvider(SandboxProvider):
         provisioner_url = self._config.get("provisioner_url")
         if provisioner_url:
             logger.info(f"Using remote sandbox backend with provisioner at {provisioner_url}")
-            return RemoteSandboxBackend(provisioner_url=provisioner_url)
+            return RemoteSandboxBackend(provisioner_url=provisioner_url, config_mounts=self._config["mounts"])
 
         logger.info("Using local container sandbox backend")
         return LocalContainerBackend(
