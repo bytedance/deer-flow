@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from collections.abc import Callable, Coroutine
@@ -111,7 +112,7 @@ class OutboundMessage:
 # MessageBus
 # ---------------------------------------------------------------------------
 
-OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, None]]
+OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, None] | None]
 
 
 class MessageBus:
@@ -151,6 +152,9 @@ class MessageBus:
 
     def subscribe_outbound(self, callback: OutboundCallback) -> None:
         """Register an async callback for outbound messages."""
+        if callback is None:
+            logger.warning("Skipping None outbound callback registration")
+            return
         self._outbound_listeners.append(callback)
 
     def unsubscribe_outbound(self, callback: OutboundCallback) -> None:
@@ -167,7 +171,15 @@ class MessageBus:
             len(msg.text),
         )
         for callback in self._outbound_listeners:
+            if callback is None:
+                logger.warning("Skipping None outbound callback for channel=%s", msg.channel_name)
+                continue
             try:
-                await callback(msg)
+                if inspect.iscoroutinefunction(callback):
+                    await callback(msg)
+                else:
+                    result = callback(msg)
+                    if inspect.isawaitable(result):
+                        await result
             except Exception:
                 logger.exception("Error in outbound callback for channel=%s", msg.channel_name)

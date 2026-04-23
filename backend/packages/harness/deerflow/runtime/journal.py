@@ -142,8 +142,8 @@ class RunJournal(BaseCallbackHandler):
 
         # Capture the first human message sent to any LLM in this run.
         if not self._first_human_msg:
-            for batch in messages.reversed():
-                for m in batch.reversed():
+            for batch in reversed(messages):
+                for m in reversed(batch):
                     if isinstance(m, HumanMessage) and m.name != "summary":
                         caller = self._identify_caller(tags)
                         self.set_first_human_message(m.text)

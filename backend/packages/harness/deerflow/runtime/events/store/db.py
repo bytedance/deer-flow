@@ -93,7 +93,7 @@ class DbRunEventStore(RunEventStore):
                 # Use FOR UPDATE to serialize seq assignment within a thread.
                 # NOTE: with_for_update() on aggregates is a no-op on SQLite;
                 # the UNIQUE(thread_id, seq) constraint catches races there.
-                max_seq = await session.scalar(select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id).with_for_update())
+                max_seq = await session.scalar(select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id))
                 seq = (max_seq or 0) + 1
                 row = RunEventRow(
                     thread_id=thread_id,
@@ -119,7 +119,7 @@ class DbRunEventStore(RunEventStore):
                 # NOTE: with_for_update() on aggregates is a no-op on SQLite;
                 # the UNIQUE(thread_id, seq) constraint catches races there.
                 thread_id = events[0]["thread_id"]
-                max_seq = await session.scalar(select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id).with_for_update())
+                max_seq = await session.scalar(select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id))
                 seq = max_seq or 0
                 rows = []
                 for e in events:

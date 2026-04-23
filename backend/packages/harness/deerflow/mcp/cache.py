@@ -119,8 +119,8 @@ def get_cached_mcp_tools() -> list[BaseTool]:
         except RuntimeError:
             # No event loop exists, create one
             asyncio.run(initialize_mcp_tools())
-        except Exception as e:
-            logger.error(f"Failed to lazy-initialize MCP tools: {e}")
+        except Exception:
+            logger.exception("Failed to lazy-initialize MCP tools")
             return []
 
     return _mcp_tools_cache or []
