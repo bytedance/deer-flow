@@ -1,7 +1,7 @@
 from .app_config import get_app_config
 from .extensions_config import ExtensionsConfig, get_extensions_config
 from .memory_config import MemoryConfig, get_memory_config
-from .paths import Paths, get_paths
+from .paths import Paths, configure_paths, get_paths
 from .skill_evolution_config import SkillEvolutionConfig
 from .skills_config import SkillsConfig
 from .tracing_config import (
@@ -17,6 +17,7 @@ __all__ = [
     "SkillEvolutionConfig",
     "Paths",
     "get_paths",
+    "configure_paths",
     "SkillsConfig",
     "ExtensionsConfig",
     "get_extensions_config",

@@ -311,9 +311,43 @@ class Paths:
         return actual
 
 
+def _repo_root() -> Path:
+    """Parent of backend/; used to resolve relative ``base_dir`` in config."""
+    return Path(__file__).resolve().parents[5]
+
+
+
+
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _paths: Paths | None = None
+
+
+def configure_paths(base_dir: str | Path | None) -> None:
+    """Set the process-wide Paths singleton from application config.
+
+    When *base_dir* is empty or whitespace-only, reset to default resolution:
+    ``DEER_FLOW_HOME`` if set, otherwise `{backend}/.deer-flow`.
+    Relative paths are resolved against the repository root (parent of ``backend/``).
+    Non-empty values are created on disk (mkdir parents).
+    """
+    global _paths
+    if isinstance(base_dir, Path):
+        resolved = base_dir.expanduser().resolve()
+        resolved.mkdir(parents=True, exist_ok=True)
+        _paths = Paths(resolved)
+        return
+    if base_dir is None or not str(base_dir).strip():
+        _paths = None
+        return
+    p = Path(str(base_dir).strip()).expanduser()
+    if not p.is_absolute():
+        p = _repo_root() / p
+    p = p.resolve()
+    p.mkdir(parents=True, exist_ok=True)
+    _paths = Paths(p)
+
+
 
 
 def get_paths() -> Paths:
