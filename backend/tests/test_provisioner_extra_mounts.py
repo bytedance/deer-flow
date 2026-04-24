@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
+import pytest
+import requests
+from pydantic import ValidationError
+
 
 class TestBuildVolumesExtraMounts:
     def test_no_extra_mounts_returns_two_volumes(self, provisioner_module):
@@ -72,3 +78,58 @@ class TestCreateSandboxRequestExtraMounts:
         assert len(req.extra_mounts) == 1
         assert req.extra_mounts[0].host_path == "/data"
         assert req.extra_mounts[0].read_only is True
+
+
+class TestExtraMountValidation:
+    def test_relative_host_path_rejected(self, provisioner_module):
+        with pytest.raises(ValidationError):
+            provisioner_module.ExtraMount(host_path="relative/path", container_path="/mnt/data")
+
+    def test_traversal_in_host_path_rejected(self, provisioner_module):
+        with pytest.raises(ValidationError):
+            provisioner_module.ExtraMount(host_path="/data/../etc", container_path="/mnt/data")
+
+    def test_reserved_skills_container_path_rejected(self, provisioner_module):
+        with pytest.raises(ValidationError):
+            provisioner_module.ExtraMount(host_path="/data", container_path="/mnt/skills")
+
+    def test_reserved_userdata_container_path_rejected(self, provisioner_module):
+        with pytest.raises(ValidationError):
+            provisioner_module.ExtraMount(host_path="/data", container_path="/mnt/user-data")
+
+    def test_reserved_container_subpath_rejected(self, provisioner_module):
+        with pytest.raises(ValidationError):
+            provisioner_module.ExtraMount(host_path="/data", container_path="/mnt/user-data/foo")
+
+    def test_valid_mount_accepted(self, provisioner_module):
+        m = provisioner_module.ExtraMount(host_path="/data", container_path="/mnt/custom")
+        assert m.host_path == "/data"
+        assert m.container_path == "/mnt/custom"
+
+
+class TestRemoteSandboxBackendPayload:
+    def test_extra_mounts_included_in_payload(self):
+        from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
+
+        backend = RemoteSandboxBackend("http://provisioner:8002")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"sandbox_url": "http://host:30000"}
+
+        with patch.object(requests, "post", return_value=mock_resp) as mock_post:
+            backend._provisioner_create("thread-1", "sb-1", [("/host", "/mnt/custom", True)])
+
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["extra_mounts"] == [{"host_path": "/host", "container_path": "/mnt/custom", "read_only": True}]
+
+    def test_no_extra_mounts_omitted_from_payload(self):
+        from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
+
+        backend = RemoteSandboxBackend("http://provisioner:8002")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"sandbox_url": "http://host:30000"}
+
+        with patch.object(requests, "post", return_value=mock_resp) as mock_post:
+            backend._provisioner_create("thread-1", "sb-1", None)
+
+        payload = mock_post.call_args.kwargs["json"]
+        assert "extra_mounts" not in payload

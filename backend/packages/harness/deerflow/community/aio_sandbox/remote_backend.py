@@ -91,10 +91,7 @@ class RemoteSandboxBackend(SandboxBackend):
         try:
             payload: dict = {"sandbox_id": sandbox_id, "thread_id": thread_id}
             if extra_mounts:
-                payload["extra_mounts"] = [
-                    {"host_path": h, "container_path": c, "read_only": r}
-                    for h, c, r in extra_mounts
-                ]
+                payload["extra_mounts"] = [{"host_path": h, "container_path": c, "read_only": r} for h, c, r in extra_mounts]
             resp = requests.post(
                 f"{self._provisioner_url}/api/sandboxes",
                 json=payload,

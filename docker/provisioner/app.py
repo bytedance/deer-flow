@@ -40,7 +40,7 @@ from fastapi import FastAPI, HTTPException
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Suppress only the InsecureRequestWarning from urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -217,11 +217,35 @@ app = FastAPI(title="DeerFlow Sandbox Provisioner", lifespan=lifespan)
 
 # ── Request / Response models ───────────────────────────────────────────
 
+_RESERVED_CONTAINER_PREFIXES = ("/mnt/skills", "/mnt/user-data")
+
 
 class ExtraMount(BaseModel):
     host_path: str
     container_path: str
     read_only: bool = False
+
+    @field_validator("host_path")
+    @classmethod
+    def host_path_absolute(cls, v: str) -> str:
+        if not v.startswith("/"):
+            raise ValueError("host_path must be an absolute path")
+        if ".." in v.split("/"):
+            raise ValueError("host_path must not contain '..'")
+        return v
+
+    @field_validator("container_path")
+    @classmethod
+    def container_path_valid(cls, v: str) -> str:
+        if not v.startswith("/"):
+            raise ValueError("container_path must be an absolute path")
+        if ".." in v.split("/"):
+            raise ValueError("container_path must not contain '..'")
+        vn = v.rstrip("/")
+        for reserved in _RESERVED_CONTAINER_PREFIXES:
+            if vn == reserved or vn.startswith(reserved + "/"):
+                raise ValueError(f"container_path conflicts with reserved mount: {reserved}")
+        return v
 
 
 class CreateSandboxRequest(BaseModel):
