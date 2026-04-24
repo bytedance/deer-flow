@@ -217,6 +217,51 @@ def test_provisioner_create_sends_configured_mounts(monkeypatch):
     assert info.sandbox_url == "http://sandbox.local"
 
 
+def test_provisioner_create_normalizes_configured_mounts(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002/",
+        config_mounts=[
+            SimpleNamespace(
+                host_path="/host/user-data",
+                container_path="/mnt/user-data/workspace",
+                read_only=False,
+            ),
+            SimpleNamespace(
+                host_path="/host/skills",
+                container_path="/mnt/skills",
+                read_only=True,
+            ),
+            SimpleNamespace(
+                host_path="/host/shared",
+                container_path="/mnt/shared/",
+                read_only=True,
+            ),
+            SimpleNamespace(
+                host_path="/host/duplicate",
+                container_path="/mnt/shared",
+                read_only=False,
+            ),
+        ],
+    )
+    posted_payloads: list[dict] = []
+
+    def mock_post(url: str, json: dict, timeout: int):
+        posted_payloads.append(json)
+        return _StubResponse(payload={"sandbox_id": "sandbox-1", "sandbox_url": "http://sandbox.local"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend.create("thread-1", "sandbox-1")
+
+    assert posted_payloads[0]["extra_mounts"] == [
+        {
+            "host_path": "/host/shared",
+            "container_path": "/mnt/shared",
+            "read_only": True,
+        }
+    ]
+
+
 def test_provisioner_create_sends_runtime_mounts_not_already_created_by_provisioner(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
