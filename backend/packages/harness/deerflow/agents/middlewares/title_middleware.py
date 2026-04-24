@@ -9,7 +9,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.config.title_config import get_title_config
-from deerflow.models import create_chat_model
+from deerflow.models import create_chat_model, get_system_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -123,10 +123,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         prompt, user_msg = self._build_title_prompt(state)
 
         try:
-            if config.model_name:
-                model = create_chat_model(name=config.model_name, thinking_enabled=False)
-            else:
-                model = create_chat_model(thinking_enabled=False)
+            model_name = get_system_model_name(config.model_name)
+            model = create_chat_model(name=model_name, thinking_enabled=False)
             response = await model.ainvoke(prompt)
             title = self._parse_title(response.content)
             if title:

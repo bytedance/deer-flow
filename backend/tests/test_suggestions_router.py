@@ -44,6 +44,7 @@ def test_generate_suggestions_parses_and_limits(monkeypatch):
     )
     fake_model = MagicMock()
     fake_model.ainvoke = AsyncMock(return_value=MagicMock(content='```json\n["Q1", "Q2", "Q3", "Q4"]\n```'))
+    monkeypatch.setattr(suggestions, "get_system_model_name", lambda task_override=None: "sys-default")
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     result = asyncio.run(suggestions.generate_suggestions("t1", req))
@@ -62,6 +63,7 @@ def test_generate_suggestions_parses_list_block_content(monkeypatch):
     )
     fake_model = MagicMock()
     fake_model.ainvoke = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": '```json\n["Q1", "Q2"]\n```'}]))
+    monkeypatch.setattr(suggestions, "get_system_model_name", lambda task_override=None: None)
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     result = asyncio.run(suggestions.generate_suggestions("t1", req))
@@ -80,6 +82,7 @@ def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
     )
     fake_model = MagicMock()
     fake_model.ainvoke = AsyncMock(return_value=MagicMock(content=[{"type": "output_text", "text": '```json\n["Q1", "Q2"]\n```'}]))
+    monkeypatch.setattr(suggestions, "get_system_model_name", lambda task_override=None: None)
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     result = asyncio.run(suggestions.generate_suggestions("t1", req))
@@ -95,8 +98,40 @@ def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):
     )
     fake_model = MagicMock()
     fake_model.ainvoke = AsyncMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(suggestions, "get_system_model_name", lambda task_override=None: None)
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     result = asyncio.run(suggestions.generate_suggestions("t1", req))
 
     assert result.suggestions == []
+
+
+def test_generate_suggestions_uses_system_model_name(monkeypatch):
+    """Verify that generate_suggestions passes the resolved system model name to create_chat_model."""
+    req = suggestions.SuggestionsRequest(
+        messages=[
+            suggestions.SuggestionMessage(role="user", content="Hi"),
+            suggestions.SuggestionMessage(role="assistant", content="Hello"),
+        ],
+        n=2,
+        model_name=None,
+    )
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=MagicMock(content='```json\n["Q1", "Q2"]\n```'))
+
+    captured_name = {}
+
+    def _fake_get_system_model_name(task_override=None):
+        return "gpt-4o-mini"
+
+    def _fake_create_chat_model(**kwargs):
+        captured_name["name"] = kwargs.get("name")
+        return fake_model
+
+    monkeypatch.setattr(suggestions, "get_system_model_name", _fake_get_system_model_name)
+    monkeypatch.setattr(suggestions, "create_chat_model", _fake_create_chat_model)
+
+    result = asyncio.run(suggestions.generate_suggestions("t1", req))
+
+    assert result.suggestions == ["Q1", "Q2"]
+    assert captured_name["name"] == "gpt-4o-mini"

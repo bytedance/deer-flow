@@ -4,6 +4,7 @@ from .memory_config import MemoryConfig, get_memory_config
 from .paths import Paths, get_paths
 from .skill_evolution_config import SkillEvolutionConfig
 from .skills_config import SkillsConfig
+from .system_models_config import SystemModelsConfig, get_system_models_config
 from .tracing_config import (
     get_enabled_tracing_providers,
     get_explicitly_enabled_tracing_providers,
@@ -22,6 +23,8 @@ __all__ = [
     "get_extensions_config",
     "MemoryConfig",
     "get_memory_config",
+    "SystemModelsConfig",
+    "get_system_models_config",
     "get_tracing_config",
     "get_explicitly_enabled_tracing_providers",
     "get_enabled_tracing_providers",

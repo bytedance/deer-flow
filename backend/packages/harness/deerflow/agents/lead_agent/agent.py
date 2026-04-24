@@ -21,7 +21,7 @@ from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.summarization_config import get_summarization_config
-from deerflow.models import create_chat_model
+from deerflow.models import create_chat_model, get_system_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +60,8 @@ def _create_summarization_middleware() -> DeerFlowSummarizationMiddleware | None
     keep = config.keep.to_tuple()
 
     # Prepare model parameter
-    if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False)
-    else:
-        # Use a lightweight model for summarization to save costs
-        # Falls back to default model if not explicitly specified
-        model = create_chat_model(thinking_enabled=False)
+    model_name = get_system_model_name(config.model_name)
+    model = create_chat_model(name=model_name, thinking_enabled=False)
 
     # Prepare kwargs
     kwargs = {

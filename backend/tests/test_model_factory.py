@@ -1,4 +1,4 @@
-"""Tests for deerflow.models.factory.create_chat_model."""
+"""Tests for deerflow.models.factory.create_chat_model and get_system_model_name."""
 
 from __future__ import annotations
 
@@ -956,3 +956,62 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
 
     # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
     assert captured.get("reasoning_effort") == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# get_system_model_name
+# ---------------------------------------------------------------------------
+
+
+class TestGetSystemModelName:
+    """Tests for the three-tier model name resolution used by system tasks."""
+
+    def setup_method(self):
+        from deerflow.config.system_models_config import get_system_models_config
+
+        self._original = get_system_models_config()
+
+    def teardown_method(self):
+        from deerflow.config.system_models_config import set_system_models_config
+
+        set_system_models_config(self._original)
+
+    def test_returns_task_override_when_truthy(self, monkeypatch):
+        """Priority 1: task_override is returned directly, no config lookup."""
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_system_models_config(SystemModelsConfig(default="global-default"))
+        result = factory_module.get_system_model_name(task_override="my-task-model")
+        assert result == "my-task-model"
+
+    def test_returns_system_models_default_when_no_override(self, monkeypatch):
+        """Priority 2: Falls back to system_models.default when no override."""
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_system_models_config(SystemModelsConfig(default="gpt-4o-mini"))
+        result = factory_module.get_system_model_name(task_override=None)
+        assert result == "gpt-4o-mini"
+
+    def test_returns_none_when_no_override_and_no_default(self, monkeypatch):
+        """Priority 3: Returns None when neither override nor system_models.default is set."""
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_system_models_config(SystemModelsConfig(default=None))
+        result = factory_module.get_system_model_name(task_override=None)
+        assert result is None
+
+    def test_empty_string_override_falls_through_to_system_default(self):
+        """Empty string is falsy, so it should fall through to system_models.default."""
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_system_models_config(SystemModelsConfig(default="fallback-model"))
+        result = factory_module.get_system_model_name(task_override="")
+        assert result == "fallback-model"
+
+    def test_empty_string_override_and_no_default_returns_none(self):
+        """Empty string override with no system default returns None."""
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_system_models_config(SystemModelsConfig(default=None))
+        result = factory_module.get_system_model_name(task_override="")
+        assert result is None

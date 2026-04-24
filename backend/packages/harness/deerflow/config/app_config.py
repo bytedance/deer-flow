@@ -21,6 +21,7 @@ from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
+from deerflow.config.system_models_config import SystemModelsConfig, load_system_models_config_from_dict
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_usage_config import TokenUsageConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
@@ -65,6 +66,7 @@ class AppConfig(BaseModel):
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
+    system_models: SystemModelsConfig = Field(default_factory=SystemModelsConfig, description="Default model configuration for system-level LLM tasks")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
@@ -157,6 +159,12 @@ class AppConfig(BaseModel):
 
         # Always refresh ACP agent config so removed entries do not linger across reloads.
         load_acp_config_from_dict(config_data.get("acp_agents", {}))
+
+        # Load system_models config; always call to reset singleton on reload.
+        system_models_val = config_data.get("system_models")
+        load_system_models_config_from_dict(system_models_val if isinstance(system_models_val, dict) else {})
+        if not isinstance(config_data.get("system_models"), dict):
+            config_data["system_models"] = {}
 
         # Load extensions config separately (it's in a different file)
         extensions_config = ExtensionsConfig.from_file()

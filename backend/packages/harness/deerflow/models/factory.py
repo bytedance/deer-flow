@@ -9,6 +9,33 @@ from deerflow.tracing import build_tracing_callbacks
 logger = logging.getLogger(__name__)
 
 
+def get_system_model_name(task_override: str | None = None) -> str | None:
+    """Resolve the model name for a system-level LLM task.
+
+    Priority:
+    1. task_override -- per-task model_name from config (e.g., title.model_name)
+    2. system_models.default -- global system default
+    3. None -- caller should fall back to create_chat_model(name=None)
+       which uses the first model in models[].
+
+    Args:
+        task_override: The model_name from the task-specific config, or None.
+
+    Returns:
+        A model name string, or None to signal "use default model".
+    """
+    if task_override:
+        return task_override
+
+    from deerflow.config.system_models_config import get_system_models_config
+
+    system_config = get_system_models_config()
+    if system_config.default and system_config.default.strip():
+        return system_config.default
+
+    return None
+
+
 def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
     """Recursively merge two dictionaries without mutating the inputs."""
     merged = dict(base or {})

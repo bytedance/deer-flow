@@ -207,3 +207,58 @@ def test_create_summarization_middleware_registers_memory_flush_hook_when_memory
     lead_agent_module._create_summarization_middleware()
 
     assert captured["before_summarization"] == [lead_agent_module.memory_flush_hook]
+
+
+def test_create_summarization_middleware_resolves_model_via_get_system_model_name(monkeypatch):
+    """_create_summarization_middleware passes config.model_name through get_system_model_name."""
+    monkeypatch.setattr(
+        lead_agent_module,
+        "get_summarization_config",
+        lambda: SummarizationConfig(enabled=True, model_name=None),
+    )
+    monkeypatch.setattr(lead_agent_module, "get_memory_config", lambda: MemoryConfig(enabled=False))
+
+    captured_system_name = {}
+
+    def _fake_get_system_model_name(task_override=None):
+        captured_system_name["task_override"] = task_override
+        return "resolved-system-model"
+
+    captured_create = {}
+
+    def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None):
+        captured_create["name"] = name
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "get_system_model_name", _fake_get_system_model_name)
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+
+    lead_agent_module._create_summarization_middleware()
+
+    assert captured_system_name["task_override"] is None
+    assert captured_create["name"] == "resolved-system-model"
+
+
+def test_create_summarization_middleware_passes_task_override_to_resolver(monkeypatch):
+    """When config.model_name is set, it's passed as task_override to get_system_model_name."""
+    monkeypatch.setattr(
+        lead_agent_module,
+        "get_summarization_config",
+        lambda: SummarizationConfig(enabled=True, model_name="my-summarizer"),
+    )
+    monkeypatch.setattr(lead_agent_module, "get_memory_config", lambda: MemoryConfig(enabled=False))
+
+    captured_system_name = {}
+
+    def _fake_get_system_model_name(task_override=None):
+        captured_system_name["task_override"] = task_override
+        return task_override
+
+    monkeypatch.setattr(lead_agent_module, "get_system_model_name", _fake_get_system_model_name)
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+
+    lead_agent_module._create_summarization_middleware()
+
+    assert captured_system_name["task_override"] == "my-summarizer"

@@ -5,7 +5,7 @@ from fastapi import APIRouter
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from deerflow.models import create_chat_model
+from deerflow.models import create_chat_model, get_system_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class SuggestionMessage(BaseModel):
 class SuggestionsRequest(BaseModel):
     messages: list[SuggestionMessage] = Field(..., description="Recent conversation messages")
     n: int = Field(default=3, ge=1, le=5, description="Number of suggestions to generate")
-    model_name: str | None = Field(default=None, description="Optional model override")
+    model_name: str | None = Field(default=None, deprecated="Ignored. Suggestions always use system_models.default.")
 
 
 class SuggestionsResponse(BaseModel):
@@ -120,7 +120,8 @@ async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> S
     user_content = f"Conversation Context:\n{conversation}\n\nGenerate {n} follow-up questions"
 
     try:
-        model = create_chat_model(name=request.model_name, thinking_enabled=False)
+        model_name = get_system_model_name(task_override=None)
+        model = create_chat_model(name=model_name, thinking_enabled=False)
         response = await model.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=user_content)])
         raw = _extract_response_text(response.content)
         suggestions = _parse_json_string_list(raw) or []

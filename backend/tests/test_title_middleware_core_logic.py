@@ -25,11 +25,17 @@ def _set_test_title_config(**overrides) -> TitleConfig:
 
 class TestTitleMiddlewareCoreLogic:
     def setup_method(self):
-        # Title config is a global singleton; snapshot and restore for test isolation.
+        # Title config and system_models_config are global singletons; snapshot and restore for test isolation.
         self._original = _clone_title_config(get_title_config())
+        from deerflow.config.system_models_config import get_system_models_config
+
+        self._original_system_models = get_system_models_config()
 
     def teardown_method(self):
         set_title_config(self._original)
+        from deerflow.config.system_models_config import set_system_models_config
+
+        set_system_models_config(self._original_system_models)
 
     def test_should_generate_title_for_first_complete_exchange(self):
         _set_test_title_config(enabled=True)
@@ -91,7 +97,9 @@ class TestTitleMiddlewareCoreLogic:
         title = result["title"]
 
         assert title == "短标题"
-        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False)
+        create_call_kwargs = title_middleware_module.create_chat_model.call_args
+        assert create_call_kwargs.kwargs.get("thinking_enabled") is False
+        assert "name" in create_call_kwargs.kwargs
         model.ainvoke.assert_awaited_once()
 
     def test_generate_title_normalizes_structured_message_content(self, monkeypatch):
@@ -228,3 +236,59 @@ class TestTitleMiddlewareCoreLogic:
         assert result is not None
         assert "<think>" not in result["title"]
         assert result["title"] == "贵阳发展研究"
+
+    def test_generate_title_uses_system_model_default(self, monkeypatch):
+        """TitleMiddleware passes get_system_model_name result to create_chat_model."""
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_system_models_config(SystemModelsConfig(default="gpt-4o-mini"))
+        _set_test_title_config(max_chars=50)
+        middleware = TitleMiddleware()
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="测试标题"))
+
+        captured_name = {}
+
+        def _fake_create_chat_model(**kwargs):
+            captured_name["name"] = kwargs.get("name")
+            return model
+
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(side_effect=_fake_create_chat_model))
+
+        state = {
+            "messages": [
+                HumanMessage(content="你好"),
+                AIMessage(content="你好！"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+        assert result["title"] == "测试标题"
+        assert captured_name["name"] == "gpt-4o-mini"
+
+    def test_generate_title_task_override_takes_priority(self, monkeypatch):
+        """When title config has model_name set, it takes priority over system_models.default."""
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_system_models_config(SystemModelsConfig(default="gpt-4o-mini"))
+        _set_test_title_config(max_chars=50, model_name="title-specific-model")
+        middleware = TitleMiddleware()
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="特定标题"))
+
+        captured_name = {}
+
+        def _fake_create_chat_model(**kwargs):
+            captured_name["name"] = kwargs.get("name")
+            return model
+
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(side_effect=_fake_create_chat_model))
+
+        state = {
+            "messages": [
+                HumanMessage(content="你好"),
+                AIMessage(content="你好！"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+        assert result["title"] == "特定标题"
+        assert captured_name["name"] == "title-specific-model"

@@ -327,6 +327,22 @@ models:
   #         enable_thinking: true
 
 # ============================================================================
+# System Models Configuration
+# ============================================================================
+# Default model for system-level LLM tasks (title generation, memory updates,
+# summarization, suggestions, skill security scanning).
+# Each system task follows a three-tier fallback:
+#   1. Task-specific model_name override (e.g., title.model_name)
+#   2. system_models.default (this setting)
+#   3. First model in the models[] list (backward compatible)
+#
+# Recommended: Use a lightweight, cost-effective model for system tasks
+# to reduce costs on operations that don't require heavy reasoning.
+#
+# system_models:
+#   default: gpt-4o-mini  # or any model name from your models list
+
+# ============================================================================
 # Tool Groups Configuration
 # ============================================================================
 # Define groups of tools for organization and access control

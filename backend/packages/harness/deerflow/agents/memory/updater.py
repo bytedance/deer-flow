@@ -22,7 +22,7 @@ from deerflow.agents.memory.storage import (
     utc_now_iso_z,
 )
 from deerflow.config.memory_config import get_memory_config
-from deerflow.models import create_chat_model
+from deerflow.models import create_chat_model, get_system_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +310,7 @@ class MemoryUpdater:
     def _get_model(self):
         """Get the model for memory updates."""
         config = get_memory_config()
-        model_name = self._model_name or config.model_name
+        model_name = get_system_model_name(self._model_name or config.model_name)
         return create_chat_model(name=model_name, thinking_enabled=False)
 
     def _build_correction_hint(

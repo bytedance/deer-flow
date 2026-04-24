@@ -883,6 +883,100 @@ class TestReinforcementHint:
         assert "Positive reinforcement signals were detected" in prompt
 
 
+
+class TestMemoryUpdaterGetModel:
+    """Tests for MemoryUpdater._get_model model resolution via get_system_model_name."""
+
+    def setup_method(self):
+        from deerflow.config.memory_config import get_memory_config
+        from deerflow.config.system_models_config import get_system_models_config
+
+        self._original_system_models = get_system_models_config()
+        self._original_memory = get_memory_config()
+
+    def teardown_method(self):
+        from deerflow.config.memory_config import set_memory_config
+        from deerflow.config.system_models_config import set_system_models_config
+
+        set_system_models_config(self._original_system_models)
+        set_memory_config(self._original_memory)
+
+    def test_get_model_with_instance_model_name(self, monkeypatch):
+        """Instance model_name takes priority when set."""
+        from deerflow.config.memory_config import MemoryConfig, set_memory_config
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_memory_config(MemoryConfig(model_name=None))
+        set_system_models_config(SystemModelsConfig(default="sys-default"))
+
+        captured = {}
+
+        def _fake_get_system_model_name(task_override=None):
+            return task_override or "unexpected"
+
+        def _fake_create_chat_model(**kwargs):
+            captured["name"] = kwargs.get("name")
+            return MagicMock()
+
+        monkeypatch.setattr("deerflow.agents.memory.updater.get_system_model_name", _fake_get_system_model_name)
+        monkeypatch.setattr("deerflow.agents.memory.updater.create_chat_model", _fake_create_chat_model)
+        monkeypatch.setattr("deerflow.agents.memory.updater.get_memory_config", lambda: MemoryConfig(model_name=None))
+
+        updater = MemoryUpdater(model_name="instance-model")
+        updater._get_model()
+
+        assert captured["name"] == "instance-model"
+
+    def test_get_model_falls_back_to_config_model_name(self, monkeypatch):
+        """When no instance model_name, uses config.model_name via get_system_model_name."""
+        from deerflow.config.memory_config import MemoryConfig
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_system_models_config(SystemModelsConfig(default="sys-default"))
+
+        captured = {}
+
+        def _fake_get_system_model_name(task_override=None):
+            return task_override or "sys-default"
+
+        def _fake_create_chat_model(**kwargs):
+            captured["name"] = kwargs.get("name")
+            return MagicMock()
+
+        monkeypatch.setattr("deerflow.agents.memory.updater.get_system_model_name", _fake_get_system_model_name)
+        monkeypatch.setattr("deerflow.agents.memory.updater.create_chat_model", _fake_create_chat_model)
+        monkeypatch.setattr("deerflow.agents.memory.updater.get_memory_config", lambda: MemoryConfig(model_name="config-model"))
+
+        updater = MemoryUpdater(model_name=None)
+        updater._get_model()
+
+        assert captured["name"] == "config-model"
+
+    def test_get_model_falls_back_to_system_default(self, monkeypatch):
+        """When neither instance nor config model_name, falls back to system_models.default."""
+        from deerflow.config.memory_config import MemoryConfig
+        from deerflow.config.system_models_config import SystemModelsConfig, set_system_models_config
+
+        set_system_models_config(SystemModelsConfig(default="gpt-4o-mini"))
+
+        captured = {}
+
+        def _fake_get_system_model_name(task_override=None):
+            return task_override or "gpt-4o-mini"
+
+        def _fake_create_chat_model(**kwargs):
+            captured["name"] = kwargs.get("name")
+            return MagicMock()
+
+        monkeypatch.setattr("deerflow.agents.memory.updater.get_system_model_name", _fake_get_system_model_name)
+        monkeypatch.setattr("deerflow.agents.memory.updater.create_chat_model", _fake_create_chat_model)
+        monkeypatch.setattr("deerflow.agents.memory.updater.get_memory_config", lambda: MemoryConfig(model_name=None))
+
+        updater = MemoryUpdater(model_name=None)
+        updater._get_model()
+
+        assert captured["name"] == "gpt-4o-mini"
+
 class TestFinalizeCacheIsolation:
     """_finalize_update must not mutate the cached memory object."""
 
@@ -931,3 +1025,4 @@ class TestFinalizeCacheIsolation:
         # original_memory must not have been mutated — deepcopy isolates the mutation
         assert len(original_memory["facts"]) == 1, "original_memory must not be mutated by _apply_updates"
         assert original_memory["facts"][0]["content"] == "original"
+
