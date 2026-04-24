@@ -118,17 +118,25 @@ class RemoteSandboxBackend(SandboxBackend):
     def _serialize_extra_mounts(self, extra_mounts: list[tuple[str, str, bool]] | None = None) -> list[dict[str, object]]:
         """Serialize configured and runtime mounts for the provisioner API."""
         mounts: list[dict[str, object]] = []
+        seen_container_paths: set[str] = set()
 
         for mount in self._config_mounts:
+            normalized_container_path = mount.container_path.rstrip("/") or "/"
+            if self._is_provisioner_builtin_mount(normalized_container_path):
+                logger.warning("Skipping provisioner built-in config mount target: %s", mount.container_path)
+                continue
+            if normalized_container_path in seen_container_paths:
+                logger.warning("Skipping duplicate provisioner config mount target: %s", mount.container_path)
+                continue
+            seen_container_paths.add(normalized_container_path)
             mounts.append(
                 {
                     "host_path": mount.host_path,
-                    "container_path": mount.container_path,
+                    "container_path": normalized_container_path,
                     "read_only": mount.read_only,
                 }
             )
 
-        seen_container_paths = {str(mount["container_path"]).rstrip("/") or "/" for mount in mounts}
         for host_path, container_path, read_only in extra_mounts or []:
             normalized_container_path = container_path.rstrip("/") or "/"
             if self._is_provisioner_builtin_mount(normalized_container_path):
@@ -150,7 +158,12 @@ class RemoteSandboxBackend(SandboxBackend):
     @staticmethod
     def _is_provisioner_builtin_mount(container_path: str) -> bool:
         """Return true for mount paths the provisioner already creates itself."""
-        return container_path == "/mnt/skills" or container_path.startswith("/mnt/user-data/")
+        return (
+            container_path == "/mnt/skills"
+            or container_path.startswith("/mnt/skills/")
+            or container_path == "/mnt/user-data"
+            or container_path.startswith("/mnt/user-data/")
+        )
 
     def _provisioner_destroy(self, sandbox_id: str) -> None:
         """DELETE /api/sandboxes/{sandbox_id} → destroy Pod + Service."""

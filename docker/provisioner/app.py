@@ -107,6 +107,15 @@ def _is_absolute_host_path(path: str) -> bool:
     return path.startswith("/") or bool(re.match(r"^[A-Za-z]:[\\/]", path)) or path.startswith("\\\\")
 
 
+def _is_reserved_extra_mount_path(container_path: str) -> bool:
+    return (
+        container_path == "/mnt/skills"
+        or container_path.startswith("/mnt/skills/")
+        or container_path == "/mnt/user-data"
+        or container_path.startswith("/mnt/user-data/")
+    )
+
+
 # ── K8s client setup ────────────────────────────────────────────────────
 
 core_v1: k8s_client.CoreV1Api | None = None
@@ -259,7 +268,7 @@ def _sandbox_url(node_port: int) -> str:
 def _normalize_extra_mounts(extra_mounts: list[ExtraMountRequest] | None) -> list[ExtraMountRequest]:
     """Validate and normalize caller-provided hostPath mounts."""
     normalized: list[ExtraMountRequest] = []
-    seen_container_paths = {"/mnt/skills", "/mnt/user-data"}
+    seen_container_paths: set[str] = set()
 
     for mount in extra_mounts or []:
         host_path = mount.host_path
@@ -273,7 +282,7 @@ def _normalize_extra_mounts(extra_mounts: list[ExtraMountRequest] | None) -> lis
             raise ValueError(f"extra_mounts.container_path must be absolute: {mount.container_path}")
         if container_path == "/":
             raise ValueError("extra_mounts.container_path must not be the filesystem root")
-        if container_path in seen_container_paths:
+        if _is_reserved_extra_mount_path(container_path) or container_path in seen_container_paths:
             raise ValueError(f"duplicate or reserved extra_mounts.container_path: {container_path}")
         seen_container_paths.add(container_path)
 
@@ -330,7 +339,7 @@ def _build_volumes(thread_id: str, extra_mounts: list[ExtraMountRequest] | None 
                 name=f"extra-mount-{index}",
                 host_path=k8s_client.V1HostPathVolumeSource(
                     path=mount.host_path,
-                    type="Directory",
+                    type="DirectoryOrCreate",
                 ),
             )
         )

@@ -94,7 +94,7 @@ class TestBuildVolumes:
         extra_volume = volumes[2]
         assert extra_volume.name == "extra-mount-0"
         assert extra_volume.host_path.path == "/host/shared"
-        assert extra_volume.host_path.type == "Directory"
+        assert extra_volume.host_path.type == "DirectoryOrCreate"
 
 
 # ── _build_volume_mounts ───────────────────────────────────────────────
@@ -186,6 +186,28 @@ class TestBuildVolumeMounts:
         ]
 
         with pytest.raises(ValueError, match="host_path must be absolute"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
+    def test_rejects_reserved_extra_mount_subpaths(self, provisioner_module):
+        """Extra mounts may not shadow provisioner-managed mount trees."""
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/user-data",
+                container_path="/mnt/user-data/workspace",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="reserved"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/skills",
+                container_path="/mnt/skills/nested",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="reserved"):
             provisioner_module._build_volume_mounts("thread-1", extra_mounts)
 
 
