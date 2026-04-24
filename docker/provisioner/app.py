@@ -36,7 +36,8 @@ import time
 from contextlib import asynccontextmanager
 
 import urllib3
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import APIKeyHeader
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
@@ -72,6 +73,18 @@ KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
 # services on the host Kubernetes node.  On Docker Desktop for macOS this
 # is ``host.docker.internal``; on Linux it may be the host's LAN IP.
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
+
+# Optional API key for protecting the provisioner endpoints.
+# Set PROVISIONER_API_KEY in the environment to enable authentication.
+PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _require_api_key(api_key: str | None = Depends(_api_key_header)) -> None:
+    """Reject requests that do not supply the correct API key."""
+    if PROVISIONER_API_KEY and api_key != PROVISIONER_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
 
 def join_host_path(base: str, *parts: str) -> str:
@@ -437,7 +450,7 @@ async def health():
 
 
 @app.post("/api/sandboxes", response_model=SandboxResponse)
-async def create_sandbox(req: CreateSandboxRequest):
+async def create_sandbox(req: CreateSandboxRequest, _: None = Depends(_require_api_key)):
     """Create a sandbox Pod + NodePort Service for *sandbox_id*.
 
     If the sandbox already exists, returns the existing information
@@ -505,7 +518,7 @@ async def create_sandbox(req: CreateSandboxRequest):
 
 
 @app.delete("/api/sandboxes/{sandbox_id}")
-async def destroy_sandbox(sandbox_id: str):
+async def destroy_sandbox(sandbox_id: str, _: None = Depends(_require_api_key)):
     """Destroy a sandbox Pod + Service."""
     errors: list[str] = []
 
@@ -534,7 +547,7 @@ async def destroy_sandbox(sandbox_id: str):
 
 
 @app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse)
-async def get_sandbox(sandbox_id: str):
+async def get_sandbox(sandbox_id: str, _: None = Depends(_require_api_key)):
     """Return current status and URL for a sandbox."""
     node_port = _get_node_port(sandbox_id)
     if not node_port:
@@ -548,7 +561,7 @@ async def get_sandbox(sandbox_id: str):
 
 
 @app.get("/api/sandboxes")
-async def list_sandboxes():
+async def list_sandboxes(_: None = Depends(_require_api_key)):
     """List every sandbox currently managed in the namespace."""
     try:
         services = core_v1.list_namespaced_service(
