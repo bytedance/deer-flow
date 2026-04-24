@@ -181,3 +181,50 @@ class TestTitleMiddlewareCoreLogic:
         result = middleware._generate_title_result(state)
         assert result["title"].endswith("...")
         assert result["title"].startswith("这是一个非常长的问题描述")
+
+    def test_parse_title_strips_think_tags(self):
+        """Title model responses with <think>...</think> blocks are stripped before use."""
+        middleware = TitleMiddleware()
+        raw = "<think>用户想要研究贵阳发展情况。我需要使用 deep-research skill。</think>贵阳近5年发展报告研究"
+        result = middleware._parse_title(raw)
+        assert "<think>" not in result
+        assert result == "贵阳近5年发展报告研究"
+
+    def test_parse_title_strips_think_tags_only_response(self):
+        """If model only outputs a think block and nothing else, title is empty string."""
+        middleware = TitleMiddleware()
+        raw = "<think>just thinking, no real title</think>"
+        result = middleware._parse_title(raw)
+        assert result == ""
+
+    def test_build_title_prompt_strips_assistant_think_tags(self):
+        """<think> blocks in assistant messages are stripped before being included in the title prompt."""
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="贵阳发展报告研究"),
+                AIMessage(content="<think>分析用户需求</think>我将为您研究贵阳的发展情况。"),
+            ]
+        }
+        prompt, _ = middleware._build_title_prompt(state)
+        assert "<think>" not in prompt
+
+    def test_generate_title_async_strips_think_tags_in_response(self, monkeypatch):
+        """Async title generation strips <think> blocks from the model response."""
+        _set_test_title_config(max_chars=50)
+        middleware = TitleMiddleware()
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="<think>用户想研究贵阳。</think>贵阳发展研究"))
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(return_value=model))
+
+        state = {
+            "messages": [
+                HumanMessage(content="请帮我研究贵阳近5年发展情况"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+        assert result is not None
+        assert "<think>" not in result["title"]
+        assert result["title"] == "贵阳发展研究"

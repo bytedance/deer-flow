@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 6
+config_version: 7
 
 # ============================================================================
 # Logging
@@ -21,10 +21,11 @@ config_version: 6
 log_level: info
 
 # ============================================================================
-# Token Usage Tracking
+# Token Usage
 # ============================================================================
-# Track LLM token usage per model call (input/output/total tokens)
-# Logs at info level via TokenUsageMiddleware
+# Enable token usage collection and display.
+# When enabled, DeerFlow records input/output/total tokens per model call
+# and shows usage metadata in the workspace UI when providers return it.
 token_usage:
   enabled: false
 
@@ -511,7 +512,13 @@ tool_search:
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
 uploads:
-  # PDF-to-Markdown converter used when a PDF is uploaded.
+  # Automatic Office/PDF conversion runs on the backend host before sandbox
+  # isolation applies. Keep this disabled unless uploads come from a fully
+  # trusted source and you intentionally accept host-side parser risk.
+  auto_convert_documents: false
+  # Controls which PDF-to-Markdown converter is used whenever PDF conversion
+  # runs. Automatic upload conversion is gated separately by
+  # auto_convert_documents.
   # auto        — prefer pymupdf4llm when installed; fall back to MarkItDown for
   #               image-based or encrypted PDFs (recommended default).
   # pymupdf4llm — always use pymupdf4llm (must be installed: uv add pymupdf4llm).
@@ -602,14 +609,45 @@ sandbox:
 #   # Optional global max-turn override for all subagents
 #   # max_turns: 120
 #
-#   # Optional per-agent overrides
+#   # Optional per-agent overrides (applies to both built-in and custom agents)
 #   agents:
 #     general-purpose:
 #       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
 #       max_turns: 160
+#       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
+#       # skills:               # Skill whitelist (default: inherit all enabled skills)
+#       #   - web-search
+#       #   - data-analysis
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 #       max_turns: 80
+#       # skills: []            # No skills for bash agent
+#
+#   # Custom subagent types: define specialized agents with their own prompts,
+#   # tools, skills, and model configuration. Custom agents are available via
+#   # the `task` tool alongside built-in types (general-purpose, bash).
+#   # custom_agents:
+#   #   analysis:
+#   #     description: "Data analysis specialist for processing datasets and generating insights"
+#   #     system_prompt: |
+#   #       You are a data analysis subagent. Focus on:
+#   #       - Processing and analyzing datasets
+#   #       - Generating visualizations
+#   #       - Providing statistical insights
+#   #     tools:                  # Tool whitelist (null = inherit all)
+#   #       - bash
+#   #       - read_file
+#   #       - write_file
+#   #     skills:                 # Skill whitelist (null = inherit all, [] = none)
+#   #       - data-analysis
+#   #       - visualization
+#   #     model: inherit          # 'inherit' uses parent's model
+#   #     max_turns: 80
+#   #     timeout_seconds: 600
+#
+#   # Model override: by default, subagents inherit the lead agent's model.
+#   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
+#   # The model name must match a name defined in the `models:` section above.
 
 # ============================================================================
 # ACP Agents Configuration
@@ -734,6 +772,14 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+
+# ============================================================================
+# Custom Agent Management API
+# ============================================================================
+# Controls whether the HTTP gateway exposes custom-agent SOUL/USER.md management.
+# Keep this disabled unless the gateway is behind a trusted authenticated admin boundary.
+agents_api:
+  enabled: false
 
 # ============================================================================
 # Skill Self-Evolution Configuration
@@ -910,3 +956,20 @@ checkpointer:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# Circuit Breaker Configuration
+# ============================================================================
+# Circuit breaker for LLM calls prevents repeated requests to a failing provider.
+# When the failure threshold is reached, subsequent calls fast-fail until recovery.
+#
+# This is useful for:
+# - Avoiding rate-limit bans during provider outages
+# - Reducing resource exhaustion from retry loops
+# - Gracefully degrading when LLM services are unavailable
+
+# circuit_breaker:
+#   # Number of consecutive failures before opening the circuit (default: 5)
+#   failure_threshold: 5
+#   # Time in seconds before attempting to recover (default: 60)
+#   recovery_timeout_sec: 60

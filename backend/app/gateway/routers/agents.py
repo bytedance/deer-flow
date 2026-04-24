@@ -8,6 +8,7 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
 
@@ -24,6 +25,7 @@ class AgentResponse(BaseModel):
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
+    skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -40,6 +42,7 @@ class AgentCreateRequest(BaseModel):
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
+    skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all enabled, []=none)")
     soul: str = Field(default="", description="SOUL.md content — agent personality and behavioral guardrails")
 
 
@@ -49,6 +52,7 @@ class AgentUpdateRequest(BaseModel):
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
+    skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
 
 
@@ -73,6 +77,15 @@ def _normalize_agent_name(name: str) -> str:
     return name.lower()
 
 
+def _require_agents_api_enabled() -> None:
+    """Reject access unless the custom-agent management API is explicitly enabled."""
+    if not get_agents_api_config().enabled:
+        raise HTTPException(
+            status_code=403,
+            detail=("Custom-agent management API is disabled. Set agents_api.enabled=true to expose agent and user-profile routes over HTTP."),
+        )
+
+
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
@@ -84,6 +97,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         description=agent_cfg.description,
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
+        skills=agent_cfg.skills,
         soul=soul,
     )
 
@@ -100,6 +114,8 @@ async def list_agents() -> AgentsListResponse:
     Returns:
         List of all custom agents with their metadata and soul content.
     """
+    _require_agents_api_enabled()
+
     try:
         agents = list_custom_agents()
         return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True) for a in agents])
@@ -125,6 +141,7 @@ async def check_agent_name(name: str) -> dict:
     Raises:
         HTTPException: 422 if the name is invalid.
     """
+    _require_agents_api_enabled()
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
     available = not get_paths().agent_dir(normalized).exists()
@@ -149,6 +166,7 @@ async def get_agent(name: str) -> AgentResponse:
     Raises:
         HTTPException: 404 if agent not found.
     """
+    _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
 
@@ -181,6 +199,7 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     Raises:
         HTTPException: 409 if agent already exists, 422 if name is invalid.
     """
+    _require_agents_api_enabled()
     _validate_agent_name(request.name)
     normalized_name = _normalize_agent_name(request.name)
 
@@ -200,6 +219,8 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
             config_data["model"] = request.model
         if request.tool_groups is not None:
             config_data["tool_groups"] = request.tool_groups
+        if request.skills is not None:
+            config_data["skills"] = request.skills
 
         config_file = agent_dir / "config.yaml"
         with open(config_file, "w", encoding="utf-8") as f:
@@ -243,6 +264,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     Raises:
         HTTPException: 404 if agent not found.
     """
+    _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
 
@@ -255,20 +277,31 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
     try:
         # Update config if any config fields changed
-        config_changed = any(v is not None for v in [request.description, request.model, request.tool_groups])
+        # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
+        # This is critical for skills where None means "inherit all" (not "don't change").
+        fields_set = request.model_fields_set
+        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills"})
 
         if config_changed:
             updated: dict = {
                 "name": agent_cfg.name,
-                "description": request.description if request.description is not None else agent_cfg.description,
+                "description": request.description if "description" in fields_set else agent_cfg.description,
             }
-            new_model = request.model if request.model is not None else agent_cfg.model
+            new_model = request.model if "model" in fields_set else agent_cfg.model
             if new_model is not None:
                 updated["model"] = new_model
 
-            new_tool_groups = request.tool_groups if request.tool_groups is not None else agent_cfg.tool_groups
+            new_tool_groups = request.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
             if new_tool_groups is not None:
                 updated["tool_groups"] = new_tool_groups
+
+            # skills: None = inherit all, [] = no skills, ["a","b"] = whitelist
+            if "skills" in fields_set:
+                new_skills = request.skills
+            else:
+                new_skills = agent_cfg.skills
+            if new_skills is not None:
+                updated["skills"] = new_skills
 
             config_file = agent_dir / "config.yaml"
             with open(config_file, "w", encoding="utf-8") as f:
@@ -315,6 +348,8 @@ async def get_user_profile() -> UserProfileResponse:
     Returns:
         UserProfileResponse with content=None if USER.md does not exist yet.
     """
+    _require_agents_api_enabled()
+
     try:
         user_md_path = get_paths().user_md_file
         if not user_md_path.exists():
@@ -341,6 +376,8 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     Returns:
         UserProfileResponse with the saved content.
     """
+    _require_agents_api_enabled()
+
     try:
         paths = get_paths()
         paths.base_dir.mkdir(parents=True, exist_ok=True)
@@ -367,6 +404,7 @@ async def delete_agent(name: str) -> None:
     Raises:
         HTTPException: 404 if agent not found.
     """
+    _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
 

@@ -38,6 +38,6 @@ class JinaClient:
 
             return response.text
         except Exception as e:
-            error_message = f"Request to Jina API failed: {str(e)}"
-            logger.exception(error_message)
+            error_message = f"Request to Jina API failed: {type(e).__name__}: {e}"
+            logger.warning(error_message)
             return f"Error: {error_message}"

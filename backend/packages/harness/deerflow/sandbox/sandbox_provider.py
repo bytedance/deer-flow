@@ -8,6 +8,8 @@ from deerflow.sandbox.sandbox import Sandbox
 class SandboxProvider(ABC):
     """Abstract base class for sandbox providers"""
 
+    uses_thread_data_mounts: bool = False
+
     @abstractmethod
     def acquire(self, thread_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.

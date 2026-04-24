@@ -27,7 +27,7 @@ from langgraph.types import Checkpointer
 
 from deerflow.config.app_config import get_app_config
 from deerflow.config.checkpointer_config import CheckpointerConfig
-from deerflow.runtime.store._sqlite_utils import resolve_sqlite_conn_str
+from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,7 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
             raise ImportError(SQLITE_INSTALL) from exc
 
         conn_str = resolve_sqlite_conn_str(config.connection_string or "store.db")
+        ensure_sqlite_parent_dir(conn_str)
         with SqliteSaver.from_conn_string(conn_str) as saver:
             saver.setup()
             logger.info("Checkpointer: using SqliteSaver (%s)", conn_str)

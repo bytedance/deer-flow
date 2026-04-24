@@ -17,10 +17,14 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 | `pnpm check`     | Lint + type check (run before committing)         |
 | `pnpm lint`      | ESLint only                                       |
 | `pnpm lint:fix`  | ESLint with auto-fix                              |
+| `pnpm test`      | Run unit tests with Vitest                        |
+| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)          |
 | `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)            |
 | `pnpm start`     | Start production server                           |
 
-No test framework is configured.
+Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Vitest; import source modules via the `@/` path alias.
+
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
 
 ## Architecture
 
