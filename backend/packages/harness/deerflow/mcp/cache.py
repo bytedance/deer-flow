@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+from typing import Any
 
 from langchain_core.tools import BaseTool
 
@@ -12,6 +13,8 @@ _mcp_tools_cache: list[BaseTool] | None = None
 _cache_initialized = False
 _initialization_lock = asyncio.Lock()
 _config_mtime: float | None = None  # Track config file modification time
+_enabled_server_count = 0
+_active_tools_by_server: dict[str, list[str]] = {}
 
 
 def _get_config_mtime() -> float | None:
@@ -28,7 +31,7 @@ def _get_config_mtime() -> float | None:
     return None
 
 
-def _is_cache_stale() -> bool:
+def _is_cache_stale(*, log_change: bool = True) -> bool:
     """Check if the cache is stale due to config file changes.
 
     Returns:
@@ -47,10 +50,43 @@ def _is_cache_stale() -> bool:
 
     # If the config file has been modified since we cached, it's stale
     if current_mtime > _config_mtime:
-        logger.info(f"MCP config file has been modified (mtime: {_config_mtime} -> {current_mtime}), cache is stale")
+        if log_change:
+            logger.info(f"MCP config file has been modified (mtime: {_config_mtime} -> {current_mtime}), cache is stale")
         return True
 
     return False
+
+
+def get_mcp_cache_status() -> dict[str, Any]:
+    """Return the current MCP cache status for runtime feedback surfaces.
+
+    The values describe the state observed by the current Python process. In
+    split gateway/runtime deployments, other processes may refresh on their own
+    next MCP tool load after the config file mtime changes.
+    """
+    cache_stale = _is_cache_stale(log_change=False)
+    active_tool_count = len(_mcp_tools_cache or []) if _cache_initialized else 0
+    status = (
+        "not_initialized"
+        if not _cache_initialized
+        else "pending_reload"
+        if cache_stale
+        else "in_sync"
+    )
+
+    return {
+        "status": status,
+        "reload_mode": "next_tool_load",
+        "restart_required": False,
+        "will_apply_on_next_load": (not _cache_initialized) or cache_stale,
+        "cache_initialized": _cache_initialized,
+        "cache_stale": cache_stale,
+        "config_last_modified_at": _get_config_mtime(),
+        "runtime_config_last_loaded_at": _config_mtime,
+        "active_server_count": _enabled_server_count if _cache_initialized else 0,
+        "active_tool_count": active_tool_count,
+        "active_tools_by_server": _active_tools_by_server if _cache_initialized else {},
+    }
 
 
 async def initialize_mcp_tools() -> list[BaseTool]:
@@ -61,20 +97,32 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     Returns:
         List of LangChain tools from all enabled MCP servers.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _cache_initialized, _config_mtime, _enabled_server_count, _active_tools_by_server
 
     async with _initialization_lock:
         if _cache_initialized:
             logger.info("MCP tools already initialized")
             return _mcp_tools_cache or []
 
-        from deerflow.mcp.tools import get_mcp_tools
+        from deerflow.config.extensions_config import ExtensionsConfig
+        from deerflow.mcp.tools import get_mcp_tools_for_config
 
         logger.info("Initializing MCP tools...")
-        _mcp_tools_cache = await get_mcp_tools()
+        extensions_config = ExtensionsConfig.from_file()
+        _mcp_tools_cache = await get_mcp_tools_for_config(extensions_config)
         _cache_initialized = True
+        _enabled_server_count = len(extensions_config.get_enabled_mcp_servers())
+        _active_tools_by_server = _group_active_tools_by_server(
+            _mcp_tools_cache,
+            list(extensions_config.get_enabled_mcp_servers().keys()),
+        )
         _config_mtime = _get_config_mtime()  # Record config file mtime
-        logger.info(f"MCP tools initialized: {len(_mcp_tools_cache)} tool(s) loaded (config mtime: {_config_mtime})")
+        logger.info(
+            "MCP tools initialized: %s tool(s) loaded across %s enabled server(s) (config mtime: %s)",
+            len(_mcp_tools_cache),
+            _enabled_server_count,
+            _config_mtime,
+        )
 
         return _mcp_tools_cache
 
@@ -130,13 +178,39 @@ def get_cached_mcp_tools() -> list[BaseTool]:
     return _mcp_tools_cache or []
 
 
+def _group_active_tools_by_server(
+    tools: list[BaseTool] | None,
+    server_names: list[str],
+) -> dict[str, list[str]]:
+    """Group active MCP tool names by server using the persisted name prefix."""
+    from deerflow.mcp.tools import split_prefixed_mcp_tool_name
+
+    grouped = {server_name: [] for server_name in server_names}
+
+    for tool in tools or []:
+        split_name = split_prefixed_mcp_tool_name(tool.name, server_names)
+        if split_name is None:
+            continue
+
+        server_name, raw_tool_name = split_name
+        grouped.setdefault(server_name, []).append(raw_tool_name)
+
+    return {
+        server_name: sorted(tool_names)
+        for server_name, tool_names in grouped.items()
+        if tool_names
+    }
+
+
 def reset_mcp_tools_cache() -> None:
     """Reset the MCP tools cache.
 
     This is useful for testing or when you want to reload MCP tools.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _cache_initialized, _config_mtime, _enabled_server_count, _active_tools_by_server
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_mtime = None
+    _enabled_server_count = 0
+    _active_tools_by_server = {}
     logger.info("MCP tools cache reset")

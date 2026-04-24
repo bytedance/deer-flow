@@ -31,6 +31,12 @@ class McpOAuthConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class McpToolStateConfig(BaseModel):
+    """Configuration for a single MCP tool exposed by a server."""
+
+    enabled: bool = Field(default=True, description="Whether this MCP tool is enabled")
+
+
 class McpServerConfig(BaseModel):
     """Configuration for a single MCP server."""
 
@@ -43,6 +49,10 @@ class McpServerConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    tools: dict[str, McpToolStateConfig] = Field(
+        default_factory=dict,
+        description="Per-tool enabled states for this MCP server",
+    )
     model_config = ConfigDict(extra="allow")
 
 
@@ -179,6 +189,21 @@ class ExtensionsConfig(BaseModel):
             Dictionary of enabled MCP servers.
         """
         return {name: config for name, config in self.mcp_servers.items() if config.enabled}
+
+    def is_mcp_tool_enabled(self, server_name: str, tool_name: str) -> bool:
+        """Check if a tool under an MCP server is enabled.
+
+        Unconfigured tools default to enabled so existing installations keep
+        their current behavior until users opt into tool-level filtering.
+        """
+        server_config = self.mcp_servers.get(server_name)
+        if server_config is None:
+            return False
+
+        tool_config = getattr(server_config, "tools", {}).get(tool_name)
+        if tool_config is None:
+            return True
+        return tool_config.enabled
 
     def is_skill_enabled(self, skill_name: str, skill_category: str) -> bool:
         """Check if a skill is enabled.

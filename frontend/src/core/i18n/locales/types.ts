@@ -348,6 +348,35 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      applyChangesHint: string;
+      runtimeStatusTitle: string;
+      statusSaving: string;
+      statusPendingReload: string;
+      statusInSync: string;
+      statusNotInitialized: string;
+      savingDescription: string;
+      pendingReloadDescription: string;
+      inSyncDescription: string;
+      notInitializedDescription: string;
+      saveFailedTitle: string;
+      noRestartRequired: string;
+      reloadModeNextLoad: string;
+      configSavedAt: (relative: string) => string;
+      configNotSavedYet: string;
+      runtimeLoadedAt: (relative: string) => string;
+      runtimeSummary: (toolCount: number, serverCount: number) => string;
+      runtimeEmpty: string;
+      serverRuntimeTools: (count: number) => string;
+      serverPendingChanges: (count: number) => string;
+      toolActiveNow: string;
+      toolWillEnable: string;
+      toolWillDisable: string;
+      noDescription: string;
+      noToolsDiscovered: string;
+      enableServerToRefresh: string;
+      discoveredTool: string;
+      configuredTool: string;
+      toolCount: (count: number) => string;
     };
     skills: {
       title: string;

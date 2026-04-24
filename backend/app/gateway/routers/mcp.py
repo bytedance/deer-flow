@@ -1,12 +1,19 @@
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    get_extensions_config,
+    reload_extensions_config,
+)
+from deerflow.mcp.cache import get_mcp_cache_status
+from deerflow.mcp.tools import discover_mcp_tools_by_server
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
@@ -43,6 +50,46 @@ class McpServerConfigResponse(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    tools: dict[str, "McpToolConfigResponse"] = Field(
+        default_factory=dict,
+        description="Tool-level enablement states under this MCP server",
+    )
+    runtime_tool_count: int = Field(
+        default=0,
+        description="Number of tools from this server currently active in the current process runtime cache",
+    )
+    pending_reload_tool_count: int = Field(
+        default=0,
+        description="Number of tools under this server whose saved state differs from the current process runtime cache",
+    )
+
+
+class McpToolConfigResponse(BaseModel):
+    """Response model for a tool exposed by an MCP server."""
+
+    enabled: bool = Field(default=True, description="Whether this MCP tool is enabled")
+    discovered: bool = Field(
+        default=False,
+        description="Whether this tool was discovered from the live MCP server",
+    )
+    description: str = Field(
+        default="",
+        description="Best-effort description discovered from the MCP tool metadata",
+    )
+    active_in_runtime: bool = Field(
+        default=False,
+        description="Whether this tool is currently active in the current process runtime cache",
+    )
+    pending_reload_action: Literal["none", "enable", "disable"] = Field(
+        default="none",
+        description="Whether the saved config will enable or disable this tool on the next MCP tool load",
+    )
+
+
+class McpToolConfigUpdateRequest(BaseModel):
+    """Request model for updating a single MCP tool's state."""
+
+    enabled: bool = Field(default=True, description="Whether this MCP tool is enabled")
 
 
 class McpConfigResponse(BaseModel):
@@ -52,14 +99,184 @@ class McpConfigResponse(BaseModel):
         default_factory=dict,
         description="Map of MCP server name to configuration",
     )
+    runtime: "McpRuntimeStatusResponse" = Field(
+        default_factory=lambda: McpRuntimeStatusResponse(),
+        description="Hot-reload and runtime cache status for MCP tools in the current process",
+    )
 
 
 class McpConfigUpdateRequest(BaseModel):
     """Request model for updating MCP configuration."""
 
-    mcp_servers: dict[str, McpServerConfigResponse] = Field(
+    mcp_servers: dict[str, "McpServerConfigUpdateRequest"] = Field(
         ...,
         description="Map of MCP server name to configuration",
+    )
+
+
+class McpServerConfigUpdateRequest(BaseModel):
+    """Request model for a single MCP server configuration update."""
+
+    enabled: bool = Field(default=True, description="Whether this MCP server is enabled")
+    type: str = Field(default="stdio", description="Transport type: 'stdio', 'sse', or 'http'")
+    command: str | None = Field(default=None, description="Command to execute to start the MCP server (for stdio type)")
+    args: list[str] = Field(default_factory=list, description="Arguments to pass to the command (for stdio type)")
+    env: dict[str, str] = Field(default_factory=dict, description="Environment variables for the MCP server")
+    url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
+    headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
+    oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
+    description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    tools: dict[str, McpToolConfigUpdateRequest] = Field(
+        default_factory=dict,
+        description="Tool-level enablement states under this MCP server",
+    )
+
+
+class McpRuntimeStatusResponse(BaseModel):
+    """Runtime status for MCP tool hot reload visibility."""
+
+    status: Literal["not_initialized", "pending_reload", "in_sync"] = Field(
+        default="not_initialized",
+        description="Whether the current process has loaded MCP tools and if its cache is stale",
+    )
+    reload_mode: Literal["next_tool_load"] = Field(
+        default="next_tool_load",
+        description="How persisted MCP config changes are applied",
+    )
+    restart_required: bool = Field(
+        default=False,
+        description="Whether a full application restart is required to pick up saved MCP config changes",
+    )
+    will_apply_on_next_load: bool = Field(
+        default=True,
+        description="Whether the latest saved config will be picked up automatically on the next MCP tool load",
+    )
+    cache_initialized: bool = Field(
+        default=False,
+        description="Whether the current process has initialized its MCP tools cache",
+    )
+    cache_stale: bool = Field(
+        default=False,
+        description="Whether the current process cache is behind the latest config file mtime",
+    )
+    config_last_modified_at: datetime | None = Field(
+        default=None,
+        description="Timestamp of the latest saved extensions config on disk",
+    )
+    runtime_config_last_loaded_at: datetime | None = Field(
+        default=None,
+        description="Timestamp of the config file that the current process cache last loaded",
+    )
+    active_server_count: int = Field(
+        default=0,
+        description="Number of enabled MCP servers loaded into the current process cache",
+    )
+    active_tool_count: int = Field(
+        default=0,
+        description="Number of MCP tools currently loaded into the current process cache",
+    )
+    active_tools_by_server: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Active MCP tool names grouped by server in the current process cache",
+    )
+
+
+McpServerConfigResponse.model_rebuild()
+McpConfigResponse.model_rebuild()
+McpConfigUpdateRequest.model_rebuild()
+
+
+def _timestamp_to_datetime(timestamp: float | None) -> datetime | None:
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=UTC)
+
+
+def _build_mcp_runtime_status_response() -> McpRuntimeStatusResponse:
+    status = get_mcp_cache_status()
+    return McpRuntimeStatusResponse(
+        **{
+            **status,
+            "config_last_modified_at": _timestamp_to_datetime(status.get("config_last_modified_at")),
+            "runtime_config_last_loaded_at": _timestamp_to_datetime(status.get("runtime_config_last_loaded_at")),
+        }
+    )
+
+
+async def _build_mcp_config_response(config: ExtensionsConfig) -> McpConfigResponse:
+    try:
+        discovered_tools = await discover_mcp_tools_by_server(config)
+    except Exception:
+        logger.exception("Failed to discover MCP tools by server; falling back to empty discovery results.")
+        discovered_tools = {}
+
+    runtime_status = _build_mcp_runtime_status_response()
+    runtime_tools_by_server = {
+        server_name: set(tool_names)
+        for server_name, tool_names in runtime_status.active_tools_by_server.items()
+    }
+    servers: dict[str, McpServerConfigResponse] = {}
+
+    for server_name, server in config.mcp_servers.items():
+        server_runtime_tools = runtime_tools_by_server.get(server_name, set())
+        configured_tools = {
+            tool_name: McpToolConfigResponse(
+                enabled=tool_config.enabled,
+                discovered=False,
+                description="",
+                active_in_runtime=tool_name in server_runtime_tools,
+                pending_reload_action=(
+                    "disable"
+                    if tool_name in server_runtime_tools and not (server.enabled and tool_config.enabled)
+                    else "none"
+                ),
+            )
+            for tool_name, tool_config in server.tools.items()
+        }
+
+        for tool_name, description in discovered_tools.get(server_name, {}).items():
+            desired_active = server.enabled and config.is_mcp_tool_enabled(server_name, tool_name)
+            active_in_runtime = tool_name in server_runtime_tools
+            pending_reload_action: Literal["none", "enable", "disable"] = "none"
+            if active_in_runtime and not desired_active:
+                pending_reload_action = "disable"
+            elif desired_active and not active_in_runtime and runtime_status.status != "in_sync":
+                pending_reload_action = "enable"
+
+            configured_tools[tool_name] = McpToolConfigResponse(
+                enabled=config.is_mcp_tool_enabled(server_name, tool_name),
+                discovered=True,
+                description=description,
+                active_in_runtime=active_in_runtime,
+                pending_reload_action=pending_reload_action,
+            )
+
+        for tool_name in sorted(server_runtime_tools):
+            if tool_name in configured_tools:
+                continue
+
+            configured_tools[tool_name] = McpToolConfigResponse(
+                enabled=False,
+                discovered=False,
+                description="",
+                active_in_runtime=True,
+                pending_reload_action="disable",
+            )
+
+        pending_reload_tool_count = sum(
+            1 for tool in configured_tools.values() if tool.pending_reload_action != "none"
+        )
+
+        servers[server_name] = McpServerConfigResponse(
+            **server.model_dump(exclude={"tools"}),
+            tools=dict(sorted(configured_tools.items())),
+            runtime_tool_count=len(server_runtime_tools),
+            pending_reload_tool_count=pending_reload_tool_count,
+        )
+
+    return McpConfigResponse(
+        mcp_servers=servers,
+        runtime=runtime_status,
     )
 
 
@@ -91,8 +308,7 @@ async def get_mcp_configuration() -> McpConfigResponse:
         ```
     """
     config = get_extensions_config()
-
-    return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in config.mcp_servers.items()})
+    return await _build_mcp_config_response(config)
 
 
 @router.put(
@@ -162,7 +378,7 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
 
         # Reload the configuration and update the global cache
         reloaded_config = reload_extensions_config()
-        return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in reloaded_config.mcp_servers.items()})
+        return await _build_mcp_config_response(reloaded_config)
 
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)

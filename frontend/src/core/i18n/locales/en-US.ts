@@ -426,6 +426,47 @@ export const enUS: Translations = {
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",
+      applyChangesHint:
+        "Server and tool changes apply automatically on the next MCP tool load.",
+      runtimeStatusTitle: "Hot Reload Status",
+      statusSaving: "Saving",
+      statusPendingReload: "Pending refresh",
+      statusInSync: "In sync",
+      statusNotInitialized: "Waiting for first load",
+      savingDescription:
+        "Saving MCP changes now. The updated configuration will be picked up automatically on the next MCP tool load.",
+      pendingReloadDescription:
+        "This process's runtime cache is still using the previous MCP configuration and will refresh automatically on the next MCP tool load.",
+      inSyncDescription:
+        "This process's runtime cache is already using the latest saved MCP configuration.",
+      notInitializedDescription:
+        "This process has not loaded MCP tools yet. The latest saved configuration will apply on the first MCP tool load.",
+      saveFailedTitle: "Failed to save MCP changes",
+      noRestartRequired: "No restart required",
+      reloadModeNextLoad: "Reload mode: automatic on next MCP tool load.",
+      configSavedAt: (relative: string) => `Latest config saved ${relative}.`,
+      configNotSavedYet: "No extensions configuration has been saved yet.",
+      runtimeLoadedAt: (relative: string) =>
+        `This process's runtime cache last loaded ${relative}.`,
+      runtimeSummary: (toolCount: number, serverCount: number) =>
+        `This process's runtime cache: ${toolCount} tool${toolCount === 1 ? "" : "s"} from ${serverCount} enabled server${serverCount === 1 ? "" : "s"}.`,
+      runtimeEmpty:
+        "This process's runtime cache is loaded, but no MCP tools are active.",
+      serverRuntimeTools: (count: number) =>
+        `${count} active now`,
+      serverPendingChanges: (count: number) =>
+        `${count} pending change${count === 1 ? "" : "s"}`,
+      toolActiveNow: "Active now",
+      toolWillEnable: "Will enable on next load",
+      toolWillDisable: "Will disable on next load",
+      noDescription: "No description provided.",
+      noToolsDiscovered: "No tools discovered for this server yet.",
+      enableServerToRefresh:
+        "Enable this server to discover and refresh its tools.",
+      discoveredTool: "Discovered from the live MCP server.",
+      configuredTool: "Configured manually and waiting to be discovered.",
+      toolCount: (count: number) =>
+        `${count} tool${count === 1 ? "" : "s"}`,
     },
     skills: {
       title: "Agent Skills",
