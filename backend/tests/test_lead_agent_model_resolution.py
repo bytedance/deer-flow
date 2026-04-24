@@ -113,6 +113,54 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
     assert result["model"] is not None
 
 
+def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
+    app_config = _make_app_config(
+        [
+            _make_model("default-model", supports_thinking=False),
+            _make_model("context-model", supports_thinking=True),
+        ]
+    )
+
+    import deerflow.tools as tools_module
+
+    get_available_tools = MagicMock(return_value=[])
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", get_available_tools)
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda config, model_name, agent_name=None: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None):
+        captured["name"] = name
+        captured["thinking_enabled"] = thinking_enabled
+        captured["reasoning_effort"] = reasoning_effort
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module.make_lead_agent(
+        {
+            "context": {
+                "model_name": "context-model",
+                "thinking_enabled": False,
+                "reasoning_effort": "high",
+                "is_plan_mode": True,
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 7,
+            }
+        }
+    )
+
+    assert captured == {
+        "name": "context-model",
+        "thinking_enabled": False,
+        "reasoning_effort": "high",
+    }
+    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True)
+    assert result["model"] is not None
+
+
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
