@@ -145,6 +145,21 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
     assert config["configurable"]["agent_name"] == "explicit-agent"
 
 
+def test_build_run_config_context_custom_agent_injects_agent_name():
+    """Custom assistant_id must be forwarded as context['agent_name'] in context mode."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"model_name": "deepseek-v3"}},
+        None,
+        assistant_id="finalis",
+    )
+
+    assert config["context"]["agent_name"] == "finalis"
+    assert "configurable" not in config
+
+
 def test_resolve_agent_factory_returns_make_lead_agent():
     """resolve_agent_factory always returns make_lead_agent regardless of assistant_id."""
     from app.gateway.services import resolve_agent_factory
@@ -296,6 +311,36 @@ def test_build_run_config_with_context():
     assert config["context"]["user_id"] == "u-42"
     assert "configurable" not in config
     assert config["recursion_limit"] == 100
+
+
+def test_build_run_config_null_context_becomes_empty_context():
+    """When caller sends context=null, treat it as an empty context object."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"context": None}, None)
+
+    assert config["context"] == {}
+    assert "configurable" not in config
+
+
+def test_build_run_config_rejects_non_mapping_context():
+    """When caller sends a non-object context, raise a clear error instead of a TypeError."""
+    import pytest
+
+    from app.gateway.services import build_run_config
+
+    with pytest.raises(ValueError, match="context"):
+        build_run_config("thread-1", {"context": "bad-context"}, None)
+
+
+def test_build_run_config_null_context_custom_agent_injects_agent_name():
+    """Custom assistant_id can still be injected when context=null starts context mode."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"context": None}, None, assistant_id="finalis")
+
+    assert config["context"] == {"agent_name": "finalis"}
+    assert "configurable" not in config
 
 
 def test_build_run_config_context_plus_configurable_warns(caplog):

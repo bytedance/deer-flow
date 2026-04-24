@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -101,9 +102,10 @@ def resolve_agent_factory(assistant_id: str | None):
     """Resolve the agent factory callable from config.
 
     Custom agents are implemented as ``lead_agent`` + an ``agent_name``
-    injected into ``configurable`` — see :func:`build_run_config`.  All
-    ``assistant_id`` values therefore map to the same factory; the routing
-    happens inside ``make_lead_agent`` when it reads ``cfg["agent_name"]``.
+    injected into ``configurable`` or ``context`` — see
+    :func:`build_run_config`.  All ``assistant_id`` values therefore map to the
+    same factory; the routing happens inside ``make_lead_agent`` when it reads
+    ``cfg["agent_name"]``.
     """
     from deerflow.agents.lead_agent.agent import make_lead_agent
 
@@ -120,10 +122,12 @@ def build_run_config(
     """Build a RunnableConfig dict for the agent.
 
     When *assistant_id* refers to a custom agent (anything other than
-    ``"lead_agent"`` / ``None``), the name is forwarded as
-    ``configurable["agent_name"]``.  ``make_lead_agent`` reads this key to
-    load the matching ``agents/<name>/SOUL.md`` and per-agent config —
-    without it the agent silently runs as the default lead agent.
+    ``"lead_agent"`` / ``None``), the name is forwarded as ``agent_name`` in
+    whichever runtime options container is active: ``context`` for
+    LangGraph >= 0.6.0 requests, otherwise ``configurable``.
+    ``make_lead_agent`` reads this key to load the matching
+    ``agents/<name>/SOUL.md`` and per-agent config — without it the agent
+    silently runs as the default lead agent.
 
     This mirrors the channel manager's ``_resolve_run_params`` logic so that
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
@@ -142,7 +146,14 @@ def build_run_config(
                     thread_id,
                     list(request_config.get("configurable", {}).keys()),
                 )
-            config["context"] = request_config["context"]
+            context_value = request_config["context"]
+            if context_value is None:
+                context = {}
+            elif isinstance(context_value, Mapping):
+                context = dict(context_value)
+            else:
+                raise ValueError("request config 'context' must be a mapping or null.")
+            config["context"] = context
         else:
             configurable = {"thread_id": thread_id}
             configurable.update(request_config.get("configurable", {}))
@@ -154,13 +165,19 @@ def build_run_config(
         config["configurable"] = {"thread_id": thread_id}
 
     # Inject custom agent name when the caller specified a non-default assistant.
-    # Honour an explicit configurable["agent_name"] in the request if already set.
-    if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID and "configurable" in config:
-        if "agent_name" not in config["configurable"]:
-            normalized = assistant_id.strip().lower().replace("_", "-")
-            if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-                raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
-            config["configurable"]["agent_name"] = normalized
+    # Honour an explicit agent_name in the active runtime options container.
+    if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
+        normalized = assistant_id.strip().lower().replace("_", "-")
+        if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
+            raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+        if "configurable" in config:
+            target = config["configurable"]
+        elif "context" in config:
+            target = config["context"]
+        else:
+            target = config.setdefault("configurable", {})
+        if target is not None and "agent_name" not in target:
+            target["agent_name"] = normalized
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config
