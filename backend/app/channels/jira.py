@@ -127,9 +127,9 @@ class JiraChannel(Channel):
                                 return
 
                             if line.startswith("event:"):
-                                event_type = line[len("event:"):].strip()
+                                event_type = line[len("event:") :].strip()
                             elif line.startswith("data:"):
-                                data_lines.append(line[len("data:"):].strip())
+                                data_lines.append(line[len("data:") :].strip())
                             elif line == "":
                                 # Empty line = end of event
                                 if event_type and data_lines:
