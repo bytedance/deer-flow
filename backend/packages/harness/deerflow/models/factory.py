@@ -133,6 +133,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
 
     # For MindIE models: inject extended timeouts to support mock streaming
     import httpx
+
     from deerflow.models.mindie_provider import MindIEChatModel
 
     if issubclass(model_class, MindIEChatModel):
@@ -152,14 +153,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # Enforce max_retries constraint to prevent cascading timeouts.
         model_settings_from_config["max_retries"] = model_settings_from_config.get("max_retries", 1)
 
-        model_settings_from_config["http_client"] = httpx.Client(
-            timeout=extended_timeout,
-            verify=False,
-        )
-        model_settings_from_config["http_async_client"] = httpx.AsyncClient(
-            timeout=extended_timeout,
-            verify=False,
-        )
+        model_settings_from_config["http_client"] = httpx.Client(timeout=extended_timeout)
+        model_settings_from_config["http_async_client"] = httpx.AsyncClient(timeout=extended_timeout)
 
     model_instance = model_class(**{**model_settings_from_config, **kwargs})
 
