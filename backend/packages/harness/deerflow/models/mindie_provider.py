@@ -2,7 +2,9 @@ import ast
 import json
 import re
 import uuid
+from collections.abc import Iterator
 
+import httpx
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
@@ -69,12 +71,11 @@ def _parse_xml_tool_call_to_dict(content: str) -> tuple[str, list[dict]]:
         return content, []
 
     tool_calls = []
-    tool_call_blocks = re.finditer(r"<tool_call>(.*?)</tool_call>", content, re.DOTALL)
-
-    clean_content = content
-    for block_match in tool_call_blocks:
-        full_block = block_match.group(0)
-        inner_content = block_match.group(1)
+    clean_parts: list[str] = []
+    cursor = 0
+    for start, end, inner_content in _iter_tool_call_blocks(content):
+        clean_parts.append(content[cursor:start])
+        cursor = end
 
         func_match = re.search(r"<function=([^>]+)>", inner_content)
         if not func_match:
@@ -102,10 +103,48 @@ def _parse_xml_tool_call_to_dict(content: str) -> tuple[str, list[dict]]:
             args[key] = parsed_value
 
         tool_calls.append({"name": function_name, "args": args, "id": f"call_{uuid.uuid4().hex[:10]}"})
+    clean_parts.append(content[cursor:])
 
-        clean_content = clean_content.replace(full_block, "")
+    return "".join(clean_parts).strip(), tool_calls
 
-    return clean_content.strip(), tool_calls
+
+def _iter_tool_call_blocks(content: str) -> Iterator[tuple[int, int, str]]:
+    """Iterate `<tool_call>...</tool_call>` blocks and tolerate nesting."""
+    token_pattern = re.compile(r"</?tool_call>")
+    depth = 0
+    block_start = -1
+
+    for match in token_pattern.finditer(content):
+        token = match.group(0)
+        if token == "<tool_call>":
+            if depth == 0:
+                block_start = match.start()
+            depth += 1
+            continue
+
+        if depth == 0:
+            continue
+
+        depth -= 1
+        if depth == 0 and block_start != -1:
+            block_end = match.end()
+            inner_start = block_start + len("<tool_call>")
+            inner_end = match.start()
+            yield block_start, block_end, content[inner_start:inner_end]
+            block_start = -1
+
+
+def _decode_escaped_newlines_outside_fences(content: str) -> str:
+    """Decode literal `\\n` outside fenced code blocks."""
+    if "\\n" not in content:
+        return content
+
+    parts = re.split(r"(```[\s\S]*?```)", content)
+    for idx, part in enumerate(parts):
+        if part.startswith("```"):
+            continue
+        parts[idx] = part.replace("\\n", "\n")
+    return "".join(parts)
 
 
 class MindIEChatModel(ChatOpenAI):
@@ -119,14 +158,32 @@ class MindIEChatModel(ChatOpenAI):
     - Fixing over-escaped newline characters from gateway responses.
     """
 
+    def __init__(self, **kwargs):
+        """Normalize timeout kwargs without creating long-lived clients."""
+        connect_timeout = kwargs.pop("connect_timeout", 30.0)
+        read_timeout = kwargs.pop("read_timeout", 900.0)
+        write_timeout = kwargs.pop("write_timeout", 60.0)
+        pool_timeout = kwargs.pop("pool_timeout", 30.0)
+
+        kwargs.setdefault(
+            "timeout",
+            httpx.Timeout(
+                connect=connect_timeout,
+                read=read_timeout,
+                write=write_timeout,
+                pool=pool_timeout,
+            ),
+        )
+        super().__init__(**kwargs)
+
     def _patch_result_with_tools(self, result: ChatResult) -> ChatResult:
         """Apply post-generation fixes to the model result."""
         for gen in result.generations:
             msg = gen.message
 
             if isinstance(msg.content, str):
-                # Fix over-escaped newlines returned by the gateway
-                msg.content = msg.content.replace("\\n", "\n")
+                # Keep escaped newlines inside fenced code blocks untouched.
+                msg.content = _decode_escaped_newlines_outside_fences(msg.content)
 
                 if "<tool_call>" in msg.content:
                     clean_content, extracted_tools = _parse_xml_tool_call_to_dict(msg.content)
@@ -151,7 +208,7 @@ class MindIEChatModel(ChatOpenAI):
         if not kwargs.get("tools"):
             async for chunk in super()._astream(_fix_messages(messages), stop=stop, run_manager=run_manager, **kwargs):
                 if isinstance(chunk.message.content, str):
-                    chunk.message.content = chunk.message.content.replace("\\n", "\n")
+                    chunk.message.content = _decode_escaped_newlines_outside_fences(chunk.message.content)
                 yield chunk
             return
 

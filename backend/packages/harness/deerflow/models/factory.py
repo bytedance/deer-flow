@@ -131,30 +131,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"
 
-    # For MindIE models: inject extended timeouts to support mock streaming
-    import httpx
-
-    from deerflow.models.mindie_provider import MindIEChatModel
-
-    if issubclass(model_class, MindIEChatModel):
-        # Extract timeout settings from config with safe defaults for mock streaming
-        connect_timeout = model_settings_from_config.pop("connect_timeout", 30.0)
-        read_timeout = model_settings_from_config.pop("read_timeout", 900.0)
-        write_timeout = model_settings_from_config.pop("write_timeout", 60.0)
-        pool_timeout = model_settings_from_config.pop("pool_timeout", 30.0)
-
-        extended_timeout = httpx.Timeout(
-            connect=connect_timeout,
-            read=read_timeout,
-            write=write_timeout,
-            pool=pool_timeout,
-        )
-
+    # For MindIE models: enforce conservative retry defaults.
+    # Timeout normalization is handled inside MindIEChatModel itself.
+    if getattr(model_class, "__name__", "") == "MindIEChatModel":
         # Enforce max_retries constraint to prevent cascading timeouts.
         model_settings_from_config["max_retries"] = model_settings_from_config.get("max_retries", 1)
-
-        model_settings_from_config["http_client"] = httpx.Client(timeout=extended_timeout)
-        model_settings_from_config["http_async_client"] = httpx.AsyncClient(timeout=extended_timeout)
 
     model_instance = model_class(**{**model_settings_from_config, **kwargs})
 
