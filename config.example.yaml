@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 7
+config_version: 8
 
 # ============================================================================
 # Logging
@@ -725,6 +725,19 @@ summarization:
   # Custom summary prompt template (null = use default LangChain prompt)
   # The prompt should guide the model to extract important context
   summary_prompt: null
+
+  # Recently-loaded skill files are excluded from summarization so the agent
+  # does not lose skill instructions after a compression pass. Claude Code uses
+  # a similar strategy (keep the most recent ~5 skills, ~25k total tokens, with
+  # a ~5k cap per skill). Set preserve_recent_skill_count to 0 to disable.
+  preserve_recent_skill_count: 5
+  preserve_recent_skill_tokens: 25000
+  preserve_recent_skill_tokens_per_skill: 5000
+  skill_file_read_tool_names:
+    - read_file
+    - read
+    - view
+    - cat
 
 # ============================================================================
 # Memory Configuration
