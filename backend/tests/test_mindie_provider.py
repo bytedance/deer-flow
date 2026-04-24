@@ -19,6 +19,7 @@ from deerflow.models.mindie_provider import (
 # Helpers
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def _make_chat_result(content: str, tool_calls=None) -> ChatResult:
     msg = AIMessage(content=content)
     if tool_calls:
@@ -31,23 +32,27 @@ def _make_chat_result(content: str, tool_calls=None) -> ChatResult:
 # 1.  _fix_messages
 # ═════════════════════════════════════════════════════════════════════════════
 
-class TestFixMessages:
 
+class TestFixMessages:
     # ── list content → str ────────────────────────────────────────────────────
 
     def test_list_content_extracted_to_str(self):
-        msg = HumanMessage(content=[
-            {"type": "text", "text": "Hello"},
-            {"type": "text", "text": " world"},
-        ])
+        msg = HumanMessage(
+            content=[
+                {"type": "text", "text": "Hello"},
+                {"type": "text", "text": " world"},
+            ]
+        )
         result = _fix_messages([msg])
         assert result[0].content == "Hello world"
 
     def test_list_content_ignores_non_text_blocks(self):
-        msg = HumanMessage(content=[
-            {"type": "image_url", "image_url": "http://x.com/img.png"},
-            {"type": "text", "text": "caption"},
-        ])
+        msg = HumanMessage(
+            content=[
+                {"type": "image_url", "image_url": "http://x.com/img.png"},
+                {"type": "text", "text": "caption"},
+            ]
+        )
         result = _fix_messages([msg])
         assert result[0].content == "caption"
 
@@ -73,11 +78,13 @@ class TestFixMessages:
     def test_ai_message_with_tool_calls_serialised_to_xml(self):
         msg = AIMessage(
             content="Sure",
-            tool_calls=[{
-                "name": "get_weather",
-                "args": {"city": "London"},
-                "id": "call_abc",
-            }],
+            tool_calls=[
+                {
+                    "name": "get_weather",
+                    "args": {"city": "London"},
+                    "id": "call_abc",
+                }
+            ],
         )
         result = _fix_messages([msg])
         out = result[0]
@@ -139,7 +146,7 @@ class TestFixMessages:
         ]
         result = _fix_messages(msgs)
         assert len(result) == 4
-        assert isinstance(result[2], HumanMessage)  
+        assert isinstance(result[2], HumanMessage)
         assert result[3].content == "follow up"
 
     # ── SystemMessage pass-through ────────────────────────────────────────────
@@ -154,8 +161,8 @@ class TestFixMessages:
 # 2.  _parse_xml_tool_call_to_dict
 # ═════════════════════════════════════════════════════════════════════════════
 
-class TestParseXmlToolCalls:
 
+class TestParseXmlToolCalls:
     def test_no_tool_call_returns_original(self):
         content = "Just a normal reply."
         clean, calls = _parse_xml_tool_call_to_dict(content)
@@ -163,13 +170,7 @@ class TestParseXmlToolCalls:
         assert calls == []
 
     def test_single_tool_call_parsed(self):
-        content = (
-            "<tool_call>"
-            " <function=search>"
-            " <parameter=query>pytest</parameter>"
-            " </function>"
-            " </tool_call>"
-        )
+        content = "<tool_call> <function=search> <parameter=query>pytest</parameter> </function> </tool_call>"
         clean, calls = _parse_xml_tool_call_to_dict(content)
         assert clean == ""
         assert len(calls) == 1
@@ -178,10 +179,7 @@ class TestParseXmlToolCalls:
         assert calls[0]["id"].startswith("call_")
 
     def test_multiple_tool_calls_parsed(self):
-        content = (
-            "<tool_call><function=a><parameter=x>1</parameter></function></tool_call>"
-            "<tool_call><function=b><parameter=y>2</parameter></function></tool_call>"
-        )
+        content = "<tool_call><function=a><parameter=x>1</parameter></function></tool_call><tool_call><function=b><parameter=y>2</parameter></function></tool_call>"
         _, calls = _parse_xml_tool_call_to_dict(content)
         assert len(calls) == 2
         assert calls[0]["name"] == "a"
@@ -196,7 +194,7 @@ class TestParseXmlToolCalls:
     def test_integer_param_deserialised(self):
         content = "<tool_call><function=f><parameter=n>42</parameter></function></tool_call>"
         _, calls = _parse_xml_tool_call_to_dict(content)
-        assert calls[0]["args"]["n"] == 42  
+        assert calls[0]["args"]["n"] == 42
 
     def test_list_param_deserialised(self):
         content = '<tool_call><function=f><parameter=lst>["a","b"]</parameter></function></tool_call>'
@@ -233,8 +231,8 @@ class TestParseXmlToolCalls:
 # 3.  MindIEChatModel._patch_result_with_tools
 # ═════════════════════════════════════════════════════════════════════════════
 
-class TestPatchResult:
 
+class TestPatchResult:
     def _model(self):
         with patch.object(MindIEChatModel, "__init__", return_value=None):
             m = MindIEChatModel.__new__(MindIEChatModel)
@@ -287,12 +285,10 @@ class TestPatchResult:
 # 4.  MindIEChatModel._generate  (sync)
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 class TestGenerate:
-
     def test_generate_calls_fix_messages_and_patch(self):
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._generate") as mock_super_gen, \
-             patch.object(MindIEChatModel, "__init__", return_value=None):
-
+        with patch("deerflow.models.mindie_provider.ChatOpenAI._generate") as mock_super_gen, patch.object(MindIEChatModel, "__init__", return_value=None):
             mock_super_gen.return_value = _make_chat_result("hello")
             model = MindIEChatModel.__new__(MindIEChatModel)
 
@@ -309,13 +305,11 @@ class TestGenerate:
 # 5.  MindIEChatModel._agenerate  (async)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class TestAGenerate:
 
+class TestAGenerate:
     @pytest.mark.asyncio
     async def test_agenerate_patches_result(self):
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._agenerate", new_callable=AsyncMock) as mock_ag, \
-             patch.object(MindIEChatModel, "__init__", return_value=None):
-
+        with patch("deerflow.models.mindie_provider.ChatOpenAI._agenerate", new_callable=AsyncMock) as mock_ag, patch.object(MindIEChatModel, "__init__", return_value=None):
             mock_ag.return_value = _make_chat_result("world\\nfoo")
             model = MindIEChatModel.__new__(MindIEChatModel)
 
@@ -327,8 +321,8 @@ class TestAGenerate:
 # 6.  MindIEChatModel._astream  (async generator)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class TestAStream:
 
+class TestAStream:
     async def _collect(self, gen):
         chunks = []
         async for chunk in gen:
@@ -344,13 +338,9 @@ class TestAStream:
             for char in ["hel", "lo"]:
                 yield ChatGenerationChunk(message=AIMessageChunk(content=char))
 
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), \
-             patch.object(MindIEChatModel, "__init__", return_value=None):
-
+        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
             model = MindIEChatModel.__new__(MindIEChatModel)
-            chunks = await self._collect(
-                model._astream([HumanMessage(content="hi")])   
-            )
+            chunks = await self._collect(model._astream([HumanMessage(content="hi")]))
 
         assert "".join(c.message.content for c in chunks) == "hello"
 
@@ -362,52 +352,34 @@ class TestAStream:
         async def fake_stream(*args, **kwargs):
             yield ChatGenerationChunk(message=AIMessageChunk(content="a\\nb"))
 
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), \
-             patch.object(MindIEChatModel, "__init__", return_value=None):
-
+        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
             model = MindIEChatModel.__new__(MindIEChatModel)
-            chunks = await self._collect(
-                model._astream([HumanMessage(content="x")])
-            )
+            chunks = await self._collect(model._astream([HumanMessage(content="x")]))
 
         assert chunks[0].message.content == "a\nb"
 
     @pytest.mark.asyncio
     async def test_with_tools_fake_streams_text_in_chunks(self):
-        with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag, \
-             patch.object(MindIEChatModel, "__init__", return_value=None):
-
-            long_text = "A" * 50   
+        with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag, patch.object(MindIEChatModel, "__init__", return_value=None):
+            long_text = "A" * 50
             mock_ag.return_value = _make_chat_result(long_text)
             model = MindIEChatModel.__new__(MindIEChatModel)
 
-            chunks = await self._collect(
-                model._astream(
-                    [HumanMessage(content="q")],
-                    tools=[{"type": "function", "function": {"name": "dummy"}}]
-                )
-            )
+            chunks = await self._collect(model._astream([HumanMessage(content="q")], tools=[{"type": "function", "function": {"name": "dummy"}}]))
 
         full = "".join(c.message.content for c in chunks)
         assert full == long_text
-        assert len(chunks) > 1   
+        assert len(chunks) > 1
 
     @pytest.mark.asyncio
     async def test_with_tools_emits_tool_call_chunk(self):
 
         tool_calls = [{"name": "fn", "args": {}, "id": "c1"}]
-        with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag, \
-             patch.object(MindIEChatModel, "__init__", return_value=None):
-
+        with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag, patch.object(MindIEChatModel, "__init__", return_value=None):
             mock_ag.return_value = _make_chat_result("ok", tool_calls=tool_calls)
             model = MindIEChatModel.__new__(MindIEChatModel)
 
-            chunks = await self._collect(
-                model._astream(
-                    [HumanMessage(content="q")],
-                    tools=[{"type": "function", "function": {"name": "fn"}}]
-                )
-            )
+            chunks = await self._collect(model._astream([HumanMessage(content="q")], tools=[{"type": "function", "function": {"name": "fn"}}]))
 
         tool_chunks = [c for c in chunks if getattr(c.message, "tool_calls", [])]
         assert tool_chunks, "No chunk carried tool_calls"
@@ -416,17 +388,10 @@ class TestAStream:
     @pytest.mark.asyncio
     async def test_with_tools_empty_text_still_emits_tool_chunk(self):
         tool_calls = [{"name": "x", "args": {}, "id": "c2"}]
-        with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag, \
-             patch.object(MindIEChatModel, "__init__", return_value=None):
-
+        with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag, patch.object(MindIEChatModel, "__init__", return_value=None):
             mock_ag.return_value = _make_chat_result("", tool_calls=tool_calls)
             model = MindIEChatModel.__new__(MindIEChatModel)
 
-            chunks = await self._collect(
-                model._astream(
-                    [HumanMessage(content="q")],
-                    tools=[{"type": "function", "function": {"name": "x"}}]
-                )
-            )
+            chunks = await self._collect(model._astream([HumanMessage(content="q")], tools=[{"type": "function", "function": {"name": "x"}}]))
 
         assert any(getattr(c.message, "tool_calls", []) for c in chunks)
