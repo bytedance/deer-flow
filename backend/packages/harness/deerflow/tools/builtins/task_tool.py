@@ -18,6 +18,17 @@ from deerflow.subagents.executor import SubagentStatus, cleanup_background_task,
 logger = logging.getLogger(__name__)
 
 
+def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
+    """Return the effective subagent skill allowlist under the parent policy."""
+    if parent is None:
+        return child
+    if child is None:
+        return list(parent)
+
+    parent_set = set(parent)
+    return [skill for skill in child if skill in parent_set]
+
+
 @tool("task", parse_docstring=True)
 async def task_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
@@ -83,9 +94,6 @@ async def task_tool(
     if max_turns is not None:
         overrides["max_turns"] = max_turns
 
-    if overrides:
-        config = replace(config, **overrides)
-
     # Extract parent context from runtime
     sandbox_state = None
     thread_data = None
@@ -107,6 +115,13 @@ async def task_tool(
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
+
+    parent_available_skills = metadata.get("available_skills")
+    if parent_available_skills is not None:
+        overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
+
+    if overrides:
+        config = replace(config, **overrides)
 
     # Get available tools (excluding task tool to prevent nesting)
     # Lazy import to avoid circular dependency
