@@ -325,7 +325,8 @@ class TestRegistryGetSubagentConfig:
         _reset_subagents_config(timeout_seconds=900)
         config = get_subagent_config("general-purpose")
         assert config.timeout_seconds == 900
-        assert config.max_turns == 100
+        # start-cloud custom: general-purpose builtin raised to 150 (upstream default is 100)
+        assert config.max_turns == 150
 
     def test_global_timeout_override_applied(self):
         from deerflow.subagents.registry import get_subagent_config
