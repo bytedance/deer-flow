@@ -598,6 +598,7 @@ class TestUpdateMemoryStructuredResponse:
 
         assert result is True
         model.ainvoke.assert_awaited_once()
+        assert model.ainvoke.await_args.kwargs["config"] == {"run_name": "memory_agent"}
 
     def test_correction_hint_injected_when_detected(self):
         updater = MemoryUpdater()
