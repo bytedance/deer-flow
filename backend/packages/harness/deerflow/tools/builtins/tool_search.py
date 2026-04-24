@@ -112,6 +112,15 @@ class DeferredToolRegistry:
     def entries(self) -> list[DeferredToolEntry]:
         return list(self._entries)
 
+    @property
+    def deferred_names(self) -> set[str]:
+        """Names of tools that are still hidden from model binding."""
+        return {entry.name for entry in self._entries}
+
+    def contains(self, name: str) -> bool:
+        """Return whether *name* is still deferred."""
+        return any(entry.name == name for entry in self._entries)
+
     def __len__(self) -> int:
         return len(self._entries)
 
