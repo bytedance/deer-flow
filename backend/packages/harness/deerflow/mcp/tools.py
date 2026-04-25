@@ -12,6 +12,7 @@ from langchain_core.tools import BaseTool
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
+from deerflow.reflection import resolve_variable
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,27 @@ async def get_mcp_tools() -> list[BaseTool]:
         oauth_interceptor = build_oauth_tool_interceptor(extensions_config)
         if oauth_interceptor is not None:
             tool_interceptors.append(oauth_interceptor)
+
+        # Load custom interceptors declared in extensions_config.json
+        # Format: "mcpInterceptors": ["pkg.module:builder_func", ...]
+        raw_interceptor_paths = (extensions_config.model_extra or {}).get("mcpInterceptors")
+        if isinstance(raw_interceptor_paths, str):
+            raw_interceptor_paths = [raw_interceptor_paths]
+        elif not isinstance(raw_interceptor_paths, list):
+            if raw_interceptor_paths is not None:
+                logger.warning(f"mcpInterceptors must be a list of strings, got {type(raw_interceptor_paths).__name__}; skipping")
+            raw_interceptor_paths = []
+        for interceptor_path in raw_interceptor_paths:
+            try:
+                builder = resolve_variable(interceptor_path)
+                interceptor = builder()
+                if callable(interceptor):
+                    tool_interceptors.append(interceptor)
+                    logger.info(f"Loaded MCP interceptor: {interceptor_path}")
+                elif interceptor is not None:
+                    logger.warning(f"Builder {interceptor_path} returned non-callable {type(interceptor).__name__}; skipping")
+            except Exception as e:
+                logger.warning(f"Failed to load MCP interceptor {interceptor_path}: {e}", exc_info=True)
 
         client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors, tool_name_prefix=True)
 
