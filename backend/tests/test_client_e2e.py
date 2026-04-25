@@ -513,6 +513,19 @@ class TestArtifactAccess:
         with pytest.raises((PermissionError, ValueError, FileNotFoundError)):
             c.get_artifact("test-thread", "mnt/user-data/outputs/../../etc/passwd")
 
+    def test_get_artifact_rejects_outputs_escape_to_uploads(self, e2e_env):
+        """Artifacts cannot escape outputs to read uploaded files."""
+        from deerflow.config.paths import get_paths
+
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        tid = str(uuid.uuid4())
+        upload = get_paths().sandbox_uploads_dir(tid) / "secret.txt"
+        upload.parent.mkdir(parents=True, exist_ok=True)
+        upload.write_text("secret")
+
+        with pytest.raises((PermissionError, ValueError, FileNotFoundError)):
+            c.get_artifact(tid, "mnt/user-data/outputs/../uploads/secret.txt")
+
 
 # ---------------------------------------------------------------------------
 # Step 9: Skill installation (no LLM needed)
