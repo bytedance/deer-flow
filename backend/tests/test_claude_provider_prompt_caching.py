@@ -209,6 +209,7 @@ def test_breakpoints_placed_on_last_candidates(model):
     for i in range(1, 5):
         assert payload["system"][i].get("cache_control") == {"type": "ephemeral"}, f"block {i} should be cached"
 
+
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
