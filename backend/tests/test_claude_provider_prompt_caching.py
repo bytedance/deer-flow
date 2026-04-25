@@ -207,10 +207,7 @@ def test_breakpoints_placed_on_last_candidates(model):
     assert "cache_control" not in payload["system"][0]
     # Last 4 blocks ARE cached
     for i in range(1, 5):
-        assert payload["system"][i].get("cache_control") == {"type": "ephemeral"}, (
-            f"block {i} should be cached"
-        )
-
+        assert payload["system"][i].get("cache_control") == {"type": "ephemeral"}, f"block {i} should be cached"
 
 # ---------------------------------------------------------------------------
 # Edge cases
