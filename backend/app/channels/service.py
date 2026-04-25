@@ -25,6 +25,12 @@ _CHANNEL_REGISTRY: dict[str, str] = {
 
 _CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
 _CHANNELS_GATEWAY_URL_ENV = "DEER_FLOW_CHANNELS_GATEWAY_URL"
+_DOCKER_LANGGRAPH_URL = "http://langgraph:2024"
+_DOCKER_GATEWAY_URL = "http://gateway:8001"
+
+
+def _is_containerized_runtime() -> bool:
+    return os.path.exists("/.dockerenv") or bool(os.getenv("KUBERNETES_SERVICE_HOST"))
 
 
 def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, default: str) -> str:
@@ -48,8 +54,11 @@ class ChannelService:
         self.bus = MessageBus()
         self.store = ChannelStore()
         config = dict(channels_config or {})
-        langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
-        gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
+        running_in_container = _is_containerized_runtime()
+        langgraph_default = _DOCKER_LANGGRAPH_URL if running_in_container else DEFAULT_LANGGRAPH_URL
+        gateway_default = _DOCKER_GATEWAY_URL if running_in_container else DEFAULT_GATEWAY_URL
+        langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, langgraph_default)
+        gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, gateway_default)
         default_session = config.pop("session", None)
         channel_sessions = {name: channel_config.get("session") for name, channel_config in config.items() if isinstance(channel_config, dict)}
         self.manager = ChannelManager(
