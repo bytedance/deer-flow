@@ -1,0 +1,26 @@
+repos:
+  # Backend: ruff lint + format
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.10
+    hooks:
+      - id: ruff
+        name: ruff lint
+        args: [--fix]
+      - id: ruff-format
+
+  # Frontend: eslint + prettier (must run from frontend/ for node_modules resolution)
+  - repo: local
+    hooks:
+      - id: frontend-eslint
+        name: eslint (frontend)
+        entry: bash -c 'cd frontend && npx eslint --fix "${@/#frontend\//}"' --
+        language: system
+        types_or: [javascript, tsx, ts]
+        files: ^frontend/
+
+      - id: frontend-prettier
+        name: prettier (frontend)
+        entry: bash -c 'cd frontend && npx prettier --write "${@/#frontend\//}"' --
+        language: system
+        files: ^frontend/
+        types_or: [javascript, tsx, ts, json, css]
