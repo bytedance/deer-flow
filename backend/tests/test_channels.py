@@ -2121,6 +2121,39 @@ class TestSlackAllowedUsers:
         assert inbound.chat_id == "C123"
         assert inbound.text == "hello from slack"
 
+    def test_scalar_allowed_users_warns_and_matches_stringified_event_user_id(self, caplog):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        with caplog.at_level("WARNING"):
+            channel = SlackChannel(
+                bus=bus,
+                config={"allowed_users": 123456},
+            )
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "user": "123456",
+            "text": "hello from slack",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ) as submit:
+            channel._handle_message_event(event)
+
+        assert "Slack allowed_users should be a list" in caplog.text
+        submit.assert_called_once()
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.user_id == "123456"
+
     def test_raises_after_all_retries_exhausted(self):
         from app.channels.slack import SlackChannel
 
