@@ -3,6 +3,7 @@ from typing import Annotated
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langchain_core.messages import ToolMessage
+from langgraph.config import get_config
 from langgraph.types import Command
 from langgraph.typing import ContextT
 
@@ -10,6 +11,23 @@ from deerflow.agents.thread_state import ThreadState
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 
 OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
+
+
+def _get_thread_id(runtime: ToolRuntime[ContextT, ThreadState]) -> str | None:
+    """Resolve the current thread id from runtime context or RunnableConfig."""
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    if thread_id:
+        return thread_id
+
+    runtime_config = getattr(runtime, "config", None) or {}
+    thread_id = runtime_config.get("configurable", {}).get("thread_id")
+    if thread_id:
+        return thread_id
+
+    try:
+        return get_config().get("configurable", {}).get("thread_id")
+    except RuntimeError:
+        return None
 
 
 def _normalize_presented_filepath(
@@ -33,9 +51,9 @@ def _normalize_presented_filepath(
     if runtime.state is None:
         raise ValueError("Thread runtime state is not available")
 
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    thread_id = _get_thread_id(runtime)
     if not thread_id:
-        raise ValueError("Thread ID is not available in runtime context")
+        raise ValueError("Thread ID is not available in runtime context or runtime config")
 
     thread_data = runtime.state.get("thread_data") or {}
     outputs_path = thread_data.get("outputs_path")

@@ -6,14 +6,14 @@ import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
@@ -30,6 +30,7 @@ class SubagentStatus(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
 
 
@@ -56,6 +57,7 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def __post_init__(self):
         """Initialize mutable defaults."""
@@ -73,6 +75,9 @@ _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent
 # Thread pool for actual subagent execution (with timeout support)
 # Larger pool to avoid blocking when scheduler submits execution tasks
 _execution_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-exec-")
+
+# Dedicated pool for sync execute() calls made from an already-running event loop.
+_isolated_loop_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-isolated-")
 
 
 def _filter_tools(
@@ -179,7 +184,63 @@ class SubagentExecutor:
             state_schema=ThreadState,
         )
 
-    def _build_initial_state(self, task: str) -> dict[str, Any]:
+    async def _load_skill_messages(self) -> list[SystemMessage]:
+        """Load skill content as conversation items based on config.skills.
+
+        Aligned with Codex's pattern: each subagent loads its own skills
+        per-session and injects them as conversation items (developer messages),
+        not as system prompt text. The config.skills whitelist controls which
+        skills are loaded:
+        - None: load all enabled skills
+        - []: no skills
+        - ["skill-a", "skill-b"]: only these skills
+
+        Returns:
+            List of SystemMessages containing skill content.
+        """
+        if self.config.skills is not None and len(self.config.skills) == 0:
+            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading")
+            return []
+
+        try:
+            from deerflow.skills.loader import load_skills
+
+            # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
+            all_skills = await asyncio.to_thread(load_skills, enabled_only=True)
+            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
+        except Exception:
+            logger.warning(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}", exc_info=True)
+            return []
+
+        if not all_skills:
+            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found")
+            return []
+
+        # Filter by config.skills whitelist
+        if self.config.skills is not None:
+            allowed = set(self.config.skills)
+            skills = [s for s in all_skills if s.name in allowed]
+        else:
+            skills = all_skills
+
+        if not skills:
+            return []
+
+        # Read each skill's SKILL.md content and create conversation items
+        messages = []
+        for skill in skills:
+            try:
+                content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
+                content = content.strip()
+                if content:
+                    messages.append(SystemMessage(content=f'<skill name="{skill.name}">\n{content}\n</skill>'))
+                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
+            except Exception:
+                logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)
+
+        return messages
+
+    async def _build_initial_state(self, task: str) -> dict[str, Any]:
         """Build the initial state for agent execution.
 
         Args:
@@ -188,8 +249,17 @@ class SubagentExecutor:
         Returns:
             Initial state dictionary.
         """
+        # Load skills as conversation items (Codex pattern)
+        skill_messages = await self._load_skill_messages()
+
+        messages: list = []
+        # Skill content injected as developer/system messages before the task
+        messages.extend(skill_messages)
+        # Then the actual task
+        messages.append(HumanMessage(content=task))
+
         state: dict[str, Any] = {
-            "messages": [HumanMessage(content=task)],
+            "messages": messages,
         }
 
         # Pass through sandbox and thread data from parent
@@ -225,7 +295,7 @@ class SubagentExecutor:
 
         try:
             agent = self._create_agent()
-            state = self._build_initial_state(task)
+            state = await self._build_initial_state(task)
 
             # Build config with thread_id for sandbox access and recursion limit
             run_config: RunnableConfig = {
@@ -241,7 +311,31 @@ class SubagentExecutor:
             # Use stream instead of invoke to get real-time updates
             # This allows us to collect AI messages as they are generated
             final_state = None
+
+            # Pre-check: bail out immediately if already cancelled before streaming starts
+            if result.cancel_event.is_set():
+                logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming")
+                with _background_tasks_lock:
+                    if result.status == SubagentStatus.RUNNING:
+                        result.status = SubagentStatus.CANCELLED
+                        result.error = "Cancelled by user"
+                        result.completed_at = datetime.now()
+                return result
+
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+                # Cooperative cancellation: check if parent requested stop.
+                # Note: cancellation is only detected at astream iteration boundaries,
+                # so long-running tool calls within a single iteration will not be
+                # interrupted until the next chunk is yielded.
+                if result.cancel_event.is_set():
+                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
+                    with _background_tasks_lock:
+                        if result.status == SubagentStatus.RUNNING:
+                            result.status = SubagentStatus.CANCELLED
+                            result.error = "Cancelled by user"
+                            result.completed_at = datetime.now()
+                    return result
+
                 final_state = chunk
 
                 # Extract AI messages from the current state
@@ -348,11 +442,54 @@ class SubagentExecutor:
 
         return result
 
+    def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+        """Execute the subagent in a completely fresh event loop.
+
+        This method is designed to run in a separate thread to ensure complete
+        isolation from any parent event loop, preventing conflicts with asyncio
+        primitives that may be bound to the parent loop (e.g., httpx clients).
+        """
+        try:
+            previous_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            previous_loop = None
+
+        # Create and set a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(self._aexecute(task, result_holder))
+        finally:
+            try:
+                pending = asyncio.all_tasks(loop)
+                if pending:
+                    for task_obj in pending:
+                        task_obj.cancel()
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.run_until_complete(loop.shutdown_default_executor())
+            except Exception:
+                logger.debug(
+                    f"[trace={self.trace_id}] Failed while cleaning up isolated event loop for subagent {self.config.name}",
+                    exc_info=True,
+                )
+            finally:
+                try:
+                    loop.close()
+                finally:
+                    asyncio.set_event_loop(previous_loop)
+
     def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task synchronously (wrapper around async execution).
 
         This method runs the async execution in a new event loop, allowing
         asynchronous tools (like MCP tools) to be used within the thread pool.
+
+        When called from within an already-running event loop (e.g., when the
+        parent agent is async), this method isolates the subagent execution in
+        a separate thread to avoid event loop conflicts with shared async
+        primitives like httpx clients.
 
         Args:
             task: The task description for the subagent.
@@ -361,16 +498,18 @@ class SubagentExecutor:
         Returns:
             SubagentResult with the execution result.
         """
-        # Run the async execution in a new event loop
-        # This is necessary because:
-        # 1. We may have async-only tools (like MCP tools)
-        # 2. We're running inside a ThreadPoolExecutor which doesn't have an event loop
-        #
-        # Note: _aexecute() catches all exceptions internally, so this outer
-        # try-except only handles asyncio.run() failures (e.g., if called from
-        # an async context where an event loop already exists). Subagent execution
-        # errors are handled within _aexecute() and returned as FAILED status.
         try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None and loop.is_running():
+                logger.debug(f"[trace={self.trace_id}] Subagent {self.config.name} detected running event loop, using isolated thread")
+                future = _isolated_loop_pool.submit(self._execute_in_isolated_loop, task, result_holder)
+                return future.result()
+
+            # Standard path: no running event loop, use asyncio.run
             return asyncio.run(self._aexecute(task, result_holder))
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
@@ -437,10 +576,12 @@ class SubagentExecutor:
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
                     with _background_tasks_lock:
-                        _background_tasks[task_id].status = SubagentStatus.TIMED_OUT
-                        _background_tasks[task_id].error = f"Execution timed out after {self.config.timeout_seconds} seconds"
-                        _background_tasks[task_id].completed_at = datetime.now()
-                    # Cancel the future (best effort - may not stop the actual execution)
+                        if _background_tasks[task_id].status == SubagentStatus.RUNNING:
+                            _background_tasks[task_id].status = SubagentStatus.TIMED_OUT
+                            _background_tasks[task_id].error = f"Execution timed out after {self.config.timeout_seconds} seconds"
+                            _background_tasks[task_id].completed_at = datetime.now()
+                    # Signal cooperative cancellation and cancel the future
+                    result_holder.cancel_event.set()
                     execution_future.cancel()
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
@@ -454,6 +595,24 @@ class SubagentExecutor:
 
 
 MAX_CONCURRENT_SUBAGENTS = 3
+
+
+def request_cancel_background_task(task_id: str) -> None:
+    """Signal a running background task to stop.
+
+    Sets the cancel_event on the task, which is checked cooperatively
+    by ``_aexecute`` during ``agent.astream()`` iteration.  This allows
+    subagent threads — which cannot be force-killed via ``Future.cancel()``
+    — to stop at the next iteration boundary.
+
+    Args:
+        task_id: The task ID to cancel.
+    """
+    with _background_tasks_lock:
+        result = _background_tasks.get(task_id)
+        if result is not None:
+            result.cancel_event.set()
+            logger.info("Requested cancellation for background task %s", task_id)
 
 
 def get_background_task_result(task_id: str) -> SubagentResult | None:
@@ -503,6 +662,7 @@ def cleanup_background_task(task_id: str) -> None:
         is_terminal_status = result.status in {
             SubagentStatus.COMPLETED,
             SubagentStatus.FAILED,
+            SubagentStatus.CANCELLED,
             SubagentStatus.TIMED_OUT,
         }
         if is_terminal_status or result.completed_at is not None:

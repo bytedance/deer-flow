@@ -23,6 +23,7 @@ import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicato
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
@@ -41,20 +42,23 @@ export default function AgentChatPage() {
 
   const { agent } = useAgent(agent_name);
 
-  const { threadId, isNewThread, setIsNewThread } = useThreadChat();
+  const { threadId, setThreadId, isNewThread, setIsNewThread } =
+    useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
+  const { tokenUsageEnabled } = useModels();
 
   const { showNotification } = useNotification();
   const [thread, sendMessage] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: { ...settings.context, agent_name: agent_name },
-    onStart: () => {
+    onStart: (createdThreadId) => {
+      setThreadId(createdThreadId);
       setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(
         null,
         "",
-        `/workspace/agents/${agent_name}/chats/${threadId}`,
+        `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
       );
     },
     onFinish: (state) => {
@@ -126,7 +130,10 @@ export default function AgentChatPage() {
                   <PlusSquare /> {t.agents.newChat}
                 </Button>
               </Tooltip>
-              <TokenUsageIndicator messages={thread.messages} />
+              <TokenUsageIndicator
+                enabled={tokenUsageEnabled}
+                messages={thread.messages}
+              />
               <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
@@ -139,6 +146,7 @@ export default function AgentChatPage() {
                 threadId={threadId}
                 thread={thread}
                 paddingBottom={messageListPaddingBottom}
+                tokenUsageEnabled={tokenUsageEnabled}
               />
             </div>
 

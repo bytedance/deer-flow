@@ -4,7 +4,8 @@ import abc
 import json
 import logging
 import threading
-from datetime import datetime
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,11 +16,16 @@ from deerflow.config.paths import get_paths
 logger = logging.getLogger(__name__)
 
 
+def utc_now_iso_z() -> str:
+    """Current UTC time as ISO-8601 with ``Z`` suffix (matches prior naive-UTC output)."""
+    return datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
+
+
 def create_empty_memory() -> dict[str, Any]:
     """Create an empty memory structure."""
     return {
         "version": "1.0",
-        "lastUpdated": datetime.utcnow().isoformat() + "Z",
+        "lastUpdated": utc_now_iso_z(),
         "user": {
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
@@ -61,6 +67,8 @@ class FileMemoryStorage(MemoryStorage):
         # Per-agent memory cache: keyed by agent_name (None = global)
         # Value: (memory_data, file_mtime)
         self._memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
+        # Guards all reads and writes to _memory_cache across concurrent callers.
+        self._cache_lock = threading.Lock()
 
     def _validate_agent_name(self, agent_name: str) -> None:
         """Validate that the agent name is safe to use in filesystem paths.
@@ -109,14 +117,17 @@ class FileMemoryStorage(MemoryStorage):
         except OSError:
             current_mtime = None
 
-        cached = self._memory_cache.get(agent_name)
+        with self._cache_lock:
+            cached = self._memory_cache.get(agent_name)
+            if cached is not None and cached[1] == current_mtime:
+                return cached[0]
 
-        if cached is None or cached[1] != current_mtime:
-            memory_data = self._load_memory_from_file(agent_name)
+        memory_data = self._load_memory_from_file(agent_name)
+
+        with self._cache_lock:
             self._memory_cache[agent_name] = (memory_data, current_mtime)
-            return memory_data
 
-        return cached[0]
+        return memory_data
 
     def reload(self, agent_name: str | None = None) -> dict[str, Any]:
         """Reload memory data from file, forcing cache invalidation."""
@@ -128,7 +139,8 @@ class FileMemoryStorage(MemoryStorage):
         except OSError:
             mtime = None
 
-        self._memory_cache[agent_name] = (memory_data, mtime)
+        with self._cache_lock:
+            self._memory_cache[agent_name] = (memory_data, mtime)
         return memory_data
 
     def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
@@ -137,9 +149,12 @@ class FileMemoryStorage(MemoryStorage):
 
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
+            # Shallow-copy before adding lastUpdated so the caller's dict is not
+            # mutated as a side-effect, and the cache reference is not silently
+            # updated before the file write succeeds.
+            memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
 
-            temp_path = file_path.with_suffix(".tmp")
+            temp_path = file_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(memory_data, f, indent=2, ensure_ascii=False)
 
@@ -150,7 +165,8 @@ class FileMemoryStorage(MemoryStorage):
             except OSError:
                 mtime = None
 
-            self._memory_cache[agent_name] = (memory_data, mtime)
+            with self._cache_lock:
+                self._memory_cache[agent_name] = (memory_data, mtime)
             logger.info("Memory saved to %s", file_path)
             return True
         except OSError as e:

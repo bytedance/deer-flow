@@ -6,6 +6,7 @@ import logging
 import os
 from typing import Any
 
+from app.channels.base import Channel
 from app.channels.manager import DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import MessageBus
 from app.channels.store import ChannelStore
@@ -14,9 +15,12 @@ logger = logging.getLogger(__name__)
 
 # Channel name → import path for lazy loading
 _CHANNEL_REGISTRY: dict[str, str] = {
+    "discord": "app.channels.discord:DiscordChannel",
     "feishu": "app.channels.feishu:FeishuChannel",
     "slack": "app.channels.slack:SlackChannel",
     "telegram": "app.channels.telegram:TelegramChannel",
+    "wechat": "app.channels.wechat:WechatChannel",
+    "wecom": "app.channels.wecom:WeComChannel",
 }
 
 _CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
@@ -162,6 +166,10 @@ class ChannelService:
             "service_running": self._running,
             "channels": channels_status,
         }
+
+    def get_channel(self, name: str) -> Channel | None:
+        """Return a running channel instance by name when available."""
+        return self._channels.get(name)
 
 
 # -- singleton access -------------------------------------------------------

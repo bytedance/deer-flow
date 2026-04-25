@@ -6,6 +6,7 @@ Covers:
 - asyncio.run() properly executes async workflow within thread pool context
 - Error handling in both sync and async paths
 - Async tool support (MCP tools)
+- Cooperative cancellation via cancel_event
 
 Note: Due to circular import issues in the main codebase, conftest.py mocks
 deerflow.subagents.executor. This test file uses delayed import via fixture to test
@@ -14,6 +15,7 @@ the real implementation in isolation.
 
 import asyncio
 import sys
+import threading
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -27,6 +29,7 @@ _MOCKED_MODULE_NAMES = [
     "deerflow.agents.middlewares.thread_data_middleware",
     "deerflow.sandbox",
     "deerflow.sandbox.middleware",
+    "deerflow.sandbox.security",
     "deerflow.models",
 ]
 
@@ -430,6 +433,42 @@ class TestSyncExecutionPath:
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "Thread pool result"
 
+    @pytest.mark.anyio
+    async def test_execute_in_running_event_loop_uses_isolated_thread(self, classes, base_config, mock_agent, msg):
+        """Test that execute() uses the isolated-thread path inside a running loop."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        execution_threads = []
+        final_state = {
+            "messages": [
+                msg.human("Task"),
+                msg.ai("Async loop result", "msg-1"),
+            ]
+        }
+
+        async def mock_astream(*args, **kwargs):
+            execution_threads.append(threading.current_thread().name)
+            yield final_state
+
+        mock_agent.astream = mock_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            with patch.object(executor, "_execute_in_isolated_loop", wraps=executor._execute_in_isolated_loop) as isolated:
+                result = executor.execute("Task")
+
+        assert isolated.call_count == 1
+        assert execution_threads
+        assert all(name.startswith("subagent-isolated-") for name in execution_threads)
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "Async loop result"
+
     def test_execute_handles_asyncio_run_failure(self, classes, base_config):
         """Test handling when asyncio.run() itself fails."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -770,4 +809,234 @@ class TestCleanupBackgroundTask:
         executor_module.cleanup_background_task(task_id)
 
         # Should be removed because completed_at is set
+        assert task_id not in executor_module._background_tasks
+
+
+# -----------------------------------------------------------------------------
+# Cooperative Cancellation Tests
+# -----------------------------------------------------------------------------
+
+
+class TestCooperativeCancellation:
+    """Test cooperative cancellation via cancel_event."""
+
+    @pytest.fixture
+    def executor_module(self, _setup_executor_classes):
+        """Import the executor module with real classes."""
+        import importlib
+
+        from deerflow.subagents import executor
+
+        return importlib.reload(executor)
+
+    @pytest.mark.anyio
+    async def test_aexecute_cancelled_before_streaming(self, classes, base_config, mock_agent, msg):
+        """Test that _aexecute returns CANCELLED when cancel_event is set before streaming."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        # The agent should never be called
+        call_count = 0
+
+        async def mock_astream(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            yield {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+
+        mock_agent.astream = mock_astream
+
+        # Pre-create result holder with cancel_event already set
+        result_holder = SubagentResult(
+            task_id="cancel-before",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event.set()
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task", result_holder=result_holder)
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert result.error == "Cancelled by user"
+        assert result.completed_at is not None
+        assert call_count == 0  # astream was never entered
+
+    @pytest.mark.anyio
+    async def test_aexecute_cancelled_mid_stream(self, classes, base_config, msg):
+        """Test that _aexecute returns CANCELLED when cancel_event is set during streaming."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        cancel_event = threading.Event()
+
+        async def mock_astream(*args, **kwargs):
+            yield {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
+            # Simulate cancellation during streaming
+            cancel_event.set()
+            yield {"messages": [msg.human("Task"), msg.ai("Should not appear", "msg-2")]}
+
+        mock_agent = MagicMock()
+        mock_agent.astream = mock_astream
+
+        result_holder = SubagentResult(
+            task_id="cancel-mid",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task", result_holder=result_holder)
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert result.error == "Cancelled by user"
+        assert result.completed_at is not None
+
+    def test_request_cancel_sets_event(self, executor_module, classes):
+        """Test that request_cancel_background_task sets the cancel_event."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-cancel-event"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        assert not result.cancel_event.is_set()
+
+        executor_module.request_cancel_background_task(task_id)
+
+        assert result.cancel_event.is_set()
+
+    def test_request_cancel_nonexistent_task_is_noop(self, executor_module):
+        """Test that requesting cancellation on a nonexistent task does not raise."""
+        executor_module.request_cancel_background_task("nonexistent-task")
+
+    def test_timeout_does_not_overwrite_cancelled(self, executor_module, classes, base_config, msg):
+        """Test that the real timeout handler does not overwrite CANCELLED status.
+
+        This exercises the actual execute_async → run_task → FuturesTimeoutError
+        code path in executor.py.  We make execute() block so the timeout fires
+        deterministically, pre-set the task to CANCELLED, and verify the RUNNING
+        guard preserves it.  Uses threading.Event for synchronisation instead of
+        wall-clock sleeps.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        short_config = classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=0.05,  # 50ms – just enough for the future to time out
+        )
+
+        # Synchronisation primitives
+        execute_entered = threading.Event()  # signals that execute() has started
+        execute_release = threading.Event()  # lets execute() return
+        run_task_done = threading.Event()  # signals that run_task() has finished
+
+        # A blocking execute() replacement so we control the timing exactly
+        def blocking_execute(task, result_holder=None):
+            # Cooperative cancellation: honour cancel_event like real _aexecute
+            if result_holder and result_holder.cancel_event.is_set():
+                result_holder.status = SubagentStatus.CANCELLED
+                result_holder.error = "Cancelled by user"
+                result_holder.completed_at = datetime.now()
+                execute_entered.set()
+                return result_holder
+            execute_entered.set()
+            execute_release.wait(timeout=5)
+            # Return a minimal completed result (will be ignored because timeout fires first)
+            from deerflow.subagents.executor import SubagentResult as _R
+
+            return _R(task_id="x", trace_id="t", status=SubagentStatus.COMPLETED, result="late")
+
+        executor = SubagentExecutor(
+            config=short_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
+        # Wrap _scheduler_pool.submit so we know when run_task finishes
+        original_scheduler_submit = executor_module._scheduler_pool.submit
+
+        def tracked_submit(fn, *args, **kwargs):
+            def wrapper():
+                try:
+                    fn(*args, **kwargs)
+                finally:
+                    run_task_done.set()
+
+            return original_scheduler_submit(wrapper)
+
+        with patch.object(executor, "execute", blocking_execute), patch.object(executor_module._scheduler_pool, "submit", tracked_submit):
+            task_id = executor.execute_async("Task")
+
+            # Wait until execute() is entered (i.e. it's running in _execution_pool)
+            assert execute_entered.wait(timeout=3), "execute() was never called"
+
+            # Set CANCELLED on the result before the timeout handler runs.
+            # The 50ms timeout will fire while execute() is blocked.
+            with executor_module._background_tasks_lock:
+                executor_module._background_tasks[task_id].status = SubagentStatus.CANCELLED
+                executor_module._background_tasks[task_id].error = "Cancelled by user"
+                executor_module._background_tasks[task_id].completed_at = datetime.now()
+
+            # Wait for run_task to finish — the FuturesTimeoutError handler has
+            # now executed and (should have) left CANCELLED intact.
+            assert run_task_done.wait(timeout=5), "run_task() did not finish"
+
+            # Only NOW release the blocked execute() so the thread pool worker
+            # can be reclaimed.  This MUST come after run_task_done to avoid a
+            # race where execute() returns before the timeout fires.
+            execute_release.set()
+
+        result = executor_module._background_tasks.get(task_id)
+        assert result is not None
+        # The RUNNING guard in the FuturesTimeoutError handler must have
+        # preserved CANCELLED instead of overwriting with TIMED_OUT.
+        assert result.status.value == SubagentStatus.CANCELLED.value
+        assert result.error == "Cancelled by user"
+        assert result.completed_at is not None
+
+    def test_cleanup_removes_cancelled_task(self, executor_module, classes):
+        """Test that cleanup removes a CANCELLED task (terminal state)."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-cancelled-cleanup"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.CANCELLED,
+            error="Cancelled by user",
+            completed_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
         assert task_id not in executor_module._background_tasks

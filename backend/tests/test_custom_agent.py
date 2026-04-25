@@ -9,6 +9,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from deerflow.config.agents_api_config import AgentsApiConfig, get_agents_api_config, set_agents_api_config
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -387,13 +389,38 @@ def _make_test_app(tmp_path: Path):
 @pytest.fixture()
 def agent_client(tmp_path):
     """TestClient with agents router, using tmp_path as base_dir."""
-    paths_instance = _make_paths(tmp_path)
+    import app.gateway.routers.agents as agents_router
 
-    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch("app.gateway.routers.agents.get_paths", return_value=paths_instance):
-        app = _make_test_app(tmp_path)
-        with TestClient(app) as client:
-            client._tmp_path = tmp_path  # type: ignore[attr-defined]
-            yield client
+    paths_instance = _make_paths(tmp_path)
+    previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
+
+    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+        set_agents_api_config(AgentsApiConfig(enabled=True))
+        try:
+            app = _make_test_app(tmp_path)
+            with TestClient(app) as client:
+                client._tmp_path = tmp_path  # type: ignore[attr-defined]
+                yield client
+        finally:
+            set_agents_api_config(previous_config)
+
+
+@pytest.fixture()
+def disabled_agent_client(tmp_path):
+    """TestClient with agents router while the management API is disabled."""
+    import app.gateway.routers.agents as agents_router
+
+    paths_instance = _make_paths(tmp_path)
+    previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
+
+    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+        set_agents_api_config(AgentsApiConfig(enabled=False))
+        try:
+            app = _make_test_app(tmp_path)
+            with TestClient(app) as client:
+                yield client
+        finally:
+            set_agents_api_config(previous_config)
 
 
 class TestAgentsAPI:
@@ -438,6 +465,15 @@ class TestAgentsAPI:
         names = [a["name"] for a in response.json()["agents"]]
         assert "agent-one" in names
         assert "agent-two" in names
+
+    def test_list_agents_includes_soul(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "soul-agent", "soul": "My soul content"})
+
+        response = agent_client.get("/api/agents")
+        assert response.status_code == 200
+        agents = response.json()["agents"]
+        soul_agent = next(a for a in agents if a["name"] == "soul-agent")
+        assert soul_agent["soul"] == "My soul content"
 
     def test_get_agent(self, agent_client):
         agent_client.post("/api/agents", json={"name": "test-agent", "soul": "Hello world"})
@@ -550,3 +586,37 @@ class TestUserProfileAPI:
         response = agent_client.put("/api/user-profile", json={"content": ""})
         assert response.status_code == 200
         assert response.json()["content"] is None
+
+
+class TestAgentsApiDisabled:
+    def test_agents_list_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents")
+        assert response.status_code == 403
+        assert "agents_api.enabled=true" in response.json()["detail"]
+
+    def test_agent_get_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents/example-agent")
+        assert response.status_code == 403
+
+    def test_agent_name_check_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents/check", params={"name": "example-agent"})
+        assert response.status_code == 403
+
+    def test_agent_create_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.post("/api/agents", json={"name": "example-agent", "soul": "blocked"})
+        assert response.status_code == 403
+
+    def test_agent_update_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.put("/api/agents/example-agent", json={"description": "blocked"})
+        assert response.status_code == 403
+
+    def test_agent_delete_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.delete("/api/agents/example-agent")
+        assert response.status_code == 403
+
+    def test_user_profile_routes_return_403(self, disabled_agent_client):
+        get_response = disabled_agent_client.get("/api/user-profile")
+        put_response = disabled_agent_client.put("/api/user-profile", json={"content": "blocked"})
+
+        assert get_response.status_code == 403
+        assert put_response.status_code == 403

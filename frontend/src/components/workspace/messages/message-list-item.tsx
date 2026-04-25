@@ -1,7 +1,11 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { FileIcon, Loader2Icon } from "lucide-react";
-import { useParams } from "next/navigation";
-import { memo, useMemo, type ImgHTMLAttributes } from "react";
+import {
+  memo,
+  useMemo,
+  type AnchorHTMLAttributes,
+  type ImgHTMLAttributes,
+} from "react";
 import rehypeKatex from "rehype-katex";
 
 import { Loader } from "@/components/ai-elements/loader";
@@ -34,15 +38,20 @@ import { cn } from "@/lib/utils";
 import { CopyButton } from "../copy-button";
 
 import { MarkdownContent } from "./markdown-content";
+import { MessageTokenUsage } from "./message-token-usage";
 
 export function MessageListItem({
   className,
   message,
   isLoading,
+  threadId,
+  tokenUsageEnabled = false,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
+  threadId: string;
+  tokenUsageEnabled?: boolean;
 }) {
   const isHuman = message.type === "human";
   return (
@@ -54,6 +63,8 @@ export function MessageListItem({
         className={isHuman ? "w-fit" : "w-full"}
         message={message}
         isLoading={isLoading}
+        threadId={threadId}
+        tokenUsageEnabled={tokenUsageEnabled}
       />
       {!isLoading && (
         <MessageToolbar
@@ -111,21 +122,38 @@ function MessageContent_({
   className,
   message,
   isLoading = false,
+  threadId,
+  tokenUsageEnabled = false,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
+  threadId: string;
+  tokenUsageEnabled?: boolean;
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
-  const { thread_id } = useParams<{ thread_id: string }>();
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
-        <MessageImage {...props} threadId={thread_id} maxWidth="90%" />
+        <MessageImage {...props} threadId={threadId} maxWidth="90%" />
       ),
+      a: ({ href, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) => {
+        if (href?.startsWith("/mnt/")) {
+          const url = resolveArtifactURL(href, threadId);
+          return (
+            <a
+              {...props}
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+            />
+          );
+        }
+        return <a {...props} href={href} />;
+      },
     }),
-    [thread_id],
+    [threadId],
   );
 
   const rawContent = extractContentFromMessage(message);
@@ -151,8 +179,8 @@ function MessageContent_({
   }, [rawContent, isHuman]);
 
   const filesList =
-    files && files.length > 0 && thread_id ? (
-      <RichFilesList files={files} threadId={thread_id} />
+    files && files.length > 0 ? (
+      <RichFilesList files={files} threadId={threadId} />
     ) : null;
 
   // Uploading state: mock AI message shown while files upload
@@ -179,6 +207,11 @@ function MessageContent_({
           <ReasoningTrigger />
           <ReasoningContent>{reasoningContent}</ReasoningContent>
         </Reasoning>
+        <MessageTokenUsage
+          enabled={tokenUsageEnabled}
+          isLoading={isLoading}
+          message={message}
+        />
       </AIElementMessageContent>
     );
   }
@@ -189,6 +222,7 @@ function MessageContent_({
         remarkPlugins={humanMessagePlugins.remarkPlugins}
         rehypePlugins={humanMessagePlugins.rehypePlugins}
         components={components}
+        parseIncompleteMarkdown={false}
       >
         {contentToDisplay}
       </AIElementMessageResponse>
@@ -214,6 +248,11 @@ function MessageContent_({
         rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
         className="my-3"
         components={components}
+      />
+      <MessageTokenUsage
+        enabled={tokenUsageEnabled}
+        isLoading={isLoading}
+        message={message}
       />
     </AIElementMessageContent>
   );
