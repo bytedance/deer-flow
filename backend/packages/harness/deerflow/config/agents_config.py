@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from deerflow.config.paths import get_paths
 
@@ -26,6 +26,14 @@ def validate_agent_name(name: str | None) -> str | None:
     return name
 
 
+class SubagentConfig(BaseModel):
+    """Per-agent subagent configuration overrides."""
+
+    model: str | None = Field(default=None, description="Model name for subagents (None = inherit from parent)")
+    timeout_seconds: int | None = Field(default=None, ge=1, description="Timeout in seconds for subagents")
+    max_turns: int | None = Field(default=None, ge=1, description="Maximum turns for subagents")
+
+
 class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
@@ -38,6 +46,12 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # Enable plan mode with TodoMiddleware for complex multi-step tasks
+    plan_mode: bool = False
+    # Enable extended thinking for models that support it
+    thinking_enabled: bool = True
+    # Subagent configuration overrides
+    subagent: SubagentConfig | None = None
 
 
 def load_agent_config(name: str | None) -> AgentConfig | None:

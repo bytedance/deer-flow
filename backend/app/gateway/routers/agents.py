@@ -9,13 +9,29 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from deerflow.config.agents_config import AgentConfig, SubagentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+class SubagentConfigRequest(BaseModel):
+    """Request model for subagent configuration."""
+
+    model: str | None = Field(default=None, description="Model name for subagents")
+    timeout_seconds: int | None = Field(default=None, ge=1, description="Timeout in seconds for subagents")
+    max_turns: int | None = Field(default=None, ge=1, description="Maximum turns for subagents")
+
+
+class SubagentConfigResponse(BaseModel):
+    """Response model for subagent configuration."""
+
+    model: str | None = Field(default=None, description="Model name for subagents")
+    timeout_seconds: int | None = Field(default=None, description="Timeout in seconds for subagents")
+    max_turns: int | None = Field(default=None, description="Maximum turns for subagents")
 
 
 class AgentResponse(BaseModel):
@@ -26,6 +42,9 @@ class AgentResponse(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
+    plan_mode: bool = Field(default=False, description="Enable plan mode with TodoMiddleware")
+    thinking_enabled: bool = Field(default=True, description="Enable extended thinking for supported models")
+    subagent: SubagentConfigResponse | None = Field(default=None, description="Subagent configuration overrides")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -43,6 +62,9 @@ class AgentCreateRequest(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all enabled, []=none)")
+    plan_mode: bool = Field(default=False, description="Enable plan mode with TodoMiddleware")
+    thinking_enabled: bool = Field(default=True, description="Enable extended thinking for supported models")
+    subagent: SubagentConfigRequest | None = Field(default=None, description="Subagent configuration overrides")
     soul: str = Field(default="", description="SOUL.md content — agent personality and behavioral guardrails")
 
 
@@ -53,6 +75,9 @@ class AgentUpdateRequest(BaseModel):
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
+    plan_mode: bool | None = Field(default=None, description="Updated plan mode setting")
+    thinking_enabled: bool | None = Field(default=None, description="Updated thinking enabled setting")
+    subagent: SubagentConfigRequest | None = Field(default=None, description="Updated subagent configuration")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
 
 
@@ -86,6 +111,17 @@ def _require_agents_api_enabled() -> None:
         )
 
 
+def _subagent_config_to_response(cfg: SubagentConfig | None) -> SubagentConfigResponse | None:
+    """Convert SubagentConfig to SubagentConfigResponse."""
+    if cfg is None:
+        return None
+    return SubagentConfigResponse(
+        model=cfg.model,
+        timeout_seconds=cfg.timeout_seconds,
+        max_turns=cfg.max_turns,
+    )
+
+
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
@@ -98,6 +134,9 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
+        plan_mode=agent_cfg.plan_mode,
+        thinking_enabled=agent_cfg.thinking_enabled,
+        subagent=_subagent_config_to_response(agent_cfg.subagent),
         soul=soul,
     )
 
@@ -221,6 +260,20 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
             config_data["tool_groups"] = request.tool_groups
         if request.skills is not None:
             config_data["skills"] = request.skills
+        if request.plan_mode:
+            config_data["plan_mode"] = request.plan_mode
+        if not request.thinking_enabled:
+            config_data["thinking_enabled"] = request.thinking_enabled
+        if request.subagent is not None:
+            subagent_data = {}
+            if request.subagent.model is not None:
+                subagent_data["model"] = request.subagent.model
+            if request.subagent.timeout_seconds is not None:
+                subagent_data["timeout_seconds"] = request.subagent.timeout_seconds
+            if request.subagent.max_turns is not None:
+                subagent_data["max_turns"] = request.subagent.max_turns
+            if subagent_data:
+                config_data["subagent"] = subagent_data
 
         config_file = agent_dir / "config.yaml"
         with open(config_file, "w", encoding="utf-8") as f:
@@ -280,7 +333,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = request.model_fields_set
-        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills"})
+        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills", "plan_mode", "thinking_enabled", "subagent"})
 
         if config_changed:
             updated: dict = {
@@ -302,6 +355,48 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
                 new_skills = agent_cfg.skills
             if new_skills is not None:
                 updated["skills"] = new_skills
+
+            # plan_mode: only write if explicitly set to True
+            if "plan_mode" in fields_set and request.plan_mode:
+                updated["plan_mode"] = request.plan_mode
+            elif agent_cfg.plan_mode:
+                updated["plan_mode"] = agent_cfg.plan_mode
+
+            # thinking_enabled: only write if explicitly set to False
+            if "thinking_enabled" in fields_set and not request.thinking_enabled:
+                updated["thinking_enabled"] = request.thinking_enabled
+            elif not agent_cfg.thinking_enabled:
+                updated["thinking_enabled"] = agent_cfg.thinking_enabled
+
+            # subagent: merge request with existing config
+            if "subagent" in fields_set and request.subagent is not None:
+                subagent_data = {}
+                existing_subagent = agent_cfg.subagent or SubagentConfig()
+                if request.subagent.model is not None:
+                    subagent_data["model"] = request.subagent.model
+                elif existing_subagent.model is not None:
+                    subagent_data["model"] = existing_subagent.model
+                if request.subagent.timeout_seconds is not None:
+                    subagent_data["timeout_seconds"] = request.subagent.timeout_seconds
+                elif existing_subagent.timeout_seconds is not None:
+                    subagent_data["timeout_seconds"] = existing_subagent.timeout_seconds
+                if request.subagent.max_turns is not None:
+                    subagent_data["max_turns"] = request.subagent.max_turns
+                elif existing_subagent.max_turns is not None:
+                    subagent_data["max_turns"] = existing_subagent.max_turns
+                if subagent_data:
+                    updated["subagent"] = subagent_data
+            elif agent_cfg.subagent is not None:
+                # Preserve existing subagent config
+                subagent_data = {}
+                if agent_cfg.subagent.model is not None:
+                    subagent_data["model"] = agent_cfg.subagent.model
+                if agent_cfg.subagent.timeout_seconds is not None:
+                    subagent_data["timeout_seconds"] = agent_cfg.subagent.timeout_seconds
+                if agent_cfg.subagent.max_turns is not None:
+                    subagent_data["max_turns"] = agent_cfg.subagent.max_turns
+                if subagent_data:
+                    updated["subagent"] = subagent_data
 
             config_file = agent_dir / "config.yaml"
             with open(config_file, "w", encoding="utf-8") as f:

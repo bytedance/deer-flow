@@ -311,16 +311,20 @@ def make_lead_agent(config: RunnableConfig):
 
     cfg = _get_runtime_config(config)
 
-    thinking_enabled = cfg.get("thinking_enabled", True)
-    reasoning_effort = cfg.get("reasoning_effort", None)
-    requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
-    is_plan_mode = cfg.get("is_plan_mode", False)
-    subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+
+    # Resolve thinking_enabled: request override → agent config → default True
+    thinking_enabled = cfg.get("thinking_enabled", agent_config.thinking_enabled if agent_config else True)
+    reasoning_effort = cfg.get("reasoning_effort", None)
+    requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
+    # Resolve plan_mode: request override → agent config → default False
+    is_plan_mode = cfg.get("is_plan_mode", agent_config.plan_mode if agent_config else False)
+    subagent_enabled = cfg.get("subagent_enabled", False)
+    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -363,6 +367,9 @@ def make_lead_agent(config: RunnableConfig):
             "available_skills": ["bootstrap"] if is_bootstrap else (agent_config.skills if agent_config and agent_config.skills is not None else None),
         }
     )
+
+    # Pass plan_mode to configurable for middleware
+    config.setdefault("configurable", {})["is_plan_mode"] = is_plan_mode
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
