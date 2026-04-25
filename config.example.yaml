@@ -326,6 +326,27 @@ models:
   #       chat_template_kwargs:
   #         enable_thinking: true
 
+
+  # Example: Qwen3-Coder deployed on MindIE Engine
+  # - name: Qwen3_Coder_480B_MindIE
+  #   display_name: Qwen3-Coder-480B (MindIE)
+  #   use: deerflow.models.mindie_provider:MindIEChatModel
+  #   model: Qwen3-Coder-480B-A35B-Instruct-Client
+  #   base_url: http://localhost:8989/v1
+  #   api_key: $OPENAI_API_KEY
+  #   temperature: 0
+  #   max_retries: 1
+  #   supports_thinking: false
+  #   supports_vision: false
+  #   supports_reasoning_effort: false
+  #   # --- Advanced Network Settings ---
+  #   # Due to MindIE's streaming limitations with tool calling, the provider
+  #   # uses mock-streaming (awaiting full generation). Extended timeouts are required.
+  #   read_timeout: 900.0     # 15 minutes to prevent drops during long document generation
+  #   connect_timeout: 30.0
+  #   write_timeout: 60.0
+  #   pool_timeout: 30.0
+
 # ============================================================================
 # Tool Groups Configuration
 # ============================================================================
