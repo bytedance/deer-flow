@@ -36,7 +36,7 @@ def _fix_messages(messages: list) -> list:
         if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", []):
             xml_parts = []
             for tool in msg.tool_calls:
-                args_xml = " ".join(f"<parameter={k}>{json.dumps(v, ensure_ascii=False)}</parameter>" for k, v in tool.get("args", {}).items())
+                args_xml = " ".join(f"<parameter={k}>{v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)}</parameter>" for k, v in tool.get("args", {}).items())
                 xml_parts.append(f"<tool_call> <function={tool['name']}> {args_xml} </function> </tool_call>")
             full_text = f"{text}\n" + "\n".join(xml_parts) if text else "\n".join(xml_parts)
             fixed.append(AIMessage(content=full_text.strip() or " "))

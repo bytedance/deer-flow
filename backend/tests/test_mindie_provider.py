@@ -91,7 +91,7 @@ class TestFixMessages:
         assert isinstance(out, AIMessage)
         assert "<tool_call>" in out.content
         assert "<function=get_weather>" in out.content
-        assert '<parameter=city>"London"</parameter>' in out.content
+        assert '<parameter=city>London</parameter>' in out.content
         assert not getattr(out, "tool_calls", [])
 
     def test_ai_message_text_preserved_before_xml(self):
@@ -185,6 +185,14 @@ class TestParseXmlToolCalls:
         assert calls[0]["name"] == "a"
         assert calls[1]["name"] == "b"
 
+    def test_nested_tool_call_blocks_do_not_break_parsing(self):
+        content = "<tool_call><function=outer><parameter=q>1</parameter><tool_call><function=inner><parameter=x>2</parameter></function></tool_call></function></tool_call>"
+        clean, calls = _parse_xml_tool_call_to_dict(content)
+        assert clean == ""
+        assert len(calls) == 1
+        assert calls[0]["name"] == "outer"
+        assert calls[0]["args"]["q"] == 1
+
     def test_text_before_tool_call_preserved(self):
         content = "Here is the answer.\n<tool_call><function=f><parameter=k>v</parameter></function></tool_call>"
         clean, calls = _parse_xml_tool_call_to_dict(content)
@@ -244,6 +252,12 @@ class TestPatchResult:
         patched = model._patch_result_with_tools(result)
         assert patched.generations[0].message.content == "line1\nline2"
 
+    def test_escaped_newlines_inside_code_fence_preserved(self):
+        model = self._model()
+        result = _make_chat_result('text\\n```json\n{"k":"a\\\\nb"}\n```\\nend')
+        patched = model._patch_result_with_tools(result)
+        assert patched.generations[0].message.content == 'text\n```json\n{"k":"a\\\\nb"}\n```\nend'
+
     def test_xml_tool_calls_extracted(self):
         model = self._model()
         content = "<tool_call><function=calc><parameter=expr>1+1</parameter></function></tool_call>"
@@ -279,6 +293,50 @@ class TestPatchResult:
         result = ChatResult(generations=[gen])
         patched = model._patch_result_with_tools(result)
         assert patched is not None
+
+
+class TestMindIEInit:
+    def test_timeout_kwargs_are_normalized(self):
+        captured = {}
+
+        def fake_init(self, **kwargs):
+            captured.update(kwargs)
+
+        with patch("deerflow.models.mindie_provider.ChatOpenAI.__init__", new=fake_init):
+            MindIEChatModel(
+                model="mindie-test",
+                api_key="test-key",
+                connect_timeout=1.0,
+                read_timeout=2.0,
+                write_timeout=3.0,
+                pool_timeout=4.0,
+            )
+
+        timeout = captured.get("timeout")
+        assert timeout is not None
+        assert timeout.connect == 1.0
+        assert timeout.read == 2.0
+        assert timeout.write == 3.0
+        assert timeout.pool == 4.0
+
+    def test_explicit_timeout_takes_precedence(self):
+        captured = {}
+
+        def fake_init(self, **kwargs):
+            captured.update(kwargs)
+
+        with patch("deerflow.models.mindie_provider.ChatOpenAI.__init__", new=fake_init):
+            MindIEChatModel(
+                model="mindie-test",
+                api_key="test-key",
+                timeout=9.0,
+                connect_timeout=1.0,
+                read_timeout=2.0,
+                write_timeout=3.0,
+                pool_timeout=4.0,
+            )
+
+        assert captured.get("timeout") == 9.0
 
 
 # ═════════════════════════════════════════════════════════════════════════════
