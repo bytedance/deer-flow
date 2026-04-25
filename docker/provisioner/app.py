@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 
@@ -74,17 +75,30 @@ KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
 # is ``host.docker.internal``; on Linux it may be the host's LAN IP.
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
 
-# Optional API key for protecting the provisioner endpoints.
-# Set PROVISIONER_API_KEY in the environment to enable authentication.
+# API key for protecting the provisioner endpoints.
+# Authentication is enforced by default; set PROVISIONER_AUTH_DISABLED=true to explicitly opt out.
+# Set PROVISIONER_API_KEY to the expected secret key value.
 PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
+PROVISIONER_AUTH_DISABLED = os.environ.get("PROVISIONER_AUTH_DISABLED", "").lower() == "true"
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def _require_api_key(api_key: str | None = Depends(_api_key_header)) -> None:
-    """Reject requests that do not supply the correct API key."""
-    if PROVISIONER_API_KEY and api_key != PROVISIONER_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing API key")
+    """Reject requests that do not supply the correct API key.
+
+    Authentication is enforced by default.  To disable it (e.g. in a
+    fully-private network), set PROVISIONER_AUTH_DISABLED=true explicitly.
+    Uses constant-time comparison to prevent timing side-channel attacks.
+    """
+    if PROVISIONER_AUTH_DISABLED:
+        return
+    if not PROVISIONER_API_KEY:
+        raise HTTPException(
+            status_code=401, detail="Provisioner API key not configured; set PROVISIONER_API_KEY"
+        )
+    if not api_key or not secrets.compare_digest(api_key, PROVISIONER_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 def join_host_path(base: str, *parts: str) -> str:
@@ -449,8 +463,8 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/api/sandboxes", response_model=SandboxResponse)
-async def create_sandbox(req: CreateSandboxRequest, _: None = Depends(_require_api_key)):
+@app.post("/api/sandboxes", response_model=SandboxResponse, dependencies=[Depends(_require_api_key)])
+async def create_sandbox(req: CreateSandboxRequest):
     """Create a sandbox Pod + NodePort Service for *sandbox_id*.
 
     If the sandbox already exists, returns the existing information
@@ -517,8 +531,8 @@ async def create_sandbox(req: CreateSandboxRequest, _: None = Depends(_require_a
     )
 
 
-@app.delete("/api/sandboxes/{sandbox_id}")
-async def destroy_sandbox(sandbox_id: str, _: None = Depends(_require_api_key)):
+@app.delete("/api/sandboxes/{sandbox_id}", dependencies=[Depends(_require_api_key)])
+async def destroy_sandbox(sandbox_id: str):
     """Destroy a sandbox Pod + Service."""
     errors: list[str] = []
 
@@ -546,8 +560,8 @@ async def destroy_sandbox(sandbox_id: str, _: None = Depends(_require_api_key)):
     return {"ok": True, "sandbox_id": sandbox_id}
 
 
-@app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse)
-async def get_sandbox(sandbox_id: str, _: None = Depends(_require_api_key)):
+@app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse, dependencies=[Depends(_require_api_key)])
+async def get_sandbox(sandbox_id: str):
     """Return current status and URL for a sandbox."""
     node_port = _get_node_port(sandbox_id)
     if not node_port:
@@ -560,8 +574,8 @@ async def get_sandbox(sandbox_id: str, _: None = Depends(_require_api_key)):
     )
 
 
-@app.get("/api/sandboxes")
-async def list_sandboxes(_: None = Depends(_require_api_key)):
+@app.get("/api/sandboxes", dependencies=[Depends(_require_api_key)])
+async def list_sandboxes():
     """List every sandbox currently managed in the namespace."""
     try:
         services = core_v1.list_namespaced_service(
