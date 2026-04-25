@@ -223,6 +223,90 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
     get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False)
 
 
+def test_task_tool_inherits_parent_skill_allowlist_for_default_subagent(monkeypatch):
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    runtime.config["metadata"]["available_skills"] = ["safe-skill"]
+    events = []
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="执行任务",
+        prompt="use skills",
+        subagent_type="general-purpose",
+        tool_call_id="tc-skills",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    assert captured["config"].skills == ["safe-skill"]
+
+
+def test_task_tool_intersects_parent_and_subagent_skill_allowlists(monkeypatch):
+    config = _make_subagent_config()
+    config = SubagentConfig(
+        name=config.name,
+        description=config.description,
+        system_prompt=config.system_prompt,
+        max_turns=config.max_turns,
+        timeout_seconds=config.timeout_seconds,
+        skills=["safe-skill", "other-skill"],
+    )
+    runtime = _make_runtime()
+    runtime.config["metadata"]["available_skills"] = ["safe-skill"]
+    events = []
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="执行任务",
+        prompt="use skills",
+        subagent_type="general-purpose",
+        tool_call_id="tc-skills-intersection",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    assert captured["config"].skills == ["safe-skill"]
+
+
 def test_task_tool_no_tool_groups_passes_none(monkeypatch):
     """Verify that when metadata has no tool_groups, groups=None is passed (backward compat)."""
     config = _make_subagent_config()

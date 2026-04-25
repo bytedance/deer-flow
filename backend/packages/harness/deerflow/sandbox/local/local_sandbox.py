@@ -288,10 +288,10 @@ class LocalSandbox(Sandbox):
                 timeout=600,
             )
         else:
+            args = [shell, "-c", resolved_command]
             result = subprocess.run(
-                resolved_command,
-                executable=shell,
-                shell=True,
+                args,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=600,
