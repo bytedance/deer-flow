@@ -255,7 +255,9 @@ class TestMultipleMounts:
 
         sandbox.execute_command("cat /mnt/data/test.txt")
         # Verify the command received the resolved local path
-        assert str(data_dir) in captured.get("command", "")
+        command = captured.get("command", [])
+        assert isinstance(command, list) and len(command) >= 3
+        assert str(data_dir) in command[2]
 
     def test_reverse_resolve_path_does_not_match_partial_prefix(self, tmp_path):
         foo_dir = tmp_path / "foo"
