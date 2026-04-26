@@ -2,7 +2,7 @@
 
 import logging
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any
 
 from deerflow.canvas.components import (
@@ -77,13 +77,13 @@ class CanvasEngine:
             in_degree[edge.target] += 1
 
         # Find all nodes with no incoming edges
-        queue = [node_id for node_id, degree in in_degree.items() if degree == 0]
+        queue = deque(node_id for node_id, degree in in_degree.items() if degree == 0)
 
         sorted_nodes = []
         node_map = {node.id: node for node in self.canvas.nodes}
 
         while queue:
-            node_id = queue.pop(0)
+            node_id = queue.popleft()
             sorted_nodes.append(node_map[node_id])
 
             for neighbor in adj[node_id]:
