@@ -4,7 +4,7 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from deerflow.config import get_app_config
@@ -129,11 +129,36 @@ async def get_table_schema(connection_id: str, table_name: str):
         raise HTTPException(status_code=500, detail=f"Failed to get schema: {str(e)}")
 
 
+def _validate_table_name(table_name: str) -> str:
+    """验证表名，防止 SQL 注入。
+
+    只允许字母、数字和下划线，防止注入攻击。
+
+    Args:
+        table_name: 要验证的表名
+
+    Returns:
+        验证通过的表名
+
+    Raises:
+        ValueError: 如果表名包含非法字符
+    """
+    import re
+
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table_name):
+        raise ValueError(f"Invalid table name: '{table_name}'. Only alphanumeric characters and underscores are allowed.")
+    return table_name
+
+
 @router.get(
     "/db-connections/{connection_id}/tables/{table_name}/preview",
     response_model=TablePreviewResponse,
 )
-async def preview_table(connection_id: str, table_name: str, limit: int = 100):
+async def preview_table(
+    connection_id: str,
+    table_name: str,
+    limit: int = Query(default=100, ge=1, le=10000),
+):
     """Preview data from a table."""
     config = get_app_config()
 
@@ -150,8 +175,13 @@ async def preview_table(connection_id: str, table_name: str, limit: int = 100):
         raise HTTPException(status_code=404, detail=f"Connection '{connection_id}' not found")
 
     try:
-        rows, total_rows = await _preview_table_data(conn, table_name, limit)
+        # 验证表名防止 SQL 注入
+        validated_table_name = _validate_table_name(table_name)
+        rows, total_rows = await _preview_table_data(conn, validated_table_name, limit)
         return TablePreviewResponse(rows=rows, total_rows=total_rows)
+    except ValueError as e:
+        logger.warning(f"Invalid table name {table_name}: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to preview {table_name}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to preview: {str(e)}")
@@ -213,19 +243,29 @@ async def _get_table_schema(conn: Any, table_name: str) -> list[TableColumnRespo
 
 
 async def _preview_table_data(conn: Any, table_name: str, limit: int) -> tuple[list[dict[str, Any]], int]:
-    """Get preview data from a table."""
+    """Get preview data from a table.
+
+    Args:
+        conn: 数据库连接配置
+        table_name: 已验证的表名（只包含字母、数字和下划线）
+        limit: 限制返回的行数（已在路由层验证范围 1-10000）
+
+    Returns:
+        tuple[list[dict[str, Any]], int]: 行数据和总行数
+    """
     import sqlalchemy
     from sqlalchemy import text
 
     engine = sqlalchemy.create_engine(_build_connection_url(conn))
 
     with engine.connect() as connection:
-        # Get total count
+        # Get total count - 使用验证后的表名构建查询
+        # 表名已通过 _validate_table_name 验证，只包含安全字符
         count_result = connection.execute(text(f'SELECT COUNT(*) FROM "{table_name}"'))
         total_rows = count_result.scalar() or 0
 
-        # Get preview rows
-        result = connection.execute(text(f'SELECT * FROM "{table_name}" LIMIT {limit}'))
+        # Get preview rows - 使用参数化查询处理 LIMIT
+        result = connection.execute(text(f'SELECT * FROM "{table_name}" LIMIT :limit'), {"limit": limit})
         rows = [dict(row._mapping) for row in result]
 
         return rows, total_rows
