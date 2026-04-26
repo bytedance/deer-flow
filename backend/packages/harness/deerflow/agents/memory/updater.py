@@ -2,7 +2,6 @@
 
 import asyncio
 import atexit
-import concurrent.futures
 import copy
 import json
 import logging
@@ -24,6 +23,7 @@ from deerflow.agents.memory.storage import (
     get_memory_storage,
     utc_now_iso_z,
 )
+from deerflow.config import get_app_config
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
 
@@ -44,8 +44,16 @@ logger = logging.getLogger(__name__)
 # completely isolated from the main agent's cached client.
 # ---------------------------------------------------------------------------
 _MEMORY_LOOP: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+
+
+def _run_memory_loop() -> None:
+    """Thread target: register the loop for this thread, then run it forever."""
+    asyncio.set_event_loop(_MEMORY_LOOP)
+    _MEMORY_LOOP.run_forever()
+
+
 _MEMORY_LOOP_THREAD = threading.Thread(
-    target=_MEMORY_LOOP.run_forever,
+    target=_run_memory_loop,
     name="memory-event-loop",
     daemon=True,
 )
@@ -53,13 +61,20 @@ _MEMORY_LOOP_THREAD.start()
 
 # Dedicated httpx client whose connections are always bound to _MEMORY_LOOP.
 _MEMORY_HTTP_CLIENT: httpx.AsyncClient = httpx.AsyncClient()
-atexit.register(lambda: asyncio.run_coroutine_threadsafe(_MEMORY_HTTP_CLIENT.aclose(), _MEMORY_LOOP))
 
-_SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=4,
-    thread_name_prefix="memory-updater-sync",
-)
-atexit.register(lambda: _SYNC_MEMORY_UPDATER_EXECUTOR.shutdown(wait=False))
+
+def _shutdown_memory_loop() -> None:
+    """Gracefully close the dedicated HTTP client and stop the memory loop."""
+    try:
+        future = asyncio.run_coroutine_threadsafe(_MEMORY_HTTP_CLIENT.aclose(), _MEMORY_LOOP)
+        future.result(timeout=5)
+    except Exception:
+        pass
+    finally:
+        _MEMORY_LOOP.call_soon_threadsafe(_MEMORY_LOOP.stop)
+
+
+atexit.register(_shutdown_memory_loop)
 
 
 def _create_empty_memory() -> dict[str, Any]:
@@ -337,10 +352,15 @@ class MemoryUpdater:
         """Get the model for memory updates."""
         config = get_memory_config()
         model_name = self._model_name or config.model_name
-        # Pass the dedicated httpx client so memory LLM calls never share the
-        # @lru_cache'd client used by the main agent, preventing cross-loop
-        # connection contamination.
-        return create_chat_model(name=model_name, thinking_enabled=False, http_async_client=_MEMORY_HTTP_CLIENT)
+        # Only inject the dedicated httpx client for OpenAI-compatible models.
+        # Other providers (Anthropic, Ollama, etc.) do not accept http_async_client
+        # and would raise TypeError.
+        app_cfg = get_app_config()
+        model_cfg = app_cfg.get_model_config(model_name)
+        extra: dict = {}
+        if model_cfg is not None and model_cfg.use.startswith("langchain_openai:"):
+            extra["http_async_client"] = _MEMORY_HTTP_CLIENT
+        return create_chat_model(name=model_name, thinking_enabled=False, **extra)
 
     def _build_correction_hint(
         self,
