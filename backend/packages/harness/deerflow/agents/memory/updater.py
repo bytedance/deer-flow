@@ -27,6 +27,7 @@ from deerflow.agents.memory.storage import (
 from deerflow.config import get_app_config
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
+from deerflow.reflection import resolve_class
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +379,23 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped.casefold()
 
 
+def _uses_chatopenai_async_client(model_use: str) -> bool:
+    """Return whether the provider class is ChatOpenAI-based.
+
+    This includes direct ``langchain_openai:*`` classes and local wrappers
+    that subclass ``langchain_openai.ChatOpenAI`` (e.g.
+    ``deerflow.models.patched_openai:PatchedChatOpenAI``).
+    """
+    if model_use.startswith("langchain_openai:"):
+        return True
+    try:
+        model_class = resolve_class(model_use)
+    except (ImportError, ValueError):
+        return False
+
+    return any(base.__name__ == "ChatOpenAI" and base.__module__.startswith("langchain_openai") for base in model_class.__mro__)
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -399,7 +417,7 @@ class MemoryUpdater:
         app_cfg = get_app_config()
         model_cfg = app_cfg.get_model_config(model_name)
         extra: dict[str, Any] = {}
-        if model_cfg is not None and model_cfg.use.startswith("langchain_openai:"):
+        if model_cfg is not None and _uses_chatopenai_async_client(model_cfg.use):
             _, client = _ensure_memory_loop()
             extra["http_async_client"] = client
         return create_chat_model(name=model_name, thinking_enabled=False, **extra)

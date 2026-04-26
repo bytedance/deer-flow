@@ -8,6 +8,7 @@ from deerflow.agents.memory.updater import (
     MemoryUpdater,
     _extract_text,
     _run_async_update_sync,
+    _uses_chatopenai_async_client,
     clear_memory_data,
     create_memory_fact,
     delete_memory_fact,
@@ -40,6 +41,22 @@ def _memory_config(**overrides: object) -> MemoryConfig:
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
+
+
+def test_uses_chatopenai_async_client_accepts_langchain_openai_provider_path() -> None:
+    assert _uses_chatopenai_async_client("langchain_openai:ChatOpenAI") is True
+
+
+def test_uses_chatopenai_async_client_accepts_patched_chatopenai_subclass() -> None:
+    assert _uses_chatopenai_async_client("deerflow.models.patched_openai:PatchedChatOpenAI") is True
+
+
+def test_uses_chatopenai_async_client_rejects_non_chatopenai_class() -> None:
+    class _DummyModel:
+        pass
+
+    with patch("deerflow.agents.memory.updater.resolve_class", return_value=_DummyModel):
+        assert _uses_chatopenai_async_client("dummy.provider:Model") is False
 
 
 def test_apply_updates_skips_existing_duplicate_and_preserves_removals() -> None:
