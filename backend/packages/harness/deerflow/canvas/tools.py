@@ -249,7 +249,7 @@ def canvas_add_edge_tool(
 
 
 @tool("canvas_execute", parse_docstring=True)
-def canvas_execute_tool(
+async def canvas_execute_tool(
     runtime: ToolRuntime[ContextT, dict],
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
@@ -289,25 +289,53 @@ def canvas_execute_tool(
 
     config = get_app_config()
     db_connections = {}
-    if hasattr(config, "db_connections"):
+    if hasattr(config, "db_connections") and config.db_connections:
         db_connections = {conn.name: conn.model_dump() for conn in config.db_connections}
 
+    # 获取 sandbox 从 context
+    sandbox = None
+    if runtime.context:
+        sandbox = runtime.context.get("sandbox")
+
     # Create engine and execute
-    _engine = CanvasEngine(
+    engine = CanvasEngine(
         canvas=canvas,
         db_connections=db_connections,
-        sandbox=None,  # Sandbox will be provided by middleware
+        sandbox=sandbox,
     )
 
-    # Return a command that will trigger async execution
-    # The actual execution will be handled by a separate async mechanism
-    logger.info(f"Canvas {canvas.id} execution requested")
+    logger.info(f"Canvas {canvas.id} execution started")
+
+    # 实际执行 canvas
+    result = await engine.execute()
+
+    # 保存更新后的 canvas 状态
+    storage.save(canvas)
+
+    # 构建结果消息
+    status_msg = "成功" if result.status.value == "completed" else "失败"
+    result_lines = [
+        f"Canvas 执行{status_msg}。",
+        f"Canvas ID: {canvas.id}",
+        f"状态: {result.status.value}",
+        f"完成节点: {len(result.completed_nodes)}/{len(canvas.nodes)}",
+    ]
+
+    if result.failed_nodes:
+        result_lines.append(f"失败节点: {', '.join(result.failed_nodes)}")
+        # 添加第一个失败节点的错误信息
+        for node_id in result.failed_nodes:
+            if node_id in result.results:
+                error = result.results[node_id].error
+                if error:
+                    result_lines.append(f"错误: {error}")
+                    break
 
     return Command(
         update={
             "messages": [
                 ToolMessage(
-                    f"Canvas execution started.\nCanvas ID: {canvas.id}\nNodes: {len(canvas.nodes)}\nEdges: {len(canvas.edges)}\nUse canvas_status to check progress.",
+                    "\n".join(result_lines),
                     tool_call_id=tool_call_id,
                 )
             ],

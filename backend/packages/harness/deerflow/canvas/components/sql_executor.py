@@ -4,20 +4,23 @@ import logging
 import re
 from typing import Any
 
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+
 from deerflow.canvas.components.base import ComponentExecutor, ExecutionContext
 from deerflow.canvas.models import CanvasNode, NodeResult
 
 logger = logging.getLogger(__name__)
 
-# Regex to find {{variable}} patterns
-VARIABLE_PATTERN = re.compile(r"\{\{(\w+)\}\}")
+# Regex to find {{node-X.field}} patterns
+VARIABLE_PATTERN = re.compile(r"\{\{(node-\d+)\.(\w+)\}\}")
 
 
 class SQLExecutorExecutor(ComponentExecutor):
     """Executor for sql_executor nodes.
 
     Executes SQL statements to create tables (CREATE TABLE ... AS SELECT).
-    Supports variable substitution using {{variable_name}} syntax.
+    Supports variable substitution using {{node-X.field}} syntax.
     """
 
     @property
@@ -44,7 +47,7 @@ class SQLExecutorExecutor(ComponentExecutor):
         # Resolve variables in SQL
         resolved_sql = self._resolve_variables(sql_template, context.resolved_variables)
 
-        # Get database connection (use first available or specific one)
+        # Get database connection info
         conn_info = self._get_connection_info(node, context)
         if not conn_info:
             return NodeResult(
@@ -52,21 +55,26 @@ class SQLExecutorExecutor(ComponentExecutor):
                 error="No database connection available",
             )
 
-        connection = conn_info.get("connection")
-        if not connection:
+        # 从连接信息获取 URL
+        db_url = conn_info.get("url") or conn_info.get("connection_url")
+        if not db_url:
             return NodeResult(
                 success=False,
-                error="Database connection not initialized",
+                error="Database connection URL not configured",
             )
 
         logs = []
         rows_affected = 0
+        engine: Engine | None = None
 
         try:
-            # Execute the SQL
-            with connection.cursor() as cursor:
-                cursor.execute(resolved_sql)
-                rows_affected = cursor.rowcount or 0
+            # 创建 SQLAlchemy 引擎
+            engine = create_engine(db_url)
+
+            # 执行 SQL
+            with engine.connect() as connection:
+                result = connection.execute(text(resolved_sql))
+                rows_affected = result.rowcount or 0
                 connection.commit()
 
             logs.append(f"Executed SQL successfully, {rows_affected} rows affected")
@@ -79,7 +87,6 @@ class SQLExecutorExecutor(ComponentExecutor):
                 logs=logs,
             )
         except Exception as e:
-            connection.rollback()
             error_msg = f"SQL execution failed: {str(e)}"
             logs.append(error_msg)
             logger.error(f"SQL executor {node.id}: {error_msg}")
@@ -88,19 +95,29 @@ class SQLExecutorExecutor(ComponentExecutor):
                 error=error_msg,
                 logs=logs,
             )
+        finally:
+            if engine:
+                engine.dispose()
 
     def _resolve_variables(self, sql: str, variables: dict[str, Any]) -> str:
-        """Replace {{variable}} patterns with resolved values."""
+        """Replace {{node-X.field}} patterns with resolved values."""
 
         def replacer(match):
-            var_name = match.group(1)
-            return str(variables.get(var_name, match.group(0)))
+            node_id = match.group(1)
+            field = match.group(2)
+            var_key = f"{node_id}.{field}"
+            return str(variables.get(var_key, match.group(0)))
 
         return VARIABLE_PATTERN.sub(replacer, sql)
 
     def _get_connection_info(self, node: CanvasNode, context: ExecutionContext) -> dict[str, Any] | None:
         """Get database connection info for this node."""
-        # First connection available, or implement connection selection logic
+        # 优先使用节点指定的连接
+        connection_id = node.data.get("connection_id")
+        if connection_id and connection_id in context.db_connections:
+            return context.db_connections[connection_id]
+
+        # 否则使用第一个可用连接
         for conn_id, conn_info in context.db_connections.items():
             return conn_info
         return None

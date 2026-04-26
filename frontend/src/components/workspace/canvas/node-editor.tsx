@@ -6,7 +6,7 @@ import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { useValidateSQL } from "@/core/canvas/hooks";
+import { useUpdateCanvas, useValidateSQL } from "@/core/canvas/hooks";
 import type { CanvasNode, NodeType } from "@/core/canvas/types";
 
 import { CodeEditorDialog } from "./code-editor-dialog";
@@ -30,14 +30,69 @@ interface Variable {
 
 /**
  * 从上游节点获取可用变量
+ * 基于 DAG 的边关系提取上游节点的输出变量
  */
 function getAvailableVariables(
-  _node: CanvasNode,
-  _canvasNodes: CanvasNode[]
+  node: CanvasNode,
+  canvasNodes: CanvasNode[],
+  canvasEdges?: Array<{ source: string; target: string }>
 ): Variable[] {
-  // TODO: 实现基于 DAG 依赖关系的变量提取
-  // 目前返回空数组，后续可以根据边关系提取上游节点的输出变量
-  return [];
+  const variables: Variable[] = [];
+
+  // 如果有边信息，基于边关系获取上游节点
+  if (canvasEdges && canvasEdges.length > 0) {
+    // 找到指向当前节点的所有边
+    const upstreamNodeIds = canvasEdges
+      .filter((edge) => edge.target === node.id)
+      .map((edge) => edge.source);
+
+    // 获取上游节点信息
+    for (const nodeId of upstreamNodeIds) {
+      const upstreamNode = canvasNodes.find((n) => n.id === nodeId);
+      if (upstreamNode) {
+        const nodeData = upstreamNode.data as Record<string, unknown>;
+        const outputTable = typeof nodeData?.output_table === "string"
+          ? nodeData.output_table
+          : undefined;
+        const displayName = (typeof nodeData?.display_name === "string"
+          ? nodeData.display_name
+          : null) ?? outputTable ?? String(upstreamNode.type);
+
+        variables.push({
+          name: `{{${nodeId}.output_table}}`,
+          description: `${displayName} 的输出表`,
+        });
+      }
+    }
+  } else {
+    // 如果没有边信息，返回所有其他节点的输出变量
+    for (const otherNode of canvasNodes) {
+      if (otherNode.id !== node.id) {
+        const nodeData = otherNode.data as Record<string, unknown>;
+        // 只有有输出表的节点才添加变量
+        const outputTable = nodeData?.output_table;
+        if (outputTable && typeof outputTable === "string") {
+          const displayName = (typeof nodeData?.display_name === "string"
+            ? nodeData.display_name
+            : null) ?? outputTable ?? String(otherNode.type);
+
+          variables.push({
+            name: `{{${otherNode.id}.output_table}}`,
+            description: `${displayName} 的输出表`,
+          });
+        } else if (nodeData?.table_name && typeof nodeData.table_name === "string") {
+          // Data Source 节点使用 table_name
+          const tableName = nodeData.table_name;
+          variables.push({
+            name: `{{${otherNode.id}.table_name}}`,
+            description: `${tableName} 数据源`,
+          });
+        }
+      }
+    }
+  }
+
+  return variables;
 }
 
 export function NodeEditor() {
@@ -48,9 +103,13 @@ export function NodeEditor() {
     setCodeEditorOpen,
     setDataPreviewOpen,
     setDataPreviewNode,
+    setCanvas,
   } = useCanvasContext();
 
   const selectedNode = canvas?.nodes.find((n) => n.id === selectedNodeId);
+
+  // 获取 canvas 更新 hook
+  const { updateCanvas, isUpdating } = useUpdateCanvas(canvas?.thread_id ?? "");
 
   // 验证状态
   const [validationResult, setValidationResult] = useState<{
@@ -76,14 +135,32 @@ export function NodeEditor() {
     setCodeEditorOpen(true);
   }, [setCodeEditorOpen]);
 
-  // 数据更新处理
+  // 数据更新处理 - 实际保存到 canvas
   const handleDataUpdate = useCallback(
     (data: Record<string, unknown>) => {
-      // TODO: 实现 canvas 更新逻辑
-      // 需要通过 useUpdateCanvas hook 更新节点数据
-      console.log("Update node data:", selectedNodeId, data);
+      if (!canvas || !selectedNodeId || !selectedNode) return;
+
+      // 更新本地 canvas 状态
+      const updatedNodes = canvas.nodes.map((n) =>
+        n.id === selectedNodeId
+          ? { ...n, data: { ...n.data, ...data } }
+          : n
+      );
+
+      const updatedCanvas = {
+        ...canvas,
+        nodes: updatedNodes,
+      };
+
+      // 更新本地状态
+      setCanvas(updatedCanvas);
+
+      // 保存到后端
+      updateCanvas({
+        nodes: updatedNodes,
+      });
     },
-    [selectedNodeId]
+    [canvas, selectedNodeId, selectedNode, setCanvas, updateCanvas]
   );
 
   // SQL 验证
@@ -129,7 +206,7 @@ export function NodeEditor() {
 
   // 获取可用变量
   const variables = selectedNode && canvas?.nodes
-    ? getAvailableVariables(selectedNode, canvas.nodes)
+    ? getAvailableVariables(selectedNode, canvas.nodes, canvas?.edges)
     : [];
 
   // 渲染类型特定编辑器
@@ -215,8 +292,13 @@ export function NodeEditor() {
       {/* 标题栏 */}
       <div className="flex items-center justify-between p-4 border-b">
         <div className="flex flex-col">
-          <h3 className="font-medium">
+          <h3 className="font-medium flex items-center gap-2">
             {NODE_TYPE_LABELS[nodeType ?? "data_source"]}
+            {isUpdating && (
+              <span className="text-xs text-muted-foreground animate-pulse">
+                保存中...
+              </span>
+            )}
           </h3>
           <p className="text-xs text-muted-foreground">
             ID: {selectedNode.id}
