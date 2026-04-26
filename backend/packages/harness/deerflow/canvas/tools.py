@@ -7,11 +7,12 @@ import logging
 import uuid
 from typing import Annotated
 
-from langchain.tools import ToolRuntime, tool
-from langchain_core.tools import InjectedToolArg
+from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
 
+from deerflow.agents.thread_state import ThreadState
 from deerflow.canvas.models import (
     AgentExecutionMode,
     Canvas,
@@ -27,7 +28,7 @@ from deerflow.config.paths import get_paths
 logger = logging.getLogger(__name__)
 
 
-def _get_thread_id(runtime: ToolRuntime[ContextT, dict]) -> str | None:
+def _get_thread_id(runtime: ToolRuntime[ContextT, ThreadState]) -> str | None:
     """Resolve thread ID from runtime context."""
     thread_id = runtime.context.get("thread_id") if runtime.context else None
     if thread_id:
@@ -44,10 +45,11 @@ def _get_storage() -> CanvasStorage:
 
 @tool("canvas_plan", parse_docstring=True)
 def canvas_plan_tool(
-    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
+    runtime: ToolRuntime[ContextT, ThreadState],
     description: str,
     name: str = "",
     agent_execution_mode: str = "readonly",
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Create or update a canvas with the given description.
 
@@ -62,7 +64,7 @@ def canvas_plan_tool(
     thread_id = _get_thread_id(runtime)
     if not thread_id:
         return Command(
-            update={"messages": ["Error: Thread ID not available"]},
+            update={"messages": [ToolMessage("Error: Thread ID not available", tool_call_id=tool_call_id)]},
         )
 
     storage = _get_storage()
@@ -98,7 +100,10 @@ def canvas_plan_tool(
     return Command(
         update={
             "messages": [
-                f"Canvas '{canvas.name}' ready with description: {description}\nCanvas ID: {canvas.id}\nAgent Mode: {mode.value}"
+                ToolMessage(
+                    f"Canvas '{canvas.name}' ready with description: {description}\nCanvas ID: {canvas.id}\nAgent Mode: {mode.value}",
+                    tool_call_id=tool_call_id,
+                )
             ],
         },
     )
@@ -106,10 +111,11 @@ def canvas_plan_tool(
 
 @tool("canvas_add_node", parse_docstring=True)
 def canvas_add_node_tool(
-    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
+    runtime: ToolRuntime[ContextT, ThreadState],
     node_type: str | dict,
     config: dict | None = None,
     node_id: str = "",
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Add a node to the current canvas.
 
@@ -120,6 +126,7 @@ def canvas_add_node_tool(
         config: Node configuration (varies by type).
         node_id: Optional custom node ID (auto-generated if not provided).
     """
+    # Handle dict payload for node_type
     if isinstance(node_type, dict):
         payload = node_type
         node_type = str(payload.get("node_type", ""))
@@ -131,7 +138,10 @@ def canvas_add_node_tool(
         return Command(
             update={
                 "messages": [
-                    "Error: Missing node config for canvas_add_node."
+                    ToolMessage(
+                        "Error: Missing node config for canvas_add_node.",
+                        tool_call_id=tool_call_id,
+                    )
                 ]
             },
         )
@@ -139,7 +149,7 @@ def canvas_add_node_tool(
     thread_id = _get_thread_id(runtime)
     if not thread_id:
         return Command(
-            update={"messages": ["Error: Thread ID not available"]},
+            update={"messages": [ToolMessage("Error: Thread ID not available", tool_call_id=tool_call_id)]},
         )
 
     storage = _get_storage()
@@ -147,7 +157,7 @@ def canvas_add_node_tool(
 
     if canvas is None:
         return Command(
-            update={"messages": ["Error: No canvas exists. Use canvas_plan first."]},
+            update={"messages": [ToolMessage("Error: No canvas exists. Use canvas_plan first.", tool_call_id=tool_call_id)]},
         )
 
     try:
@@ -156,7 +166,10 @@ def canvas_add_node_tool(
         return Command(
             update={
                 "messages": [
-                    f"Error: Invalid node type '{node_type}'. Valid types: {[t.value for t in NodeType]}"
+                    ToolMessage(
+                        f"Error: Invalid node type '{node_type}'. Valid types: {[t.value for t in NodeType]}",
+                        tool_call_id=tool_call_id,
+                    )
                 ]
             },
         )
@@ -182,7 +195,10 @@ def canvas_add_node_tool(
     return Command(
         update={
             "messages": [
-                f"Added {node_type} node '{node_id}' to canvas.\nTotal nodes: {len(canvas.nodes)}"
+                ToolMessage(
+                    f"Added {node_type} node '{node_id}' to canvas.\nTotal nodes: {len(canvas.nodes)}",
+                    tool_call_id=tool_call_id,
+                )
             ],
         },
     )
@@ -190,9 +206,10 @@ def canvas_add_node_tool(
 
 @tool("canvas_add_edge", parse_docstring=True)
 def canvas_add_edge_tool(
-    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
+    runtime: ToolRuntime[ContextT, ThreadState],
     source: str,
     target: str,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Add an edge connecting two nodes in the canvas.
 
@@ -205,7 +222,7 @@ def canvas_add_edge_tool(
     thread_id = _get_thread_id(runtime)
     if not thread_id:
         return Command(
-            update={"messages": ["Error: Thread ID not available"]},
+            update={"messages": [ToolMessage("Error: Thread ID not available", tool_call_id=tool_call_id)]},
         )
 
     storage = _get_storage()
@@ -213,25 +230,25 @@ def canvas_add_edge_tool(
 
     if canvas is None:
         return Command(
-            update={"messages": ["Error: No canvas exists. Use canvas_plan first."]},
+            update={"messages": [ToolMessage("Error: No canvas exists. Use canvas_plan first.", tool_call_id=tool_call_id)]},
         )
 
     # Validate nodes exist
     node_ids = {n.id for n in canvas.nodes}
     if source not in node_ids:
         return Command(
-            update={"messages": [f"Error: Source node '{source}' not found"]},
+            update={"messages": [ToolMessage(f"Error: Source node '{source}' not found", tool_call_id=tool_call_id)]},
         )
     if target not in node_ids:
         return Command(
-            update={"messages": [f"Error: Target node '{target}' not found"]},
+            update={"messages": [ToolMessage(f"Error: Target node '{target}' not found", tool_call_id=tool_call_id)]},
         )
 
     # Check for duplicate edge
     for edge in canvas.edges:
         if edge.source == source and edge.target == target:
             return Command(
-                update={"messages": [f"Edge {source} -> {target} already exists"]},
+                update={"messages": [ToolMessage(f"Edge {source} -> {target} already exists", tool_call_id=tool_call_id)]},
             )
 
     edge = CanvasEdge(source=source, target=target)
@@ -243,15 +260,19 @@ def canvas_add_edge_tool(
     return Command(
         update={
             "messages": [
-                f"Added edge: {source} -> {target}\nTotal edges: {len(canvas.edges)}"
+                ToolMessage(
+                    f"Added edge: {source} -> {target}\nTotal edges: {len(canvas.edges)}",
+                    tool_call_id=tool_call_id,
+                )
             ],
         },
     )
 
 
-@tool("canvas_execute", parse_docstring=True)
+@tool("canvas_execute")
 async def canvas_execute_tool(
-    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
+    runtime: ToolRuntime[ContextT, ThreadState],
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Execute the canvas DAG.
 
@@ -261,7 +282,7 @@ async def canvas_execute_tool(
     thread_id = _get_thread_id(runtime)
     if not thread_id:
         return Command(
-            update={"messages": ["Error: Thread ID not available"]},
+            update={"messages": [ToolMessage("Error: Thread ID not available", tool_call_id=tool_call_id)]},
         )
 
     storage = _get_storage()
@@ -269,12 +290,12 @@ async def canvas_execute_tool(
 
     if canvas is None:
         return Command(
-            update={"messages": ["Error: No canvas exists. Use canvas_plan first."]},
+            update={"messages": [ToolMessage("Error: No canvas exists. Use canvas_plan first.", tool_call_id=tool_call_id)]},
         )
 
     if not canvas.nodes:
         return Command(
-            update={"messages": ["Error: Canvas has no nodes to execute"]},
+            update={"messages": [ToolMessage("Error: Canvas has no nodes to execute", tool_call_id=tool_call_id)]},
         )
 
     # Import engine lazily to avoid circular imports
@@ -330,15 +351,19 @@ async def canvas_execute_tool(
     return Command(
         update={
             "messages": [
-                "\n".join(result_lines)
+                ToolMessage(
+                    "\n".join(result_lines),
+                    tool_call_id=tool_call_id,
+                )
             ],
         },
     )
 
 
-@tool("canvas_status", parse_docstring=True)
+@tool("canvas_status")
 def canvas_status_tool(
-    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
+    runtime: ToolRuntime[ContextT, ThreadState],
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Get the current status of the canvas.
 
@@ -347,7 +372,7 @@ def canvas_status_tool(
     thread_id = _get_thread_id(runtime)
     if not thread_id:
         return Command(
-            update={"messages": ["Error: Thread ID not available"]},
+            update={"messages": [ToolMessage("Error: Thread ID not available", tool_call_id=tool_call_id)]},
         )
 
     storage = _get_storage()
@@ -355,7 +380,7 @@ def canvas_status_tool(
 
     if canvas is None:
         return Command(
-            update={"messages": ["No canvas exists for this thread."]},
+            update={"messages": [ToolMessage("No canvas exists for this thread.", tool_call_id=tool_call_id)]},
         )
 
     # Build status report
@@ -374,7 +399,7 @@ def canvas_status_tool(
             status_lines.append(f"  - {entry.node_id}: {'OK' if entry.success else 'FAILED'}")
 
     return Command(
-        update={"messages": ["\n".join(status_lines)]},
+        update={"messages": [ToolMessage("\n".join(status_lines), tool_call_id=tool_call_id)]},
     )
 
 

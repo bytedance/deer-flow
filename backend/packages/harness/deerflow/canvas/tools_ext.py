@@ -3,6 +3,7 @@
 These tools provide database introspection capabilities for the canvas-analysis skill.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -10,11 +11,11 @@ from typing import Annotated, Any
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import InjectedToolArg
 from langgraph.types import Command
 from langgraph.typing import ContextT
 from pydantic import BaseModel
 
+from deerflow.agents.thread_state import ThreadState
 from deerflow.canvas.storage import CanvasStorage
 from deerflow.config import get_app_config
 from deerflow.config.paths import get_paths
@@ -22,7 +23,7 @@ from deerflow.config.paths import get_paths
 logger = logging.getLogger(__name__)
 
 
-def _get_thread_id(runtime: ToolRuntime[ContextT, dict]) -> str | None:
+def _get_thread_id(runtime: ToolRuntime[ContextT, ThreadState]) -> str | None:
     """Resolve thread ID from runtime context."""
     thread_id = runtime.context.get("thread_id") if runtime.context else None
     if thread_id:
@@ -69,7 +70,7 @@ class TableColumnInfo(BaseModel):
 
 @tool("canvas_inspect")
 def canvas_inspect_tool(
-    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
+    runtime: ToolRuntime[ContextT, ThreadState],
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Inspect the current canvas state including nodes, edges and available variables.
@@ -90,10 +91,10 @@ def canvas_inspect_tool(
             update={
                 "messages": [
                     ToolMessage(
-                        "Canvas is empty. No canvas exists for this thread.\nUse canvas_plan_tool to create a new canvas.",
+                        "Canvas is empty. No canvas exists for this thread.\nUse canvas_plan to create a new canvas.",
                         tool_call_id=tool_call_id,
                     )
-                ],
+                ]
             },
         )
 
@@ -181,7 +182,7 @@ def canvas_inspect_tool(
 
 @tool("canvas_list_tables")
 async def canvas_list_tables_tool(
-    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
+    runtime: ToolRuntime[ContextT, ThreadState],
     connection_id: str = "",
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
@@ -200,7 +201,7 @@ async def canvas_list_tables_tool(
                         "No database connections configured. Please configure db_connections in config.yaml.",
                         tool_call_id=tool_call_id,
                     )
-                ],
+                ]
             },
         )
 
@@ -251,7 +252,7 @@ async def canvas_list_tables_tool(
 
 @tool("canvas_table_schema")
 async def canvas_table_schema_tool(
-    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
+    runtime: ToolRuntime[ContextT, ThreadState],
     connection_id: str,
     table_name: str,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
@@ -272,7 +273,7 @@ async def canvas_table_schema_tool(
                         f"Connection '{connection_id}' not found. Available connections: {list(db_connections.keys())}",
                         tool_call_id=tool_call_id,
                     )
-                ],
+                ]
             },
         )
 
@@ -319,7 +320,7 @@ async def canvas_table_schema_tool(
 
 @tool("canvas_preview_data")
 async def canvas_preview_data_tool(
-    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
+    runtime: ToolRuntime[ContextT, ThreadState],
     source: str,
     limit: int = 100,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
@@ -580,13 +581,11 @@ def _get_tables_from_connection_sync(conn: Any) -> list[str]:
 
 async def _get_tables_from_connection(conn: Any) -> list[str]:
     """Get list of tables from a database connection (async wrapper)."""
-    import asyncio
     return await asyncio.to_thread(_get_tables_from_connection_sync, conn)
 
 
 def _get_table_schema_sync(conn: Any, table_name: str) -> list[TableColumnInfo]:
     """Synchronous helper to get column info for a table."""
-    import asyncio
     import sqlalchemy
     from sqlalchemy import inspect
 
@@ -611,7 +610,6 @@ def _get_table_schema_sync(conn: Any, table_name: str) -> list[TableColumnInfo]:
 
 async def _get_table_schema(conn: Any, table_name: str) -> list[TableColumnInfo]:
     """Get column info for a table (async wrapper)."""
-    import asyncio
     return await asyncio.to_thread(_get_table_schema_sync, conn, table_name)
 
 
@@ -647,7 +645,6 @@ def _preview_table_data_sync(conn: Any, table_name: str, limit: int) -> tuple[li
 
 async def _preview_table_data(conn: Any, table_name: str, limit: int) -> tuple[list[dict[str, Any]], int]:
     """Get preview data from a table (async wrapper)."""
-    import asyncio
     return await asyncio.to_thread(_preview_table_data_sync, conn, table_name, limit)
 
 
