@@ -1,7 +1,6 @@
 """Python Script component - executes Python code in sandbox."""
 
 import logging
-from typing import Any
 
 from deerflow.canvas.components.base import ComponentExecutor, ExecutionContext
 from deerflow.canvas.models import CanvasNode, NodeResult
@@ -99,9 +98,9 @@ class PythonScriptExecutor(ComponentExecutor):
         """
         env_setup = f"""
 import os
-os.environ['INPUT_TABLES'] = '{','.join(input_tables)}'
-os.environ['OUTPUT_TABLE'] = '{output_table}'
-os.environ['DB_URL'] = '{db_url}'
+os.environ['INPUT_TABLES'] = {repr(','.join(input_tables))}
+os.environ['OUTPUT_TABLE'] = {repr(output_table)}
+os.environ['DB_URL'] = {repr(db_url)}
 
 """
         return env_setup + script
