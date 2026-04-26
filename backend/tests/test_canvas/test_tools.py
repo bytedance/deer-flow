@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from deerflow.canvas.tools import canvas_execute_tool, canvas_plan_tool
+from deerflow.canvas.tools import canvas_add_node_tool, canvas_execute_tool, canvas_plan_tool
 
 
 def make_runtime(thread_id: str = "thread-1") -> SimpleNamespace:
@@ -16,6 +16,43 @@ def make_runtime(thread_id: str = "thread-1") -> SimpleNamespace:
 
 
 class TestCanvasPlanTool:
+    def test_canvas_add_node_accepts_packed_args_dict(self):
+        """canvas_add_node tolerates executors that pass the args object positionally."""
+        runtime = make_runtime()
+        with patch("deerflow.canvas.tools.CanvasStorage") as mock_storage:
+            from deerflow.canvas.models import AgentExecutionMode, Canvas, CanvasStatus
+
+            mock_storage.return_value.load.return_value = Canvas(
+                id="canvas-1",
+                thread_id="thread-1",
+                name="Existing",
+                description="Existing canvas",
+                agent_execution_mode=AgentExecutionMode.READONLY,
+                nodes=[],
+                edges=[],
+                status=CanvasStatus.IDLE,
+            )
+            mock_storage.return_value.save = MagicMock()
+
+            result = canvas_add_node_tool.func(
+                runtime,
+                {
+                    "node_type": "data_source",
+                    "config": {
+                        "connection_id": "dataflow",
+                        "table_name": "fact_sales",
+                        "display_name": "销售事实表",
+                    },
+                    "node_id": "node-1",
+                },
+                tool_call_id="tc-packed",
+            )
+
+        assert result is not None
+        assert result.update is not None
+        assert "Added data_source node 'node-1'" in result.update["messages"][0].content
+        mock_storage.return_value.save.assert_called_once()
+
     def test_canvas_plan_creates_new_canvas(self):
         """canvas_plan creates a new canvas with description."""
         runtime = make_runtime()

@@ -22,28 +22,28 @@ const components: ComponentItem[] = [
     type: "data_source",
     name: "Data Source",
     description: "从数据库或文件导入数据",
-    icon: <Database className="h-5 w-5" />,
+    icon: <Database className="h-4 w-4" />,
     color: "text-blue-500",
   },
   {
     type: "sql_executor",
     name: "SQL Executor",
     description: "执行 SQL 查询处理数据",
-    icon: <FileCode className="h-5 w-5" />,
+    icon: <FileCode className="h-4 w-4" />,
     color: "text-green-500",
   },
   {
     type: "python_script",
     name: "Python Script",
     description: "运行 Python 脚本处理数据",
-    icon: <Code className="h-5 w-5" />,
+    icon: <Code className="h-4 w-4" />,
     color: "text-yellow-500",
   },
   {
     type: "data_output",
     name: "Data Output",
     description: "导出数据到文件或数据库",
-    icon: <FileOutput className="h-5 w-5" />,
+    icon: <FileOutput className="h-4 w-4" />,
     color: "text-purple-500",
   },
 ];
@@ -52,12 +52,14 @@ interface ComponentPanelProps {
   onDragStart?: (nodeType: NodeType) => void;
   onNodeAdd?: (nodeType: NodeType) => void;
   className?: string;
+  horizontal?: boolean;
 }
 
 export function ComponentPanel({
   onDragStart,
   onNodeAdd,
   className,
+  horizontal = false,
 }: ComponentPanelProps) {
   // 拖拽开始处理
   const handleDragStart = useCallback(
@@ -79,6 +81,37 @@ export function ComponentPanel({
     [onNodeAdd],
   );
 
+  if (horizontal) {
+    // 水平布局 - 紧凑的底部工具栏样式
+    return (
+      <div className={cn("flex items-center h-full px-4 gap-4", className)}>
+        <span className="text-xs text-muted-foreground shrink-0">组件:</span>
+        <div className="flex items-center gap-2">
+          {components.map((component) => (
+            <div
+              key={component.type}
+              draggable
+              onDragStart={() => handleDragStart(component.type)}
+              onDoubleClick={() => handleDoubleClick(component.type)}
+              className={cn(
+                "flex items-center gap-2 px-3 py-1.5 rounded-md border bg-card cursor-grab",
+                "hover:border-primary hover:bg-accent transition-colors",
+                "active:cursor-grabbing",
+              )}
+              title={component.description}
+            >
+              <div className={cn(component.color)}>
+                {component.icon}
+              </div>
+              <span className="text-xs font-medium">{component.name}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // 垂直布局（默认）
   return (
     <div className={cn("flex flex-col h-full", className)}>
       <div className="border-b p-3">

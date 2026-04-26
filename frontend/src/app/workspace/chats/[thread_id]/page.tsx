@@ -1,9 +1,11 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
+import { CanvasTrigger } from "@/components/workspace/canvas";
 import {
   ChatBox,
   useSpecificChatMode,
@@ -25,7 +27,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadSettings } from "@/core/settings";
-import { useThreadStream } from "@/core/threads/hooks";
+import { useThreadStream, type ToolEndEvent } from "@/core/threads/hooks";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -45,6 +47,19 @@ export default function ChatPage() {
   }, []);
 
   const { showNotification } = useNotification();
+  const queryClient = useQueryClient();
+
+  // Canvas 工具名称列表
+  const CANVAS_TOOLS = [
+    "canvas_plan",
+    "canvas_add_node",
+    "canvas_add_edge",
+    "canvas_execute",
+    "canvas_status",
+    "canvas_update_node",
+    "canvas_delete_node",
+    "canvas_delete_edge",
+  ];
 
   const [thread, sendMessage, isUploading] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
@@ -70,6 +85,12 @@ export default function ChatPage() {
           }
         }
         showNotification(state.title, { body });
+      }
+    },
+    onToolEnd: (event: ToolEndEvent) => {
+      // 当 canvas 工具执行完成后，invalidate canvas query 以触发刷新
+      if (CANVAS_TOOLS.includes(event.name) && threadId) {
+        void queryClient.invalidateQueries({ queryKey: ["canvas", threadId] });
       }
     },
   });
@@ -109,6 +130,7 @@ export default function ChatPage() {
                 enabled={tokenUsageEnabled}
                 messages={thread.messages}
               />
+              <CanvasTrigger />
               <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>

@@ -1,5 +1,6 @@
 """SQL Executor component - executes SQL and creates tables."""
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -14,6 +15,33 @@ logger = logging.getLogger(__name__)
 
 # Regex to find {{node-X.field}} patterns
 VARIABLE_PATTERN = re.compile(r"\{\{(node-\d+)\.(\w+)\}\}")
+
+
+def _execute_sql_sync(db_url: str, sql: str) -> tuple[int, list[str]]:
+    """Synchronous helper to execute SQL."""
+    rows_affected = 0
+    logs = []
+    engine: Engine | None = None
+
+    try:
+        engine = create_engine(db_url)
+        with engine.connect() as connection:
+            # 支持多条SQL语句（用分号分隔）
+            statements = [s.strip() for s in sql.split(';') if s.strip()]
+            for stmt in statements:
+                result = connection.execute(text(stmt))
+                if result.rowcount is not None:
+                    rows_affected += result.rowcount
+            connection.commit()
+        logs.append(f"Executed SQL successfully, {rows_affected} rows affected")
+    except Exception as e:
+        logs.append(f"SQL execution failed: {str(e)}")
+        raise
+    finally:
+        if engine:
+            engine.dispose()
+
+    return rows_affected, logs
 
 
 class SQLExecutorExecutor(ComponentExecutor):
@@ -63,21 +91,16 @@ class SQLExecutorExecutor(ComponentExecutor):
                 error="Database connection URL not configured",
             )
 
-        logs = []
-        rows_affected = 0
-        engine: Engine | None = None
+        # 如果有output_table且SQL是SELECT，包装成CREATE TABLE语句
+        effective_sql = resolved_sql.strip()
+        if output_table and effective_sql.upper().startswith("SELECT"):
+            # 先删除已存在的表，然后创建新表
+            effective_sql = f"DROP TABLE IF EXISTS {output_table}; CREATE TABLE {output_table} AS {effective_sql}"
 
         try:
-            # 创建 SQLAlchemy 引擎
-            engine = create_engine(db_url)
+            # 使用 asyncio.to_thread 包装同步数据库操作
+            rows_affected, logs = await asyncio.to_thread(_execute_sql_sync, db_url, effective_sql)
 
-            # 执行 SQL
-            with engine.connect() as connection:
-                result = connection.execute(text(resolved_sql))
-                rows_affected = result.rowcount or 0
-                connection.commit()
-
-            logs.append(f"Executed SQL successfully, {rows_affected} rows affected")
             logger.info(f"SQL executor {node.id}: created table {output_table}")
 
             return NodeResult(
@@ -88,16 +111,12 @@ class SQLExecutorExecutor(ComponentExecutor):
             )
         except Exception as e:
             error_msg = f"SQL execution failed: {str(e)}"
-            logs.append(error_msg)
             logger.error(f"SQL executor {node.id}: {error_msg}")
             return NodeResult(
                 success=False,
                 error=error_msg,
-                logs=logs,
+                logs=[error_msg],
             )
-        finally:
-            if engine:
-                engine.dispose()
 
     def _resolve_variables(self, sql: str, variables: dict[str, Any]) -> str:
         """Replace {{node-X.field}} patterns with resolved values."""

@@ -13,7 +13,12 @@ import {
 import { useCanvasContext } from "./context";
 
 export function CanvasTrigger() {
-  const { open, setOpen } = useCanvasContext();
+  const { open, setOpen, canvas } = useCanvasContext();
+
+  // 与 ArtifactTrigger 一致：只在有 canvas 数据时才显示
+  if (!canvas) {
+    return null;
+  }
 
   return (
     <TooltipProvider>

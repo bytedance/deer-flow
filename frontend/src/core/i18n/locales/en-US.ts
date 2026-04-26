@@ -455,4 +455,26 @@ export const enUS: Translations = {
       emptyDescription: "Credits and acknowledgements will show here.",
     },
   },
+  canvas: {
+    dataAnalysis: "Data Analysis",
+    openCanvas: "Open Canvas",
+    editMode: "Edit Mode",
+    runMode: "Run Mode",
+    execute: "Execute",
+    save: "Save",
+    clear: "Clear",
+    addNode: "Add Node",
+    nodeTypes: {
+      dataSource: "Data Source",
+      sqlExecutor: "SQL Executor",
+      pythonScript: "Python Script",
+      dataOutput: "Data Output",
+    },
+    status: {
+      idle: "Idle",
+      running: "Running",
+      completed: "Completed",
+      failed: "Failed",
+    },
+  },
 };

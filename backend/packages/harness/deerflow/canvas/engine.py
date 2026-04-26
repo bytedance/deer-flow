@@ -144,12 +144,14 @@ class CanvasEngine:
                 resolved_data = self.resolve_variables_for_node(node)
 
                 # Create execution context
+                # resolved_data contains node-specific resolved values (e.g., resolved SQL)
+                # resolved_variables contains upstream node outputs (e.g., table_name from data_source)
                 context = ExecutionContext(
                     canvas_id=self.canvas.id,
                     thread_id=self.canvas.thread_id,
                     db_connections=self.db_connections,
                     sandbox=self.sandbox,
-                    resolved_variables=resolved_data,
+                    resolved_variables={**self.resolved_variables, **resolved_data},
                 )
 
                 # Get and execute with appropriate executor
@@ -165,6 +167,9 @@ class CanvasEngine:
                     # Store output_table for downstream nodes
                     if result.output_table:
                         self.resolved_variables[f"{node.id}.output_table"] = result.output_table
+                    # Store table_name for data_source nodes
+                    if node.type == NodeType.DATA_SOURCE and node.data.get("table_name"):
+                        self.resolved_variables[f"{node.id}.table_name"] = node.data["table_name"]
                     logger.info(f"Canvas {self.canvas.id}: node {node.id} completed")
                 else:
                     failed_nodes.append(node.id)

@@ -17,7 +17,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { nanoid } from "nanoid";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { CanvasNode, CanvasEdge, NodeType } from "@/core/canvas/types";
 
@@ -60,6 +60,10 @@ export function CanvasPanel() {
     nodeResults,
   } = useCanvasContext();
 
+  // 保存状态
+  const [lastSaved, setLastSaved] = useState<Date | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+
   // 确保 edges 有唯一 id
   const ensureEdgeIds = useCallback((edges: CanvasEdge[]): CanvasEdge[] => {
     return edges.map((edge) => ({
@@ -78,14 +82,6 @@ export function CanvasPanel() {
 
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<CanvasEdge>([]);
-
-  // Sync canvas data with React Flow state
-  useEffect(() => {
-    if (canvas) {
-      setNodes(ensureNodeIds(canvas.nodes));
-      setEdges(ensureEdgeIds(canvas.edges));
-    }
-  }, [canvas, setNodes, setEdges, ensureNodeIds, ensureEdgeIds]);
 
   const onSelectionChange = useCallback(
     ({ nodes: selectedNodes, edges: selectedEdges }: OnSelectionChangeParams<CanvasNode, CanvasEdge>) => {
@@ -120,10 +116,28 @@ export function CanvasPanel() {
       };
 
       setNodes((nds) => [...nds, newNode]);
-      setCanvas({
-        ...canvas!,
-        nodes: [...canvas!.nodes, newNode],
-      });
+
+      // 如果 canvas 不存在，创建一个新的 canvas 对象
+      if (!canvas) {
+        setCanvas({
+          id: `canvas-${nanoid()}`,
+          thread_id: "",
+          name: "New Canvas",
+          description: "",
+          agent_execution_mode: "interactive",
+          nodes: [newNode],
+          edges: [],
+          status: "idle",
+          execution_log: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+      } else {
+        setCanvas({
+          ...canvas,
+          nodes: [...canvas.nodes, newNode],
+        });
+      }
     },
     [canvas, setNodes, setCanvas],
   );
@@ -199,59 +213,128 @@ export function CanvasPanel() {
     [canvasMode, setEdges],
   );
 
+  // 保存到后端（静默执行，不触发状态更新）
+  const saveCanvas = useCallback(async (silent = true) => {
+    if (!canvas || canvas.thread_id === "") {
+      console.warn("Canvas not ready for saving: no thread_id");
+      return;
+    }
+    setIsSaving(true);
+    try {
+      // 直接调用 API 而不是通过 hook，避免 query cache 更新导致重新渲染
+      const { updateCanvas } = await import("@/core/canvas/api");
+      await updateCanvas(canvas.thread_id, {
+        nodes: nodes,
+        edges: edges,
+      });
+      setLastSaved(new Date());
+      // 不更新 context，因为 React Flow 状态已经是最新
+    } catch (error) {
+      console.error("Failed to save canvas:", error);
+      // 静默模式下不显示错误，非静默模式可以处理
+      if (!silent) {
+        throw error;
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }, [canvas, nodes, edges]);
+
+  // 自动保存 - 当 nodes 或 edges 变化时 debounce 保存（静默）
+  useEffect(() => {
+    if (!canvas || canvas.thread_id === "" || canvasMode !== "edit") {
+      return;
+    }
+    // 只在有实际节点或边时才自动保存
+    if (nodes.length === 0 && edges.length === 0) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      void saveCanvas(true); // 静默保存
+    }, 1000); // 1秒 debounce
+    return () => clearTimeout(timer);
+  }, [nodes, edges, canvas, canvasMode, saveCanvas]);
+
+  // 使用上一次保存的数据引用，避免不必要的同步
+  const prevCanvasRef = useRef<typeof canvas>(null);
+
+  // Sync canvas data with React Flow state - 只在外部数据变化时同步
+  useEffect(() => {
+    if (canvas && canvas !== prevCanvasRef.current) {
+      prevCanvasRef.current = canvas;
+      // 检查是否需要更新，避免用户编辑时被外部数据覆盖
+      const currentNodesCount = nodes.length;
+      const canvasNodesCount = canvas.nodes.length;
+      // 只有当节点数量不一致时才同步（意味着外部创建了新节点）
+      if (canvasNodesCount > currentNodesCount || (currentNodesCount === 0 && canvasNodesCount > 0)) {
+        setNodes(ensureNodeIds(canvas.nodes));
+        setEdges(ensureEdgeIds(canvas.edges));
+      }
+    }
+  }, [canvas, nodes.length, setNodes, setEdges, ensureNodeIds, ensureEdgeIds]);
+
   return (
     <div className="h-full w-full flex">
-      {/* 左侧组件面板 */}
-      <div className="w-56 border-r bg-muted/30">
-        <ComponentPanel
-          onDragStart={handleDragStart}
-          onNodeAdd={addNode}
-          className="h-full"
-        />
-      </div>
-
-      {/* Canvas DAG区域 */}
-      <div
-        className="flex-1 relative"
-        ref={reactFlowWrapper}
-        onDragOver={onDragOver}
-        onDrop={onDrop}
-      >
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          onNodesChange={handleNodesChange}
-          onEdgesChange={handleEdgesChange}
-          onConnect={handleConnect}
-          onSelectionChange={onSelectionChange}
-          nodeTypes={nodeTypes}
-          fitView
-          attributionPosition="bottom-left"
-          // 运行模式下禁用交互
-          nodesDraggable={canvasMode === "edit"}
-          nodesConnectable={canvasMode === "edit"}
-          elementsSelectable={true}
+      {/* 左侧主区域 */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Canvas DAG区域 */}
+        <div
+          className="flex-1 relative min-h-0"
+          ref={reactFlowWrapper}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
         >
-          <Controls />
-          <MiniMap />
-          <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
-        </ReactFlow>
-        {/* 工具栏 */}
-        <div className="absolute top-2 left-2 z-10">
-          <CanvasToolbar />
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={handleNodesChange}
+            onEdgesChange={handleEdgesChange}
+            onConnect={handleConnect}
+            onSelectionChange={onSelectionChange}
+            nodeTypes={nodeTypes}
+            fitView
+            attributionPosition="bottom-left"
+            // 运行模式下禁用交互
+            nodesDraggable={canvasMode === "edit"}
+            nodesConnectable={canvasMode === "edit"}
+            elementsSelectable={true}
+          >
+            <Controls />
+            <MiniMap />
+            <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
+          </ReactFlow>
+          {/* 工具栏 */}
+          <div className="absolute top-2 left-2 z-10">
+            <CanvasToolbar
+              onSave={saveCanvas}
+              isSaving={isSaving}
+              lastSaved={lastSaved}
+            />
+          </div>
+          {/* 执行状态 */}
+          <div className="absolute bottom-2 left-2 z-10">
+            <ExecutionStatus
+              status={executionStatus}
+              nodeResults={nodeResults}
+              onNodeSelect={selectNode}
+            />
+          </div>
         </div>
-        {/* 执行状态 */}
-        <div className="absolute bottom-2 left-2 z-10">
-          <ExecutionStatus
-            status={executionStatus}
-            nodeResults={nodeResults}
-            onNodeSelect={selectNode}
+
+        {/* 底部组件面板 - 水平布局 */}
+        <div className="h-16 border-t bg-muted/30 shrink-0">
+          <ComponentPanel
+            onDragStart={handleDragStart}
+            onNodeAdd={addNode}
+            className="h-full"
+            horizontal={true}
           />
         </div>
       </div>
-      {/* Node Editor侧边栏 */}
+
+      {/* 右侧 Node Editor */}
       {selectedNodeId && (
-        <div className="w-64 border-l bg-background p-4">
+        <div className="w-64 border-l bg-background p-4 shrink-0 overflow-auto">
           <NodeEditor />
         </div>
       )}

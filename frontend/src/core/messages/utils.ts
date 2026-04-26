@@ -14,6 +14,8 @@ interface AssistantMessageGroup extends GenericMessageGroup<"assistant"> {}
 
 interface AssistantPresentFilesGroup extends GenericMessageGroup<"assistant:present-files"> {}
 
+interface AssistantCanvasGroup extends GenericMessageGroup<"assistant:canvas"> {}
+
 interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:clarification"> {}
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
@@ -23,6 +25,7 @@ type MessageGroup =
   | AssistantProcessingGroup
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
+  | AssistantCanvasGroup
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
@@ -80,10 +83,13 @@ export function groupMessages<T>(
         if (open) {
           open.messages.push(message);
         } else {
-          console.error(
-            "Unexpected tool message outside a processing group",
-            message,
-          );
+          // Orphan tool message - create a processing group for it
+          // This can happen when loading conversation history
+          groups.push({
+            id: message.id,
+            type: "assistant:processing",
+            messages: [message],
+          });
         }
       }
       continue;
@@ -94,6 +100,12 @@ export function groupMessages<T>(
         groups.push({
           id: message.id,
           type: "assistant:present-files",
+          messages: [message],
+        });
+      } else if (hasCanvas(message)) {
+        groups.push({
+          id: message.id,
+          type: "assistant:canvas",
           messages: [message],
         });
       } else if (hasSubagent(message)) {
@@ -286,6 +298,13 @@ export function hasPresentFiles(message: Message) {
   );
 }
 
+export function hasCanvas(message: Message) {
+  return (
+    message.type === "ai" &&
+    message.tool_calls?.some((toolCall) => toolCall.name === "canvas_plan")
+  );
+}
+
 export function isClarificationToolMessage(message: Message) {
   return message.type === "tool" && message.name === "ask_clarification";
 }
@@ -304,6 +323,22 @@ export function extractPresentFilesFromMessage(message: Message) {
     }
   }
   return files;
+}
+
+export function extractCanvasFromMessage(message: Message) {
+  if (message.type !== "ai" || !hasCanvas(message)) {
+    return null;
+  }
+  for (const toolCall of message.tool_calls ?? []) {
+    if (toolCall.name === "canvas_plan") {
+      return {
+        name: (toolCall.args.name as string) || "Data Analysis",
+        description: (toolCall.args.description as string) || "",
+        agentExecutionMode: (toolCall.args.agent_execution_mode as string) || "readonly",
+      };
+    }
+  }
+  return null;
 }
 
 export function hasSubagent(message: AIMessage) {

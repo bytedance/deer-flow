@@ -373,4 +373,28 @@ export interface Translations {
       emptyDescription: string;
     };
   };
+
+  // Canvas
+  canvas: {
+    dataAnalysis: string;
+    openCanvas: string;
+    editMode: string;
+    runMode: string;
+    execute: string;
+    save: string;
+    clear: string;
+    addNode: string;
+    nodeTypes: {
+      dataSource: string;
+      sqlExecutor: string;
+      pythonScript: string;
+      dataOutput: string;
+    };
+    status: {
+      idle: string;
+      running: string;
+      completed: string;
+      failed: string;
+    };
+  };
 }

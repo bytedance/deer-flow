@@ -10,6 +10,7 @@ from typing import Annotated, Any
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolArg
 from langgraph.types import Command
 from langgraph.typing import ContextT
 from pydantic import BaseModel
@@ -68,7 +69,7 @@ class TableColumnInfo(BaseModel):
 
 @tool("canvas_inspect")
 def canvas_inspect_tool(
-    runtime: ToolRuntime[ContextT, dict],
+    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Inspect the current canvas state including nodes, edges and available variables.
@@ -180,7 +181,7 @@ def canvas_inspect_tool(
 
 @tool("canvas_list_tables")
 async def canvas_list_tables_tool(
-    runtime: ToolRuntime[ContextT, dict],
+    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
     connection_id: str = "",
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
@@ -250,7 +251,7 @@ async def canvas_list_tables_tool(
 
 @tool("canvas_table_schema")
 async def canvas_table_schema_tool(
-    runtime: ToolRuntime[ContextT, dict],
+    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
     connection_id: str,
     table_name: str,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
@@ -318,7 +319,7 @@ async def canvas_table_schema_tool(
 
 @tool("canvas_preview_data")
 async def canvas_preview_data_tool(
-    runtime: ToolRuntime[ContextT, dict],
+    runtime: Annotated[ToolRuntime[ContextT, dict], InjectedToolArg],
     source: str,
     limit: int = 100,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
@@ -557,8 +558,8 @@ async def canvas_preview_data_tool(
 # ============================================================
 
 
-async def _get_tables_from_connection(conn: Any) -> list[str]:
-    """Get list of tables from a database connection."""
+def _get_tables_from_connection_sync(conn: Any) -> list[str]:
+    """Synchronous helper to get list of tables from a database connection."""
     import sqlalchemy
     from sqlalchemy import inspect, text
 
@@ -577,8 +578,15 @@ async def _get_tables_from_connection(conn: Any) -> list[str]:
             return inspector.get_table_names()
 
 
-async def _get_table_schema(conn: Any, table_name: str) -> list[TableColumnInfo]:
-    """Get column info for a table."""
+async def _get_tables_from_connection(conn: Any) -> list[str]:
+    """Get list of tables from a database connection (async wrapper)."""
+    import asyncio
+    return await asyncio.to_thread(_get_tables_from_connection_sync, conn)
+
+
+def _get_table_schema_sync(conn: Any, table_name: str) -> list[TableColumnInfo]:
+    """Synchronous helper to get column info for a table."""
+    import asyncio
     import sqlalchemy
     from sqlalchemy import inspect
 
@@ -601,8 +609,14 @@ async def _get_table_schema(conn: Any, table_name: str) -> list[TableColumnInfo]
     ]
 
 
-async def _preview_table_data(conn: Any, table_name: str, limit: int) -> tuple[list[dict[str, Any]], int]:
-    """Get preview data from a table."""
+async def _get_table_schema(conn: Any, table_name: str) -> list[TableColumnInfo]:
+    """Get column info for a table (async wrapper)."""
+    import asyncio
+    return await asyncio.to_thread(_get_table_schema_sync, conn, table_name)
+
+
+def _preview_table_data_sync(conn: Any, table_name: str, limit: int) -> tuple[list[dict[str, Any]], int]:
+    """Synchronous helper to get preview data from a table."""
     import sqlalchemy
     from sqlalchemy import text
 
@@ -629,6 +643,12 @@ async def _preview_table_data(conn: Any, table_name: str, limit: int) -> tuple[l
         rows = [dict(row._mapping) for row in result]
 
         return rows, total_rows
+
+
+async def _preview_table_data(conn: Any, table_name: str, limit: int) -> tuple[list[dict[str, Any]], int]:
+    """Get preview data from a table (async wrapper)."""
+    import asyncio
+    return await asyncio.to_thread(_preview_table_data_sync, conn, table_name, limit)
 
 
 def _build_connection_url(conn: Any) -> str:

@@ -1,5 +1,6 @@
 """Data Output component - exports table data to files."""
 
+import asyncio
 import csv
 import json
 import logging
@@ -17,6 +18,20 @@ TABLE_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 # Supported output formats
 SUPPORTED_FORMATS = ["csv", "json"]
+
+
+def _export_table_sync(db_url: str, table_name: str) -> tuple[list[str], list[tuple]]:
+    """Synchronous helper to query table data."""
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(db_url)
+    with engine.connect() as connection:
+        result = connection.execute(text(f"SELECT * FROM {table_name}"))
+        columns = list(result._metadata.keys)
+        rows = [tuple(row) for row in result.fetchall()]
+
+    engine.dispose()
+    return columns, rows
 
 
 class DataOutputExecutor(ComponentExecutor):
@@ -77,15 +92,13 @@ class DataOutputExecutor(ComponentExecutor):
         Returns:
             NodeResult with output_file path
         """
-        input_table_ref = node.data.get("input_table", "")
-        output_format = node.data.get("output_format", "csv")
-        filename = node.data.get("filename", "output.csv")
+        # Get values - prefer resolved values from context
+        input_table = context.resolved_variables.get("input_table", node.data.get("input_table", ""))
+        output_format = context.resolved_variables.get("output_format", node.data.get("output_format", "csv"))
+        filename = context.resolved_variables.get("filename", node.data.get("filename", "output.csv"))
 
         # Validate filename for path traversal prevention
         filename = self._validate_filename(filename)
-
-        # Resolve input table reference
-        input_table = context.resolved_variables.get(input_table_ref, input_table_ref)
 
         # Validate table name for SQL injection prevention
         try:
@@ -96,7 +109,7 @@ class DataOutputExecutor(ComponentExecutor):
                 error=str(e),
             )
 
-        # Get database connection
+        # Get database connection info
         conn_info = self._get_connection_info(node, context)
         if not conn_info:
             return NodeResult(
@@ -104,21 +117,19 @@ class DataOutputExecutor(ComponentExecutor):
                 error="No database connection available",
             )
 
-        connection = conn_info.get("connection")
-        if not connection:
+        # Get connection URL
+        db_url = conn_info.get("url") or conn_info.get("connection_url")
+        if not db_url:
             return NodeResult(
                 success=False,
-                error="Database connection not initialized",
+                error="Database connection URL not configured",
             )
 
         logs = []
 
         try:
-            # Query data from table
-            with connection.cursor() as cursor:
-                cursor.execute(f"SELECT * FROM {input_table}")
-                columns = [desc[0] for desc in cursor.description]
-                rows = cursor.fetchall()
+            # Use asyncio.to_thread to wrap synchronous database operation
+            columns, rows = await asyncio.to_thread(_export_table_sync, db_url, input_table)
 
             # Write output file
             _output_path = self._write_file(

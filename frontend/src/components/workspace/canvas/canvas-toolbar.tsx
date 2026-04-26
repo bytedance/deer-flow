@@ -1,6 +1,6 @@
 "use client";
 
-import { Play, Square, Save, Trash2, Edit, Eye, Loader2 } from "lucide-react";
+import { Play, Square, Save, Trash2, Edit, Eye, Loader2, Check } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -16,6 +16,8 @@ interface CanvasToolbarProps {
   onSave?: () => void;
   onDelete?: () => void;
   isExecuting?: boolean;
+  isSaving?: boolean;
+  lastSaved?: Date | null;
 }
 
 // 状态指示器颜色
@@ -36,7 +38,7 @@ const statusLabels: Record<CanvasStatus, string> = {
   failed: "失败",
 };
 
-export function CanvasToolbar({ onExecute, onStop, onSave, onDelete, isExecuting }: CanvasToolbarProps) {
+export function CanvasToolbar({ onExecute, onStop, onSave, onDelete, isExecuting, isSaving, lastSaved }: CanvasToolbarProps) {
   const { canvas, canvasMode, setCanvasMode, executionStatus } = useCanvasContext();
 
   const status = executionStatus?.status ?? canvas?.status ?? "idle";
@@ -116,9 +118,15 @@ export function CanvasToolbar({ onExecute, onStop, onSave, onDelete, isExecuting
       )}
 
       {/* 保存按钮 */}
-      <Button variant="outline" size="sm" onClick={onSave}>
-        <Save className="mr-1 h-4 w-4" />
-        保存
+      <Button variant="outline" size="sm" onClick={onSave} disabled={isSaving}>
+        {isSaving ? (
+          <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+        ) : lastSaved ? (
+          <Check className="mr-1 h-4 w-4 text-green-500" />
+        ) : (
+          <Save className="mr-1 h-4 w-4" />
+        )}
+        {isSaving ? "保存中" : "保存"}
       </Button>
 
       {/* 删除按钮（仅在编辑模式可用） */}

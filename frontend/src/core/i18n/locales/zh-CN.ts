@@ -436,4 +436,26 @@ export const zhCN: Translations = {
       emptyDescription: "相关的致谢信息会展示在这里。",
     },
   },
+  canvas: {
+    dataAnalysis: "数据分析",
+    openCanvas: "打开画布",
+    editMode: "编辑模式",
+    runMode: "运行模式",
+    execute: "执行",
+    save: "保存",
+    clear: "清空",
+    addNode: "添加节点",
+    nodeTypes: {
+      dataSource: "数据源",
+      sqlExecutor: "SQL 执行器",
+      pythonScript: "Python 脚本",
+      dataOutput: "数据输出",
+    },
+    status: {
+      idle: "空闲",
+      running: "运行中",
+      completed: "已完成",
+      failed: "失败",
+    },
+  },
 };
