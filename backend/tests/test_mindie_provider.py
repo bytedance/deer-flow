@@ -116,6 +116,22 @@ class TestFixMessages:
         assert "<function=tool_a>" in content
         assert "<function=tool_b>" in content
 
+    def test_ai_message_tool_args_are_xml_escaped(self):
+        msg = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "fn<&>",
+                    "args": {"k<&>": "v<&>"},
+                    "id": "id1",
+                }
+            ],
+        )
+        result = _fix_messages([msg])
+        content = result[0].content
+        assert "<function=fn&lt;&amp;&gt;>" in content
+        assert "<parameter=k&lt;&amp;&gt;>v&lt;&amp;&gt;</parameter>" in content
+
     # ── ToolMessage → HumanMessage ────────────────────────────────────────────
 
     def test_tool_message_becomes_human_message(self):
@@ -234,6 +250,12 @@ class TestParseXmlToolCalls:
         _, c1 = _parse_xml_tool_call_to_dict(block)
         _, c2 = _parse_xml_tool_call_to_dict(block)
         assert c1[0]["id"] != c2[0]["id"]
+
+    def test_escaped_entities_are_unescaped(self):
+        content = "<tool_call><function=fn&lt;&amp;&gt;><parameter=k&lt;&amp;&gt;>v&lt;&amp;&gt;</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["name"] == "fn<&>"
+        assert calls[0]["args"]["k<&>"] == "v<&>"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
