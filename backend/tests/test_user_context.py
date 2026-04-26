@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.runtime.user_context import (
-    CurrentUser,
     DEFAULT_USER_ID,
+    CurrentUser,
     get_current_user,
     get_effective_user_id,
     require_current_user,
@@ -100,6 +100,7 @@ def test_effective_user_id_returns_user_id_when_set():
 def test_effective_user_id_coerces_to_str():
     """User.id might be a UUID object; must come back as str."""
     import uuid
+
     uid = uuid.uuid4()
 
     user = SimpleNamespace(id=uid)

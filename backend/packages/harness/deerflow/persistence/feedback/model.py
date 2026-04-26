@@ -13,9 +13,7 @@ from deerflow.persistence.base import Base
 class FeedbackRow(Base):
     __tablename__ = "feedback"
 
-    __table_args__ = (
-        UniqueConstraint("thread_id", "run_id", "user_id", name="uq_feedback_thread_run_user"),
-    )
+    __table_args__ = (UniqueConstraint("thread_id", "run_id", "user_id", name="uq_feedback_thread_run_user"),)
 
     feedback_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)

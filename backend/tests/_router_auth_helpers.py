@@ -29,7 +29,6 @@ apps with the real middleware — those should not use this module.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import ParamSpec, TypeVar
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -113,11 +112,7 @@ def make_authed_test_app(
     return app
 
 
-_P = ParamSpec("_P")
-_R = TypeVar("_R")
-
-
-def call_unwrapped(decorated: Callable[_P, _R], /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+def call_unwrapped[*P, R](decorated: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> R:
     """Invoke the underlying function of a ``@require_permission``-decorated route.
 
     ``functools.wraps`` sets ``__wrapped__`` on each layer; we walk all

@@ -381,5 +381,3 @@ class TestMiddlewareEvents:
         event_types = {e["event_type"] for e in events}
         assert "middleware:title" in event_types
         assert "middleware:guardrail" in event_types
-
-

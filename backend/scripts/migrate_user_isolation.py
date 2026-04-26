@@ -5,11 +5,10 @@ Usage:
 
 The script is idempotent — re-running it after a successful migration is a no-op.
 """
+
 import argparse
-import json
 import logging
 import shutil
-from pathlib import Path
 
 from deerflow.config.paths import Paths, get_paths
 

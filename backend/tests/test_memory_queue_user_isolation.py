@@ -1,4 +1,5 @@
 """Tests for user_id propagation through memory queue."""
+
 from unittest.mock import MagicMock, patch
 
 from deerflow.agents.memory.queue import ConversationContext, MemoryUpdateQueue
