@@ -1,11 +1,8 @@
 """Tests for canvas storage."""
 
 import json
-from pathlib import Path
 
-import pytest
-
-from deerflow.canvas.models import Canvas, CanvasNode, NodeType, CanvasStatus, AgentExecutionMode
+from deerflow.canvas.models import AgentExecutionMode, Canvas, CanvasStatus
 from deerflow.canvas.storage import CanvasStorage
 
 
@@ -33,7 +30,7 @@ class TestCanvasStorage:
         storage.save(canvas)
 
         # Check file exists
-        canvas_file = tmp_path / "thread-1" / "canvas" / "canvas.json"
+        canvas_file = tmp_path / "threads" / "thread-1" / "canvas" / "canvas.json"
         assert canvas_file.exists()
 
     def test_load_canvas_from_file(self, tmp_path):
@@ -41,7 +38,7 @@ class TestCanvasStorage:
         storage = CanvasStorage(base_dir=tmp_path)
 
         # Create canvas file
-        canvas_dir = tmp_path / "thread-1" / "canvas"
+        canvas_dir = tmp_path / "threads" / "thread-1" / "canvas"
         canvas_dir.mkdir(parents=True)
         canvas_file = canvas_dir / "canvas.json"
 
@@ -90,7 +87,7 @@ class TestCanvasStorage:
         )
 
         storage.save(canvas)
-        canvas_file = tmp_path / "thread-2" / "canvas" / "canvas.json"
+        canvas_file = tmp_path / "threads" / "thread-2" / "canvas" / "canvas.json"
         assert canvas_file.exists()
 
         storage.delete("thread-2")

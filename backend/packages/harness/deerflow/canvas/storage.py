@@ -14,7 +14,7 @@ class CanvasStorage:
     """Manages canvas persistence to JSON files.
 
     Canvas files are stored at:
-        {base_dir}/{thread_id}/canvas/canvas.json
+        {base_dir}/threads/{thread_id}/canvas/canvas.json
     """
 
     def __init__(self, base_dir: Path | None = None):
@@ -32,8 +32,27 @@ class CanvasStorage:
         self.base_dir = Path(base_dir)
 
     def _canvas_path(self, thread_id: str) -> Path:
-        """Get path to canvas file for thread."""
-        return self.base_dir / thread_id / "canvas" / "canvas.json"
+        """Get path to canvas file for thread.
+
+        Args:
+            thread_id: Thread ID to get canvas path for
+
+        Returns:
+            Path to canvas.json file
+
+        Raises:
+            ValueError: If thread_id contains path traversal characters
+        """
+        # Prevent path traversal attacks
+        if ".." in thread_id or "/" in thread_id or "\\" in thread_id:
+            raise ValueError(f"Invalid thread_id: {thread_id}")
+        canvas_path = self.base_dir / "threads" / thread_id / "canvas" / "canvas.json"
+        # Double-check: ensure resolved path is still within base_dir
+        try:
+            canvas_path.resolve().relative_to(self.base_dir.resolve())
+        except ValueError:
+            raise ValueError(f"Path traversal detected in thread_id: {thread_id}")
+        return canvas_path
 
     def save(self, canvas: Canvas) -> None:
         """Save canvas to file.
