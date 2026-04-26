@@ -100,6 +100,10 @@ LLM-powered persistent context retention across conversations:
 - **System prompt injection**: Top facts + context injected into agent prompts
 - **Storage**: JSON file with mtime-based cache invalidation
 
+The HTTP memory management API is disabled by default. Set
+`memory.management_api_enabled: true` only when the deployment is protected by
+strong authentication or otherwise limited to a trusted environment.
+
 ### Tool Ecosystem
 
 | Category | Tools |
@@ -120,10 +124,10 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
 | `GET/PUT /api/skills` | List and manage skills |
 | `POST /api/skills/install` | Install skill from `.skill` archive |
-| `GET /api/memory` | Retrieve memory data |
-| `POST /api/memory/reload` | Force memory reload |
-| `GET /api/memory/config` | Memory configuration |
-| `GET /api/memory/status` | Combined config + data |
+| `GET /api/memory/config` | Safe memory configuration metadata |
+| `GET /api/memory` | Retrieve memory data when `memory.management_api_enabled` is enabled |
+| `POST /api/memory/reload` | Force memory reload when `memory.management_api_enabled` is enabled |
+| `GET /api/memory/status` | Combined config + data when `memory.management_api_enabled` is enabled |
 | `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |

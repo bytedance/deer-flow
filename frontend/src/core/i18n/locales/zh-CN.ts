@@ -358,6 +358,12 @@ export const zhCN: Translations = {
       summaryReadOnly:
         "摘要分区当前仍为只读。现在你可以清空全部记忆或删除单条事实。",
       memoryFullyEmpty: "还没有保存任何记忆。",
+      memoryDisabledTitle: "记忆功能已关闭",
+      memoryDisabledDescription:
+        "当前部署已关闭 DeerFlow 记忆功能，因此这里没有可管理的已保存记忆。",
+      managementDisabledTitle: "记忆管理已禁用",
+      managementDisabledDescription:
+        "当前部署默认不会通过 HTTP 暴露持久化记忆。只有在强身份验证保护下，才应启用 memory.management_api_enabled: true。",
       factPreviewLabel: "即将删除的事实",
       searchPlaceholder: "搜索记忆",
       filterAll: "全部",

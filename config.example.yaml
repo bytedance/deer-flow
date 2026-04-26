@@ -773,6 +773,7 @@ memory:
   max_facts: 100 # Maximum number of facts to store
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
+  management_api_enabled: false # Whether to expose the HTTP memory management API
   max_injection_tokens: 2000 # Maximum tokens for memory injection
 
 # ============================================================================

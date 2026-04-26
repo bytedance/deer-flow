@@ -541,7 +541,11 @@ All APIs return errors in a consistent format:
 
 ## Authentication
 
-Currently, DeerFlow does not implement authentication. All APIs are accessible without credentials.
+Currently, DeerFlow does not implement authentication. Most APIs are accessible without credentials.
+
+Some sensitive management surfaces may still be disabled by default. For example, the memory
+management API requires `memory.management_api_enabled: true` before the gateway will expose
+persisted memory over HTTP.
 
 Note: This is about DeerFlow API authentication. MCP outbound connections can still use OAuth for configured HTTP/SSE MCP servers.
 

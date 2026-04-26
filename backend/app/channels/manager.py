@@ -902,7 +902,7 @@ class ChannelManager:
         elif command == "models":
             reply = await self._fetch_gateway("/api/models", "models")
         elif command == "memory":
-            reply = await self._fetch_gateway("/api/memory", "memory")
+            reply = self._get_memory_status()
         elif command == "help":
             reply = (
                 "Available commands:\n"
@@ -946,6 +946,17 @@ class ChannelManager:
             facts = data.get("facts", [])
             return f"Memory contains {len(facts)} fact(s)."
         return str(data)
+
+    def _get_memory_status(self) -> str:
+        """Read memory status directly so chat commands don't depend on the public API."""
+        try:
+            from deerflow.agents.memory.updater import get_memory_data
+
+            facts = get_memory_data().get("facts", [])
+            return f"Memory contains {len(facts)} fact(s)."
+        except Exception:
+            logger.exception("Failed to fetch memory information")
+            return "Failed to fetch memory information."
 
     # -- error helper ------------------------------------------------------
 

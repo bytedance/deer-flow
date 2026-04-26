@@ -2344,6 +2344,7 @@ class TestGatewayConformance:
     def test_get_memory_config(self, client):
         mem_cfg = MagicMock()
         mem_cfg.enabled = True
+        mem_cfg.management_api_enabled = False
         mem_cfg.storage_path = ".deer-flow/memory.json"
         mem_cfg.debounce_seconds = 30
         mem_cfg.max_facts = 100
@@ -2356,11 +2357,13 @@ class TestGatewayConformance:
 
         parsed = MemoryConfigResponse(**result)
         assert parsed.enabled is True
+        assert parsed.management_api_enabled is False
         assert parsed.max_facts == 100
 
     def test_get_memory_status(self, client):
         mem_cfg = MagicMock()
         mem_cfg.enabled = True
+        mem_cfg.management_api_enabled = False
         mem_cfg.storage_path = ".deer-flow/memory.json"
         mem_cfg.debounce_seconds = 30
         mem_cfg.max_facts = 100
@@ -2392,6 +2395,7 @@ class TestGatewayConformance:
 
         parsed = MemoryStatusResponse(**result)
         assert parsed.config.enabled is True
+        assert parsed.config.management_api_enabled is False
         assert parsed.data.version == "1.0"
 
 

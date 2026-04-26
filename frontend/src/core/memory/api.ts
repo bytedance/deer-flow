@@ -1,15 +1,16 @@
 import { getBackendBaseURL } from "../config";
 
 import type {
+  MemoryConfig,
   MemoryFactInput,
   MemoryFactPatchInput,
   UserMemory,
 } from "./types";
 
-async function readMemoryResponse(
+async function readApiResponse<T>(
   response: Response,
   fallbackMessage: string,
-): Promise<UserMemory> {
+): Promise<T> {
   function formatErrorDetail(detail: unknown): string | null {
     if (typeof detail === "string") {
       return detail;
@@ -76,19 +77,27 @@ async function readMemoryResponse(
     );
   }
 
-  return response.json() as Promise<UserMemory>;
+  return response.json() as Promise<T>;
+}
+
+export async function loadMemoryConfig(): Promise<MemoryConfig> {
+  const response = await fetch(`${getBackendBaseURL()}/api/memory/config`);
+  return readApiResponse<MemoryConfig>(
+    response,
+    "Failed to fetch memory settings",
+  );
 }
 
 export async function loadMemory(): Promise<UserMemory> {
   const response = await fetch(`${getBackendBaseURL()}/api/memory`);
-  return readMemoryResponse(response, "Failed to fetch memory");
+  return readApiResponse<UserMemory>(response, "Failed to fetch memory");
 }
 
 export async function clearMemory(): Promise<UserMemory> {
   const response = await fetch(`${getBackendBaseURL()}/api/memory`, {
     method: "DELETE",
   });
-  return readMemoryResponse(response, "Failed to clear memory");
+  return readApiResponse<UserMemory>(response, "Failed to clear memory");
 }
 
 export async function deleteMemoryFact(factId: string): Promise<UserMemory> {
@@ -98,12 +107,12 @@ export async function deleteMemoryFact(factId: string): Promise<UserMemory> {
       method: "DELETE",
     },
   );
-  return readMemoryResponse(response, "Failed to delete memory fact");
+  return readApiResponse<UserMemory>(response, "Failed to delete memory fact");
 }
 
 export async function exportMemory(): Promise<UserMemory> {
   const response = await fetch(`${getBackendBaseURL()}/api/memory/export`);
-  return readMemoryResponse(response, "Failed to export memory");
+  return readApiResponse<UserMemory>(response, "Failed to export memory");
 }
 
 export async function importMemory(memory: UserMemory): Promise<UserMemory> {
@@ -114,7 +123,7 @@ export async function importMemory(memory: UserMemory): Promise<UserMemory> {
     },
     body: JSON.stringify(memory),
   });
-  return readMemoryResponse(response, "Failed to import memory");
+  return readApiResponse<UserMemory>(response, "Failed to import memory");
 }
 
 export async function createMemoryFact(
@@ -127,7 +136,7 @@ export async function createMemoryFact(
     },
     body: JSON.stringify(input),
   });
-  return readMemoryResponse(response, "Failed to create memory fact");
+  return readApiResponse<UserMemory>(response, "Failed to create memory fact");
 }
 
 export async function updateMemoryFact(
@@ -144,5 +153,5 @@ export async function updateMemoryFact(
       body: JSON.stringify(input),
     },
   );
-  return readMemoryResponse(response, "Failed to update memory fact");
+  return readApiResponse<UserMemory>(response, "Failed to update memory fact");
 }
