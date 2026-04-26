@@ -342,7 +342,7 @@ async def validate_sql(thread_id: str, request: ValidateSQLRequest):
 
     return ValidateSQLResponse(
         valid=len(errors) == 0,
-        resolved_sql=resolved_sql if errors else None,
+        resolved_sql=resolved_sql if not errors else None,
         errors=errors,
     )
 
