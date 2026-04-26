@@ -1,76 +1,33 @@
-"""
-图像查看中间件 - 在LLM调用前将图像详情注入到对话中
-
-===================
-设计思路说明
-===================
-
-**核心职责**：
-当view_image工具完成后，将图像详情作为人类消息注入：
-1. **时机检测**：检查view_image工具调用是否完成
-2. **图像注入**：将base64图像数据注入到消息中
-3. **LLM可见**：让LLM能够"看到"并分析图像
-4. **去重机制**：避免重复注入相同的图像信息
-
-**为什么需要这个中间件**：
-1. **视觉能力**：让LLM能够分析图像内容
-2. **自动化**：无需用户明确描述图像
-3. **上下文保持**：图像信息与对话上下文结合
-4. **多模态支持**：启用视觉模型的能力
-
-**设计决策**：
-- 在before_model中注入：LLM调用前提供图像信息
-- 检查完成状态：确保工具调用已完成
-- 使用HumanMessage：避免SystemMessage限制
-- base64格式：直接嵌入图像数据
-
-**为什么使用base64嵌入**：
-- **无需外部引用**：图像数据直接在消息中
-- **可靠性**：不依赖外部URL的可用性
-- **安全性**：不暴露内部文件路径
-- **兼容性**：所有支持视觉的模型都支持
-"""
+"""Middleware for injecting image details into conversation before LLM call."""
 
 import logging
-from typing import NotRequired, override
+from typing import override
 
-from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
-from deerflow.agents.thread_state import ViewedImageData
+from deerflow.agents.thread_state import ThreadState
 
 logger = logging.getLogger(__name__)
 
 
-class ViewImageMiddlewareState(AgentState):
-    """Compatible with the `ThreadState` schema."""
-
-    viewed_images: NotRequired[dict[str, ViewedImageData] | None]
+class ViewImageMiddlewareState(ThreadState):
+    """Reuse the thread state so reducer-backed keys keep their annotations."""
 
 
 class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
-    """在view_image工具完成后将图像详情作为人类消息注入
+    """Injects image details as a human message before LLM calls when view_image tools have completed.
 
-    **为什么需要这个中间件**：
-    - **自动视觉**：LLM自动接收并分析图像
-    - **无需提示**：不需要用户明确描述图像
-    - **多模态支持**：启用视觉模型的分析能力
-    - **上下文集成**：图像信息与对话上下文结合
+    This middleware:
+    1. Runs before each LLM call
+    2. Checks if the last assistant message contains view_image tool calls
+    3. Verifies all tool calls in that message have been completed (have corresponding ToolMessages)
+    4. If conditions are met, creates a human message with all viewed image details (including base64 data)
+    5. Adds the message to state so the LLM can see and analyze the images
 
-    **工作流程**：
-    1. 在每次LLM调用前运行
-    2. 检查最后一条助手消息是否包含view_image工具调用
-    3. 验证该消息中的所有工具调用都已完成（有对应的ToolMessages）
-    4. 如果满足条件，创建包含所有查看图像详情的人类消息（包括base64数据）
-    5. 将消息添加到state，使LLM可以看到并分析图像
-
-    **为什么这样设计**：
-    - **自动化**：无需用户干预，自动提供图像信息
-    - **条件触发**：只在工具完成后注入，避免不完整数据
-    - **去重机制**：检查是否已注入，避免重复
-    - **完整性**：确保所有图像都包含在消息中
+    This enables the LLM to automatically receive and analyze images that were loaded via view_image tool,
+    without requiring explicit user prompts to describe the images.
     """
 
     state_schema = ViewImageMiddlewareState

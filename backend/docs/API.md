@@ -1,58 +1,39 @@
-# API 参考文档
+# API Reference
 
-本文档提供DeerFlow后端API的完整参考。
+This document provides a complete reference for the DeerFlow backend APIs.
 
-## 概述
+## Overview
 
-===================
-设计思路说明
-===================
+DeerFlow backend exposes two sets of APIs:
 
-**为什么分为两套API**：
-DeerFlow后端暴露两套API以实现关注点分离：
+1. **LangGraph API** - Agent interactions, threads, and streaming (`/api/langgraph/*`)
+2. **Gateway API** - Models, MCP, skills, uploads, and artifacts (`/api/*`)
 
-1. **LangGraph API** (`/api/langgraph/*`) - 代理交互、线程管理和流式响应
-   - 由LangGraph服务器提供
-   - 遵循LangGraph SDK约定
-   - 处理所有与代理执行相关的操作
-
-2. **Gateway API** (`/api/*`) - 模型、MCP、技能、上传和产物
-   - 由FastAPI网关提供
-   - 处理辅助功能（配置、文件管理、技能管理等）
-   - 为前端提供统一的辅助接口
-
-**架构优势**：
-- **解耦设计**：代理逻辑与辅助功能分离，便于独立扩展
-- **标准化**：LangGraph API兼容LangGraph SDK，降低集成成本
-- **灵活性**：Gateway API可根据需求定制，不影响核心代理流程
-
-所有API通过Nginx反向代理在端口2026访问。
-
----
+All APIs are accessed through the Nginx reverse proxy at port 2026.
 
 ## LangGraph API
 
-基础URL: `/api/langgraph`
+Base URL: `/api/langgraph`
 
-LangGraph API由LangGraph服务器提供，遵循LangGraph SDK约定。
+The LangGraph API is provided by the LangGraph server and follows the LangGraph SDK conventions.
 
-### 线程(Thread)管理
+### Threads
 
-#### 创建线程
+#### Create Thread
 
 ```http
 POST /api/langgraph/threads
 Content-Type: application/json
 ```
 
-**请求体：**
+**Request Body:**
 ```json
 {
   "metadata": {}
 }
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "thread_id": "abc123",
@@ -61,13 +42,13 @@ Content-Type: application/json
 }
 ```
 
-#### 获取线程状态
+#### Get Thread State
 
 ```http
 GET /api/langgraph/threads/{thread_id}/state
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "values": {
@@ -82,18 +63,18 @@ GET /api/langgraph/threads/{thread_id}/state
 }
 ```
 
-### 运行(Run)管理
+### Runs
 
-#### 创建运行
+#### Create Run
 
-使用输入执行代理。
+Execute the agent with input.
 
 ```http
 POST /api/langgraph/threads/{thread_id}/runs
 Content-Type: application/json
 ```
 
-**请求体：**
+**Request Body:**
 ```json
 {
   "input": {
@@ -105,6 +86,7 @@ Content-Type: application/json
     ]
   },
   "config": {
+    "recursion_limit": 100,
     "configurable": {
       "model_name": "gpt-4",
       "thinking_enabled": false,
@@ -115,16 +97,31 @@ Content-Type: application/json
 }
 ```
 
-**流模式兼容性说明：**
-- **支持的模式**：`values`, `messages-tuple`, `custom`, `updates`, `events`, `debug`, `tasks`, `checkpoints`
-- **不支持的模式**：`tools`（在当前`langgraph-api`中已弃用/无效，会触发schema验证错误）
+**Stream Mode Compatibility:**
+- Use: `values`, `messages-tuple`, `custom`, `updates`, `events`, `debug`, `tasks`, `checkpoints`
+- Do not use: `tools` (deprecated/invalid in current `langgraph-api` and will trigger schema validation errors)
 
-**可配置选项：**
-- `model_name` (字符串)：覆盖默认模型
-- `thinking_enabled` (布尔值)：为支持的模型启用扩展思考模式
-- `is_plan_mode` (布尔值)：启用TodoList中间件进行任务跟踪
+**Recursion Limit:**
 
-**响应：** Server-Sent Events (SSE) 流
+`config.recursion_limit` caps the number of graph steps LangGraph will execute
+in a single run. The `/api/langgraph/*` endpoints go straight to the LangGraph
+server and therefore inherit LangGraph's native default of **25**, which is
+too low for plan-mode or subagent-heavy runs — the agent typically errors out
+with `GraphRecursionError` after the first round of subagent results comes
+back, before the lead agent can synthesize the final answer.
+
+DeerFlow's own Gateway and IM-channel paths mitigate this by defaulting to
+`100` in `build_run_config` (see `backend/app/gateway/services.py`), but
+clients calling the LangGraph API directly must set `recursion_limit`
+explicitly in the request body. `100` matches the Gateway default and is a
+safe starting point; increase it if you run deeply nested subagent graphs.
+
+**Configurable Options:**
+- `model_name` (string): Override the default model
+- `thinking_enabled` (boolean): Enable extended thinking for supported models
+- `is_plan_mode` (boolean): Enable TodoList middleware for task tracking
+
+**Response:** Server-Sent Events (SSE) stream
 
 ```
 event: values
@@ -137,13 +134,13 @@ event: end
 data: {}
 ```
 
-#### 获取运行历史
+#### Get Run History
 
 ```http
 GET /api/langgraph/threads/{thread_id}/runs
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "runs": [
@@ -156,34 +153,34 @@ GET /api/langgraph/threads/{thread_id}/runs
 }
 ```
 
-#### 流式运行
+#### Stream Run
 
-实时流式返回响应。
+Stream responses in real-time.
 
 ```http
 POST /api/langgraph/threads/{thread_id}/runs/stream
 Content-Type: application/json
 ```
 
-与创建运行相同的请求体。返回SSE流。
+Same request body as Create Run. Returns SSE stream.
 
 ---
 
 ## Gateway API
 
-基础URL: `/api`
+Base URL: `/api`
 
-### 模型管理
+### Models
 
-#### 列出模型
+#### List Models
 
-从配置中获取所有可用的LLM模型。
+Get all available LLM models from configuration.
 
 ```http
 GET /api/models
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "models": [
@@ -209,13 +206,13 @@ GET /api/models
 }
 ```
 
-#### 获取模型详情
+#### Get Model Details
 
 ```http
 GET /api/models/{model_name}
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "name": "gpt-4",
@@ -227,17 +224,17 @@ GET /api/models/{model_name}
 }
 ```
 
-### MCP配置管理
+### MCP Configuration
 
-#### 获取MCP配置
+#### Get MCP Config
 
-获取当前MCP服务器配置。
+Get current MCP server configurations.
 
 ```http
 GET /api/mcp/config
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "mcpServers": {
@@ -262,16 +259,16 @@ GET /api/mcp/config
 }
 ```
 
-#### 更新MCP配置
+#### Update MCP Config
 
-更新MCP服务器配置。
+Update MCP server configurations.
 
 ```http
 PUT /api/mcp/config
 Content-Type: application/json
 ```
 
-**请求体：**
+**Request Body:**
 ```json
 {
   "mcpServers": {
@@ -289,7 +286,7 @@ Content-Type: application/json
 }
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "success": true,
@@ -297,17 +294,17 @@ Content-Type: application/json
 }
 ```
 
-### 技能管理
+### Skills
 
-#### 列出技能
+#### List Skills
 
-获取所有可用技能。
+Get all available skills.
 
 ```http
 GET /api/skills
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "skills": [
@@ -331,13 +328,13 @@ GET /api/skills
 }
 ```
 
-#### 获取技能详情
+#### Get Skill Details
 
 ```http
 GET /api/skills/{skill_name}
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "name": "pdf-processing",
@@ -351,13 +348,13 @@ GET /api/skills/{skill_name}
 }
 ```
 
-#### 启用技能
+#### Enable Skill
 
 ```http
 POST /api/skills/{skill_name}/enable
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "success": true,
@@ -365,13 +362,13 @@ POST /api/skills/{skill_name}/enable
 }
 ```
 
-#### 禁用技能
+#### Disable Skill
 
 ```http
 POST /api/skills/{skill_name}/disable
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "success": true,
@@ -379,19 +376,19 @@ POST /api/skills/{skill_name}/disable
 }
 ```
 
-#### 安装技能
+#### Install Skill
 
-从`.skill`文件安装技能。
+Install a skill from a `.skill` file.
 
 ```http
 POST /api/skills/install
 Content-Type: multipart/form-data
 ```
 
-**请求体：**
-- `file`: 要安装的`.skill`文件
+**Request Body:**
+- `file`: The `.skill` file to install
 
-**响应：**
+**Response:**
 ```json
 {
   "success": true,
@@ -404,21 +401,21 @@ Content-Type: multipart/form-data
 }
 ```
 
-### 文件上传
+### File Uploads
 
-#### 上传文件
+#### Upload Files
 
-向线程上传一个或多个文件。
+Upload one or more files to a thread.
 
 ```http
 POST /api/threads/{thread_id}/uploads
 Content-Type: multipart/form-data
 ```
 
-**请求体：**
-- `files`: 一个或多个要上传的文件
+**Request Body:**
+- `files`: One or more files to upload
 
-**响应：**
+**Response:**
 ```json
 {
   "success": true,
@@ -439,19 +436,19 @@ Content-Type: multipart/form-data
 }
 ```
 
-**支持的文档格式**（自动转换为Markdown）：
+**Supported Document Formats** (auto-converted to Markdown):
 - PDF (`.pdf`)
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-#### 列出已上传文件
+#### List Uploaded Files
 
 ```http
 GET /api/threads/{thread_id}/uploads/list
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "files": [
@@ -469,13 +466,13 @@ GET /api/threads/{thread_id}/uploads/list
 }
 ```
 
-#### 删除文件
+#### Delete File
 
 ```http
 DELETE /api/threads/{thread_id}/uploads/{filename}
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "success": true,
@@ -483,15 +480,15 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 }
 ```
 
-### 线程清理
+### Thread Cleanup
 
-在LangGraph线程本身被删除后，删除`.deer-flow/threads/{thread_id}`下的DeerFlow管理的本地线程文件。
+Remove DeerFlow-managed local thread files under `.deer-flow/threads/{thread_id}` after the LangGraph thread itself has been deleted.
 
 ```http
 DELETE /api/threads/{thread_id}
 ```
 
-**响应：**
+**Response:**
 ```json
 {
   "success": true,
@@ -499,34 +496,34 @@ DELETE /api/threads/{thread_id}
 }
 ```
 
-**错误行为：**
-- `422` - 无效的线程ID
-- `500` - 返回通用的`{"detail": "Failed to delete local thread data."}`响应，完整异常详情保留在服务器日志中
+**Error behavior:**
+- `422` for invalid thread IDs
+- `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
 
-### 产物管理
+### Artifacts
 
-#### 获取产物
+#### Get Artifact
 
-下载或查看代理生成的产物。
+Download or view an artifact generated by the agent.
 
 ```http
 GET /api/threads/{thread_id}/artifacts/{path}
 ```
 
-**路径示例：**
+**Path Examples:**
 - `/api/threads/abc123/artifacts/mnt/user-data/outputs/result.txt`
 - `/api/threads/abc123/artifacts/mnt/user-data/uploads/document.pdf`
 
-**查询参数：**
-- `download` (布尔值)：如果为`true`，强制下载并设置Content-Disposition头
+**Query Parameters:**
+- `download` (boolean): If `true`, force download with Content-Disposition header
 
-**响应：** 带有适当Content-Type的文件内容
+**Response:** File content with appropriate Content-Type
 
 ---
 
-## 错误响应
+## Error Responses
 
-所有API以一致的格式返回错误：
+All APIs return errors in a consistent format:
 
 ```json
 {
@@ -534,30 +531,30 @@ GET /api/threads/{thread_id}/artifacts/{path}
 }
 ```
 
-**HTTP状态码：**
-- `400` - Bad Request: 无效输入
-- `404` - Not Found: 资源未找到
-- `422` - Validation Error: 请求验证失败
-- `500` - Internal Server Error: 服务器端错误
+**HTTP Status Codes:**
+- `400` - Bad Request: Invalid input
+- `404` - Not Found: Resource not found
+- `422` - Validation Error: Request validation failed
+- `500` - Internal Server Error: Server-side error
 
 ---
 
-## 认证
+## Authentication
 
-目前，DeerFlow未实现认证。所有API都无需凭据即可访问。
+Currently, DeerFlow does not implement authentication. All APIs are accessible without credentials.
 
-**注意：** 这是关于DeerFlow API认证。MCP出站连接仍可为配置的HTTP/SSE MCP服务器使用OAuth。
+Note: This is about DeerFlow API authentication. MCP outbound connections can still use OAuth for configured HTTP/SSE MCP servers.
 
-**对于生产部署，建议：**
-1. 使用Nginx进行基本认证或OAuth集成
-2. 部署在VPN或私有网络后
-3. 实现自定义认证中间件
+For production deployments, it is recommended to:
+1. Use Nginx for basic auth or OAuth integration
+2. Deploy behind a VPN or private network
+3. Implement custom authentication middleware
 
 ---
 
-## 速率限制
+## Rate Limiting
 
-默认未实现速率限制。对于生产部署，在Nginx中配置速率限制：
+No rate limiting is implemented by default. For production deployments, configure rate limiting in Nginx:
 
 ```nginx
 limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
@@ -570,9 +567,9 @@ location /api/ {
 
 ---
 
-## WebSocket支持
+## WebSocket Support
 
-LangGraph服务器支持WebSocket连接进行实时流式传输。连接到：
+The LangGraph server supports WebSocket connections for real-time streaming. Connect to:
 
 ```
 ws://localhost:2026/api/langgraph/threads/{thread_id}/runs/stream
@@ -580,7 +577,7 @@ ws://localhost:2026/api/langgraph/threads/{thread_id}/runs/stream
 
 ---
 
-## SDK使用示例
+## SDK Usage
 
 ### Python (LangGraph SDK)
 
@@ -589,10 +586,10 @@ from langgraph_sdk import get_client
 
 client = get_client(url="http://localhost:2026/api/langgraph")
 
-# 创建线程
+# Create thread
 thread = await client.threads.create()
 
-# 运行代理
+# Run agent
 async for event in client.runs.stream(
     thread["thread_id"],
     "lead_agent",
@@ -606,12 +603,12 @@ async for event in client.runs.stream(
 ### JavaScript/TypeScript
 
 ```typescript
-// 使用fetch调用Gateway API
+// Using fetch for Gateway API
 const response = await fetch('/api/models');
 const data = await response.json();
 console.log(data.models);
 
-// 使用EventSource进行流式传输
+// Using EventSource for streaming
 const eventSource = new EventSource(
   `/api/langgraph/threads/${threadId}/runs/stream`
 );
@@ -620,23 +617,23 @@ eventSource.onmessage = (event) => {
 };
 ```
 
-### cURL示例
+### cURL Examples
 
 ```bash
-# 列出模型
+# List models
 curl http://localhost:2026/api/models
 
-# 获取MCP配置
+# Get MCP config
 curl http://localhost:2026/api/mcp/config
 
-# 上传文件
+# Upload file
 curl -X POST http://localhost:2026/api/threads/abc123/uploads \
   -F "files=@document.pdf"
 
-# 启用技能
+# Enable skill
 curl -X POST http://localhost:2026/api/skills/pdf-processing/enable
 
-# 创建线程并运行代理
+# Create thread and run agent
 curl -X POST http://localhost:2026/api/langgraph/threads \
   -H "Content-Type: application/json" \
   -d '{}'
@@ -645,6 +642,14 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs \
   -H "Content-Type: application/json" \
   -d '{
     "input": {"messages": [{"role": "user", "content": "Hello"}]},
-    "config": {"configurable": {"model_name": "gpt-4"}}
+    "config": {
+      "recursion_limit": 100,
+      "configurable": {"model_name": "gpt-4"}
+    }
   }'
 ```
+
+> The `/api/langgraph/*` endpoints bypass DeerFlow's Gateway and inherit
+> LangGraph's native `recursion_limit` default of 25, which is too low for
+> plan-mode or subagent runs. Set `config.recursion_limit` explicitly — see
+> the [Create Run](#create-run) section for details.

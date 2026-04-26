@@ -6,7 +6,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from typing import Optional
+from pathlib import Path
 
 
 def configure_stdio() -> None:
@@ -20,7 +20,7 @@ def configure_stdio() -> None:
                 continue
 
 
-def run_command(command: list[str]) -> Optional[str]:
+def run_command(command: list[str]) -> str | None:
     """Run a command and return trimmed stdout, or None on failure."""
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True, shell=False)
@@ -29,7 +29,25 @@ def run_command(command: list[str]) -> Optional[str]:
     return result.stdout.strip() or result.stderr.strip()
 
 
-def parse_node_major(version_text: str) -> Optional[int]:
+def find_pnpm_command() -> list[str] | None:
+    """Return a pnpm-compatible command that exists on this machine."""
+    pnpm_path = shutil.which("pnpm")
+    if pnpm_path:
+        return [str(Path(pnpm_path))]
+
+    pnpm_cmd_path = shutil.which("pnpm.cmd")
+    if pnpm_cmd_path:
+        return [str(Path(pnpm_cmd_path))]
+
+    corepack_path = shutil.which("corepack")
+    if not corepack_path:
+        corepack_path = shutil.which("corepack.cmd")
+    if corepack_path:
+        return [str(Path(corepack_path)), "pnpm"]
+    return None
+
+
+def parse_node_major(version_text: str) -> int | None:
     version = version_text.strip()
     if version.startswith("v"):
         version = version[1:]
@@ -55,35 +73,39 @@ def main() -> int:
         if node_version:
             major = parse_node_major(node_version)
             if major is not None and major >= 22:
-                print(f"  ✓ Node.js {node_version.lstrip('v')} (>= 22 required)")
+                print(f"  OK Node.js {node_version.lstrip('v')} (>= 22 required)")
             else:
                 print(
-                    f"  ✗ Node.js {node_version.lstrip('v')} found, but version 22+ is required"
+                    f"  FAIL Node.js {node_version.lstrip('v')} found, but version 22+ is required"
                 )
                 print("    Install from: https://nodejs.org/")
                 failed = True
         else:
-            print("  ✗ Unable to determine Node.js version")
+            print("  INFO Unable to determine Node.js version")
             print("    Install from: https://nodejs.org/")
             failed = True
     else:
-        print("  ✗ Node.js not found (version 22+ required)")
+        print("  FAIL Node.js not found (version 22+ required)")
         print("    Install from: https://nodejs.org/")
         failed = True
 
     print()
     print("Checking pnpm...")
-    pnpm_executable = shutil.which("pnpm.cmd") or shutil.which("pnpm")
-    if pnpm_executable:
-        pnpm_version = run_command([pnpm_executable, "-v"])
+    pnpm_command = find_pnpm_command()
+    if pnpm_command:
+        pnpm_version = run_command([*pnpm_command, "-v"])
         if pnpm_version:
-            print(f"  ✓ pnpm {pnpm_version}")
+            if Path(pnpm_command[0]).stem.lower() == "corepack":
+                print(f"  OK pnpm {pnpm_version} (via Corepack)")
+            else:
+                print(f"  OK pnpm {pnpm_version}")
         else:
-            print("  ✗ Unable to determine pnpm version")
+            print("  INFO Unable to determine pnpm version")
             failed = True
     else:
-        print("  ✗ pnpm not found")
+        print("  FAIL pnpm not found")
         print("    Install: npm install -g pnpm")
+        print("    Or enable Corepack: corepack enable")
         print("    Or visit: https://pnpm.io/installation")
         failed = True
 
@@ -92,13 +114,14 @@ def main() -> int:
     if shutil.which("uv"):
         uv_version_text = run_command(["uv", "--version"])
         if uv_version_text:
-            uv_version = uv_version_text.split()[-1]
-            print(f"  ✓ uv {uv_version}")
+            uv_version_parts = uv_version_text.split()
+            uv_version = uv_version_parts[1] if len(uv_version_parts) > 1 else uv_version_text
+            print(f"  OK uv {uv_version}")
         else:
-            print("  ✗ Unable to determine uv version")
+            print("  INFO Unable to determine uv version")
             failed = True
     else:
-        print("  ✗ uv not found")
+        print("  FAIL uv not found")
         print("    Visit the official installation guide for your platform:")
         print("    https://docs.astral.sh/uv/getting-started/installation/")
         failed = True
@@ -109,11 +132,11 @@ def main() -> int:
         nginx_version_text = run_command(["nginx", "-v"])
         if nginx_version_text and "/" in nginx_version_text:
             nginx_version = nginx_version_text.split("/", 1)[1]
-            print(f"  ✓ nginx {nginx_version}")
+            print(f"  OK nginx {nginx_version}")
         else:
-            print("  ✓ nginx (version unknown)")
+            print("  INFO nginx (version unknown)")
     else:
-        print("  ✗ nginx not found")
+        print("  FAIL nginx not found")
         print("    macOS:   brew install nginx")
         print("    Ubuntu:  sudo apt install nginx")
         print("    Windows: use WSL for local mode or use Docker mode")
@@ -123,18 +146,20 @@ def main() -> int:
     print()
     if not failed:
         print("==========================================")
-        print("  ✓ All dependencies are installed!")
+        print("  OK All dependencies are installed!")
         print("==========================================")
         print()
         print("You can now run:")
         print("  make install  - Install project dependencies")
-        print("  make config   - Generate local config files")
+        print("  make setup    - Create a minimal working config (recommended)")
+        print("  make config   - Copy the full config template (manual setup)")
+        print("  make doctor   - Verify config and dependency health")
         print("  make dev      - Start development server")
         print("  make start    - Start production server")
         return 0
 
     print("==========================================")
-    print("  ✗ Some dependencies are missing")
+    print("  FAIL Some dependencies are missing")
     print("==========================================")
     print()
     print("Please install the missing tools and run 'make check' again.")

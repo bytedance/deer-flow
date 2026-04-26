@@ -87,6 +87,18 @@ async def test_list_by_thread(manager: RunManager):
 
 
 @pytest.mark.anyio
+async def test_list_by_thread_is_stable_when_timestamps_tie(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
+    """Newest-first ordering should not depend on timestamp precision."""
+    monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: "2026-01-01T00:00:00+00:00")
+
+    r1 = await manager.create("thread-1")
+    r2 = await manager.create("thread-1")
+
+    runs = await manager.list_by_thread("thread-1")
+    assert [run.run_id for run in runs] == [r2.run_id, r1.run_id]
+
+
+@pytest.mark.anyio
 async def test_has_inflight(manager: RunManager):
     """has_inflight should be True when a run is pending or running."""
     record = await manager.create("thread-1")

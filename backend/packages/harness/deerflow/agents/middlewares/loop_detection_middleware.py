@@ -1,35 +1,15 @@
-"""循环检测中间件 - 检测并中断重复的工具调用循环
+"""Middleware to detect and break repetitive tool call loops.
 
-===================
-设计思路说明
-===================
+P0 safety: prevents the agent from calling the same tool with the same
+arguments indefinitely until the recursion limit kills the run.
 
-**核心职责**：
-P0安全防护：防止代理无限调用相同的工具直到递归限制杀死运行
-
-**为什么需要这个中间件**：
-1. **防止无限循环**：代理可能陷入重复调用同一工具的死循环
-2. **节省资源**：避免浪费计算资源和token
-3. **提升体验**：快速中断而非等待超时
-4. **优雅恢复**：强制代理产生最终答案
-
-**检测策略**：
-1. 每次模型响应后，哈希工具调用（名称+参数）
-2. 在滑动窗口中跟踪最近的哈希
-3. 如果相同哈希出现≥warn_threshold次，注入"你正在重复—结束"系统消息（每个哈希一次）
-4. 如果出现≥hard_limit次，从响应中删除所有tool_calls，强制代理产生最终文本答案
-
-**设计决策**：
-- 使用哈希检测：比字符串比较更高效
-- 滑动窗口：只跟踪最近的N次调用
-- 分级响应：先警告后强制停止
-- 线程隔离：每个线程独立跟踪
-- LRU驱逐：限制跟踪的线程数量
-
-**架构说明**：
-- 在after_model钩子中检查：模型响应后立即检测
-- 使用MD5哈希：快速且冲突概率低
-- 线程安全：使用锁保护共享状态
+Detection strategy:
+  1. After each model response, hash the tool calls (name + args).
+  2. Track recent hashes in a sliding window.
+  3. If the same hash appears >= warn_threshold times, inject a
+     "you are repeating yourself — wrap up" system message (once per hash).
+  4. If it appears >= hard_limit times, strip all tool_calls from the
+     response so the agent is forced to produce a final text answer.
 """
 
 import hashlib
@@ -37,6 +17,7 @@ import json
 import logging
 import threading
 from collections import OrderedDict, defaultdict
+from copy import deepcopy
 from typing import override
 
 from langchain.agents import AgentState
@@ -46,67 +27,134 @@ from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
 
-# 默认值 — 可通过构造函数覆盖
-_DEFAULT_WARN_THRESHOLD = 3  # 3次相同调用后注入警告
-_DEFAULT_HARD_LIMIT = 5  # 5次相同调用后强制停止
-_DEFAULT_WINDOW_SIZE = 20  # 跟踪最近N次工具调用
-_DEFAULT_MAX_TRACKED_THREADS = 100  # LRU驱逐限制
+# Defaults — can be overridden via constructor
+_DEFAULT_WARN_THRESHOLD = 3  # inject warning after 3 identical calls
+_DEFAULT_HARD_LIMIT = 5  # force-stop after 5 identical calls
+_DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
+_DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
+_DEFAULT_TOOL_FREQ_WARN = 30  # warn after 30 calls to the same tool type
+_DEFAULT_TOOL_FREQ_HARD_LIMIT = 50  # force-stop after 50 calls to the same tool type
+
+
+def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
+    """Normalize tool call args to a dict plus an optional fallback key.
+
+    Some providers serialize ``args`` as a JSON string instead of a dict.
+    We defensively parse those cases so loop detection does not crash while
+    still preserving a stable fallback key for non-dict payloads.
+    """
+    if isinstance(raw_args, dict):
+        return raw_args, None
+
+    if isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}, raw_args
+
+        if isinstance(parsed, dict):
+            return parsed, None
+        return {}, json.dumps(parsed, sort_keys=True, default=str)
+
+    if raw_args is None:
+        return {}, None
+
+    return {}, json.dumps(raw_args, sort_keys=True, default=str)
+
+
+def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
+    """Derive a stable key from salient args without overfitting to noise."""
+    if name == "read_file" and fallback_key is None:
+        path = args.get("path") or ""
+        start_line = args.get("start_line")
+        end_line = args.get("end_line")
+
+        bucket_size = 200
+        try:
+            start_line = int(start_line) if start_line is not None else 1
+        except (TypeError, ValueError):
+            start_line = 1
+        try:
+            end_line = int(end_line) if end_line is not None else start_line
+        except (TypeError, ValueError):
+            end_line = start_line
+
+        start_line, end_line = sorted((start_line, end_line))
+        bucket_start = max(start_line, 1)
+        bucket_end = max(end_line, 1)
+        bucket_start = (bucket_start - 1) // bucket_size
+        bucket_end = (bucket_end - 1) // bucket_size
+        return f"{path}:{bucket_start}-{bucket_end}"
+
+    # write_file / str_replace are content-sensitive: same path may be updated
+    # with different payloads during iteration. Using only salient fields (path)
+    # can collapse distinct calls, so we hash full args to reduce false positives.
+    if name in {"write_file", "str_replace"}:
+        if fallback_key is not None:
+            return fallback_key
+        return json.dumps(args, sort_keys=True, default=str)
+
+    salient_fields = ("path", "url", "query", "command", "pattern", "glob", "cmd")
+    stable_args = {field: args[field] for field in salient_fields if args.get(field) is not None}
+    if stable_args:
+        return json.dumps(stable_args, sort_keys=True, default=str)
+
+    if fallback_key is not None:
+        return fallback_key
+
+    return json.dumps(args, sort_keys=True, default=str)
 
 
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
-    """计算一组工具调用的确定性哈希（名称+参数）
+    """Deterministic hash of a set of tool calls (name + stable key).
 
-    为什么这样设计：
-    - 顺序无关：相同的多组工具调用应始终产生相同的哈希，无论输入顺序如何
-    - 确定性排序：按名称和参数排序确保排列组合产生相同的哈希
-    - 使用MD5：快速且对于此用例冲突概率足够低
-
-    Args:
-        tool_calls: 工具调用列表
-
-    Returns:
-        12字符的十六进制哈希字符串
+    This is intended to be order-independent: the same multiset of tool calls
+    should always produce the same hash, regardless of their input order.
     """
-    # 首先将每个工具调用规范化为最小（名称，参数）结构
-    normalized: list[dict] = []
+    # Normalize each tool call to a stable (name, key) structure.
+    normalized: list[str] = []
     for tc in tool_calls:
-        normalized.append(
-            {
-                "name": tc.get("name", ""),
-                "args": tc.get("args", {}),
-            }
-        )
+        name = tc.get("name", "")
+        args, fallback_key = _normalize_tool_call_args(tc.get("args", {}))
+        key = _stable_tool_key(name, args, fallback_key)
 
-    # 按名称和参数的确定性序列化排序，以便相同调用的排列产生相同的排序
-    normalized.sort(
-        key=lambda tc: (
-            tc["name"],
-            json.dumps(tc["args"], sort_keys=True, default=str),
-        )
-    )
+        normalized.append(f"{name}:{key}")
+
+    # Sort so permutations of the same multiset of calls yield the same ordering.
+    normalized.sort()
     blob = json.dumps(normalized, sort_keys=True, default=str)
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
 
-_WARNING_MSG = "[循环检测] 您正在重复相同的工具调用。请停止调用工具并立即产生最终答案。如果无法完成任务，请总结到目前为止完成的工作。"
+_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
 
-_HARD_STOP_MSG = "[强制停止] 重复工具调用超过安全限制。将使用到目前为止收集的结果产生最终答案。"
+_TOOL_FREQ_WARNING_MSG = (
+    "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
+)
+
+_HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
+
+_TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
 
 
 class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
-    """检测并中断重复的工具调用循环
-
-    设计考虑：
-    - 渐进式响应：先警告后强制停止
-    - 每线程跟踪：不同线程的循环独立检测
-    - 滑动窗口：只考虑最近的调用历史
-    - 单次警告：每个哈希只警告一次
+    """Detects and breaks repetitive tool call loops.
 
     Args:
-        warn_threshold: 注入警告消息前的相同工具调用集数量。默认：3
-        hard_limit: 删除所有工具调用前的相同工具调用集数量。默认：5
-        window_size: 跟踪调用的滑动窗口大小。默认：20
-        max_tracked_threads: 在驱逐最少使用之前要跟踪的最大线程数。默认：100
+        warn_threshold: Number of identical tool call sets before injecting
+            a warning message. Default: 3.
+        hard_limit: Number of identical tool call sets before stripping
+            tool_calls entirely. Default: 5.
+        window_size: Size of the sliding window for tracking calls.
+            Default: 20.
+        max_tracked_threads: Maximum number of threads to track before
+            evicting the least recently used. Default: 100.
+        tool_freq_warn: Number of calls to the same tool *type* (regardless
+            of arguments) before injecting a frequency warning. Catches
+            cross-file read loops that hash-based detection misses.
+            Default: 30.
+        tool_freq_hard_limit: Number of calls to the same tool type before
+            forcing a stop. Default: 50.
     """
 
     def __init__(
@@ -115,59 +163,51 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         hard_limit: int = _DEFAULT_HARD_LIMIT,
         window_size: int = _DEFAULT_WINDOW_SIZE,
         max_tracked_threads: int = _DEFAULT_MAX_TRACKED_THREADS,
+        tool_freq_warn: int = _DEFAULT_TOOL_FREQ_WARN,
+        tool_freq_hard_limit: int = _DEFAULT_TOOL_FREQ_HARD_LIMIT,
     ):
         super().__init__()
         self.warn_threshold = warn_threshold
         self.hard_limit = hard_limit
         self.window_size = window_size
         self.max_tracked_threads = max_tracked_threads
+        self.tool_freq_warn = tool_freq_warn
+        self.tool_freq_hard_limit = tool_freq_hard_limit
         self._lock = threading.Lock()
-        # 使用OrderedDict进行每线程跟踪以实现LRU驱逐
+        # Per-thread tracking using OrderedDict for LRU eviction
         self._history: OrderedDict[str, list[str]] = OrderedDict()
         self._warned: dict[str, set[str]] = defaultdict(set)
+        # Per-thread, per-tool-type cumulative call counts
+        self._tool_freq: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self._tool_freq_warned: dict[str, set[str]] = defaultdict(set)
 
     def _get_thread_id(self, runtime: Runtime) -> str:
-        """从运行时上下文中提取thread_id以进行每线程跟踪
-
-        为什么需要这个函数：
-        - 支持per-thread隔离
-        - 提供默认值作为后备
-        - 便于日志记录
-
-        Args:
-            runtime: 运行时上下文
-
-        Returns:
-            线程ID字符串
-        """
+        """Extract thread_id from runtime context for per-thread tracking."""
         thread_id = runtime.context.get("thread_id") if runtime.context else None
         if thread_id:
             return thread_id
         return "default"
 
     def _evict_if_needed(self) -> None:
-        """如果超过限制，驱逐最少使用的线程
+        """Evict least recently used threads if over the limit.
 
-        为什么需要LRU驱逐：
-        - 限制内存使用
-        - 只跟踪活跃线程
-        - 自动清理不活跃线程
-
-        必须在持有self._lock时调用
+        Must be called while holding self._lock.
         """
         while len(self._history) > self.max_tracked_threads:
             evicted_id, _ = self._history.popitem(last=False)
             self._warned.pop(evicted_id, None)
+            self._tool_freq.pop(evicted_id, None)
+            self._tool_freq_warned.pop(evicted_id, None)
             logger.debug("Evicted loop tracking for thread %s (LRU)", evicted_id)
 
     def _track_and_check(self, state: AgentState, runtime: Runtime) -> tuple[str | None, bool]:
-        """跟踪工具调用并检查循环
+        """Track tool calls and check for loops.
 
-        工作流程：
-        1. 检查最后一条消息是否是AI消息
-        2. 提取工具调用并计算哈希
-        3. 更新线程历史
-        4. 检查计数并决定是否警告或停止
+        Two detection layers:
+          1. **Hash-based** (existing): catches identical tool call sets.
+          2. **Frequency-based** (new): catches the same *tool type* being
+             called many times with varying arguments (e.g. ``read_file``
+             on 40 different files).
 
         Returns:
             (warning_message_or_none, should_hard_stop)
@@ -188,7 +228,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         call_hash = _hash_tool_calls(tool_calls)
 
         with self._lock:
-            # 触摸/创建条目（移动到末尾以进行LRU）
+            # Touch / create entry (move to end for LRU)
             if thread_id in self._history:
                 self._history.move_to_end(thread_id)
             else:
@@ -203,6 +243,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             count = history.count(call_hash)
             tool_names = [tc.get("name", "?") for tc in tool_calls]
 
+            # --- Layer 1: hash-based (identical call sets) ---
             if count >= self.hard_limit:
                 logger.error(
                     "Loop hard limit reached — forcing stop",
@@ -229,80 +270,120 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         },
                     )
                     return _WARNING_MSG, False
-                # 已为此哈希注入警告 — 抑制
-                return None, False
+
+            # --- Layer 2: per-tool-type frequency ---
+            freq = self._tool_freq[thread_id]
+            for tc in tool_calls:
+                name = tc.get("name", "")
+                if not name:
+                    continue
+                freq[name] += 1
+                tc_count = freq[name]
+
+                if tc_count >= self.tool_freq_hard_limit:
+                    logger.error(
+                        "Tool frequency hard limit reached — forcing stop",
+                        extra={
+                            "thread_id": thread_id,
+                            "tool_name": name,
+                            "count": tc_count,
+                        },
+                    )
+                    return _TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=tc_count), True
+
+                if tc_count >= self.tool_freq_warn:
+                    warned = self._tool_freq_warned[thread_id]
+                    if name not in warned:
+                        warned.add(name)
+                        logger.warning(
+                            "Tool frequency warning — too many calls to same tool type",
+                            extra={
+                                "thread_id": thread_id,
+                                "tool_name": name,
+                                "count": tc_count,
+                            },
+                        )
+                        return _TOOL_FREQ_WARNING_MSG.format(tool_name=name, count=tc_count), False
 
         return None, False
 
-    def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
-        """应用循环检测逻辑并返回状态更新
+    @staticmethod
+    def _append_text(content: str | list | None, text: str) -> str | list:
+        """Append *text* to AIMessage content, handling str, list, and None.
 
-        处理策略：
-        - 硬停止：删除tool_calls强制文本输出
-        - 警告：注入HumanMessage避免系统消息错误
-        - 无操作：未检测到循环
-
-        为什么使用HumanMessage而非SystemMessage：
-        - Anthropic要求系统消息只在对话开始时
-        - 中间对话注入系统消息会崩溃langchain_anthropic
-        - HumanMessage与所有提供商兼容
-
-        Args:
-            state: 当前代理状态
-            runtime: 运行时上下文
-
-        Returns:
-            状态更新或None
+        When content is a list of content blocks (e.g. Anthropic thinking mode),
+        we append a new ``{"type": "text", ...}`` block instead of concatenating
+        a string to a list, which would raise ``TypeError``.
         """
+        if content is None:
+            return text
+        if isinstance(content, list):
+            return [*content, {"type": "text", "text": f"\n\n{text}"}]
+        if isinstance(content, str):
+            return content + f"\n\n{text}"
+        # Fallback: coerce unexpected types to str to avoid TypeError
+        return str(content) + f"\n\n{text}"
+
+    @staticmethod
+    def _build_hard_stop_update(last_msg, content: str | list) -> dict:
+        """Clear tool-call metadata so forced-stop messages serialize as plain assistant text."""
+        update = {
+            "tool_calls": [],
+            "content": content,
+        }
+
+        additional_kwargs = dict(getattr(last_msg, "additional_kwargs", {}) or {})
+        for key in ("tool_calls", "function_call"):
+            additional_kwargs.pop(key, None)
+        update["additional_kwargs"] = additional_kwargs
+
+        response_metadata = deepcopy(getattr(last_msg, "response_metadata", {}) or {})
+        if response_metadata.get("finish_reason") == "tool_calls":
+            response_metadata["finish_reason"] = "stop"
+        update["response_metadata"] = response_metadata
+
+        return update
+
+    def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
         warning, hard_stop = self._track_and_check(state, runtime)
 
         if hard_stop:
-            # 从最后一条AIMessage中删除tool_calls以强制文本输出
+            # Strip tool_calls from the last AIMessage to force text output
             messages = state.get("messages", [])
             last_msg = messages[-1]
-            stripped_msg = last_msg.model_copy(
-                update={
-                    "tool_calls": [],
-                    "content": (last_msg.content or "") + f"\n\n{_HARD_STOP_MSG}",
-                }
-            )
+            content = self._append_text(last_msg.content, warning or _HARD_STOP_MSG)
+            stripped_msg = last_msg.model_copy(update=self._build_hard_stop_update(last_msg, content))
             return {"messages": [stripped_msg]}
 
         if warning:
-            # 注入为HumanMessage而非SystemMessage以避免
-            # Anthropic的"多个非连续系统消息"错误
-            # Anthropic模型要求系统消息只在对话开始时；
-            # 在中间对话中注入一个会崩溃langchain_anthropic的_format_messages()
-            # HumanMessage适用于所有提供商。参见#1299
+            # Inject as HumanMessage instead of SystemMessage to avoid
+            # Anthropic's "multiple non-consecutive system messages" error.
+            # Anthropic models require system messages only at the start of
+            # the conversation; injecting one mid-conversation crashes
+            # langchain_anthropic's _format_messages(). HumanMessage works
+            # with all providers. See #1299.
             return {"messages": [HumanMessage(content=warning)]}
 
         return None
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        """模型响应后检查循环（同步版本）"""
         return self._apply(state, runtime)
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        """模型响应后检查循环（异步版本）"""
         return self._apply(state, runtime)
 
     def reset(self, thread_id: str | None = None) -> None:
-        """清除跟踪状态。如果给出thread_id，只清除该线程
-
-        为什么需要重置功能：
-        - 测试清理
-        - 手动重置跟踪
-        - 内存管理
-
-        Args:
-            thread_id: 如果提供，只重置特定线程
-        """
+        """Clear tracking state. If thread_id given, clear only that thread."""
         with self._lock:
             if thread_id:
                 self._history.pop(thread_id, None)
                 self._warned.pop(thread_id, None)
+                self._tool_freq.pop(thread_id, None)
+                self._tool_freq_warned.pop(thread_id, None)
             else:
                 self._history.clear()
                 self._warned.clear()
+                self._tool_freq.clear()
+                self._tool_freq_warned.clear()

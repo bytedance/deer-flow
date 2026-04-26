@@ -1,91 +1,42 @@
-"""
-Lead Agent - DeerFlow的主代理实现
-
-===================
-设计思路说明
-===================
-
-**为什么需要Lead Agent**：
-1. **统一入口**：作为所有代理请求的默认处理者
-2. **配置驱动**：通过config.yaml配置行为
-3. **功能完整**：集成所有可用的中间件和功能
-4. **生产就绪**：经过测试和优化的标准实现
-
-**核心设计原则**：
-- **模块化**：通过中间件系统扩展功能
-- **可配置**：支持通过配置文件控制行为
-- **容错性**：优雅处理配置错误和缺失
-- **性能优化**：支持成本控制和性能调优
-
-**中间件执行顺序**：
-1. ThreadDataMiddleware: 初始化线程数据
-2. UploadsMiddleware: 处理文件上传
-3. SandboxMiddleware: 沙箱环境初始化
-4. DanglingToolCallMiddleware: 修复悬空工具调用
-5. GuardrailMiddleware: 执行安全检查（如果配置）
-6. ToolErrorHandlingMiddleware: 处理工具错误
-7. SummarizationMiddleware: 对话摘要（如果配置）
-8. TodoMiddleware: 任务列表（计划模式）
-9. TitleMiddleware: 自动标题生成（如果配置）
-10. MemoryMiddleware: 记忆管理（如果配置）
-11. ViewImageMiddleware: 图像查看支持（如果配置）
-12. SubagentLimitMiddleware: 子代理限制（如果配置）
-13. LoopDetectionMiddleware: 循环检测
-14. ClarificationMiddleware: 澄清请求处理
-
-**为什么这个顺序很重要**：
-- **依赖关系**：某些中间件依赖其他中间件的输出
-- **安全优先**：安全检查在工具执行之前
-- **用户体验**：标题、摘要等在合适时机触发
-"""
-
 import logging
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware, SummarizationMiddleware
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.agents_config import load_agent_config
+from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
+from deerflow.config.memory_config import get_memory_config
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
 
 
+def _get_runtime_config(config: RunnableConfig) -> dict:
+    """Merge legacy configurable options with LangGraph runtime context."""
+    cfg = dict(config.get("configurable", {}) or {})
+    context = config.get("context", {}) or {}
+    if isinstance(context, dict):
+        cfg.update(context)
+    return cfg
+
+
 def _resolve_model_name(requested_model_name: str | None = None) -> str:
-    """安全地解析运行时模型名称，如果无效则回退到默认值
-
-    **为什么需要这个函数**：
-    - **容错处理**：用户指定的模型可能不存在
-    - **默认回退**：确保始终有可用的模型
-    - **警告提示**：通知用户回退行为
-
-    **参数说明**：
-        requested_model_name: 用户请求的模型名称
-
-    **返回值**：
-        解析后的模型名称
-
-    **异常**：
-        ValueError: 如果没有配置任何模型
-
-    **设计考虑**：
-    - 优先使用用户指定的模型
-    - 如果模型不存在，回退到默认模型
-    - 记录警告以便调试
-    """
+    """Resolve a runtime model name safely, falling back to default if invalid. Returns None if no models are configured."""
     app_config = get_app_config()
     default_model_name = app_config.models[0].name if app_config.models else None
     if default_model_name is None:
@@ -99,28 +50,8 @@ def _resolve_model_name(requested_model_name: str | None = None) -> str:
     return default_model_name
 
 
-def _create_summarization_middleware() -> SummarizationMiddleware | None:
-    """从配置创建和配置摘要中间件
-
-    **为什么需要单独的函数**：
-    - **复杂初始化**：摘要中间件需要多个配置参数
-    - **条件创建**：只有启用时才创建
-    - **成本控制**：支持使用更便宜的模型
-
-    **配置参数处理**：
-    - trigger: 转换为元组格式
-    - keep: 转换为元组格式
-    - model: 使用轻量级模型降低成本
-    - trim_tokens_to_summarize: 限制摘要调用的token数
-
-    **为什么使用轻量级模型**：
-    - 摘要任务不需要最强的推理能力
-    - 显著降低API调用成本
-    - 提高响应速度
-
-    **返回值**：
-        配置好的SummarizationMiddleware实例，如果未启用则返回None
-    """
+def _create_summarization_middleware() -> DeerFlowSummarizationMiddleware | None:
+    """Create and configure the summarization middleware from config."""
     config = get_summarization_config()
 
     if not config.enabled:
@@ -158,27 +89,38 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 
-    return SummarizationMiddleware(**kwargs)
+    hooks: list[BeforeSummarizationHook] = []
+    if get_memory_config().enabled:
+        hooks.append(memory_flush_hook)
+
+    # The logic below relies on two assumptions holding true: this factory is
+    # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
+    # config is not expected to change after startup.
+    try:
+        skills_container_path = get_app_config().skills.container_path or "/mnt/skills"
+    except Exception:
+        logger.exception("Failed to resolve skills container path; falling back to default")
+        skills_container_path = "/mnt/skills"
+
+    return DeerFlowSummarizationMiddleware(
+        **kwargs,
+        skills_container_path=skills_container_path,
+        skill_file_read_tool_names=config.skill_file_read_tool_names,
+        before_summarization=hooks,
+        preserve_recent_skill_count=config.preserve_recent_skill_count,
+        preserve_recent_skill_tokens=config.preserve_recent_skill_tokens,
+        preserve_recent_skill_tokens_per_skill=config.preserve_recent_skill_tokens_per_skill,
+    )
 
 
 def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
-    """创建和配置TodoList中间件
+    """Create and configure the TodoList middleware.
 
-    **为什么需要TodoList中间件**：
-    - **任务跟踪**：帮助AI管理复杂的多步骤任务
-    - **进度可见**：让用户了解AI的工作进度
-    - **结构化输出**：提供清晰的任务列表
+    Args:
+        is_plan_mode: Whether to enable plan mode with TodoList middleware.
 
-    **参数说明**：
-        is_plan_mode: 是否启用带TodoList中间件的计划模式
-
-    **返回值**：
-        如果启用计划模式则返回TodoMiddleware实例，否则返回None
-
-    **设计考虑**：
-    - 只在计划模式下启用
-    - 使用自定义提示词匹配DeerFlow风格
-    - 强制实时更新任务状态
+    Returns:
+        TodoMiddleware instance if plan mode is enabled, None otherwise.
     """
     if not is_plan_mode:
         return None
@@ -315,7 +257,8 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
         middlewares.append(summarization_middleware)
 
     # Add TodoList middleware if plan mode is enabled
-    is_plan_mode = config.get("configurable", {}).get("is_plan_mode", False)
+    cfg = _get_runtime_config(config)
+    is_plan_mode = cfg.get("is_plan_mode", False)
     todo_list_middleware = _create_todo_list_middleware(is_plan_mode)
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
@@ -344,9 +287,9 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
         middlewares.append(DeferredToolFilterMiddleware())
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
-    subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
+    subagent_enabled = cfg.get("subagent_enabled", False)
     if subagent_enabled:
-        max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
+        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
@@ -366,7 +309,7 @@ def make_lead_agent(config: RunnableConfig):
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent
 
-    cfg = config.get("configurable", {})
+    cfg = _get_runtime_config(config)
 
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
@@ -375,17 +318,17 @@ def make_lead_agent(config: RunnableConfig):
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
-    agent_name = cfg.get("agent_name")
+    agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
-    # Custom agent model or fallback to global/default model resolution
-    agent_model_name = agent_config.model if agent_config and agent_config.model else _resolve_model_name()
+    # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
+    agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
-    # Final model name resolution with request override, then agent config, then global default
-    model_name = requested_model_name or agent_model_name
+    # Final model name resolution: request → agent config → global default, with fallback for unknown names
+    model_name = _resolve_model_name(requested_model_name or agent_model_name)
 
     app_config = get_app_config()
-    model_config = app_config.get_model_config(model_name) if model_name else None
+    model_config = app_config.get_model_config(model_name)
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
@@ -416,6 +359,8 @@ def make_lead_agent(config: RunnableConfig):
             "reasoning_effort": reasoning_effort,
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
+            "tool_groups": agent_config.tool_groups if agent_config else None,
+            "available_skills": ["bootstrap"] if is_bootstrap else (agent_config.skills if agent_config and agent_config.skills is not None else None),
         }
     )
 
@@ -434,6 +379,8 @@ def make_lead_agent(config: RunnableConfig):
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
-        system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
+        system_prompt=apply_prompt_template(
+            subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
+        ),
         state_schema=ThreadState,
     )

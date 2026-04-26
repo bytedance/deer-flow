@@ -1,59 +1,28 @@
-# MCP (Model Context Protocol) 配置指南
+# MCP (Model Context Protocol) Configuration
 
-===================
-设计思路说明
-===================
+DeerFlow supports configurable MCP servers and skills to extend its capabilities, which are loaded from a dedicated `extensions_config.json` file in the project root directory.
 
-**为什么需要MCP**：
-1. 扩展Agent能力：通过MCP服务器访问外部系统
-2. 标准化接口：统一不同工具的接入方式
-3. 插件化架构：动态加载工具，无需修改核心代码
+## Setup
 
-**核心设计原则**：
-- 配置驱动：通过JSON配置管理MCP服务器
-- 多传输支持：stdio/sse/http适应不同场景
-- OAuth集成：支持需要认证的企业MCP服务器
-
-**为什么使用extensions_config.json**：
-- 集中管理所有扩展（MCP和Skills）
-- 支持热重载，修改后无需重启
-- 便于版本控制和团队协作
-
-DeerFlow 支持可配置的 MCP 服务器和技能来扩展其能力，这些从项目根目录的专用 `extensions_config.json` 文件加载。
-
-## 设置
-
-1. 将 `extensions_config.example.json` 复制到项目根目录的 `extensions_config.json`。
+1. Copy `extensions_config.example.json` to `extensions_config.json` in the project root directory.
    ```bash
-   # 复制示例配置
+   # Copy example configuration
    cp extensions_config.example.json extensions_config.json
    ```
+   
+2. Enable the desired MCP servers or skills by setting `"enabled": true`.
+3. Configure each server’s command, arguments, and environment variables as needed.
+4. Restart the application to load and register MCP tools.
 
-2. 通过设置 `"enabled": true` 启用所需的 MCP 服务器或技能。
+## OAuth Support (HTTP/SSE MCP Servers)
 
-3. 根据需要配置每个服务器的命令、参数和环境变量。
+For `http` and `sse` MCP servers, DeerFlow supports OAuth token acquisition and automatic token refresh.
 
-4. 重启应用以加载并注册 MCP 工具。
+- Supported grants: `client_credentials`, `refresh_token`
+- Configure per-server `oauth` block in `extensions_config.json`
+- Secrets should be provided via environment variables (for example: `$MCP_OAUTH_CLIENT_SECRET`)
 
-**为什么需要复制配置文件**：
-- 避免将本地配置提交到git
-- 保留示例作为参考
-- 支持多环境配置
-
-## OAuth 支持（HTTP/SSE MCP 服务器）
-
-对于 `http` 和 `sse` MCP 服务器，DeerFlow 支持 OAuth token 获取和自动 token 刷新。
-
-- 支持的授权类型：`client_credentials`、`refresh_token`
-- 在 `extensions_config.json` 中配置每个服务器的 `oauth` 块
-- 密钥应通过环境变量提供（例如：`$MCP_OAUTH_CLIENT_SECRET`）
-
-**为什么需要OAuth支持**：
-- 企业MCP服务器通常需要认证
-- Token会过期，需要自动刷新
-- 支持多种OAuth流程
-
-示例：
+Example:
 
 ```json
 {
@@ -76,41 +45,56 @@ DeerFlow 支持可配置的 MCP 服务器和技能来扩展其能力，这些从
 }
 ```
 
-**为什么使用环境变量引用**：
-- 避免在配置文件中硬编码密钥
-- 支持多环境部署
-- 提高安全性
+## Custom Tool Interceptors
 
-## 工作原理
+You can register custom interceptors that run before every MCP tool call. This is useful for injecting per-request headers (e.g., user auth tokens from the LangGraph execution context), logging, or metrics.
 
-MCP 服务器暴露工具，这些工具在运行时自动发现并集成到 DeerFlow 的 agent 系统中。一旦启用，这些工具就可以被 agent 使用，而无需额外的代码更改。
+Declare interceptors in `extensions_config.json` using the `mcpInterceptors` field:
 
-**为什么是自动发现**：
-- 降低集成成本
-- 支持动态加载
-- 无需修改核心代码
+```json
+{
+  "mcpInterceptors": [
+    "my_package.mcp.auth:build_auth_interceptor"
+  ],
+  "mcpServers": { ... }
+}
+```
 
-## 示例能力
+Each entry is a Python import path in `module:variable` format (resolved via `resolve_variable`). The variable must be a **no-arg builder function** that returns an async interceptor compatible with `MultiServerMCPClient`’s `tool_interceptors` interface, or `None` to skip.
 
-MCP 服务器可以提供访问：
+Example interceptor that injects auth headers from LangGraph metadata:
 
-- **文件系统**
-- **数据库**（例如 PostgreSQL）
-- **外部 API**（例如 GitHub、Brave Search）
-- **浏览器自动化**（例如 Puppeteer）
-- **自定义 MCP 服务器实现**
+```python
+def build_auth_interceptor():
+    async def interceptor(request, handler):
+        from langgraph.config import get_config
+        metadata = get_config().get("metadata", {})
+        headers = dict(request.headers or {})
+        if token := metadata.get("auth_token"):
+            headers["X-Auth-Token"] = token
+        return await handler(request.override(headers=headers))
+    return interceptor
+```
 
-**为什么支持这些能力**：
-- 满足常见的企业需求
-- 覆盖主要的数据源
-- 支持自定义扩展
+- A single string value is accepted and normalized to a one-element list.
+- Invalid paths or builder failures are logged as warnings without blocking other interceptors.
+- The builder return value must be `callable`; non-callable values are skipped with a warning.
 
-## 了解更多
+## How It Works
 
-关于 Model Context Protocol 的详细文档，请访问：
+MCP servers expose tools that are automatically discovered and integrated into DeerFlow’s agent system at runtime. Once enabled, these tools become available to agents without additional code changes.
+
+## Example Capabilities
+
+MCP servers can provide access to:
+
+- **File systems**
+- **Databases** (e.g., PostgreSQL)
+- **External APIs** (e.g., GitHub, Brave Search)
+- **Browser automation** (e.g., Puppeteer)
+- **Custom MCP server implementations**
+
+## Learn More
+
+For detailed documentation about the Model Context Protocol, visit:  
 https://modelcontextprotocol.io
-
-**为什么链接到官方文档**：
-- 协议不断演进
-- 提供最新的规范
-- 支持社区贡献

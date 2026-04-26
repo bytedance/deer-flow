@@ -1,158 +1,34 @@
-# DeerFlow 待办事项清单
+# TODO List
 
-===================
-设计思路说明
-===================
+## Completed Features
 
-**为什么需要TODO文档**：
-1. **路线图管理**：跟踪已完成和计划中的功能
-2. **优先级指导**：帮助团队决定下一步工作
-3. **透明度**：让社区了解项目发展方向
-4. **技术债务记录**：记录需要优化的异步并发问题
+- [x] Launch the sandbox only after the first file system or bash tool is called
+- [x] Add Clarification Process for the whole process
+- [x] Implement Context Summarization Mechanism to avoid context explosion
+- [x] Integrate MCP (Model Context Protocol) for extensible tools
+- [x] Add file upload support with automatic document conversion
+- [x] Implement automatic thread title generation
+- [x] Add Plan Mode with TodoList middleware
+- [x] Add vision model support with ViewImageMiddleware
+- [x] Skills system with SKILL.md format
+- [x] Replace `time.sleep(5)` with `asyncio.sleep()` in `packages/harness/deerflow/tools/builtins/task_tool.py` (subagent polling)
 
-**文档组织原则**：
-- 已完成功能：展示项目进展
-- 计划功能：明确未来方向
-- 已解决问题：记录修复历史
+## Planned Features
 
-**为什么记录异步优化**：
-- 当前代码中存在同步阻塞调用
-- 影响IM频道多任务场景的性能
-- 需要系统性替换为异步实现
+- [ ] Pooling the sandbox resources to reduce the number of sandbox containers
+- [ ] Add authentication/authorization layer
+- [ ] Implement rate limiting
+- [ ] Add metrics and monitoring
+- [ ] Support for more document formats in upload
+- [ ] Skill marketplace / remote skill installation
+- [ ] Optimize async concurrency in agent hot path (IM channels multi-task scenario)
+- [ ] Replace `subprocess.run()` with `asyncio.create_subprocess_shell()` in `packages/harness/deerflow/sandbox/local/local_sandbox.py`
+  - Replace sync `requests` with `httpx.AsyncClient` in community tools (tavily, jina_ai, firecrawl, infoquest, image_search)
+  - [x] Replace sync `model.invoke()` with async `model.ainvoke()` in title_middleware and memory updater
+  - Consider `asyncio.to_thread()` wrapper for remaining blocking file I/O
+  - For production: use `langgraph up` (multi-worker) instead of `langgraph dev` (single-worker)
 
----
+## Resolved Issues
 
-## 已完成功能
-
-- [x] **延迟沙箱启动**：仅在首次调用文件系统或bash工具时启动沙箱
-  - **为什么延迟启动**：减少资源消耗，提高启动速度
-  
-- [x] **澄清流程**：为整个流程添加澄清处理机制
-  - **设计价值**：提高AI响应准确性，减少误解
-  
-- [x] **上下文摘要**：实现上下文摘要机制，避免上下文爆炸
-  - **为什么需要**：控制token使用，保持对话连贯性
-  
-- [x] **MCP集成**：集成模型上下文协议(MCP)以支持可扩展工具
-  - **扩展性**：标准化工具接入方式
-  
-- [x] **文件上传支持**：添加文件上传功能，支持自动文档转换
-  - **用户体验**：支持多种文档格式，自动转换为Markdown
-  
-- [x] **自动标题生成**：实现自动线程标题生成
-  - **可读性**：便于用户识别和管理对话
-  
-- [x] **计划模式**：添加带有TodoList中间件的计划模式
-  - **任务管理**：支持复杂任务的规划和执行
-  
-- [x] **视觉模型支持**：通过ViewImageMiddleware添加视觉模型支持
-  - **多模态**：支持图像理解和分析
-  
-- [x] **技能系统**：实现SKILL.md格式的技能系统
-  - **可扩展性**：用户可以自定义AI技能
-
----
-
-## 计划功能
-
-### 基础设施改进
-
-- [ ] **沙箱资源池化**：池化沙箱资源以减少沙箱容器数量
-  - **性能优化**：降低容器创建销毁开销
-  - **资源管理**：提高资源利用率
-
-- [ ] **认证/授权层**：添加身份验证和授权层
-  - **安全性**：保护API和用户数据
-  - **多租户**：支持企业级部署
-
-- [ ] **速率限制**：实现速率限制
-  - **稳定性**：防止API滥用
-  - **成本控制**：管理资源消耗
-
-- [ ] **指标和监控**：添加指标和监控
-  - **可观测性**：了解系统运行状态
-  - **问题诊断**：快速定位和解决故障
-
-### 功能增强
-
-- [ ] **更多文档格式**：上传时支持更多文档格式
-  - **用户体验**：支持更多办公文档格式
-  - **转换质量**：提高文档转换准确性
-
-- [ ] **技能市场**：技能市场/远程技能安装
-  - **生态系统**：方便用户发现和安装技能
-  - **社区贡献**：鼓励用户分享技能
-
-### 异步并发优化（IM频道多任务场景）
-
-**为什么需要优化**：
-当前代码中存在多个同步阻塞调用，在IM频道多任务场景下影响并发性能。
-
-需要替换的同步调用：
-
-- [ ] **子代理轮询**：在 `packages/harness/deerflow/tools/builtins/task_tool.py` 中
-  - 将 `time.sleep(5)` 替换为 `asyncio.sleep()`
-  - **为什么**：避免阻塞事件循环，允许其他任务执行
-
-- [ ] **本地沙箱执行**：在 `packages/harness/deerflow/sandbox/local/local_sandbox.py` 中
-  - 将 `subprocess.run()` 替换为 `asyncio.create_subprocess_shell()`
-  - **为什么**：异步执行子进程，提高并发能力
-
-- [ ] **社区工具HTTP请求**：在社区工具中（tavily、jina_ai、firecrawl、infoquest、image_search）
-  - 将同步 `requests` 替换为 `httpx.AsyncClient`
-  - **为什么**：异步HTTP客户端，不阻塞网络I/O
-
-- [ ] **模型调用**：在title_middleware和memory updater中
-  - 将同步 `model.invoke()` 替换为异步 `model.ainvoke()`
-  - **为什么**：异步模型调用，提高吞吐量
-
-- [ ] **文件I/O**：考虑对剩余的阻塞文件I/O使用 `asyncio.to_thread()` 包装
-  - **为什么**：将阻塞操作移到线程池，保持事件循环响应
-
-- [ ] **生产部署**：使用 `langgraph up`（多worker）而非 `langgraph dev`（单worker）
-  - **为什么**：多worker提高并发处理能力
-
----
-
-## 已解决问题
-
-- [x] **确保state.artifacts中没有重复文件**
-  - **问题**：文件附件可能重复添加
-  - **解决**：添加去重逻辑
-
-- [x] **长时间思考但内容为空（答案在思考过程中）**
-  - **问题**：AI思考过程很长，但最终响应为空
-  - **解决**：改进思考内容提取逻辑
-
----
-
-## 优先级说明
-
-**高优先级**（影响生产部署）：
-- 异步并发优化
-- 认证/授权层
-- 速率限制
-
-**中优先级**（改善用户体验）：
-- 沙箱资源池化
-- 更多文档格式支持
-
-**低优先级**（生态系统建设）：
-- 技能市场
-- 指标和监控
-
----
-
-## 贡献指南
-
-如果您想为DeerFlow贡献代码：
-
-1. **查看计划功能列表**：选择您感兴趣的任务
-2. **创建Issue**：讨论您计划实现的细节
-3. **提交PR**：参考CONTRIBUTING.md了解代码规范
-4. **测试**：确保添加相应的测试用例
-
-**为什么需要贡献指南**：
-- 保持代码质量
-- 统一开发流程
-- 促进社区协作
+- [x] Make sure that no duplicated files in `state.artifacts`
+- [x] Long thinking but with empty content (answer inside thinking process)

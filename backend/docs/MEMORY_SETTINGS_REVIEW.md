@@ -1,293 +1,63 @@
-# 记忆设置审查指南
+# Memory Settings Review
 
-本文档用于在本地审查记忆设置的添加/编辑流程时，使用最少的手动步骤进行快速验证。
+Use this when reviewing the Memory Settings add/edit flow locally with the fewest possible manual steps.
 
----
+## Quick Review
 
-## 快速审查
+1. Start DeerFlow locally using any working development setup you already use.
 
-### 步骤 1：启动 DeerFlow
+   Examples:
 
-使用您已有的任何开发设置启动 DeerFlow。
+   ```bash
+   make dev
+   ```
 
-示例：
+   or
 
-```bash
-make dev
-```
+   ```bash
+   make docker-start
+   ```
 
-或
+   If you already have DeerFlow running locally, you can reuse that existing setup.
 
-```bash
-make docker-start
-```
+2. Load the sample memory fixture.
 
-如果 DeerFlow 已在本地运行，可以重用现有设置。
+   ```bash
+   python scripts/load_memory_sample.py
+   ```
 
-**为什么需要本地环境**：
-- 确保与实际部署环境一致
-- 便于快速测试和调试
-- 避免网络延迟影响
+3. Open `Settings > Memory`.
 
-### 步骤 2：加载示例记忆数据
+   Default local URLs:
+   - App: `http://localhost:2026`
+   - Local frontend-only fallback: `http://localhost:3000`
 
-```bash
-python scripts/load_memory_sample.py
-```
+## Minimal Manual Test
 
-**为什么使用示例数据**：
-- 提供预填充的测试数据
-- 包含各种类别的记忆条目
-- 便于验证搜索和过滤功能
+1. Click `Add fact`.
+2. Create a new fact with:
+   - Content: `Reviewer-added memory fact`
+   - Category: `testing`
+   - Confidence: `0.88`
+3. Confirm the new fact appears immediately and shows `Manual` as the source.
+4. Edit the sample fact `This sample fact is intended for edit testing.` and change it to:
+   - Content: `This sample fact was edited during manual review.`
+   - Category: `testing`
+   - Confidence: `0.91`
+5. Confirm the edited fact updates immediately.
+6. Refresh the page and confirm both the newly added fact and the edited fact still persist.
 
-### 步骤 3：打开记忆设置页面
+## Optional Sanity Checks
 
-```
-设置 > 记忆
-```
+- Search `Reviewer-added` and confirm the new fact is matched.
+- Search `workflow` and confirm category text is searchable.
+- Switch between `All`, `Facts`, and `Summaries`.
+- Delete the disposable sample fact `Delete fact testing can target this disposable sample entry.` and confirm the list updates immediately.
+- Clear all memory and confirm the page enters the empty state.
 
-默认本地 URL：
-- 应用：`http://localhost:2026`
-- 仅本地前端备用：`http://localhost:3000`
+## Fixture Files
 
----
+- Sample fixture: `backend/docs/memory-settings-sample.json`
+- Default local runtime target: `backend/.deer-flow/memory.json`
 
-## 最小手动测试
-
-### 测试 1：添加新事实
-
-1. 点击 `Add fact`（添加事实）
-2. 创建新事实，配置如下：
-   - 内容（Content）：`Reviewer-added memory fact`
-   - 类别（Category）：`testing`
-   - 置信度（Confidence）：`0.88`
-3. 确认新事实立即出现并显示 `Manual` 作为来源
-
-**为什么这样测试**：
-- 验证手动添加功能
-- 检查 UI 响应速度
-- 确认来源标记正确
-
-### 测试 2：编辑现有事实
-
-1. 找到示例事实 `This sample fact is intended for edit testing.`
-2. 编辑为：
-   - 内容：`This sample fact was edited during manual review.`
-   - 类别：`testing`
-   - 置信度：`0.91`
-3. 确认编辑的事实立即更新
-
-**为什么这样测试**：
-- 验证编辑功能
-- 检查更新是否实时反映
-- 确认字段修改生效
-
-### 测试 3：刷新持久化
-
-1. 刷新页面
-2. 确认新添加的事实和编辑的事实仍然存在
-
-**为什么这样测试**：
-- 验证数据持久化
-- 确保刷新后数据不丢失
-- 检查存储机制正常工作
-
----
-
-## 可选的健全性检查
-
-这些检查可以更全面地验证功能，但不是必需的：
-
-### 搜索功能测试
-
-- 搜索 `Reviewer-added` 并确认新事实被匹配
-- 搜索 `workflow` 并确认类别文本可搜索
-- 验证搜索结果的准确性和完整性
-
-**为什么测试搜索**：
-- 确保搜索索引正确更新
-- 验证搜索算法覆盖所有字段
-- 检查搜索性能
-
-### 过滤器测试
-
-- 在 `All`（全部）、`Facts`（事实）和 `Summaries`（摘要）之间切换
-- 确认每种过滤器显示正确的内容
-
-**为什么测试过滤器**：
-- 验证分类逻辑正确
-- 确保过滤器状态同步
-- 检查 UI 切换流畅
-
-### 删除功能测试
-
-- 删除可丢弃的示例事实 `Delete fact testing can target this disposable sample entry.`
-- 确认列表立即更新
-
-**为什么测试删除**：
-- 验证删除操作
-- 检查列表实时更新
-- 确认删除确认机制
-
-### 清空记忆测试
-
-- 清空所有记忆
-- 确认页面进入空状态
-
-**为什么测试清空**：
-- 验证批量删除功能
-- 检查空状态 UI 正确显示
-- 确认清空操作不可逆警告
-
----
-
-## 测试夹具文件
-
-### 示例数据文件
-
-**文件路径**：`backend/docs/memory-settings-sample.json`
-
-**内容结构**：
-- 版本信息
-- 用户上下文（工作、个人、当前关注）
-- 历史记录（最近月份、早期上下文、长期背景）
-- 事实列表（包含各种类别的测试数据）
-
-### 运行时目标文件
-
-**默认路径**：`backend/.deer-flow/memory.json`
-
-**为什么使用不同的文件**：
-- 示例文件：版本控制的测试数据
-- 运行时文件：实际使用的记忆数据
-- 分离确保测试数据不会污染实际记忆
-
-### 自动备份机制
-
-加载脚本会在覆盖现有运行时记忆文件之前自动创建时间戳备份。
-
-**为什么需要备份**：
-- 防止意外丢失现有记忆数据
-- 便于恢复到测试前状态
-- 提供测试历史记录
-
-**备份文件命名**：`memory.json.backup.<timestamp>`
-
----
-
-## 测试工作流最佳实践
-
-### 测试前准备
-
-1. 确保 DeerFlow 正在运行
-2. 备份现有记忆数据（如果重要）
-3. 记录当前记忆状态（截图或笔记）
-
-### 测试执行
-
-1. 按顺序执行最小手动测试
-2. 对每个测试步骤记录结果
-3. 捕获任何异常或意外行为
-
-### 测试后清理
-
-1. 决定是否保留测试数据
-2. 如需要，从备份恢复原始数据
-3. 更新测试文档（发现问题时）
-
----
-
-## 常见问题排查
-
-### 问题：示例数据未加载
-
-**可能原因**：
-- 脚本路径不正确
-- 文件权限问题
-- DeerFlow 未运行
-
-**解决方案**：
-```bash
-# 检查文件是否存在
-ls -la backend/docs/memory-settings-sample.json
-
-# 检查 DeerFlow 是否运行
-curl http://localhost:2026/health
-
-# 手动运行脚本查看错误
-python scripts/load_memory_sample.py
-```
-
-### 问题：更改未持久化
-
-**可能原因**：
-- 文件写入权限问题
-- 磁盘空间不足
-- 缓存未刷新
-
-**解决方案**：
-```bash
-# 检查文件权限
-ls -la backend/.deer-flow/memory.json
-
-# 检查磁盘空间
-df -h
-
-# 强制刷新记忆
-curl -X POST http://localhost:2026/api/memory/reload
-```
-
-### 问题：UI 未更新
-
-**可能原因**：
-- 浏览器缓存
-- WebSocket 连接断开
-- 前端错误
-
-**解决方案**：
-- 硬刷新浏览器（Ctrl+Shift+R）
-- 检查浏览器控制台错误
-- 重启前端开发服务器
-
----
-
-## 扩展测试
-
-### 性能测试
-
-测试大量记忆条目的性能：
-```bash
-# 生成大量测试数据
-python scripts/generate_large_memory_set.py --count 1000
-
-# 加载并测试
-python scripts/load_memory_sample.py large_memory.json
-```
-
-### 并发测试
-
-测试多用户同时编辑：
-```bash
-# 在多个终端中启动不同的浏览器实例
-# 同时进行编辑操作
-# 观察数据一致性
-```
-
-### 边界条件测试
-
-- 添加空内容的事实
-- 设置极端置信度值（0 或 1）
-- 使用特殊字符和 Unicode
-- 测试超长内容
-
----
-
-## 总结
-
-本指南提供了记忆设置功能的最小化测试流程，确保：
-- **快速验证**：最少的手动步骤
-- **全面覆盖**：涵盖核心功能
-- **可重复性**：每次测试一致
-- **安全性**：自动备份保护数据
-
-遵循这些步骤可以高效地验证记忆设置功能的正确性，同时最大限度地减少手动工作。
+The loader script creates a timestamped backup automatically before overwriting an existing runtime memory file.

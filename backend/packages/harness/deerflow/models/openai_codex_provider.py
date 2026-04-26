@@ -48,6 +48,10 @@ class CodexChatModel(BaseChatModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    @classmethod
+    def is_lc_serializable(cls) -> bool:
+        return True
+
     @property
     def _llm_type(self) -> str:
         return "codex-responses"
@@ -216,17 +220,47 @@ class CodexChatModel(BaseChatModel):
     def _stream_response(self, headers: dict, payload: dict) -> dict:
         """Stream SSE from Codex API and collect the final response."""
         completed_response = None
+        streamed_output_items: dict[int, dict[str, Any]] = {}
 
         with httpx.Client(timeout=300) as client:
             with client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=payload) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines():
                     data = self._parse_sse_data_line(line)
-                    if data and data.get("type") == "response.completed":
+                    if not data:
+                        continue
+
+                    event_type = data.get("type")
+                    if event_type == "response.output_item.done":
+                        output_index = data.get("output_index")
+                        output_item = data.get("item")
+                        if isinstance(output_index, int) and isinstance(output_item, dict):
+                            streamed_output_items[output_index] = output_item
+                    elif event_type == "response.completed":
                         completed_response = data["response"]
 
         if not completed_response:
             raise RuntimeError("Codex API stream ended without response.completed event")
+
+        # ChatGPT Codex can emit the final assistant content only in stream events.
+        # When response.completed arrives, response.output may still be empty.
+        if streamed_output_items:
+            merged_output = []
+            response_output = completed_response.get("output")
+            if isinstance(response_output, list):
+                merged_output = list(response_output)
+
+            max_index = max(max(streamed_output_items), len(merged_output) - 1)
+            if max_index >= 0 and len(merged_output) <= max_index:
+                merged_output.extend([None] * (max_index + 1 - len(merged_output)))
+
+            for output_index, output_item in streamed_output_items.items():
+                existing_item = merged_output[output_index]
+                if not isinstance(existing_item, dict):
+                    merged_output[output_index] = output_item
+
+            completed_response = dict(completed_response)
+            completed_response["output"] = [item for item in merged_output if isinstance(item, dict)]
 
         return completed_response
 

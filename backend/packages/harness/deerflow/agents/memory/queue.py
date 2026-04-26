@@ -1,36 +1,10 @@
-"""带防抖机制的记忆更新队列
-
-===================
-设计思路说明
-===================
-
-**为什么需要记忆更新队列**：
-1. **性能优化**：避免频繁的LLM调用，通过批量处理降低成本
-2. **防抖机制**：在短时间内多次更新时，只处理最后一次
-3. **异步处理**：不阻塞主流程，在后台处理记忆更新
-4. **线程安全**：使用锁保护共享状态
-
-**核心设计模式**：
-- 单例模式：全局唯一的队列实例
-- 防抖模式：延迟处理，合并多次更新
-- 生产者-消费者模式：添加更新和处理更新分离
-
-**为什么使用防抖机制**：
-- **成本控制**：减少LLM API调用次数
-- **效率提升**：批量处理比单次处理更高效
-- **用户体验**：不阻塞对话响应
-
-**设计权衡**：
-- **实时性 vs 成本**：延迟处理降低成本但牺牲实时性
-- **批量大小**：防抖窗口越长，批量越大，但延迟越高
-- **线程安全**：使用锁保护，确保并发安全
-"""
+"""Memory update queue with debounce mechanism."""
 
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from deerflow.config.memory_config import get_memory_config
@@ -40,112 +14,134 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversationContext:
-    """等待记忆更新处理的对话上下文
-
-    **为什么需要这个数据类**：
-    - **数据封装**：将对话相关数据打包在一起
-    - **类型安全**：使用dataclass提供类型提示
-    - **不可变性**：时间戳自动生成，避免手动设置
-
-    **字段说明**：
-        thread_id: 对话线程ID
-        messages: 对话消息列表
-        timestamp: 上下文创建时间（UTC）
-        agent_name: 可选的代理名称，用于per-agent记忆
-    """
+    """Context for a conversation to be processed for memory update."""
 
     thread_id: str
     messages: list[Any]
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     agent_name: str | None = None
+    correction_detected: bool = False
+    reinforcement_detected: bool = False
 
 
 class MemoryUpdateQueue:
-    """带防抖机制的记忆更新队列
+    """Queue for memory updates with debounce mechanism.
 
-    **为什么需要这个类**：
-    - **批量处理**：收集多个对话上下文，批量更新记忆
-    - **防抖优化**：在防抖窗口内的多次更新会被合并
-    - **成本节约**：减少LLM API调用次数
-    - **异步执行**：不阻塞主对话流程
-
-    **工作原理**：
-    1. 对话上下文添加到队列
-    2. 重置/启动防抖定时器
-    3. 定时器到期后批量处理队列
-    4. 同一线程的新上下文替换旧的
-
-    **为什么使用线程锁**：
-    - 保护共享状态（队列、定时器）
-    - 确保并发安全
-    - 防止竞态条件
+    This queue collects conversation contexts and processes them after
+    a configurable debounce period. Multiple conversations received within
+    the debounce window are batched together.
     """
 
     def __init__(self):
-        """初始化记忆更新队列
-
-        **为什么使用这些字段**：
-        - _queue: 存储待处理的对话上下文
-        - _lock: 保护共享状态的线程锁
-        - _timer: 防抖定时器
-        - _processing: 处理状态标志，防止重入
-        """
+        """Initialize the memory update queue."""
         self._queue: list[ConversationContext] = []
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._processing = False
 
-    def add(self, thread_id: str, messages: list[Any], agent_name: str | None = None) -> None:
-        """添加对话到更新队列
+    def add(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        agent_name: str | None = None,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+    ) -> None:
+        """Add a conversation to the update queue.
 
-        **为什么需要这个方法**：
-        - **队列管理**：将对话上下文添加到处理队列
-        - **去重优化**：同一线程的新上下文替换旧的
-        - **防抖重置**：重新启动防抖定时器
-
-        **参数说明**：
-            thread_id: 对话线程ID
-            messages: 对话消息列表
-            agent_name: 如果提供，存储per-agent记忆；如果为None，使用全局记忆
+        Args:
+            thread_id: The thread ID.
+            messages: The conversation messages.
+            agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            correction_detected: Whether recent turns include an explicit correction signal.
+            reinforcement_detected: Whether recent turns include a positive reinforcement signal.
         """
         config = get_memory_config()
         if not config.enabled:
             return
 
-        context = ConversationContext(
-            thread_id=thread_id,
-            messages=messages,
-            agent_name=agent_name,
-        )
-
         with self._lock:
-            # Check if this thread already has a pending update
-            # If so, replace it with the newer one
-            self._queue = [c for c in self._queue if c.thread_id != thread_id]
-            self._queue.append(context)
-
-            # Reset or start the debounce timer
+            self._enqueue_locked(
+                thread_id=thread_id,
+                messages=messages,
+                agent_name=agent_name,
+                correction_detected=correction_detected,
+                reinforcement_detected=reinforcement_detected,
+            )
             self._reset_timer()
 
         logger.info("Memory update queued for thread %s, queue size: %d", thread_id, len(self._queue))
 
+    def add_nowait(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        agent_name: str | None = None,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+    ) -> None:
+        """Add a conversation and start processing immediately in the background."""
+        config = get_memory_config()
+        if not config.enabled:
+            return
+
+        with self._lock:
+            self._enqueue_locked(
+                thread_id=thread_id,
+                messages=messages,
+                agent_name=agent_name,
+                correction_detected=correction_detected,
+                reinforcement_detected=reinforcement_detected,
+            )
+            self._schedule_timer(0)
+
+        logger.info("Memory update queued for immediate processing on thread %s, queue size: %d", thread_id, len(self._queue))
+
+    def _enqueue_locked(
+        self,
+        *,
+        thread_id: str,
+        messages: list[Any],
+        agent_name: str | None,
+        correction_detected: bool,
+        reinforcement_detected: bool,
+    ) -> None:
+        existing_context = next(
+            (context for context in self._queue if context.thread_id == thread_id),
+            None,
+        )
+        merged_correction_detected = correction_detected or (existing_context.correction_detected if existing_context is not None else False)
+        merged_reinforcement_detected = reinforcement_detected or (existing_context.reinforcement_detected if existing_context is not None else False)
+        context = ConversationContext(
+            thread_id=thread_id,
+            messages=messages,
+            agent_name=agent_name,
+            correction_detected=merged_correction_detected,
+            reinforcement_detected=merged_reinforcement_detected,
+        )
+
+        self._queue = [c for c in self._queue if c.thread_id != thread_id]
+        self._queue.append(context)
+
     def _reset_timer(self) -> None:
         """Reset the debounce timer."""
         config = get_memory_config()
+        self._schedule_timer(config.debounce_seconds)
 
+        logger.debug("Memory update timer set for %ss", config.debounce_seconds)
+
+    def _schedule_timer(self, delay_seconds: float) -> None:
+        """Schedule queue processing after the provided delay."""
         # Cancel existing timer if any
         if self._timer is not None:
             self._timer.cancel()
 
-        # Start new timer
         self._timer = threading.Timer(
-            config.debounce_seconds,
+            delay_seconds,
             self._process_queue,
         )
         self._timer.daemon = True
         self._timer.start()
-
-        logger.debug("Memory update timer set for %ss", config.debounce_seconds)
 
     def _process_queue(self) -> None:
         """Process all queued conversation contexts."""
@@ -154,8 +150,8 @@ class MemoryUpdateQueue:
 
         with self._lock:
             if self._processing:
-                # Already processing, reschedule
-                self._reset_timer()
+                # Preserve immediate flush semantics even if another worker is active.
+                self._schedule_timer(0)
                 return
 
             if not self._queue:
@@ -178,6 +174,8 @@ class MemoryUpdateQueue:
                         messages=context.messages,
                         thread_id=context.thread_id,
                         agent_name=context.agent_name,
+                        correction_detected=context.correction_detected,
+                        reinforcement_detected=context.reinforcement_detected,
                     )
                     if success:
                         logger.info("Memory updated successfully for thread %s", context.thread_id)
@@ -205,6 +203,13 @@ class MemoryUpdateQueue:
                 self._timer = None
 
         self._process_queue()
+
+    def flush_nowait(self) -> None:
+        """Start queue processing immediately in a background thread."""
+        with self._lock:
+            # Daemon thread: queued messages may be lost if the process exits
+            # before _process_queue completes. Acceptable for best-effort memory updates.
+            self._schedule_timer(0)
 
     def clear(self) -> None:
         """Clear the queue without processing.

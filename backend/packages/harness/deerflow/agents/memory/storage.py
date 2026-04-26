@@ -1,38 +1,11 @@
-"""记忆存储提供者
-
-===================
-设计思路说明
-===================
-
-**为什么需要存储抽象层**：
-1. **多后端支持**：支持不同的存储实现（文件、数据库等）
-2. **可测试性**：便于在测试中使用mock实现
-3. **扩展性**：未来可以添加新的存储后端
-4. **解耦**：业务逻辑与存储实现分离
-
-**核心设计模式**：
-- 抽象基类模式：定义统一的存储接口
-- 策略模式：支持不同的存储策略
-- 缓存模式：FileMemoryStorage实现了内存缓存
-
-**为什么这样设计**：
-- **接口统一**：所有存储实现遵循相同接口
-- **类型安全**：使用抽象基类强制实现
-- **性能优化**：通过缓存减少文件I/O
-- **灵活性**：支持per-agent和全局记忆
-
-**公共API**：
-- create_empty_memory(): 创建空记忆结构
-- MemoryStorage: 存储抽象基类
-- FileMemoryStorage: 文件存储实现
-- get_memory_storage(): 获取存储实例
-"""
+"""Memory storage providers."""
 
 import abc
 import json
 import logging
 import threading
-from datetime import datetime
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,25 +16,16 @@ from deerflow.config.paths import get_paths
 logger = logging.getLogger(__name__)
 
 
+def utc_now_iso_z() -> str:
+    """Current UTC time as ISO-8601 with ``Z`` suffix (matches prior naive-UTC output)."""
+    return datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
+
+
 def create_empty_memory() -> dict[str, Any]:
-    """创建空记忆结构
-
-    **为什么需要这个函数**：
-    - **标准化**：确保所有记忆使用相同的结构
-    - **初始化**：为新代理或用户创建空白记忆
-    - **向后兼容**：保持记忆结构的版本一致性
-
-    **为什么使用这个结构**：
-    - **分层组织**：用户上下文、历史、事实分离
-    - **时间追踪**：每个部分都有更新时间戳
-    - **灵活性**：支持不同类型的记忆信息
-
-    **返回值**：
-        空的记忆数据结构，包含所有必要的字段
-    """
+    """Create an empty memory structure."""
     return {
         "version": "1.0",
-        "lastUpdated": datetime.utcnow().isoformat() + "Z",
+        "lastUpdated": utc_now_iso_z(),
         "user": {
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
@@ -77,14 +41,7 @@ def create_empty_memory() -> dict[str, Any]:
 
 
 class MemoryStorage(abc.ABC):
-    """记忆存储提供者的抽象基类
-
-    **为什么需要抽象基类**：
-    - **接口定义**：强制子类实现必要的方法
-    - **类型安全**：确保所有存储实现遵循相同接口
-    - **多态支持**：允许运行时切换存储实现
-    - **测试便利**：便于创建mock实现
-    """
+    """Abstract base class for memory storage providers."""
 
     @abc.abstractmethod
     def load(self, agent_name: str | None = None) -> dict[str, Any]:
@@ -110,6 +67,8 @@ class FileMemoryStorage(MemoryStorage):
         # Per-agent memory cache: keyed by agent_name (None = global)
         # Value: (memory_data, file_mtime)
         self._memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
+        # Guards all reads and writes to _memory_cache across concurrent callers.
+        self._cache_lock = threading.Lock()
 
     def _validate_agent_name(self, agent_name: str) -> None:
         """Validate that the agent name is safe to use in filesystem paths.
@@ -158,14 +117,17 @@ class FileMemoryStorage(MemoryStorage):
         except OSError:
             current_mtime = None
 
-        cached = self._memory_cache.get(agent_name)
+        with self._cache_lock:
+            cached = self._memory_cache.get(agent_name)
+            if cached is not None and cached[1] == current_mtime:
+                return cached[0]
 
-        if cached is None or cached[1] != current_mtime:
-            memory_data = self._load_memory_from_file(agent_name)
+        memory_data = self._load_memory_from_file(agent_name)
+
+        with self._cache_lock:
             self._memory_cache[agent_name] = (memory_data, current_mtime)
-            return memory_data
 
-        return cached[0]
+        return memory_data
 
     def reload(self, agent_name: str | None = None) -> dict[str, Any]:
         """Reload memory data from file, forcing cache invalidation."""
@@ -177,7 +139,8 @@ class FileMemoryStorage(MemoryStorage):
         except OSError:
             mtime = None
 
-        self._memory_cache[agent_name] = (memory_data, mtime)
+        with self._cache_lock:
+            self._memory_cache[agent_name] = (memory_data, mtime)
         return memory_data
 
     def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
@@ -186,9 +149,12 @@ class FileMemoryStorage(MemoryStorage):
 
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
+            # Shallow-copy before adding lastUpdated so the caller's dict is not
+            # mutated as a side-effect, and the cache reference is not silently
+            # updated before the file write succeeds.
+            memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
 
-            temp_path = file_path.with_suffix(".tmp")
+            temp_path = file_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(memory_data, f, indent=2, ensure_ascii=False)
 
@@ -199,7 +165,8 @@ class FileMemoryStorage(MemoryStorage):
             except OSError:
                 mtime = None
 
-            self._memory_cache[agent_name] = (memory_data, mtime)
+            with self._cache_lock:
+                self._memory_cache[agent_name] = (memory_data, mtime)
             logger.info("Memory saved to %s", file_path)
             return True
         except OSError as e:

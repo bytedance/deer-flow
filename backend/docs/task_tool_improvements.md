@@ -1,44 +1,16 @@
-# 任务工具改进
+# Task Tool Improvements
 
-===================
-设计思路说明
-===================
+## Overview
 
-**为什么需要改进任务工具**：
-1. **消除浪费性轮询**：之前LLM需要反复调用`task_status`来检查完成状态
-2. **降低API成本**：减少不必要的LLM请求
-3. **简化使用体验**：让工具自动处理等待逻辑
-4. **提高可靠性**：由后端统一管理状态检查
+The task tool has been improved to eliminate wasteful LLM polling. Previously, when using background tasks, the LLM had to repeatedly call `task_status` to poll for completion, causing unnecessary API requests.
 
-**核心改进目标**：
-- 从LLM管理的轮询改为后端自动轮询
-- 保持异步执行的优势，但隐藏复杂性
-- 提供超时保护，防止无限等待
-- 简化API，减少参数和步骤
+## Changes Made
 
-## 功能概述
+### 1. Removed `run_in_background` Parameter
 
-任务工具已得到改进，消除了浪费性的LLM轮询。以前，使用后台任务时，LLM必须反复调用`task_status`来轮询完成状态，导致不必要的API请求。
+The `run_in_background` parameter has been removed from the `task` tool. All subagent tasks now run asynchronously by default, but the tool handles completion automatically.
 
-**为什么之前的设计有问题**：
-- **LLM负担**：让LLM管理轮询逻辑是浪费其能力
-- **成本高昂**：每次轮询都是一次完整的LLM API调用
-- **延迟累积**：轮询间隔加上网络延迟增加总等待时间
-- **复杂性高**：需要LLM理解并正确实现轮询模式
-
-## 实施的变更
-
-### 1. 移除`run_in_background`参数
-
-从`task`工具中移除了`run_in_background`参数。所有子代理任务现在默认异步运行，但工具会自动处理完成等待。
-
-**为什么移除这个参数**：
-- **默认异步**：所有任务都应该异步执行以提高效率
-- **自动等待**：工具应该自动等待完成，而不是让调用者管理
-- **简化API**：减少参数数量，降低使用复杂度
-- **行为一致**：无论是否后台运行，都使用相同的代码路径
-
-**改进前的使用方式**：
+**Before:**
 ```python
 # LLM had to manage polling
 task_id = task(
@@ -65,25 +37,19 @@ result = task(
 # Result is available immediately after the call returns
 ```
 
-### 2. 后端轮询机制
+### 2. Backend Polling
 
-`task_tool`现在：
-- 异步启动子代理任务
-- 在后端轮询完成状态（每2秒）
-- 阻塞工具调用直到完成
-- 直接返回最终结果
+The `task_tool` now:
+- Starts the subagent task asynchronously
+- Polls for completion in the backend (every 2 seconds)
+- Blocks the tool call until completion
+- Returns the final result directly
 
-**这意味着**：
-- ✅ LLM只进行一次工具调用
-- ✅ 没有浪费性的LLM轮询请求
-- ✅ 后端处理所有状态检查
-- ✅ 超时保护（最多5分钟）
-
-**为什么使用后端轮询**：
-- **成本优化**：后端轮询是简单的HTTP请求，成本远低于LLM API调用
-- **可靠性**：后端轮询不受LLM输出格式影响
-- **一致性**：统一的轮询逻辑，不会因为LLM理解不同而有差异
-- **可观测性**：后端轮询更容易添加日志和监控
+This means:
+- ✅ LLM makes only ONE tool call
+- ✅ No wasteful LLM polling requests
+- ✅ Backend handles all status checking
+- ✅ Timeout protection (5 minutes max)
 
 ### 3. Removed `task_status` from LLM Tools
 
@@ -95,9 +61,9 @@ The `task_status_tool` is no longer exposed to the LLM. It's kept in the codebas
 - Simplified usage examples
 - Made it clear that the tool automatically waits for completion
 
-## 实现细节
+## Implementation Details
 
-### 轮询逻辑
+### Polling Logic
 
 Located in `packages/harness/deerflow/tools/builtins/task_tool.py`:
 
@@ -123,45 +89,33 @@ while True:
         return "Task timed out after 5 minutes"
 ```
 
-### 执行超时机制
+### Execution Timeout
 
-除了轮询超时外，子代理执行现在还具有内置超时机制：
+In addition to polling timeout, subagent execution now has a built-in timeout mechanism:
 
-**配置位置**（`packages/harness/deerflow/subagents/config.py`）：
+**Configuration** (`packages/harness/deerflow/subagents/config.py`):
 ```python
 @dataclass
 class SubagentConfig:
     # ...
-    timeout_seconds: int = 300  # 默认5分钟
+    timeout_seconds: int = 300  # 5 minutes default
 ```
 
-**为什么需要执行超时**：
-- **防止挂起**：子代理可能因为代码错误或外部依赖而挂起
-- **资源保护**：限制单个任务的最大执行时间
-- **用户体验**：避免用户无限等待
-- **可配置性**：不同场景可能需要不同的超时时间
+**Thread Pool Architecture**:
 
-**线程池架构设计**：
+To avoid nested thread pools and resource waste, we use two dedicated thread pools:
 
-为了避免嵌套线程池和资源浪费，我们使用两个专用的线程池：
+1. **Scheduler Pool** (`_scheduler_pool`):
+   - Max workers: 4
+   - Purpose: Orchestrates background task execution
+   - Runs `run_task()` function that manages task lifecycle
 
-1. **调度器池**（`_scheduler_pool`）：
-   - 最大工作线程：4
-   - 用途：协调后台任务执行
-   - 运行管理任务生命周期的`run_task()`函数
+2. **Execution Pool** (`_execution_pool`):
+   - Max workers: 8 (larger to avoid blocking)
+   - Purpose: Actual subagent execution with timeout support
+   - Runs `execute()` method that invokes the agent
 
-2. **执行池**（`_execution_pool`）：
-   - 最大工作线程：8（更大以避免阻塞）
-   - 用途：实际的子代理执行，支持超时
-   - 运行调用代理的`execute()`方法
-
-**为什么使用两个线程池**：
-- **关注点分离**：调度和执行是不同的职责
-- **避免嵌套**：防止线程池嵌套导致的资源问题
-- **灵活配置**：调度和执行可以有不同的线程数
-- **超时控制**：在正确的层级实现超时机制
-
-**工作原理**：
+**How it works**:
 ```python
 # In execute_async():
 _scheduler_pool.submit(run_task)  # Submit orchestration task
@@ -171,34 +125,24 @@ future = _execution_pool.submit(self.execute, task)  # Submit execution
 exec_result = future.result(timeout=timeout_seconds)  # Wait with timeout
 ```
 
-**架构优势**：
-- ✅ 关注点清晰分离（调度 vs 执行）
-- ✅ 没有嵌套线程池
-- ✅ 在正确的层级强制超时
-- ✅ 更好的资源利用率
+**Benefits**:
+- ✅ Clean separation of concerns (scheduling vs execution)
+- ✅ No nested thread pools
+- ✅ Timeout enforcement at the right level
+- ✅ Better resource utilization
 
-**两层超时保护**：
-1. **执行超时**：子代理执行本身有5分钟超时（在SubagentConfig中可配置）
-2. **轮询超时**：工具轮询有5分钟超时（30次轮询 × 10秒）
+**Two-Level Timeout Protection**:
+1. **Execution Timeout**: Subagent execution itself has a 5-minute timeout (configurable in SubagentConfig)
+2. **Polling Timeout**: Tool polling has a 5-minute timeout (30 polls × 10 seconds)
 
-**为什么需要两层超时**：
-- **执行超时**：防止子代理任务本身挂起
-- **轮询超时**：防止工具调用无限等待
-- **双重保险**：即使一层失败，另一层也能保护系统
-- **不同粒度**：执行超时控制任务，轮询超时控制等待
+This ensures that even if subagent execution hangs, the system won't wait indefinitely.
 
-### 改进收益
+### Benefits
 
-1. **降低API成本**：不再有重复的LLM轮询请求
-2. **更简单的用户体验**：LLM不需要管理轮询逻辑
-3. **更好的可靠性**：后端一致地处理所有状态检查
-4. **超时保护**：两层超时防止无限等待（执行 + 轮询）
-
-**为什么这些收益很重要**：
-- **成本节约**：LLM API调用昂贵，减少轮询直接降低成本
-- **用户体验**：减少等待时间和复杂性
-- **系统稳定性**：超时保护防止资源耗尽
-- **可维护性**：简化的代码更容易理解和维护
+1. **Reduced API Costs**: No more repeated LLM requests for polling
+2. **Simpler UX**: LLM doesn't need to manage polling logic
+3. **Better Reliability**: Backend handles all status checking consistently
+4. **Timeout Protection**: Two-level timeout prevents infinite waiting (execution + polling)
 
 ## Testing
 

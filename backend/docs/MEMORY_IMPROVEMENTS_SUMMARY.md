@@ -1,126 +1,38 @@
-# 记忆系统改进 - 摘要
+# Memory System Improvements - Summary
 
-===================
-设计思路说明
-===================
+## Sync Note (2026-03-10)
 
-**为什么需要这个摘要文档**：
-1. **快速参考**：提供记忆系统改进的精炼概述
-2. **状态同步**：与main分支实现保持同步
-3. **澄清误解**：纠正文档与代码不一致的问题
+This summary is synchronized with the `main` branch implementation.
+TF-IDF/context-aware retrieval is **planned**, not merged yet.
 
-**核心内容**：
-- 已实现的功能列表
-- 计划中但未合并的功能
-- 当前API形状说明
-- 验证测试指针
+## Implemented
 
-**为什么需要状态同步**：
-- 避免文档超前于实现
-- 防止用户期望与实际功能不符
-- 确保文档准确性
+- Accurate token counting with `tiktoken` in memory injection.
+- Facts are injected into `<memory>` prompt content.
+- Facts are ordered by confidence and bounded by `max_injection_tokens`.
 
-## 同步说明（2026-03-10）
+## Planned (Not Yet Merged)
 
-**本摘要与 `main` 分支实现同步**
+- TF-IDF cosine similarity recall based on recent conversation context.
+- `current_context` parameter for `format_memory_for_injection`.
+- Weighted ranking (`similarity` + `confidence`).
+- Runtime extraction/injection flow for context-aware fact selection.
 
-TF-IDF/上下文感知检索是**计划中**的功能，尚未合并。
+## Why This Sync Was Needed
 
-**为什么需要这个同步说明**：
-- 明确区分已实现和计划中的功能
-- 解决issue #1059中提出的文档不一致问题
-- 帮助开发者准确了解当前状态
+Earlier docs described TF-IDF behavior as already implemented, which did not match code in `main`.
+This mismatch is tracked in issue `#1059`.
 
-## 已实现功能
-
-- **准确token计数**：在记忆注入中使用 `tiktoken` 进行精确token计算
-- **事实注入**：将事实注入到 `<memory>` 提示内容中
-- **置信度排序**：事实按置信度排序，并受 `max_injection_tokens` 限制
-
-**为什么这些是基础功能**：
-- token计数是记忆系统的基础
-- 置信度排序提供基本的相关性
-- 为未来高级功能奠定基础
-
-## 计划中（尚未合并）
-
-- **TF-IDF余弦相似度**：基于最近对话上下文的召回
-- **上下文参数**：`format_memory_for_injection` 的 `current_context` 参数
-- **加权排序**：综合相似度和置信度的排名
-- **运行时集成**：上下文感知事实选择的提取/注入流程
-
-**为什么这些功能仍在计划中**：
-- 需要验证基础功能的有效性
-- TF-IDF实现需要额外的依赖和计算
-- 加权策略需要实际数据验证
-
-## 为什么需要这次同步
-
-早期文档将TF-IDF行为描述为已实现，这与 `main` 中的代码不匹配。
-这种不一致在issue `#1059`中跟踪。
-
-**为什么会出现这种不一致**：
-- 文档编写时假设功能会很快实现
-- 功能实现进度与文档更新不同步
-- 没有明确的"已实现"与"计划中"区分
-
-## 当前API形状
+## Current API Shape
 
 ```python
 def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000) -> str:
 ```
 
-**当前不存在的参数**：
-- `current_context` 参数在 `main` 分支中尚不可用
+No `current_context` argument is currently available in `main`.
 
-**为什么API这样设计**：
-- 简单的参数列表便于使用
-- max_tokens控制token预算
-- 为未来扩展预留空间
+## Verification Pointers
 
-## 验证指针
-
-**实现位置**：
-- `packages/harness/deerflow/agents/memory/prompt.py`
-
-**提示组装位置**：
-- `packages/harness/deerflow/agents/lead_agent/prompt.py`
-
-**回归测试**：
-- `backend/tests/test_memory_prompt_injection.py`
-
-**为什么需要验证指针**：
-- 帮助开发者快速定位代码
-- 便于代码审查和调试
-- 支持持续集成测试
-
-## 未来路线图
-
-**短期**（已实现）：
-- ✅ 精确token计数
-- ✅ 置信度排序
-- ✅ token预算限制
-
-**中期**（计划中）：
-- ⏳ TF-IDF相似度检索
-- ⏳ 上下文感知评分
-- ⏳ 加权排名策略
-
-**长期**（考虑中）：
-- 📋 向量嵌入检索
-- 📋 跨会话记忆整合
-- 📋 记忆重要性衰减
-
-**为什么分阶段实现**：
-- 每个阶段建立在前一阶段基础上
-- 允许用户反馈指导开发
-- 降低实现风险
-
-## 总结
-
-本摘要文档提供了记忆系统改进的精炼视图，强调：
-- **准确性**：与代码实现保持同步
-- **清晰性**：明确区分已实现和计划中
-- **可维护性**：提供验证指针和路线图
-
-通过保持文档与代码同步，确保开发者获得准确的信息。
+- Implementation: `packages/harness/deerflow/agents/memory/prompt.py`
+- Prompt assembly: `packages/harness/deerflow/agents/lead_agent/prompt.py`
+- Regression tests: `backend/tests/test_memory_prompt_injection.py`

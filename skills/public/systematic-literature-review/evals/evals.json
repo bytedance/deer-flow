@@ -1,0 +1,79 @@
+{
+  "skill_name": "systematic-literature-review",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Do a systematic literature review on diffusion models in computer vision. 10 papers, last 2 years, category cs.CV, APA format. Save to default output location.",
+      "expected_output": "A structured SLR report saved to /mnt/user-data/outputs/ with APA citations, thematic synthesis across 10 papers, and per-paper annotations.",
+      "expectations": [
+        "The skill read SKILL.md for systematic-literature-review",
+        "The arxiv_search.py script was called with a short keyword query (2-3 words), not the full topic description",
+        "The search used --category cs.CV",
+        "The search used --sort-by relevance, not submittedDate",
+        "The search was executed only once without retries",
+        "Metadata extraction was delegated via the task tool to subagents, not done inline or via python -c",
+        "The APA template file (templates/apa.md) was read",
+        "The final report was saved to /mnt/user-data/outputs/ with a filename matching slr-<topic-slug>-<YYYYMMDD>.md",
+        "The present_files tool was called to make the report visible to the user",
+        "The report contains an Executive Summary section",
+        "The report identifies at least 3 themes with cross-paper analysis",
+        "The report contains a Convergences and Disagreements section",
+        "The report contains a Gaps and Open Questions section",
+        "The report contains per-paper annotations for each of the 10 papers",
+        "The references section uses APA 7th format with arXiv URLs"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Survey recent papers on graph neural networks for drug discovery. 5 papers, BibTeX format.",
+      "expected_output": "A structured SLR report with BibTeX citations using @misc entries for arXiv preprints.",
+      "expectations": [
+        "The skill read SKILL.md for systematic-literature-review",
+        "The arxiv_search.py script was called with a short keyword query",
+        "Metadata extraction was delegated via the task tool to subagents",
+        "The BibTeX template file (templates/bibtex.md) was read, not apa.md or ieee.md",
+        "The final report was saved to /mnt/user-data/outputs/",
+        "The present_files tool was called",
+        "The report contains BibTeX entries using @misc, not @article",
+        "Each BibTeX entry includes eprint and primaryClass fields",
+        "The report contains thematic synthesis, not just a list of papers"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Review the literature on retrieval-augmented generation — key findings, limitations, and open questions. 15 papers, IEEE format.",
+      "expected_output": "A structured SLR report with IEEE numeric citations and 15 papers extracted in parallel batches.",
+      "expectations": [
+        "The skill read SKILL.md for systematic-literature-review",
+        "The arxiv_search.py script was called with --max-results 15 or higher",
+        "Metadata extraction used the task tool with multiple subagent batches (15 papers requires 3 batches of 5)",
+        "The IEEE template file (templates/ieee.md) was read",
+        "The report uses IEEE numeric citations [1], [2], etc. in the text",
+        "The references section uses IEEE format with numbered entries",
+        "The report contains per-paper annotations for all papers",
+        "The report identifies themes across the papers"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Review this paper: https://arxiv.org/abs/2310.06825",
+      "expected_output": "The SLR skill should NOT be triggered. The request should route to academic-paper-review instead.",
+      "expectations": [
+        "The systematic-literature-review skill was NOT triggered",
+        "The agent did not call arxiv_search.py",
+        "The agent recognized this as a single-paper review request"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "What does the literature say about RLHF?",
+      "expected_output": "The SLR skill should be triggered despite no explicit 'systematic' or 'survey' keyword, because 'the literature' implies multi-paper synthesis.",
+      "expectations": [
+        "The skill read SKILL.md for systematic-literature-review",
+        "The arxiv_search.py script was called",
+        "The agent asked a clarification question about scope (paper count, format) or used reasonable defaults",
+        "The final output is a multi-paper synthesis, not a single factual answer"
+      ]
+    }
+  ]
+}

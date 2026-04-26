@@ -1,32 +1,3 @@
-"""
-线程数据中间件 - 为每个线程执行创建线程数据目录
-
-===================
-设计思路说明
-===================
-
-**核心职责**：
-为每个线程执行创建隔离的目录结构：
-1. **工作空间**：{base_dir}/threads/{thread_id}/user-data/workspace
-2. **上传目录**：{base_dir}/threads/{thread_id}/user-data/uploads
-3. **输出目录**：{base_dir}/threads/{thread_id}/user-data/outputs
-
-**为什么需要线程隔离**：
-1. **安全隔离**：不同线程的文件互不干扰
-2. **资源清理**：便于按线程清理临时文件
-3. **并发支持**：多个线程可以同时运行
-4. **路径可预测**：标准化的目录结构
-
-**生命周期管理**：
-- lazy_init=True（默认）：只计算路径，按需创建目录
-- lazy_init=False：在before_agent()中立即创建目录
-
-**为什么默认使用lazy_init**：
-- **性能优化**：避免不必要的目录创建
-- **按需分配**：只在真正需要时才创建
-- **启动速度**：减少代理启动时间
-"""
-
 import logging
 from typing import NotRequired, override
 
@@ -42,39 +13,22 @@ logger = logging.getLogger(__name__)
 
 
 class ThreadDataMiddlewareState(AgentState):
-    """与ThreadState模式兼容
-
-    **为什么需要这个类**：
-    - **类型提示**：提供thread_data字段的类型
-    - **模式兼容**：确保与ThreadState兼容
-    - **可选字段**：使用NotRequired表示可选
-    """
+    """Compatible with the `ThreadState` schema."""
 
     thread_data: NotRequired[ThreadDataState | None]
 
 
 class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
-    """为每次线程执行创建线程数据目录
+    """Create thread data directories for each thread execution.
 
-    **目录结构**：
+    Creates the following directory structure:
     - {base_dir}/threads/{thread_id}/user-data/workspace
     - {base_dir}/threads/{thread_id}/user-data/uploads
     - {base_dir}/threads/{thread_id}/user-data/outputs
 
-    **为什么需要这个中间件**：
-    - **线程隔离**：每个线程有独立的文件空间
-    - **安全隔离**：防止跨线程文件访问
-    - **便于清理**：按线程清理临时文件
-    - **标准化**：统一的目录结构便于工具使用
-
-    **生命周期管理**：
-    - lazy_init=True（默认）：只计算路径，按需创建目录
-    - lazy_init=False：在before_agent()中立即创建目录
-
-    **为什么默认lazy_init**：
-    - **性能优化**：避免不必要的I/O操作
-    - **按需创建**：只在需要时才创建目录
-    - **减少开销**：不使用的线程不占用磁盘空间
+    Lifecycle Management:
+    - With lazy_init=True (default): Only compute paths, directories created on-demand
+    - With lazy_init=False: Eagerly create directories in before_agent()
     """
 
     state_schema = ThreadDataMiddlewareState

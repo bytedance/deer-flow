@@ -6,9 +6,11 @@ Handles container lifecycle, port allocation, and cross-process container discov
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
+from datetime import datetime
 
 from deerflow.utils.network import get_free_port, release_port
 
@@ -16,6 +18,72 @@ from .backend import SandboxBackend, wait_for_sandbox_ready
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_docker_timestamp(raw: str) -> float:
+    """Parse Docker's ISO 8601 timestamp into a Unix epoch float.
+
+    Docker returns timestamps with nanosecond precision and a trailing ``Z``
+    (e.g. ``2026-04-08T01:22:50.123456789Z``).  Python's ``fromisoformat``
+    accepts at most microseconds and (pre-3.11) does not accept ``Z``, so the
+    string is normalized before parsing.  Returns ``0.0`` on empty input or
+    parse failure so callers can use ``0.0`` as a sentinel for "unknown age".
+    """
+    if not raw:
+        return 0.0
+    try:
+        s = raw.strip()
+        if "." in s:
+            dot_pos = s.index(".")
+            tz_start = dot_pos + 1
+            while tz_start < len(s) and s[tz_start].isdigit():
+                tz_start += 1
+            frac = s[dot_pos + 1 : tz_start][:6]  # truncate to microseconds
+            tz_suffix = s[tz_start:]
+            s = s[: dot_pos + 1] + frac + tz_suffix
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).timestamp()
+    except (ValueError, TypeError) as e:
+        logger.debug(f"Could not parse docker timestamp {raw!r}: {e}")
+        return 0.0
+
+
+def _extract_host_port(inspect_entry: dict, container_port: int) -> int | None:
+    """Extract the host port mapped to ``container_port/tcp`` from a docker inspect entry.
+
+    Returns None if the container has no port mapping for that port.
+    """
+    try:
+        ports = (inspect_entry.get("NetworkSettings") or {}).get("Ports") or {}
+        bindings = ports.get(f"{container_port}/tcp") or []
+        if bindings:
+            host_port = bindings[0].get("HostPort")
+            if host_port:
+                return int(host_port)
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def _format_container_mount(runtime: str, host_path: str, container_path: str, read_only: bool) -> list[str]:
+    """Format a bind-mount argument for the selected runtime.
+
+    Docker's ``-v host:container`` syntax is ambiguous for Windows drive-letter
+    paths like ``D:/...`` because ``:`` is both the drive separator and the
+    volume separator. Use ``--mount type=bind,...`` for Docker to avoid that
+    parsing ambiguity. Apple Container keeps using ``-v``.
+    """
+    if runtime == "docker":
+        mount_spec = f"type=bind,src={host_path},dst={container_path}"
+        if read_only:
+            mount_spec += ",readonly"
+        return ["--mount", mount_spec]
+
+    mount_spec = f"{host_path}:{container_path}"
+    if read_only:
+        mount_spec += ":ro"
+    return ["-v", mount_spec]
 
 
 class LocalContainerBackend(SandboxBackend):
@@ -152,8 +220,12 @@ class LocalContainerBackend(SandboxBackend):
 
     def destroy(self, info: SandboxInfo) -> None:
         """Stop the container and release its port."""
-        if info.container_id:
-            self._stop_container(info.container_id)
+        # Prefer container_id, fall back to container_name (both accepted by docker stop).
+        # This ensures containers discovered via list_running() (which only has the name)
+        # can also be stopped.
+        stop_target = info.container_id or info.container_name
+        if stop_target:
+            self._stop_container(stop_target)
         # Extract port from sandbox_url for release
         try:
             from urllib.parse import urlparse
@@ -202,6 +274,129 @@ class LocalContainerBackend(SandboxBackend):
             container_name=container_name,
         )
 
+    def list_running(self) -> list[SandboxInfo]:
+        """Enumerate all running containers matching the configured prefix.
+
+        Uses a single ``docker ps`` call to list container names, then a
+        single batched ``docker inspect`` call to retrieve creation timestamp
+        and port mapping for all containers at once.  Total subprocess calls:
+        2 (down from 2N+1 in the naive per-container approach).
+
+        Note: Docker's ``--filter name=`` performs *substring* matching,
+        so a secondary ``startswith`` check is applied to ensure only
+        containers with the exact prefix are included.
+
+        Containers without port mappings are still included (with empty
+        sandbox_url) so that startup reconciliation can adopt orphans
+        regardless of their port state.
+        """
+        # Step 1: enumerate container names via docker ps
+        try:
+            result = subprocess.run(
+                [
+                    self._runtime,
+                    "ps",
+                    "--filter",
+                    f"name={self._container_prefix}-",
+                    "--format",
+                    "{{.Names}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                stderr = (result.stderr or "").strip()
+                logger.warning(
+                    "Failed to list running containers with %s ps (returncode=%s, stderr=%s)",
+                    self._runtime,
+                    result.returncode,
+                    stderr or "<empty>",
+                )
+                return []
+            if not result.stdout.strip():
+                return []
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            logger.warning(f"Failed to list running containers: {e}")
+            return []
+
+        # Filter to names matching our exact prefix (docker filter is substring-based)
+        container_names = [name.strip() for name in result.stdout.strip().splitlines() if name.strip().startswith(self._container_prefix + "-")]
+        if not container_names:
+            return []
+
+        # Step 2: batched docker inspect — single subprocess call for all containers
+        inspections = self._batch_inspect(container_names)
+
+        infos: list[SandboxInfo] = []
+        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+        for container_name in container_names:
+            data = inspections.get(container_name)
+            if data is None:
+                # Container disappeared between ps and inspect, or inspect failed
+                continue
+            created_at, host_port = data
+            sandbox_id = container_name[len(self._container_prefix) + 1 :]
+            sandbox_url = f"http://{sandbox_host}:{host_port}" if host_port else ""
+
+            infos.append(
+                SandboxInfo(
+                    sandbox_id=sandbox_id,
+                    sandbox_url=sandbox_url,
+                    container_name=container_name,
+                    created_at=created_at,
+                )
+            )
+
+        logger.info(f"Found {len(infos)} running sandbox container(s)")
+        return infos
+
+    def _batch_inspect(self, container_names: list[str]) -> dict[str, tuple[float, int | None]]:
+        """Batch-inspect containers in a single subprocess call.
+
+        Returns a mapping of ``container_name -> (created_at, host_port)``.
+        Missing containers or parse failures are silently dropped from the result.
+        """
+        if not container_names:
+            return {}
+        try:
+            result = subprocess.run(
+                [self._runtime, "inspect", *container_names],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            logger.warning(f"Failed to batch-inspect containers: {e}")
+            return {}
+
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            logger.warning(
+                "Failed to batch-inspect containers with %s inspect (returncode=%s, stderr=%s)",
+                self._runtime,
+                result.returncode,
+                stderr or "<empty>",
+            )
+            return {}
+
+        try:
+            payload = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse docker inspect output as JSON: {e}")
+            return {}
+
+        out: dict[str, tuple[float, int | None]] = {}
+        for entry in payload:
+            # ``Name`` is prefixed with ``/`` in the docker inspect response
+            name = (entry.get("Name") or "").lstrip("/")
+            if not name:
+                continue
+            created_at = _parse_docker_timestamp(entry.get("Created", ""))
+            host_port = _extract_host_port(entry, 8080)
+            out[name] = (created_at, host_port)
+        return out
+
     # ── Container operations ─────────────────────────────────────────────
 
     def _start_container(
@@ -246,18 +441,26 @@ class LocalContainerBackend(SandboxBackend):
 
         # Config-level volume mounts
         for mount in self._config_mounts:
-            mount_spec = f"{mount.host_path}:{mount.container_path}"
-            if mount.read_only:
-                mount_spec += ":ro"
-            cmd.extend(["-v", mount_spec])
+            cmd.extend(
+                _format_container_mount(
+                    self._runtime,
+                    mount.host_path,
+                    mount.container_path,
+                    mount.read_only,
+                )
+            )
 
         # Extra mounts (thread-specific, skills, etc.)
         if extra_mounts:
             for host_path, container_path, read_only in extra_mounts:
-                mount_spec = f"{host_path}:{container_path}"
-                if read_only:
-                    mount_spec += ":ro"
-                cmd.extend(["-v", mount_spec])
+                cmd.extend(
+                    _format_container_mount(
+                        self._runtime,
+                        host_path,
+                        container_path,
+                        read_only,
+                    )
+                )
 
         cmd.append(self._image)
 

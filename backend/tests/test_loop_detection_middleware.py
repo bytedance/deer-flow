@@ -1,5 +1,6 @@
 """Tests for LoopDetectionMiddleware."""
 
+import copy
 from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -19,8 +20,13 @@ def _make_runtime(thread_id="test-thread"):
 
 
 def _make_state(tool_calls=None, content=""):
-    """Build a minimal AgentState dict with an AIMessage."""
-    msg = AIMessage(content=content, tool_calls=tool_calls or [])
+    """Build a minimal AgentState dict with an AIMessage.
+
+    Deep-copies *content* when it is mutable (e.g. list) so that
+    successive calls never share the same object reference.
+    """
+    safe_content = copy.deepcopy(content) if isinstance(content, list) else content
+    msg = AIMessage(content=safe_content, tool_calls=tool_calls or [])
     return {"messages": [msg]}
 
 
@@ -48,6 +54,70 @@ class TestHashToolCalls:
         h = _hash_tool_calls([])
         assert isinstance(h, str)
         assert len(h) > 0
+
+    def test_stringified_dict_args_match_dict_args(self):
+        dict_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "start_line": "1", "end_line": "150"},
+        }
+        string_call = {
+            "name": "read_file",
+            "args": '{"path":"/tmp/demo.py","start_line":"1","end_line":"150"}',
+        }
+
+        assert _hash_tool_calls([dict_call]) == _hash_tool_calls([string_call])
+
+    def test_reversed_read_file_range_matches_forward_range(self):
+        forward_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "start_line": 10, "end_line": 300},
+        }
+        reversed_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "start_line": 300, "end_line": 10},
+        }
+
+        assert _hash_tool_calls([forward_call]) == _hash_tool_calls([reversed_call])
+
+    def test_stringified_non_dict_args_do_not_crash(self):
+        non_dict_json_call = {"name": "bash", "args": '"echo hello"'}
+        plain_string_call = {"name": "bash", "args": "echo hello"}
+
+        json_hash = _hash_tool_calls([non_dict_json_call])
+        plain_hash = _hash_tool_calls([plain_string_call])
+
+        assert isinstance(json_hash, str)
+        assert isinstance(plain_hash, str)
+        assert json_hash
+        assert plain_hash
+
+    def test_grep_pattern_affects_hash(self):
+        grep_foo = {"name": "grep", "args": {"path": "/tmp", "pattern": "foo"}}
+        grep_bar = {"name": "grep", "args": {"path": "/tmp", "pattern": "bar"}}
+
+        assert _hash_tool_calls([grep_foo]) != _hash_tool_calls([grep_bar])
+
+    def test_glob_pattern_affects_hash(self):
+        glob_py = {"name": "glob", "args": {"path": "/tmp", "pattern": "*.py"}}
+        glob_ts = {"name": "glob", "args": {"path": "/tmp", "pattern": "*.ts"}}
+
+        assert _hash_tool_calls([glob_py]) != _hash_tool_calls([glob_ts])
+
+    def test_write_file_content_affects_hash(self):
+        v1 = {"name": "write_file", "args": {"path": "/tmp/a.py", "content": "v1"}}
+        v2 = {"name": "write_file", "args": {"path": "/tmp/a.py", "content": "v2"}}
+        assert _hash_tool_calls([v1]) != _hash_tool_calls([v2])
+
+    def test_str_replace_content_affects_hash(self):
+        a = {
+            "name": "str_replace",
+            "args": {"path": "/tmp/a.py", "old_str": "foo", "new_str": "bar"},
+        }
+        b = {
+            "name": "str_replace",
+            "args": {"path": "/tmp/a.py", "old_str": "foo", "new_str": "baz"},
+        }
+        assert _hash_tool_calls([a]) != _hash_tool_calls([b])
 
 
 class TestLoopDetection:
@@ -210,6 +280,8 @@ class TestLoopDetection:
         mw._apply(_make_state(tool_calls=call), runtime_new)
 
         assert "thread-0" not in mw._history
+        assert "thread-0" not in mw._tool_freq
+        assert "thread-0" not in mw._tool_freq_warned
         assert "thread-new" in mw._history
         assert len(mw._history) == 3
 
@@ -229,3 +301,338 @@ class TestLoopDetection:
 
         mw._apply(_make_state(tool_calls=call), runtime)
         assert "default" in mw._history
+
+
+class TestAppendText:
+    """Unit tests for LoopDetectionMiddleware._append_text."""
+
+    def test_none_content_returns_text(self):
+        result = LoopDetectionMiddleware._append_text(None, "hello")
+        assert result == "hello"
+
+    def test_str_content_concatenates(self):
+        result = LoopDetectionMiddleware._append_text("existing", "appended")
+        assert result == "existing\n\nappended"
+
+    def test_empty_str_content_concatenates(self):
+        result = LoopDetectionMiddleware._append_text("", "appended")
+        assert result == "\n\nappended"
+
+    def test_list_content_appends_text_block(self):
+        """List content (e.g. Anthropic thinking mode) should get a new text block."""
+        content = [
+            {"type": "thinking", "text": "Let me think..."},
+            {"type": "text", "text": "Here is my answer"},
+        ]
+        result = LoopDetectionMiddleware._append_text(content, "stop msg")
+        assert isinstance(result, list)
+        assert len(result) == 3
+        assert result[0] == content[0]
+        assert result[1] == content[1]
+        assert result[2] == {"type": "text", "text": "\n\nstop msg"}
+
+    def test_empty_list_content_appends_text_block(self):
+        result = LoopDetectionMiddleware._append_text([], "stop msg")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0] == {"type": "text", "text": "\n\nstop msg"}
+
+    def test_unexpected_type_coerced_to_str(self):
+        """Unexpected content types should be coerced to str as a fallback."""
+        result = LoopDetectionMiddleware._append_text(42, "stop msg")
+        assert isinstance(result, str)
+        assert result == "42\n\nstop msg"
+
+    def test_list_content_not_mutated_in_place(self):
+        """_append_text must not modify the original list."""
+        original = [{"type": "text", "text": "hello"}]
+        result = LoopDetectionMiddleware._append_text(original, "appended")
+        assert len(original) == 1  # original unchanged
+        assert len(result) == 2  # new list has the appended block
+
+
+class TestHardStopWithListContent:
+    """Regression tests: hard stop must not crash when AIMessage.content is a list."""
+
+    def test_hard_stop_with_list_content(self):
+        """Hard stop on list content should not raise TypeError (regression)."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        # Build state with list content (e.g. Anthropic thinking mode)
+        list_content = [
+            {"type": "thinking", "text": "Let me think..."},
+            {"type": "text", "text": "I'll run ls"},
+        ]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call, content=list_content), runtime)
+
+        # Fourth call triggers hard stop — must not raise TypeError
+        result = mw._apply(_make_state(tool_calls=call, content=list_content), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls == []
+        # Content should remain a list with the stop message appended
+        assert isinstance(msg.content, list)
+        assert len(msg.content) == 3
+        assert msg.content[2]["type"] == "text"
+        assert _HARD_STOP_MSG in msg.content[2]["text"]
+
+    def test_hard_stop_with_none_content(self):
+        """Hard stop on None content should produce a plain string."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        # Fourth call with default empty-string content
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg.content, str)
+        assert _HARD_STOP_MSG in msg.content
+
+    def test_hard_stop_with_str_content(self):
+        """Hard stop on str content should concatenate the stop message."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call, content="thinking..."), runtime)
+
+        result = mw._apply(_make_state(tool_calls=call, content="thinking..."), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg.content, str)
+        assert msg.content.startswith("thinking...")
+        assert _HARD_STOP_MSG in msg.content
+
+    def test_hard_stop_clears_raw_tool_call_metadata(self):
+        """Forced-stop messages must not retain provider-level raw tool-call payloads."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        def _make_provider_state():
+            return {
+                "messages": [
+                    AIMessage(
+                        content="thinking...",
+                        tool_calls=call,
+                        additional_kwargs={
+                            "tool_calls": [
+                                {
+                                    "id": "call_ls",
+                                    "type": "function",
+                                    "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+                                    "thought_signature": "sig-1",
+                                }
+                            ],
+                            "function_call": {"name": "bash", "arguments": '{"command":"ls"}'},
+                        },
+                        response_metadata={"finish_reason": "tool_calls"},
+                    )
+                ]
+            }
+
+        for _ in range(3):
+            mw._apply(_make_provider_state(), runtime)
+
+        result = mw._apply(_make_provider_state(), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert msg.tool_calls == []
+        assert "tool_calls" not in msg.additional_kwargs
+        assert "function_call" not in msg.additional_kwargs
+        assert msg.response_metadata["finish_reason"] == "stop"
+
+
+class TestToolFrequencyDetection:
+    """Tests for per-tool-type frequency detection (Layer 2).
+
+    This catches the case where an agent calls the same tool type many times
+    with *different* arguments (e.g. read_file on 40 different files), which
+    bypasses hash-based detection.
+    """
+
+    def _read_call(self, path):
+        return {"name": "read_file", "id": f"call_read_{path}", "args": {"path": path}}
+
+    def test_below_freq_warn_returns_none(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+
+        for i in range(4):
+            result = mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+            assert result is None
+
+    def test_freq_warn_at_threshold(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+
+        for i in range(4):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+
+        # 5th call to read_file (different file each time) triggers freq warning
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_4.py")]), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, HumanMessage)
+        assert "read_file" in msg.content
+        assert "LOOP DETECTED" in msg.content
+
+    def test_freq_warn_only_injected_once(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+
+        # 3rd triggers warning
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
+        assert result is not None
+        assert "LOOP DETECTED" in result["messages"][0].content
+
+        # 4th should not re-warn (already warned for read_file)
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_3.py")]), runtime)
+        assert result is None
+
+    def test_freq_hard_stop_at_limit(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=6)
+        runtime = _make_runtime()
+
+        for i in range(5):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+
+        # 6th call triggers hard stop
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_5.py")]), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls == []
+        assert "FORCED STOP" in msg.content
+        assert "read_file" in msg.content
+
+    def test_different_tools_tracked_independently(self):
+        """read_file and bash should have independent frequency counters."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+
+        # 2 read_file calls
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+
+        # 2 bash calls — should not trigger (bash count = 2, read_file count = 2)
+        for i in range(2):
+            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
+            assert result is None
+
+        # 3rd read_file triggers (read_file count = 3)
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
+        assert result is not None
+        assert "read_file" in result["messages"][0].content
+
+    def test_freq_reset_clears_state(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+
+        mw.reset()
+
+        # After reset, count restarts — should not trigger
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_new.py")]), runtime)
+        assert result is None
+
+    def test_freq_reset_per_thread_clears_only_target(self):
+        """reset(thread_id=...) should clear frequency state for that thread only."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime_a = _make_runtime("thread-A")
+        runtime_b = _make_runtime("thread-B")
+
+        # 2 calls on each thread
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/a_{i}.py")]), runtime_a)
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/b_{i}.py")]), runtime_b)
+
+        # Reset only thread-A
+        mw.reset(thread_id="thread-A")
+
+        assert "thread-A" not in mw._tool_freq
+        assert "thread-A" not in mw._tool_freq_warned
+
+        # thread-B state should still be intact — 3rd call triggers warn
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/b_2.py")]), runtime_b)
+        assert result is not None
+        assert "LOOP DETECTED" in result["messages"][0].content
+
+        # thread-A restarted from 0 — should not trigger
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/a_new.py")]), runtime_a)
+        assert result is None
+
+    def test_freq_per_thread_isolation(self):
+        """Frequency counts should be independent per thread."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime_a = _make_runtime("thread-A")
+        runtime_b = _make_runtime("thread-B")
+
+        # 2 calls on thread A
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime_a)
+
+        # 2 calls on thread B — should NOT push thread A over threshold
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/other_{i}.py")]), runtime_b)
+
+        # 3rd call on thread A — triggers (count=3 for thread A only)
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime_a)
+        assert result is not None
+        assert "LOOP DETECTED" in result["messages"][0].content
+
+    def test_multi_tool_single_response_counted(self):
+        """When a single response has multiple tool calls, each is counted."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+
+        # Response 1: 2 read_file calls → count = 2
+        call = [self._read_call("/a.py"), self._read_call("/b.py")]
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is None
+
+        # Response 2: 2 more → count = 4
+        call = [self._read_call("/c.py"), self._read_call("/d.py")]
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is None
+
+        # Response 3: 1 more → count = 5 → triggers warn
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/e.py")]), runtime)
+        assert result is not None
+        assert "read_file" in result["messages"][0].content
+
+    def test_hash_detection_takes_priority(self):
+        """Hash-based hard stop fires before frequency check for identical calls."""
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=3,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        runtime = _make_runtime()
+        call = [self._read_call("/same_file.py")]
+
+        for _ in range(2):
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        # 3rd identical call → hash hard_limit=3 fires (not freq)
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert _HARD_STOP_MSG in msg.content

@@ -1,10 +1,6 @@
 # RFC: `create_deerflow_agent` — 纯参数的 SDK 工厂 API
 
-> **文档目的**：记录DeerFlow SDK API的设计决策和实现方案
-
-## 1. 问题陈述
-
-### 当前问题
+## 1. 问题
 
 当前 harness 的唯一公开入口是 `make_lead_agent(config: RunnableConfig)`。它内部：
 
@@ -19,21 +15,9 @@ make_lead_agent
   └─ _build_middlewares()      ← 读 config.yaml（summarization、model vision）
 ```
 
-**问题核心**：**6 处隐式 I/O** — 全部依赖文件系统。如果你想把 `deerflow-harness` 当 Python 库嵌入自己的应用，你必须准备 `config.yaml` + `extensions_config.json` + skills 目录。这对 SDK 用户是不可接受的。
+**6 处隐式 I/O** — 全部依赖文件系统。如果你想把 `deerflow-harness` 当 Python 库嵌入自己的应用，你必须准备 `config.yaml` + `extensions_config.json` + skills 目录。这对 SDK 用户是不可接受的。
 
-### 为什么这样设计有问题
-
-**对于SDK用户**：
-- 需要了解复杂的配置文件结构
-- 无法通过代码直接配置行为
-- 测试和集成困难
-
-**对于库设计**：
-- 违反了显式优于隐式的原则
-- 依赖隐式的全局状态
-- 难以进行单元测试
-
-### 对比分析
+### 对比
 
 | | `langchain.create_agent` | `make_lead_agent` | `DeerFlowClient`（增强后） |
 |---|---|---|---|
@@ -43,36 +27,14 @@ make_lead_agent
 | 用户接口 | `graph.invoke(state)` | 内部使用 | **`client.chat("hello")`** |
 | 适合谁 | 写 LangChain 的人 | 内部使用 | **所有 DeerFlow 用户** |
 
-**为什么需要新的API**：
-- 降低SDK使用门槛
-- 提供更灵活的配置方式
-- 支持纯代码集成场景
-
 ## 2. 设计原则
 
 ### Python 中的 DI 最佳实践
 
-**为什么遵循这些原则**：
-
 1. **函数参数即注入** — 不读全局状态，所有依赖通过参数传入
-   - 显式依赖：一目了然需要什么
-   - 易于测试：可以注入mock对象
-   - 避免隐式耦合
-
 2. **Protocol 定义契约** — 不依赖具体类，依赖行为接口
-   - 灵活性：可以替换实现
-   - 解耦：不依赖具体类型
-   - 可测试：易于创建测试替身
-
 3. **合理默认值** — `sandbox=True` 等价于 `sandbox=LocalSandboxProvider()`
-   - 便利性：简单用法不需要复杂配置
-   - 一致性：默认行为可预测
-   - 可覆盖：高级用户可以完全自定义
-
 4. **分层 API** — 简单用法一行搞定，复杂用法有逃生舱
-   - 渐进式复杂度：从简单到复杂
-   - 不限制高级用户：提供完全控制
-   - 易学易用：新手友好，专家满意
 
 ### 分层架构
 
@@ -91,12 +53,6 @@ make_lead_agent
     └──────────────────────┘
 ```
 
-**为什么这样分层**：
-- **DeerFlowClient**：唯一公开 API，提供用户友好的接口
-- **make_lead_agent**：内部工厂，处理配置文件逻辑
-- **create_deerflow_agent**：纯参数工厂，支持SDK场景
-- **langchain.create_agent**：底层原语，提供核心能力
-
 `DeerFlowClient` 是唯一公开 API。`create_deerflow_agent` 和 `make_lead_agent` 都是内部实现。
 
 用户通过 `DeerFlowClient` 三个参数控制行为：
@@ -111,27 +67,10 @@ make_lead_agent
 
 ### 核心约束
 
-**为什么这些约束很重要**：
-
 - **配置覆盖** — `config` dict > config.yaml > 默认值
-  - 灵活性：代码配置优先于文件配置
-  - 向后兼容：不传参数时行为不变
-  - 渐进式迁移：可以逐步从文件迁移到代码
-
 - **三层不重叠** — config 传参数，features 传实例，extra_middleware 传新增
-  - 职责清晰：每个参数有明确的用途
-  - 避免混淆：不会出现配置冲突
-  - 易于理解：用户知道在哪里配置什么
-
 - **向前兼容** — 现有 `DeerFlowClient()` 无参构造行为不变
-  - 安全升级：现有代码不会破坏
-  - 渐进式采用：可以逐步使用新功能
-  - 低风险：不会引入破坏性变更
-
 - **harness 边界合规** — 不 import `app.*`（`test_harness_boundary.py` 强制）
-  - 模块化：保持harness独立
-  - 可测试：不依赖app模块
-  - 可重用：可以在其他项目中使用
 
 ## 3. API 设计
 
@@ -167,12 +106,7 @@ client = DeerFlowClient(
 )
 ```
 
-**为什么这样设计**：
-- **config参数**：直接映射YAML结构，学习成本低
-- **features参数**：类型安全，IDE支持好
-- **extra_middleware**：灵活扩展，不破坏现有结构
-
-### 三种典型用法
+三种典型用法：
 
 ```python
 # 用法 1：全读 config.yaml（现有行为，不变）
@@ -197,11 +131,6 @@ client = DeerFlowClient(config={
 
 内部实现：`final_config = deep_merge(file_config, code_config)`
 
-**为什么支持deep merge**：
-- 细粒度覆盖：只覆盖需要的配置项
-- 配置组合：文件配置基础，代码覆盖细节
-- 灵活性：支持各种配置场景
-
 ### 3.2 `create_deerflow_agent` — 内部工厂（不公开）
 
 ```python
@@ -219,14 +148,11 @@ def create_deerflow_agent(
     ...
 ```
 
-**为什么不公开这个函数**：
-- 用户不需要接触 `CompiledStateGraph`
-- 这是内部实现细节
-- 通过 `DeerFlowClient` 提供更友好的接口
+`DeerFlowClient` 内部调用此函数。
 
 ### 3.3 `RuntimeFeatures` — 内置 Middleware 替换
 
-**为什么只做一件事**：用自定义实例替换内置 middleware。不管配置参数（参数走 `config` dict）。
+只做一件事：用自定义实例替换内置 middleware。不管配置参数（参数走 `config` dict）。
 
 ```python
 @dataclass
@@ -245,11 +171,6 @@ class RuntimeFeatures:
 | `False` | 关闭该功能 |
 | `AgentMiddleware` 实例 | 替换整个实现 |
 
-**为什么这样设计**：
-- **清晰语义**：bool开关 vs 实例替换，一目了然
-- **类型安全**：编译时检查，避免运行时错误
-- **灵活性**：支持启用、禁用、替换三种模式
-
 不再有 `MemoryOptions`、`TitleOptions` 等。参数调整走 `config` dict：
 
 ```python
@@ -265,11 +186,6 @@ client = DeerFlowClient(
     features=RuntimeFeatures(auto_title=MyTitleMiddleware()),
 )
 ```
-
-**为什么分离参数和实现**：
-- **关注点分离**：参数调整不关心实现
-- **测试友好**：可以独立测试参数和实现
-- **文档清晰**：每个参数有明确的归属
 
 ### 3.4 Middleware 链组装
 
@@ -319,36 +235,19 @@ def _assemble_from_features(feat: RuntimeFeatures, config: AppConfig) -> tuple[l
     return chain, extra_tools
 ```
 
-**为什么不用priority排序**：
-- **可读性**：代码顺序就是执行顺序
-- **可维护性**：不需要查找priority定义
-- **确定性**：没有隐式的排序逻辑
-
 ### 3.6 Middleware 排序策略
 
 **两阶段排序：内置固定 + 外置插入**
 
-**为什么这样设计**：
 1. **内置链固定顺序** — 按代码中的 append 顺序确定，不参与 @Next/@Prev
-   - 稳定性：内置顺序不会意外改变
-   - 可预测：开发者知道确切的执行顺序
-   - 文档友好：顺序在代码中一目了然
-
 2. **外置 middleware 插入** — `extra_middleware` 中的 middleware 通过 @Next/@Prev 声明锚点，自由锚定任意 middleware（内置或其他外置均可）
-   - 灵活性：用户可以在任意位置插入
-   - 类型安全：编译时检查锚点存在性
-   - 声明式：通过装饰器声明位置
-
 3. **冲突检测** — 两个外置 middleware 如果 @Next 或 @Prev 同一个目标 → `ValueError`
-   - 安全性：防止意外的顺序冲突
-   - 早期发现：在启动时而不是运行时发现
-   - 明确错误：告诉用户哪里冲突
 
 **这不是全排序。** 内置链的顺序在代码中已确定，外置 middleware 只做插入操作。这样可以避免内置和外置同时竞争同一个位置的问题。
 
 ### 3.7 `@Next` / `@Prev` 装饰器
 
-**为什么使用装饰器**：用户自定义 middleware 通过装饰器声明在链中的位置，类型安全：
+用户自定义 middleware 通过装饰器声明在链中的位置，类型安全：
 
 ```python
 from deerflow.agents import Next, Prev
@@ -365,12 +264,6 @@ class MyFilterMiddleware(AgentMiddleware):
     def after_model(self, state, runtime):
         ...
 ```
-
-**装饰器的优势**：
-- **类型安全**：编译时检查middleware类型
-- **声明式**：位置信息与类定义在一起
-- **IDE友好**：可以跳转到目标middleware
-- **可读性**：一目了然类的排序意图
 
 实现：
 
@@ -504,11 +397,6 @@ client = DeerFlowClient(
 
 Phase 1 中 `auto_title` 默认为 `False` 以避免无 config 时崩溃。其他有 config 依赖的 feature 默认也为 `False`。
 
-**为什么有这些限制**：
-- **渐进式实现**：先建立框架，再完善细节
-- **向后兼容**：不影响现有配置文件用户
-- **风险控制**：逐步迁移，降低风险
-
 ## 7. 迁移路径
 
 ```
@@ -528,11 +416,6 @@ Phase 3:
   - SDK 文档和示例
   - deerflow.client 稳定 API
 ```
-
-**为什么分阶段**：
-- **降低风险**：每个阶段都是可回滚的
-- **渐进式采用**：用户可以逐步迁移
-- **反馈驱动**：根据用户反馈调整后续计划
 
 ## 8. 设计决议
 
@@ -605,21 +488,16 @@ graph TB
 | DanglingToolCallMiddleware | ✓ | ✗ | 主 agent 独有：补缺失 ToolMessage |
 | GuardrailMiddleware | ✓ | ✓ | 共享：工具调用授权（可选） |
 | ToolErrorHandlingMiddleware | ✓ | ✓ | 共享：工具异常处理 |
-| SummarizationMiddleware | ✓ | ✗ | 主 agent 独有：上下文压缩 |
-| TodoMiddleware | ✓ | ✗ | 主 agent 独有：计划模式 |
-| TitleMiddleware | ✓ | ✗ | 主 agent 独有：标题生成 |
-| MemoryMiddleware | ✓ | ✗ | 主 agent 独有：记忆管理 |
-| ViewImageMiddleware | ✓ | ✗ | 主 agent 独有：图片处理 |
-| SubagentLimitMiddleware | ✓ | ✗ | 主 agent 独有：子代理限制 |
-| LoopDetectionMiddleware | ✓ | ✗ | 主 agent 独有：循环检测 |
-| ClarificationMiddleware | ✓ | ✗ | 主 agent 独有：澄清中断 |
+| SummarizationMiddleware | ✓ | ✗ | |
+| TodoMiddleware | ✓ | ✗ | |
+| TitleMiddleware | ✓ | ✗ | |
+| MemoryMiddleware | ✓ | ✗ | |
+| ViewImageMiddleware | ✓ | ✗ | |
+| SubagentLimitMiddleware | ✓ | ✗ | |
+| LoopDetectionMiddleware | ✓ | ✗ | |
+| ClarificationMiddleware | ✓ | ✗ | |
 
 **设计原则**：
 - `RuntimeFeatures`、`@Next/@Prev`、排序机制只作用于**主 agent**
 - Subagent 链短且固定（4 个），不需要动态组装
 - `extra_middleware` 当前只影响主 agent，不传递给 subagent
-
-**为什么Subagent链更短**：
-- **简化**：子代理专注执行，不需要额外功能
-- **性能**：减少中间件开销
-- **清晰**：主代理和子代理职责分明

@@ -1,32 +1,4 @@
-"""
-记忆系统提示词模板模块
-
-===================
-设计思路说明
-===================
-
-**为什么需要这个模块**：
-1. 提供记忆更新和注入的提示词模板
-2. 定义记忆数据的结构和格式
-3. 实现token计数和格式化功能
-
-**核心设计模式**：
-- 模板模式：使用字符串模板构建提示词
-- 策略模式：根据token预算动态调整内容
-- 工具模式：提供各种格式化和转换函数
-
-**为什么这样设计**：
-- **一致性**：确保所有记忆操作使用相同的格式
-- **优化**：准确控制token使用，避免超限
-- **灵活性**：支持不同类型的记忆数据
-
-**模块职责**：
-1. 定义记忆更新提示词模板
-2. 定义事实提取提示词模板
-3. 实现记忆格式化函数
-4. 实现token计数功能
-5. 实现对话格式化功能
-"""
+"""Prompt templates for memory update and injection."""
 
 import math
 import re
@@ -39,11 +11,7 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
-# 记忆更新提示词模板
-# 为什么需要这样详细的模板：
-# - 确保LLM理解记忆更新的目标和要求
-# - 定义清晰的数据结构和格式
-# - 提供具体的示例和指导原则
+# Prompt template for updating memory based on conversation
 MEMORY_UPDATE_PROMPT = """You are a memory management system. Your task is to analyze a conversation and update the user's memory profile.
 
 Current Memory State:
@@ -60,6 +28,17 @@ Instructions:
 1. Analyze the conversation for important information about the user
 2. Extract relevant facts, preferences, and context with specific details (numbers, names, technologies)
 3. Update the memory sections as needed following the detailed length guidelines below
+
+Before extracting facts, perform a structured reflection on the conversation:
+1. Error/Retry Detection: Did the agent encounter errors, require retries, or produce incorrect results?
+   If yes, record the root cause and correct approach as a high-confidence fact with category "correction".
+2. User Correction Detection: Did the user correct the agent's direction, understanding, or output?
+   If yes, record the correct interpretation or approach as a high-confidence fact with category "correction".
+   Include what went wrong in "sourceError" only when category is "correction" and the mistake is explicit in the conversation.
+3. Project Constraint Discovery: Were any project-specific constraints discovered during the conversation?
+   If yes, record them as facts with the most appropriate category and confidence.
+
+{correction_hint}
 
 Memory Section Guidelines:
 
@@ -94,6 +73,7 @@ Memory Section Guidelines:
   * context: Background facts (job title, projects, locations, languages)
   * behavior: Working patterns, communication habits, problem-solving approaches
   * goal: Stated objectives, learning targets, project ambitions
+  * correction: Explicit agent mistakes or user corrections, including the correct approach
 - Confidence levels:
   * 0.9-1.0: Explicitly stated facts ("I work on X", "My role is Y")
   * 0.7-0.8: Strongly implied from actions/discussions
@@ -126,7 +106,7 @@ Output Format (JSON):
     "longTermBackground": {{ "summary": "...", "shouldUpdate": true/false }}
   }},
   "newFacts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal", "confidence": 0.0-1.0 }}
+    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
   ],
   "factsToRemove": ["fact_id_1", "fact_id_2"]
 }}
@@ -136,6 +116,8 @@ Important Rules:
 - Follow length guidelines: workContext/personalContext are concise (1-3 sentences), topOfMind and history sections are detailed (paragraphs)
 - Include specific metrics, version numbers, and proper nouns in facts
 - Only add facts that are clearly stated (0.9+) or strongly implied (0.7+)
+- Use category "correction" for explicit agent mistakes or user corrections; assign confidence >= 0.95 when the correction is explicit
+- Include "sourceError" only for explicit correction facts when the prior mistake or wrong approach is clearly stated; omit it otherwise
 - Remove facts that are contradicted by new information
 - When updating topOfMind, integrate new focus areas while removing completed/abandoned ones
   Keep 3-5 concurrent focus themes that are still active and relevant
@@ -148,11 +130,8 @@ Important Rules:
 
 Return ONLY valid JSON, no explanation or markdown."""
 
-# 事实提取提示词模板
-# 为什么需要单独的模板：
-# - 从单条消息中快速提取事实
-# - 用于实时记忆更新
-# - 比完整更新更轻量
+
+# Prompt template for extracting facts from a single message
 FACT_EXTRACTION_PROMPT = """Extract factual information about the user from this message.
 
 Message:
@@ -161,7 +140,7 @@ Message:
 Extract facts in this JSON format:
 {{
   "facts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal", "confidence": 0.0-1.0 }}
+    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
   ]
 }}
 
@@ -171,6 +150,7 @@ Categories:
 - context: Background context (location, job, projects)
 - behavior: Behavioral patterns
 - goal: User's goals or objectives
+- correction: Explicit corrections or mistakes to avoid repeating
 
 Rules:
 - Only extract clear, specific facts
@@ -181,72 +161,33 @@ Return ONLY valid JSON."""
 
 
 def _count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
-    """
-    使用tiktoken计算文本的token数
+    """Count tokens in text using tiktoken.
 
-    ===================
-    设计思路说明
-    ===================
+    Args:
+        text: The text to count tokens for.
+        encoding_name: The encoding to use (default: cl100k_base for GPT-4/3.5).
 
-    **核心职责**：
-    准确计算文本的token数量，用于控制提示词长度
-
-    **为什么需要这个函数**：
-    - **精确控制**：准确控制注入到提示词的token数量
-    - **成本优化**：避免超出token预算导致额外成本
-    - **性能优化**：确保提示词在模型限制内
-
-    **参数说明**：
-    - text: 要计算token的文本
-    - encoding_name: 使用的编码（默认cl100k_base，适用于GPT-4/3.5）
-
-    **返回值**：
-    文本的token数量
-
-    **为什么有fallback机制**：
-    - tiktoken可能未安装
-    - 使用字符数/4作为粗略估计
-    - 确保函数总是可用
+    Returns:
+        The number of tokens in the text.
     """
     if not TIKTOKEN_AVAILABLE:
-        # 如果tiktoken不可用，回退到基于字符的估计
+        # Fallback to character-based estimation if tiktoken is not available
         return len(text) // 4
 
     try:
         encoding = tiktoken.get_encoding(encoding_name)
         return len(encoding.encode(text))
     except Exception:
-        # 错误时回退到字符估计
+        # Fallback to character-based estimation on error
         return len(text) // 4
 
 
 def _coerce_confidence(value: Any, default: float = 0.0) -> float:
-    """
-    将类置信度值强制转换为[0, 1]范围内的浮点数
+    """Coerce a confidence-like value to a bounded float in [0, 1].
 
-    ===================
-    设计思路说明
-    ===================
-
-    **核心职责**：
-    安全地将各种类型的值转换为有效的置信度浮点数
-
-    **为什么需要这个函数**：
-    - **类型安全**：处理各种可能的输入类型
-    - **边界保护**：确保值在有效范围内
-    - **NaN处理**：防止非有限值破坏排序
-
-    **参数说明**：
-    - value: 要转换的值
-    - default: 当值无效时使用的默认值
-
-    **返回值**：
-    在[0, 1]范围内的浮点数
-
-    **为什么这样处理NaN**：
-    - NaN不能正确比较或排序
-    - 使用默认值而非NaN
-    - 防止排序异常
+    Non-finite values (NaN, inf, -inf) are treated as invalid and fall back
+    to the default before clamping, preventing them from dominating ranking.
+    The ``default`` parameter is assumed to be a finite value.
     """
     try:
         confidence = float(value)
@@ -258,46 +199,21 @@ def _coerce_confidence(value: Any, default: float = 0.0) -> float:
 
 
 def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000) -> str:
-    """
-    格式化记忆数据用于注入到系统提示词
+    """Format memory data for injection into system prompt.
 
-    ===================
-    设计思路说明
-    ===================
+    Args:
+        memory_data: The memory data dictionary.
+        max_tokens: Maximum tokens to use (counted via tiktoken for accuracy).
 
-    **核心职责**：
-    将记忆数据转换为适合注入到系统提示词的格式
-
-    **为什么需要这个函数**：
-    - **token优化**：确保注入内容在token预算内
-    - **优先级排序**：高置信度事实优先
-    - **结构化**：格式化为易于阅读的文本
-
-    **参数说明**：
-    - memory_data: 记忆数据字典
-    - max_tokens: 最大token数（通过tiktoken精确计数）
-
-    **返回值**：
-    格式化的记忆字符串，用于系统提示词注入
-
-    **为什么这样设计格式化逻辑**：
-    - **分段计算**：逐个添加事实，避免重复token化
-    - **优先级排序**：按置信度排序，优先包含高置信度事实
-    - **精确控制**：准确计算token数，避免超限
-
-    **执行流程**：
-    1. 格式化用户上下文（工作、个人、当前关注）
-    2. 格式化历史（最近、较早、长期背景）
-    3. 按置信度排序事实
-    4. 逐个添加事实直到达到token预算
-    5. 如果超出限制，截断到合适长度
+    Returns:
+        Formatted memory string for system prompt injection.
     """
     if not memory_data:
         return ""
 
     sections = []
 
-    # 格式化用户上下文
+    # Format user context
     user_data = memory_data.get("user", {})
     if user_data:
         user_sections = []
@@ -317,7 +233,7 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         if user_sections:
             sections.append("User Context:\n" + "\n".join(f"- {s}" for s in user_sections))
 
-    # 格式化历史
+    # Format history
     history_data = memory_data.get("history", {})
     if history_data:
         history_sections = []
@@ -330,10 +246,14 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         if earlier.get("summary"):
             history_sections.append(f"Earlier: {earlier['summary']}")
 
+        background = history_data.get("longTermBackground", {})
+        if background.get("summary"):
+            history_sections.append(f"Background: {background['summary']}")
+
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
 
-    # 格式化事实（按置信度排序；在token预算允许内包含尽可能多）
+    # Format facts (sorted by confidence; include as many as token budget allows)
     facts_data = memory_data.get("facts", [])
     if isinstance(facts_data, list) and facts_data:
         ranked_facts = sorted(
@@ -342,11 +262,11 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
             reverse=True,
         )
 
-        # 计算现有部分的token计数一次，然后为每个事实行增量计算
-        # 避免完整的字符串重新token化
+        # Compute token count for existing sections once, then account
+        # incrementally for each fact line to avoid full-string re-tokenization.
         base_text = "\n\n".join(sections)
         base_tokens = _count_tokens(base_text) if base_text else 0
-        # 计算现有部分和事实部分之间的分隔符的token
+        # Account for the separator between existing sections and the facts section.
         facts_header = "Facts:\n"
         separator_tokens = _count_tokens("\n\n" + facts_header) if base_text else _count_tokens(facts_header)
         running_tokens = base_tokens + separator_tokens
@@ -361,9 +281,13 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
                 continue
             category = str(fact.get("category", "context")).strip() or "context"
             confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
-            line = f"- [{category} | {confidence:.2f}] {content}"
+            source_error = fact.get("sourceError")
+            if category == "correction" and isinstance(source_error, str) and source_error.strip():
+                line = f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
+            else:
+                line = f"- [{category} | {confidence:.2f}] {content}"
 
-            # 每个额外行前面有一个换行符（除了第一个）
+            # Each additional line is preceded by a newline (except the first).
             line_text = ("\n" + line) if fact_lines else line
             line_tokens = _count_tokens(line_text)
 
@@ -381,51 +305,33 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
 
     result = "\n\n".join(sections)
 
-    # 使用tiktoken进行精确的token计数
+    # Use accurate token counting with tiktoken
     token_count = _count_tokens(result)
     if token_count > max_tokens:
-        # 截断以适应token限制
-        # 基于token比率估计要删除的字符数
+        # Truncate to fit within token limit
+        # Estimate characters to remove based on token ratio
         char_per_token = len(result) / token_count
-        target_chars = int(max_tokens * char_per_token * 0.95)  # 95%以留出余量
+        target_chars = int(max_tokens * char_per_token * 0.95)  # 95% to leave margin
         result = result[:target_chars] + "\n..."
 
     return result
 
 
 def format_conversation_for_update(messages: list[Any]) -> str:
-    """
-    格式化对话消息用于记忆更新提示词
+    """Format conversation messages for memory update prompt.
 
-    ===================
-    设计思路说明
-    ===================
+    Args:
+        messages: List of conversation messages.
 
-    **核心职责**：
-    将消息列表转换为适合LLM分析的文本格式
-
-    **为什么需要这个函数**：
-    - **标准化**：统一消息格式
-    - **清理**：移除不相关的内容（如文件上传标签）
-    - **简化**：截断过长的消息
-
-    **参数说明**：
-    - messages: 对话消息列表
-
-    **返回值**：
-    格式化的对话字符串
-
-    **为什么需要清理文件上传标签**：
-    - 文件路径是会话特定的
-    - 不会在未来的会话中可访问
-    - 记录这些信息会造成混淆
+    Returns:
+        Formatted conversation string.
     """
     lines = []
     for msg in messages:
         role = getattr(msg, "type", "unknown")
         content = getattr(msg, "content", str(msg))
 
-        # 处理可能是列表的内容（多模态）
+        # Handle content that might be a list (multimodal)
         if isinstance(content, list):
             text_parts = []
             for p in content:
@@ -437,15 +343,15 @@ def format_conversation_for_update(messages: list[Any]) -> str:
                         text_parts.append(text_val)
             content = " ".join(text_parts) if text_parts else str(content)
 
-        # 从人类消息中去除uploaded_files标签
-        # 避免将短暂的文件路径信息持久化到长期记忆中
-        # 如果去除后没有剩余内容，则跳过该轮（仅上传消息）
+        # Strip uploaded_files tags from human messages to avoid persisting
+        # ephemeral file path info into long-term memory.  Skip the turn entirely
+        # when nothing remains after stripping (upload-only message).
         if role == "human":
             content = re.sub(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", "", str(content)).strip()
             if not content:
                 continue
 
-        # 截断非常长的消息
+        # Truncate very long messages
         if len(str(content)) > 1000:
             content = str(content)[:1000] + "..."
 

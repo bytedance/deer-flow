@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from deerflow.config.paths import Paths
+from deerflow.config.paths import Paths, join_host_path
 
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
 
@@ -29,6 +29,13 @@ def test_ensure_thread_dirs_acp_workspace_is_world_writable(tmp_path):
     acp_dir = tmp_path / "threads" / "thread-2" / "acp-workspace"
     mode = oct(acp_dir.stat().st_mode & 0o777)
     assert mode == oct(0o777)
+
+
+def test_host_thread_dir_rejects_invalid_thread_id(tmp_path):
+    paths = Paths(base_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        paths.host_thread_dir("../escape")
 
 
 # ── _get_thread_mounts ───────────────────────────────────────────────────────
@@ -73,6 +80,30 @@ def test_get_thread_mounts_includes_user_data_dirs(tmp_path, monkeypatch):
     assert "/mnt/user-data/workspace" in container_paths
     assert "/mnt/user-data/uploads" in container_paths
     assert "/mnt/user-data/outputs" in container_paths
+
+
+def test_join_host_path_preserves_windows_drive_letter_style():
+    base = r"C:\Users\demo\deer-flow\backend\.deer-flow"
+
+    joined = join_host_path(base, "threads", "thread-9", "user-data", "outputs")
+
+    assert joined == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-9\user-data\outputs"
+
+
+def test_get_thread_mounts_preserves_windows_host_path_style(tmp_path, monkeypatch):
+    """Docker bind mount sources must keep Windows-style paths intact."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setenv("DEER_FLOW_HOST_BASE_DIR", r"C:\Users\demo\deer-flow\backend\.deer-flow")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+
+    mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-10")
+
+    container_paths = {container_path: host_path for host_path, container_path, _ in mounts}
+
+    assert container_paths["/mnt/user-data/workspace"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\workspace"
+    assert container_paths["/mnt/user-data/uploads"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\uploads"
+    assert container_paths["/mnt/user-data/outputs"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\outputs"
+    assert container_paths["/mnt/acp-workspace"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\acp-workspace"
 
 
 def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatch):

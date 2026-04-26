@@ -1,41 +1,13 @@
-"""DeerFlow代理的纯参数工厂
+"""Pure-argument factory for DeerFlow agents.
 
-===================
-设计思路说明
-===================
+``create_deerflow_agent`` accepts plain Python arguments — no YAML files, no
+global singletons.  It is the SDK-level entry point sitting between the raw
+``langchain.agents.create_agent`` primitive and the config-driven
+``make_lead_agent`` application factory.
 
-**为什么需要纯参数工厂**：
-1. **SDK友好**：接受纯Python参数，无需YAML文件，无全局单例
-2. **层级设计**：位于原始`langchain.agents.create_agent`和配置驱动的`make_lead_agent`之间
-3. **编程式API**：适合需要动态创建代理的场景
-4. **测试便利**：单元测试中可以直接创建测试代理
-
-**架构定位**：
-```
-langchain.agents.create_agent (底层原语)
-        ↓
-deerflow.agents.factory.create_deerflow_agent (SDK层)
-        ↓
-deerflow.agents.make_lead_agent (应用层，配置驱动)
-```
-
-**为什么这样设计三层架构**：
-- **底层原语**：LangChain提供的基础能力
-- **SDK层**：提供编程式API，参数化控制
-- **应用层**：提供配置驱动API，适合生产部署
-
-**设计原则**：
-- **配置自由**：工厂组装本身不读取配置文件
-- **可组合性**：支持中间件的自定义组合
-- **向后兼容**：支持从简单到复杂的各种使用场景
-- **类型安全**：完整的类型提示
-
-**注意**：工厂组装本身是无配置的，但某些注入的运行时组件
-（如子代理的``task_tool``）在调用时可能仍依赖全局配置。
-完全无配置的运行时是第二阶段目标。
-
-**公共API**：
-- `create_deerflow_agent()`: 从纯Python参数创建代理
+Note: the factory assembly itself is config-free, but some injected runtime
+components (e.g. ``task_tool`` for subagent) may still read global config at
+invocation time.  Full config-free runtime is a Phase 2 goal.
 """
 
 from __future__ import annotations
@@ -63,13 +35,8 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# TodoMiddleware提示词（最小SDK版本）
+# TodoMiddleware prompts (minimal SDK version)
 # ---------------------------------------------------------------------------
-
-# 为什么需要这些提示词常量：
-# - SDK版本不应依赖配置文件
-# - 提供合理的默认行为
-# - 保持与配置版本的一致性
 
 _TODO_SYSTEM_PROMPT = """
 <todo_list_system>
@@ -87,7 +54,7 @@ _TODO_TOOL_DESCRIPTION = "Use this tool to create and manage a structured task l
 
 
 # ---------------------------------------------------------------------------
-# 公共API
+# Public API
 # ---------------------------------------------------------------------------
 
 
@@ -104,49 +71,41 @@ def create_deerflow_agent(
     checkpointer: BaseCheckpointSaver | None = None,
     name: str = "default",
 ) -> CompiledStateGraph:
-    """从纯Python参数创建DeerFlow代理
+    """Create a DeerFlow agent from plain Python arguments.
 
-    **为什么需要这个函数**：
-    - **SDK入口**：为开发者提供编程式API
-    - **灵活性**：支持参数化配置，无需YAML文件
-    - **可测试性**：单元测试中可以轻松创建测试代理
-    - **组合性**：支持自定义中间件组合
+    The factory assembly itself reads no config files.  Some injected runtime
+    components (e.g. ``task_tool``) may still depend on global config at
+    invocation time — see Phase 2 roadmap for full config-free runtime.
 
-    **参数互斥设计**：
-    - `middleware` vs `features`/`extra_middleware`：完全接管 vs 自动组装
-    - 为什么互斥：避免行为不一致和配置冲突
+    Parameters
+    ----------
+    model:
+        Chat model instance.
+    tools:
+        User-provided tools.  Feature-injected tools are appended automatically.
+    system_prompt:
+        System message.  ``None`` uses a minimal default.
+    middleware:
+        **Full takeover** — if provided, this exact list is used.
+        Cannot be combined with *features* or *extra_middleware*.
+    features:
+        Declarative feature flags.  Cannot be combined with *middleware*.
+    extra_middleware:
+        Additional middlewares inserted into the auto-assembled chain via
+        ``@Next``/``@Prev`` positioning.  Cannot be used with *middleware*.
+    plan_mode:
+        Enable TodoMiddleware for task tracking.
+    state_schema:
+        LangGraph state type.  Defaults to ``ThreadState``.
+    checkpointer:
+        Optional persistence backend.
+    name:
+        Agent name (passed to middleware that cares, e.g. ``MemoryMiddleware``).
 
-    **工厂组装本身不读取配置文件**。某些注入的运行时组件
-    （如``task_tool``）在调用时可能仍依赖全局配置 —
-    参见第二阶段路线图了解完全无配置的运行时。
-
-    **参数说明**：
-        model:
-            聊天模型实例
-        tools:
-            用户提供的工具。功能注入的工具会自动追加
-        system_prompt:
-            系统消息。``None``使用最小默认值
-        middleware:
-            **完全接管** — 如果提供，使用这个确切的列表
-            不能与*features*或*extra_middleware*组合使用
-        features:
-            声明式功能标志。不能与*middleware*组合使用
-        extra_middleware:
-            通过``@Next``/``@Prev``定位插入到自动组装链中的额外中间件
-            不能与*middleware*一起使用
-        plan_mode:
-            启用TodoMiddleware进行任务跟踪
-        state_schema:
-            LangGraph状态类型。默认为``ThreadState``
-        checkpointer:
-            可选的持久化后端
-        name:
-            代理名称（传递给关心的中间件，如``MemoryMiddleware``）
-
-    **异常**：
-        ValueError
-            如果同时提供了*middleware*和*features*/*extra_middleware*
+    Raises
+    ------
+    ValueError
+        If both *middleware* and *features*/*extra_middleware* are provided.
     """
     if middleware is not None and features is not None:
         raise ValueError("Cannot specify both 'middleware' and 'features'.  Use one or the other.")
@@ -189,7 +148,7 @@ def create_deerflow_agent(
 
 
 # ---------------------------------------------------------------------------
-# 内部：基于功能的中间件组装
+# Internal: feature-driven middleware assembly
 # ---------------------------------------------------------------------------
 
 

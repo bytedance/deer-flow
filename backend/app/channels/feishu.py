@@ -1,124 +1,66 @@
-"""
-飞书/Lark频道 - 通过WebSocket连接到飞书（无需公网IP）
-
-===================
-设计思路说明
-===================
-
-**为什么选择WebSocket**：
-- 无需公网IP：飞书主动连接到我们的服务器
-- 实时性高：消息推送及时，无需轮询
-- 稳定性好：长连接，减少连接建立开销
-
-**核心特性**：
-1. 使用lark-oapi SDK的WebSocket客户端
-2. 支持交互式卡片（富文本消息）
-3. 支持文件上传（图片和文档）
-4. 消息回复机制（thread reply）
-5. Emoji反应（OK/DONE）提供即时反馈
-
-**消息流程设计**：
-1. 用户发送消息 → 机器人添加"OK"表情反应
-2. 机器人在线程中回复："正在处理..."
-3. Agent处理消息并返回结果
-4. 机器人在线程中更新卡片显示结果
-5. 机器人添加"DONE"表情反应
-
-**为什么这样设计消息流程**：
-- 即时反馈：用户知道机器人已收到消息
-- 进度可见：实时显示处理状态
-- 结果清晰：在原线程中显示结果，保持上下文
-"""
+"""Feishu/Lark channel — connects to Feishu via WebSocket (no public IP needed)."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 import threading
-from typing import Any
+from typing import Any, Literal
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
 
 
+def _is_feishu_command(text: str) -> bool:
+    if not text.startswith("/"):
+        return False
+    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
+
+
 class FeishuChannel(Channel):
-    """
-    飞书/Lark IM频道实现
+    """Feishu/Lark IM channel using the ``lark-oapi`` WebSocket client.
 
-    ===================
-    设计思路说明
-    ===================
+    Configuration keys (in ``config.yaml`` under ``channels.feishu``):
+        - ``app_id``: Feishu app ID.
+        - ``app_secret``: Feishu app secret.
+        - ``verification_token``: (optional) Event verification token.
 
-    **核心设计**：
-    - 使用lark-oapi SDK的WebSocket客户端
-    - 长连接模式，无需公网IP
-    - 支持交互式卡片（富文本消息）
+    The channel uses WebSocket long-connection mode so no public IP is required.
 
-    **配置说明**（在config.yaml的channels.feishu下）：
-    - app_id: 飞书应用ID
-    - app_secret: 飞书应用密钥
-    - verification_token: （可选）事件验证令牌
-    - domain: 飞书API域名（默认https://open.feishu.cn）
-
-    **消息流程设计**：
-    1. 用户发送消息 → 机器人添加"OK"表情反应
-    2. 机器人在线程中回复："正在处理..."
-    3. Agent处理消息并返回结果
-    4. 机器人在线程中更新卡片显示结果
-    5. 机器人添加"DONE"表情反应
-
-    **为什么这样设计**：
-    - 即时反馈：用户知道机器人已收到并正在处理
-    - 进度可见：实时显示处理状态
-    - 结果清晰：在原线程中显示，保持上下文
-    - 状态标记：表情反应提供视觉反馈
-
-    **技术亮点**：
-    - 独立线程运行WebSocket：避免与主事件循环冲突
-    - 卡片消息更新：而不是发送多条消息
-    - 任务跟踪：防止并发和资源泄漏
+    Message flow:
+        1. User sends a message → bot adds "OK" emoji reaction
+        2. Bot replies in thread: "Working on it......"
+        3. Agent processes the message and returns a result
+        4. Bot replies in thread with the result
+        5. Bot adds "DONE" emoji reaction to the original message
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
-        """
-        初始化飞书频道
-
-        **为什么需要这么多实例变量**：
-        - lark-oapi的请求/响应类需要缓存，避免重复导入
-        - 跟踪运行中的卡片：支持消息更新而非重复发送
-        - 后台任务管理：防止任务泄漏和资源浪费
-        """
         super().__init__(name="feishu", bus=bus, config=config)
-
-        # WebSocket相关：独立线程和事件循环
-        self._thread: threading.Thread | None = None  # WebSocket运行线程
-        self._main_loop: asyncio.AbstractEventLoop | None = None  # 主事件循环引用
-
-        # API客户端：用于发送消息和上传文件
+        self._thread: threading.Thread | None = None
+        self._main_loop: asyncio.AbstractEventLoop | None = None
         self._api_client = None
-
-        # lark-oapi SDK类的缓存（避免重复导入）
         self._CreateMessageReactionRequest = None
         self._CreateMessageReactionRequestBody = None
         self._Emoji = None
         self._PatchMessageRequest = None
         self._PatchMessageRequestBody = None
-
-        # 后台任务管理：防止任务泄漏
-        self._background_tasks: set[asyncio.Task] = set()  # 所有后台任务
-
-        # 运行中的卡片跟踪：支持消息更新
-        self._running_card_ids: dict[str, str] = {}  # 源消息ID -> 卡片消息ID
-        self._running_card_tasks: dict[str, asyncio.Task] = {}  # 源消息ID -> 创建卡片任务
-
-        # 文件上传相关的SDK类缓存
+        self._background_tasks: set[asyncio.Task] = set()
+        self._running_card_ids: dict[str, str] = {}
+        self._running_card_tasks: dict[str, asyncio.Task] = {}
         self._CreateFileRequest = None
         self._CreateFileRequestBody = None
         self._CreateImageRequest = None
         self._CreateImageRequestBody = None
+        self._GetMessageResourceRequest = None
+        self._thread_lock = threading.Lock()
 
     async def start(self) -> None:
         if self._running:
@@ -136,6 +78,7 @@ class FeishuChannel(Channel):
                 CreateMessageRequest,
                 CreateMessageRequestBody,
                 Emoji,
+                GetMessageResourceRequest,
                 PatchMessageRequest,
                 PatchMessageRequestBody,
                 ReplyMessageRequest,
@@ -159,6 +102,7 @@ class FeishuChannel(Channel):
         self._CreateFileRequestBody = CreateFileRequestBody
         self._CreateImageRequest = CreateImageRequest
         self._CreateImageRequestBody = CreateImageRequestBody
+        self._GetMessageResourceRequest = GetMessageResourceRequest
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
@@ -269,7 +213,9 @@ class FeishuChannel(Channel):
                     await asyncio.sleep(delay)
 
         logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        if last_exc is None:
+            raise RuntimeError("Feishu send failed without an exception from any attempt")
+        raise last_exc
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -335,6 +281,112 @@ class FeishuChannel(Channel):
         if not response.success():
             raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
         return response.data.file_key
+
+    async def receive_file(self, msg: InboundMessage, thread_id: str) -> InboundMessage:
+        """Download a Feishu file into the thread uploads directory.
+
+        Returns the sandbox virtual path when the image is persisted successfully.
+        """
+        if not msg.thread_ts:
+            logger.warning("[Feishu] received file message without thread_ts, cannot associate with conversation: %s", msg)
+            return msg
+        files = msg.files
+        if not files:
+            logger.warning("[Feishu] received message with no files: %s", msg)
+            return msg
+        text = msg.text
+        for file in files:
+            if file.get("image_key"):
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id)
+                text = text.replace("[image]", virtual_path, 1)
+            elif file.get("file_key"):
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id)
+                text = text.replace("[file]", virtual_path, 1)
+        msg.text = text
+        return msg
+
+    async def _receive_single_file(self, message_id: str, file_key: str, type: Literal["image", "file"], thread_id: str) -> str:
+        request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(type).build()
+
+        def inner():
+            return self._api_client.im.v1.message_resource.get(request)
+
+        try:
+            response = await asyncio.to_thread(inner)
+        except Exception:
+            logger.exception("[Feishu] resource get request failed for resource_key=%s type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+
+        if not response.success():
+            logger.warning(
+                "[Feishu] resource get failed: resource_key=%s, type=%s, code=%s, msg=%s, log_id=%s ",
+                file_key,
+                type,
+                response.code,
+                response.msg,
+                response.get_log_id(),
+            )
+            return f"Failed to obtain the [{type}]"
+
+        image_stream = getattr(response, "file", None)
+        if image_stream is None:
+            logger.warning("[Feishu] resource get returned no file stream: resource_key=%s, type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+
+        try:
+            content: bytes = await asyncio.to_thread(image_stream.read)
+        except Exception:
+            logger.exception("[Feishu] failed to read resource stream: resource_key=%s, type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+
+        if not content:
+            logger.warning("[Feishu] empty resource content: resource_key=%s, type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+
+        paths = get_paths()
+        paths.ensure_thread_dirs(thread_id)
+        uploads_dir = paths.sandbox_uploads_dir(thread_id).resolve()
+
+        ext = "png" if type == "image" else "bin"
+        raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"
+
+        # Sanitize filename: preserve extension, replace path chars in name part
+        if "." in raw_filename:
+            name_part, ext = raw_filename.rsplit(".", 1)
+            name_part = re.sub(r"[./\\]", "_", name_part)
+            filename = f"{name_part}.{ext}"
+        else:
+            filename = re.sub(r"[./\\]", "_", raw_filename)
+        resolved_target = uploads_dir / filename
+
+        def down_load():
+            # use thread_lock to avoid filename conflicts when writing
+            with self._thread_lock:
+                resolved_target.write_bytes(content)
+
+        try:
+            await asyncio.to_thread(down_load)
+        except Exception:
+            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", resolved_target, type)
+            return f"Failed to obtain the [{type}]"
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
+
+        try:
+            sandbox_provider = get_sandbox_provider()
+            sandbox_id = sandbox_provider.acquire(thread_id)
+            if sandbox_id != "local":
+                sandbox = sandbox_provider.get(sandbox_id)
+                if sandbox is None:
+                    logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
+                    return f"Failed to obtain the [{type}]"
+                sandbox.update_file(virtual_path, content)
+        except Exception:
+            logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
+            return f"Failed to obtain the [{type}]"
+
+        logger.info("[Feishu] downloaded resource mapped: file_key=%s -> %s", file_key, virtual_path)
+        return virtual_path
 
     # -- message formatting ------------------------------------------------
 
@@ -540,9 +592,28 @@ class FeishuChannel(Channel):
             # Parse message content
             content = json.loads(message.content)
 
+            # files_list store the any-file-key in feishu messages, which can be used to download the file content later
+            # In Feishu channel, image_keys are independent of file_keys.
+            # The file_key includes files, videos, and audio, but does not include stickers.
+            files_list = []
+
             if "text" in content:
                 # Handle plain text messages
                 text = content["text"]
+            elif "file_key" in content:
+                file_key = content.get("file_key")
+                if isinstance(file_key, str) and file_key:
+                    files_list.append({"file_key": file_key})
+                    text = "[file]"
+                else:
+                    text = ""
+            elif "image_key" in content:
+                image_key = content.get("image_key")
+                if isinstance(image_key, str) and image_key:
+                    files_list.append({"image_key": image_key})
+                    text = "[image]"
+                else:
+                    text = ""
             elif "content" in content and isinstance(content["content"], list):
                 # Handle rich-text messages with a top-level "content" list (e.g., topic groups/posts)
                 text_paragraphs: list[str] = []
@@ -556,6 +627,16 @@ class FeishuChannel(Channel):
                                     text_value = element.get("text", "")
                                     if text_value:
                                         paragraph_text_parts.append(text_value)
+                                elif element.get("tag") == "img":
+                                    image_key = element.get("image_key")
+                                    if isinstance(image_key, str) and image_key:
+                                        files_list.append({"image_key": image_key})
+                                        paragraph_text_parts.append("[image]")
+                                elif element.get("tag") in ("file", "media"):
+                                    file_key = element.get("file_key")
+                                    if isinstance(file_key, str) and file_key:
+                                        files_list.append({"file_key": file_key})
+                                        paragraph_text_parts.append("[file]")
                         if paragraph_text_parts:
                             # Join text segments within a paragraph with spaces to avoid "helloworld"
                             text_paragraphs.append(" ".join(paragraph_text_parts))
@@ -575,12 +656,13 @@ class FeishuChannel(Channel):
                 text[:100] if text else "",
             )
 
-            if not text:
+            if not (text or files_list):
                 logger.info("[Feishu] empty text, ignoring message")
                 return
 
-            # Check if it's a command
-            if text.startswith("/"):
+            # Only treat known slash commands as commands; absolute paths and
+            # other slash-prefixed text should be handled as normal chat.
+            if _is_feishu_command(text):
                 msg_type = InboundMessageType.COMMAND
             else:
                 msg_type = InboundMessageType.CHAT
@@ -594,6 +676,7 @@ class FeishuChannel(Channel):
                 text=text,
                 msg_type=msg_type,
                 thread_ts=msg_id,
+                files=files_list,
                 metadata={"message_id": msg_id, "root_id": root_id},
             )
             inbound.topic_id = topic_id

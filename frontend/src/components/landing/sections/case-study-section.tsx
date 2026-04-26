@@ -51,12 +51,13 @@ export function CaseStudySection({ className }: { className?: string }) {
       title="Case Studies"
       subtitle="See how DeerFlow is used in the wild"
     >
-      <div className="container-md mt-8 grid grid-cols-1 gap-4 px-20 md:grid-cols-2 lg:grid-cols-3">
+      <div className="container-md mt-8 grid grid-cols-1 gap-4 px-4 md:grid-cols-2 md:px-20 lg:grid-cols-3">
         {caseStudies.map((caseStudy) => (
           <Link
             key={caseStudy.title}
             href={pathOfThread(caseStudy.threadId) + "?mock=true"}
             target="_blank"
+            rel="noopener noreferrer"
           >
             <Card className="group/card relative h-64 overflow-hidden">
               <div

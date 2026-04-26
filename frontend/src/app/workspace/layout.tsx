@@ -1,42 +1,30 @@
-"use client";
-
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { cookies } from "next/headers";
 import { Toaster } from "sonner";
 
+import { QueryClientProvider } from "@/components/query-client-provider";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { CommandPalette } from "@/components/workspace/command-palette";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
-import { getLocalSettings, useLocalSettings } from "@/core/settings";
 
-const queryClient = new QueryClient();
+function parseSidebarOpenCookie(
+  value: string | undefined,
+): boolean | undefined {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return undefined;
+}
 
-export default function WorkspaceLayout({
+export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const [settings, setSettings] = useLocalSettings();
-  const [open, setOpen] = useState(false); // SSR default: open (matches server render)
-  useLayoutEffect(() => {
-    // Runs synchronously before first paint on the client — no visual flash
-    setOpen(!getLocalSettings().layout.sidebar_collapsed);
-  }, []);
-  useEffect(() => {
-    setOpen(!settings.layout.sidebar_collapsed);
-  }, [settings.layout.sidebar_collapsed]);
-  const handleOpenChange = useCallback(
-    (open: boolean) => {
-      setOpen(open);
-      setSettings("layout", { sidebar_collapsed: !open });
-    },
-    [setSettings],
+  const cookieStore = await cookies();
+  const initialSidebarOpen = parseSidebarOpenCookie(
+    cookieStore.get("sidebar_state")?.value,
   );
+
   return (
-    <QueryClientProvider client={queryClient}>
-      <SidebarProvider
-        className="h-screen"
-        open={open}
-        onOpenChange={handleOpenChange}
-      >
+    <QueryClientProvider>
+      <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
         <WorkspaceSidebar />
         <SidebarInset className="min-w-0">{children}</SidebarInset>
       </SidebarProvider>

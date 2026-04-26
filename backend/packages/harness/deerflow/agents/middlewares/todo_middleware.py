@@ -1,38 +1,14 @@
-"""
-TODO中间件 - 扩展TodoListMiddleware以检测上下文丢失
+"""Middleware that extends TodoListMiddleware with context-loss detection and premature-exit prevention.
 
-===================
-设计思路说明
-===================
+When the message history is truncated (e.g., by SummarizationMiddleware), the
+original `write_todos` tool call and its ToolMessage can be scrolled out of the
+active context window. This middleware detects that situation and injects a
+reminder message so the model still knows about the outstanding todo list.
 
-**核心职责**：
-检测并恢复因上下文截断而丢失的TODO列表：
-1. **上下文丢失检测**：当消息历史被截断时检测write_todos调用丢失
-2. **提醒注入**：注入提醒消息让模型知道当前TODO列表
-3. **去重机制**：避免重复注入相同的提醒
-
-**为什么需要这个中间件**：
-1. **摘要截断**：SummarizationMiddleware会截断消息历史
-2. **工具调用丢失**：write_todos调用可能被截断出上下文窗口
-3. **状态保持**：确保模型始终知道当前的TODO状态
-4. **任务连续性**：防止因上下文丢失导致任务中断
-
-**设计决策**：
-- 继承TodoListMiddleware：复用基础TODO功能
-- 在before_model中检测：模型调用前检查上下文
-- 使用HumanMessage：与所有模型兼容
-- 命名消息：使用name字段去重
-
-**为什么使用HumanMessage**：
-- 兼容性：所有模型都支持
-- 非侵入：不像SystemMessage有位置限制
-- 可识别：使用特殊name便于识别
-
-**工作流程**：
-1. 检查state中是否有todos
-2. 检查messages中是否有write_todos调用
-3. 如果todos存在但write_todos丢失，注入提醒
-4. 格式化TODO列表为可读文本
+Additionally, this middleware prevents the agent from exiting the loop while
+there are still incomplete todo items. When the model produces a final response
+(no tool calls) but todos are not yet complete, the middleware injects a reminder
+and jumps back to the model node to force continued engagement.
 """
 
 from __future__ import annotations
@@ -41,6 +17,7 @@ from typing import Any, override
 
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.todo import PlanningState, Todo
+from langchain.agents.middleware.types import hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
@@ -63,6 +40,11 @@ def _reminder_in_messages(messages: list[Any]) -> bool:
     return False
 
 
+def _completion_reminder_count(messages: list[Any]) -> int:
+    """Return the number of todo_completion_reminder HumanMessages in *messages*."""
+    return sum(1 for msg in messages if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == "todo_completion_reminder")
+
+
 def _format_todos(todos: list[Todo]) -> str:
     """Format a list of Todo items into a human-readable string."""
     lines: list[str] = []
@@ -74,36 +56,19 @@ def _format_todos(todos: list[Todo]) -> str:
 
 
 class TodoMiddleware(TodoListMiddleware):
-    """扩展TodoListMiddleware，添加`write_todos`上下文丢失检测
+    """Extends TodoListMiddleware with `write_todos` context-loss detection.
 
-    **为什么需要扩展TodoListMiddleware**：
-    - **上下文截断**：摘要等操作会截断消息历史
-    - **工具调用丢失**：原始write_todos调用可能被截出上下文窗口
-    - **状态恢复**：检测并恢复丢失的TODO列表意识
-
-    **工作原理**：
-    当原始`write_todos`工具调用已从消息历史中截断
-    （例如在摘要后），模型失去对当前todo列表的意识。
-    此中间件在`before_model`/`abefore_model`中检测该缺口
-    并注入提醒消息，以便模型可以继续跟踪进度。
-
-    **检测策略**：
-    1. 检查state中是否有todos
-    2. 检查messages中是否还有write_todos调用
-    3. 检查是否已注入提醒
-    4. 如果需要，格式化并注入TODO提醒
-
-    **为什么使用name字段**：
-    - **去重机制**：避免重复注入相同提醒
-    - **可识别性**：便于检测已注入的提醒
-    - **隔离性**：不影响其他HumanMessage
+    When the original `write_todos` tool call has been truncated from the message
+    history (e.g., after summarization), the model loses awareness of the current
+    todo list. This middleware detects that gap in `before_model` / `abefore_model`
+    and injects a reminder message so the model can continue tracking progress.
     """
 
     @override
     def before_model(
         self,
         state: PlanningState,
-        runtime: Runtime,  # noqa: ARG002
+        runtime: Runtime,
     ) -> dict[str, Any] | None:
         """Inject a todo-list reminder when write_todos has left the context window."""
         todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
@@ -144,3 +109,71 @@ class TodoMiddleware(TodoListMiddleware):
     ) -> dict[str, Any] | None:
         """Async version of before_model."""
         return self.before_model(state, runtime)
+
+    # Maximum number of completion reminders before allowing the agent to exit.
+    # This prevents infinite loops when the agent cannot make further progress.
+    _MAX_COMPLETION_REMINDERS = 2
+
+    @hook_config(can_jump_to=["model"])
+    @override
+    def after_model(
+        self,
+        state: PlanningState,
+        runtime: Runtime,
+    ) -> dict[str, Any] | None:
+        """Prevent premature agent exit when todo items are still incomplete.
+
+        In addition to the base class check for parallel ``write_todos`` calls,
+        this override intercepts model responses that have no tool calls while
+        there are still incomplete todo items. It injects a reminder
+        ``HumanMessage`` and jumps back to the model node so the agent
+        continues working through the todo list.
+
+        A retry cap of ``_MAX_COMPLETION_REMINDERS`` (default 2) prevents
+        infinite loops when the agent cannot make further progress.
+        """
+        # 1. Preserve base class logic (parallel write_todos detection).
+        base_result = super().after_model(state, runtime)
+        if base_result is not None:
+            return base_result
+
+        # 2. Only intervene when the agent wants to exit (no tool calls).
+        messages = state.get("messages") or []
+        last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+        if not last_ai or last_ai.tool_calls:
+            return None
+
+        # 3. Allow exit when all todos are completed or there are no todos.
+        todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
+        if not todos or all(t.get("status") == "completed" for t in todos):
+            return None
+
+        # 4. Enforce a reminder cap to prevent infinite re-engagement loops.
+        if _completion_reminder_count(messages) >= self._MAX_COMPLETION_REMINDERS:
+            return None
+
+        # 5. Inject a reminder and force the agent back to the model.
+        incomplete = [t for t in todos if t.get("status") != "completed"]
+        incomplete_text = "\n".join(f"- [{t.get('status', 'pending')}] {t.get('content', '')}" for t in incomplete)
+        reminder = HumanMessage(
+            name="todo_completion_reminder",
+            content=(
+                "<system_reminder>\n"
+                "You have incomplete todo items that must be finished before giving your final response:\n\n"
+                f"{incomplete_text}\n\n"
+                "Please continue working on these tasks. Call `write_todos` to mark items as completed "
+                "as you finish them, and only respond when all items are done.\n"
+                "</system_reminder>"
+            ),
+        )
+        return {"jump_to": "model", "messages": [reminder]}
+
+    @override
+    @hook_config(can_jump_to=["model"])
+    async def aafter_model(
+        self,
+        state: PlanningState,
+        runtime: Runtime,
+    ) -> dict[str, Any] | None:
+        """Async version of after_model."""
+        return self.after_model(state, runtime)

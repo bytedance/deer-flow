@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 4
+config_version: 8
 
 # ============================================================================
 # Logging
@@ -21,10 +21,11 @@ config_version: 4
 log_level: info
 
 # ============================================================================
-# Token Usage Tracking
+# Token Usage
 # ============================================================================
-# Track LLM token usage per model call (input/output/total tokens)
-# Logs at info level via TokenUsageMiddleware
+# Enable token usage collection and display.
+# When enabled, DeerFlow records input/output/total tokens per model call
+# and shows usage metadata in the workspace UI when providers return it.
 token_usage:
   enabled: false
 
@@ -50,6 +51,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: OpenAI model
   # - name: gpt-4
@@ -75,6 +80,41 @@ models:
   #   output_version: responses/v1
   #   supports_vision: true
 
+  # Example: Ollama (native provider — preserves thinking/reasoning content)
+  #
+  # IMPORTANT: Use langchain_ollama:ChatOllama instead of langchain_openai:ChatOpenAI
+  # for Ollama models. The OpenAI-compatible endpoint (/v1/chat/completions) does NOT
+  # return reasoning_content as a separate field — thinking content is either flattened
+  # into <think> tags or dropped entirely (ollama/ollama#15293). The native Ollama API
+  # (/api/chat) correctly separates thinking from response content.
+  #
+  # Install: cd backend && uv pip install 'deerflow-harness[ollama]'
+  #
+  # - name: qwen3-local
+  #   display_name: Qwen3 32B (Ollama)
+  #   use: langchain_ollama:ChatOllama
+  #   model: qwen3:32b
+  #   base_url: http://localhost:11434   # No /v1 suffix — uses native /api/chat
+  #   num_predict: 8192
+  #   temperature: 0.7
+  #   reasoning: true                    # Passes think:true to Ollama native API
+  #   supports_thinking: true
+  #   supports_vision: false
+  #
+  # - name: gemma4-local
+  #   display_name: Gemma 4 27B (Ollama)
+  #   use: langchain_ollama:ChatOllama
+  #   model: gemma4:27b
+  #   base_url: http://localhost:11434
+  #   num_predict: 8192
+  #   temperature: 0.7
+  #   reasoning: true
+  #   supports_thinking: true
+  #   supports_vision: true
+  #
+  # For Docker deployments, use host.docker.internal instead of localhost:
+  #   base_url: http://host.docker.internal:11434
+
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet
   #   display_name: Claude 3.5 Sonnet
@@ -88,6 +128,9 @@ models:
   #   when_thinking_enabled:
   #     thinking:
   #       type: enabled
+  #   when_thinking_disabled:
+  #     thinking:
+  #       type: disabled
 
   # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
@@ -120,6 +163,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
@@ -136,6 +183,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
@@ -153,6 +204,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: Novita AI (OpenAI-compatible)
   # Novita provides an OpenAI-compatible API with competitive pricing
@@ -173,6 +228,10 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: MiniMax (OpenAI-compatible) - International Edition
   # MiniMax provides high-performance models with 204K context window
@@ -232,7 +291,6 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
 
-  
   # Example: OpenRouter (OpenAI-compatible)
   # OpenRouter models use the same ChatOpenAI + base_url pattern as other OpenAI-compatible gateways.
   # - name: openrouter-gemini-2.5-flash
@@ -245,6 +303,49 @@ models:
   #   max_retries: 2
   #   max_tokens: 8192
   #   temperature: 0.7
+
+  # Example: vLLM 0.19.0 (OpenAI-compatible, with reasoning toggle)
+  # DeerFlow's vLLM provider preserves vLLM reasoning across tool-call turns and
+  # toggles Qwen-style reasoning by writing
+  # extra_body.chat_template_kwargs.enable_thinking=true/false.
+  # Some reasoning models also require the server to be started with
+  # `vllm serve ... --reasoning-parser <parser>`.
+  # - name: qwen3-32b-vllm
+  #   display_name: Qwen3 32B (vLLM)
+  #   use: deerflow.models.vllm_provider:VllmChatModel
+  #   model: Qwen/Qwen3-32B
+  #   api_key: $VLLM_API_KEY
+  #   base_url: http://localhost:8000/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       chat_template_kwargs:
+  #         enable_thinking: true
+
+
+  # Example: Qwen3-Coder deployed on MindIE Engine
+  # - name: Qwen3_Coder_480B_MindIE
+  #   display_name: Qwen3-Coder-480B (MindIE)
+  #   use: deerflow.models.mindie_provider:MindIEChatModel
+  #   model: Qwen3-Coder-480B-A35B-Instruct-Client
+  #   base_url: http://localhost:8989/v1
+  #   api_key: $OPENAI_API_KEY
+  #   temperature: 0
+  #   max_retries: 1
+  #   supports_thinking: false
+  #   supports_vision: false
+  #   supports_reasoning_effort: false
+  #   # --- Advanced Network Settings ---
+  #   # Due to MindIE's streaming limitations with tool calling, the provider
+  #   # uses mock-streaming (awaiting full generation). Extended timeouts are required.
+  #   read_timeout: 900.0     # 15 minutes to prevent drops during long document generation
+  #   connect_timeout: 30.0
+  #   write_timeout: 60.0
+  #   pool_timeout: 30.0
 
 # ============================================================================
 # Tool Groups Configuration
@@ -283,6 +384,30 @@ tools:
   #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
   #   search_time_range: 10
 
+  # Web search tool (uses Exa, requires EXA_API_KEY)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.exa.tools:web_search_tool
+  #   max_results: 5
+  #   search_type: auto  # Options: auto, neural, keyword
+  #   contents_max_characters: 1000
+  #   # api_key: $EXA_API_KEY
+
+  # Web search tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.firecrawl.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $FIRECRAWL_API_KEY
+
+  # Web fetch tool (uses Exa)
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry below before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.exa.tools:web_fetch_tool
+  #   # api_key: $EXA_API_KEY
+
   # Web fetch tool (uses Jina AI reader)
   - name: web_fetch
     group: web
@@ -299,6 +424,12 @@ tools:
   #   fetch_time: 10
   #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
   #   navigation_timeout: 30
+
+  # Web fetch tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.firecrawl.tools:web_fetch_tool
+  #   # api_key: $FIRECRAWL_API_KEY
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
@@ -324,6 +455,16 @@ tools:
   - name: read_file
     group: file:read
     use: deerflow.sandbox.tools:read_file_tool
+
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+    max_results: 200
+
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+    max_results: 100
 
   - name: write_file
     group: file:write
@@ -359,12 +500,41 @@ tool_search:
 
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
+uploads:
+  # Automatic Office/PDF conversion runs on the backend host before sandbox
+  # isolation applies. Keep this disabled unless uploads come from a fully
+  # trusted source and you intentionally accept host-side parser risk.
+  auto_convert_documents: false
+  # Controls which PDF-to-Markdown converter is used whenever PDF conversion
+  # runs. Automatic upload conversion is gated separately by
+  # auto_convert_documents.
+  # auto        — prefer pymupdf4llm when installed; fall back to MarkItDown for
+  #               image-based or encrypted PDFs (recommended default).
+  # pymupdf4llm — always use pymupdf4llm (must be installed: uv add pymupdf4llm).
+  #               Better heading/table extraction; faster on most files.
+  # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
+  pdf_converter: auto
+
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+  # Optional: Mount additional host directories into the sandbox.
+  # Each mount maps a host path to a virtual container path accessible by the agent.
+  # mounts:
+  #   - host_path: /home/user/my-project    # Absolute path on the host machine
+  #     container_path: /mnt/my-project     # Virtual path inside the sandbox
+  #     read_only: true                     # Whether the mount is read-only (default: false)
+
+  # Tool output truncation limits (characters).
+  # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
+  # read_file and ls use head-truncation since their content is front-loaded.
+  # Set to 0 to disable truncation.
+  bash_output_max_chars: 20000
+  read_file_output_max_chars: 50000
+  ls_output_max_chars: 20000
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
@@ -397,6 +567,9 @@ sandbox:
 #   #   - host_path: /path/on/host
 #   #     container_path: /home/user/shared
 #   #     read_only: false
+#   #
+#   #   # DeerFlow will surface configured container_path values to the agent,
+#   #   # so it can directly read/write mounted directories such as /home/user/shared
 #
 #   # Optional: Environment variables to inject into the sandbox container
 #   # Values starting with $ will be resolved from host environment variables
@@ -422,13 +595,48 @@ sandbox:
 # subagents:
 #   # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
 #   timeout_seconds: 900
+#   # Optional global max-turn override for all subagents
+#   # max_turns: 120
 #
-#   # Optional per-agent timeout overrides
+#   # Optional per-agent overrides (applies to both built-in and custom agents)
 #   agents:
 #     general-purpose:
 #       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
+#       max_turns: 160
+#       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
+#       # skills:               # Skill whitelist (default: inherit all enabled skills)
+#       #   - web-search
+#       #   - data-analysis
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
+#       max_turns: 80
+#       # skills: []            # No skills for bash agent
+#
+#   # Custom subagent types: define specialized agents with their own prompts,
+#   # tools, skills, and model configuration. Custom agents are available via
+#   # the `task` tool alongside built-in types (general-purpose, bash).
+#   # custom_agents:
+#   #   analysis:
+#   #     description: "Data analysis specialist for processing datasets and generating insights"
+#   #     system_prompt: |
+#   #       You are a data analysis subagent. Focus on:
+#   #       - Processing and analyzing datasets
+#   #       - Generating visualizations
+#   #       - Providing statistical insights
+#   #     tools:                  # Tool whitelist (null = inherit all)
+#   #       - bash
+#   #       - read_file
+#   #       - write_file
+#   #     skills:                 # Skill whitelist (null = inherit all, [] = none)
+#   #       - data-analysis
+#   #       - visualization
+#   #     model: inherit          # 'inherit' uses parent's model
+#   #     max_turns: 80
+#   #     timeout_seconds: 600
+#
+#   # Model override: by default, subagents inherit the lead agent's model.
+#   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
+#   # The model name must match a name defined in the `models:` section above.
 
 # ============================================================================
 # ACP Agents Configuration
@@ -473,6 +681,12 @@ skills:
   # This is used by the agent to access skills in both local and Docker sandbox
   # Default: /mnt/skills
   container_path: /mnt/skills
+
+# Note: To restrict which skills are loaded for a specific custom agent,
+# define a `skills` list in that agent's `config.yaml` (e.g. `agents/my-agent/config.yaml`):
+# - Omitted or null: load all globally enabled skills (default)
+# - []: disable all skills for this agent
+# - ["skill-name"]: load only specific skills
 
 # ============================================================================
 # Title Generation Configuration
@@ -533,6 +747,19 @@ summarization:
   # The prompt should guide the model to extract important context
   summary_prompt: null
 
+  # Recently-loaded skill files are excluded from summarization so the agent
+  # does not lose skill instructions after a compression pass. Claude Code uses
+  # a similar strategy (keep the most recent ~5 skills, ~25k total tokens, with
+  # a ~5k cap per skill). Set preserve_recent_skill_count to 0 to disable.
+  preserve_recent_skill_count: 5
+  preserve_recent_skill_tokens: 25000
+  preserve_recent_skill_tokens_per_skill: 5000
+  skill_file_read_tool_names:
+    - read_file
+    - read
+    - view
+    - cat
+
 # ============================================================================
 # Memory Configuration
 # ============================================================================
@@ -547,6 +774,22 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+
+# ============================================================================
+# Custom Agent Management API
+# ============================================================================
+# Controls whether the HTTP gateway exposes custom-agent SOUL/USER.md management.
+# Keep this disabled unless the gateway is behind a trusted authenticated admin boundary.
+agents_api:
+  enabled: false
+
+# ============================================================================
+# Skill Self-Evolution Configuration
+# ============================================================================
+# Allow the agent to autonomously create and improve skills in skills/custom/.
+skill_evolution:
+  enabled: false                # Set to true to allow agent-managed writes under skills/custom
+  moderation_model_name: null  # Model for LLM-based security scanning (null = use default model)
 
 # ============================================================================
 # Checkpointer Configuration
@@ -624,12 +867,42 @@ checkpointer:
 #     enabled: false
 #     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
 #     app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # empty = allow all; can also be a single Slack user ID string, e.g. U123456, but list form is recommended
 #
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
 #     allowed_users: []               # empty = allow all
+#
+#   wechat:
+#     enabled: false
+#     bot_token: $WECHAT_BOT_TOKEN
+#     ilink_bot_id: $WECHAT_ILINK_BOT_ID
+#     # Optional: allow first-time QR bootstrap when bot_token is absent
+#     qrcode_login_enabled: true
+#     # Optional: sent as iLink-App-Id header when provided
+#     ilink_app_id: ""
+#     # Optional: sent as SKRouteTag header when provided
+#     route_tag: ""
+#     allowed_users: []               # empty = allow all
+#     # Optional: long-polling timeout in seconds
+#     polling_timeout: 35
+#     # Optional: QR poll interval in seconds when qrcode_login_enabled is true
+#     qrcode_poll_interval: 2
+#     # Optional: QR bootstrap timeout in seconds
+#     qrcode_poll_timeout: 180
+#     # Optional: persist getupdates cursor under the gateway container volume
+#     state_dir: ./.deer-flow/wechat/state
+#     # Optional: max inbound image size in bytes before skipping download
+#     max_inbound_image_bytes: 20971520
+#     # Optional: max outbound image size in bytes before skipping upload
+#     max_outbound_image_bytes: 20971520
+#     # Optional: max inbound file size in bytes before skipping download
+#     max_inbound_file_bytes: 52428800
+#     # Optional: max outbound file size in bytes before skipping upload
+#     max_outbound_file_bytes: 52428800
+#     # Optional: allowed file extensions for regular file receive/send
+#     allowed_file_extensions: [".txt", ".md", ".pdf", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".log", ".zip", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf"]
 #
 #     # Optional: channel-level session overrides
 #     session:
@@ -646,6 +919,10 @@ checkpointer:
 #           context:
 #             thinking_enabled: true
 #             subagent_enabled: true
+#   wecom:
+#     enabled: false
+#     bot_id: $WECOM_BOT_ID
+#     bot_secret: $WECOM_BOT_SECRET
 
 # ============================================================================
 # Guardrails Configuration
@@ -681,3 +958,20 @@ checkpointer:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# Circuit Breaker Configuration
+# ============================================================================
+# Circuit breaker for LLM calls prevents repeated requests to a failing provider.
+# When the failure threshold is reached, subsequent calls fast-fail until recovery.
+#
+# This is useful for:
+# - Avoiding rate-limit bans during provider outages
+# - Reducing resource exhaustion from retry loops
+# - Gracefully degrading when LLM services are unavailable
+
+# circuit_breaker:
+#   # Number of consecutive failures before opening the circuit (default: 5)
+#   failure_threshold: 5
+#   # Time in seconds before attempting to recover (default: 60)
+#   recovery_timeout_sec: 60

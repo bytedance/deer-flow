@@ -1,5 +1,4 @@
 {
-  "_comment": "=================== LangGraph配置文件 ===================\n\n设计思路说明：\n\n为什么需要这个文件：\n1. 声明LangGraph项目的图（graphs）和依赖关系\n2. 配置检查点（checkpointer）用于状态持久化\n3. 指定Python版本和依赖来源\n\n核心配置项说明：\n- $schema: JSON Schema验证，确保配置正确\n- python_version: 指定Python版本\n- dependencies: 项目依赖来源\n- env: 环境变量文件路径\n- graphs: 定义的LangGraph图及其入口点\n- checkpointer: 检查点实现及其入口点\n\n为什么这样设计：\n- 声明式配置：清晰定义项目结构\n- 模块化：每个组件都有明确的入口点\n- 可扩展：便于添加新的图和检查点实现",
   "$schema": "https://langgra.ph/schema.json",
   "python_version": "3.12",
   "dependencies": [
@@ -7,11 +6,9 @@
   ],
   "env": ".env",
   "graphs": {
-    "_comment": "定义LangGraph图及其入口点\n\n为什么只定义lead_agent：\n- 当前版本只实现了lead_agent\n- 其他代理通过agent_name上下文参数实现\n- 保持配置简洁，避免复杂的多图管理\n\n入口点格式：\n- module.submodule:function_name\n- 指向make_lead_agent工厂函数",
     "lead_agent": "deerflow.agents:make_lead_agent"
   },
   "checkpointer": {
-    "_comment": "配置检查点实现\n\n为什么需要检查点：\n- 保存代理状态，支持暂停和恢复\n- 跨请求保持会话上下文\n- 支持时间旅行调试\n\n为什么使用async_provider：\n- 异步实现，不阻塞事件循环\n- 与FastAPI的异步架构一致\n- 支持高并发场景",
     "path": "./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer"
   }
 }

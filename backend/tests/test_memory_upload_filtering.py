@@ -3,14 +3,14 @@
 Covers two functions introduced to prevent ephemeral file-upload context from
 persisting in long-term memory:
 
-  - _filter_messages_for_memory  (memory_middleware)
+  - filter_messages_for_memory  (message_processing)
   - _strip_upload_mentions_from_memory  (updater)
 """
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.updater import _strip_upload_mentions_from_memory
-from deerflow.agents.middlewares.memory_middleware import _filter_messages_for_memory
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,7 +31,7 @@ def _ai(text: str, tool_calls=None) -> AIMessage:
 
 
 # ===========================================================================
-# _filter_messages_for_memory
+# filter_messages_for_memory
 # ===========================================================================
 
 
@@ -45,7 +45,7 @@ class TestFilterMessagesForMemory:
             _human(_UPLOAD_BLOCK),
             _ai("I have read the file. It says: Hello."),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         assert result == []
 
     def test_upload_with_real_question_preserves_question(self):
@@ -56,7 +56,7 @@ class TestFilterMessagesForMemory:
             _human(combined),
             _ai("The file contains: Hello DeerFlow."),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
 
         assert len(result) == 2
         human_result = result[0]
@@ -71,7 +71,7 @@ class TestFilterMessagesForMemory:
             _human("What is the capital of France?"),
             _ai("The capital of France is Paris."),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         assert len(result) == 2
         assert result[0].content == "What is the capital of France?"
         assert result[1].content == "The capital of France is Paris."
@@ -84,7 +84,7 @@ class TestFilterMessagesForMemory:
             ToolMessage(content="Search results", tool_call_id="1"),
             _ai("Here are the results."),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         human_msgs = [m for m in result if m.type == "human"]
         ai_msgs = [m for m in result if m.type == "ai"]
         assert len(human_msgs) == 1
@@ -101,7 +101,7 @@ class TestFilterMessagesForMemory:
             _human("What is 2 + 2?"),
             _ai("4"),
         ]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         human_contents = [m.content for m in result if m.type == "human"]
         ai_contents = [m.content for m in result if m.type == "ai"]
 
@@ -121,17 +121,75 @@ class TestFilterMessagesForMemory:
             ]
         )
         msgs = [msg, _ai("Done.")]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         assert result == []
 
     def test_file_path_not_in_filtered_content(self):
         """After filtering, no upload file path should appear in any message."""
         combined = _UPLOAD_BLOCK + "\n\nSummarise the file please."
         msgs = [_human(combined), _ai("It says hello.")]
-        result = _filter_messages_for_memory(msgs)
+        result = filter_messages_for_memory(msgs)
         all_content = " ".join(m.content for m in result if isinstance(m.content, str))
         assert "/mnt/user-data/uploads/" not in all_content
         assert "<uploaded_files>" not in all_content
+
+
+# ===========================================================================
+# detect_correction
+# ===========================================================================
+
+
+class TestDetectCorrection:
+    def test_detects_english_correction_signal(self):
+        msgs = [
+            _human("Please help me run the project."),
+            _ai("Use npm start."),
+            _human("That's wrong, use make dev instead."),
+            _ai("Understood."),
+        ]
+
+        assert detect_correction(msgs) is True
+
+    def test_detects_chinese_correction_signal(self):
+        msgs = [
+            _human("帮我启动项目"),
+            _ai("用 npm start"),
+            _human("不对，改用 make dev"),
+            _ai("明白了"),
+        ]
+
+        assert detect_correction(msgs) is True
+
+    def test_returns_false_without_signal(self):
+        msgs = [
+            _human("Please explain the build setup."),
+            _ai("Here is the build setup."),
+            _human("Thanks, that makes sense."),
+        ]
+
+        assert detect_correction(msgs) is False
+
+    def test_only_checks_recent_messages(self):
+        msgs = [
+            _human("That is wrong, use make dev instead."),
+            _ai("Noted."),
+            _human("Let's discuss tests."),
+            _ai("Sure."),
+            _human("What about linting?"),
+            _ai("Use ruff."),
+            _human("And formatting?"),
+            _ai("Use make format."),
+        ]
+
+        assert detect_correction(msgs) is False
+
+    def test_handles_list_content(self):
+        msgs = [
+            HumanMessage(content=["That is wrong,", {"type": "text", "text": "use make dev instead."}]),
+            _ai("Updated."),
+        ]
+
+        assert detect_correction(msgs) is True
 
 
 # ===========================================================================
@@ -212,3 +270,73 @@ class TestStripUploadMentionsFromMemory:
         mem = {"user": {}, "history": {}, "facts": []}
         result = _strip_upload_mentions_from_memory(mem)
         assert result == {"user": {}, "history": {}, "facts": []}
+
+
+# ===========================================================================
+# detect_reinforcement
+# ===========================================================================
+
+
+class TestDetectReinforcement:
+    def test_detects_english_reinforcement_signal(self):
+        msgs = [
+            _human("Can you summarise it in bullet points?"),
+            _ai("Here are the key points: ..."),
+            _human("Yes, exactly! That's what I needed."),
+            _ai("Glad it helped."),
+        ]
+
+        assert detect_reinforcement(msgs) is True
+
+    def test_detects_perfect_signal(self):
+        msgs = [
+            _human("Write it more concisely."),
+            _ai("Here is the concise version."),
+            _human("Perfect."),
+            _ai("Great!"),
+        ]
+
+        assert detect_reinforcement(msgs) is True
+
+    def test_detects_chinese_reinforcement_signal(self):
+        msgs = [
+            _human("帮我用要点来总结"),
+            _ai("好的，要点如下：..."),
+            _human("完全正确，就是这个意思"),
+            _ai("很高兴能帮到你"),
+        ]
+
+        assert detect_reinforcement(msgs) is True
+
+    def test_returns_false_without_signal(self):
+        msgs = [
+            _human("What does this function do?"),
+            _ai("It processes the input data."),
+            _human("Can you show me an example?"),
+        ]
+
+        assert detect_reinforcement(msgs) is False
+
+    def test_only_checks_recent_messages(self):
+        # Reinforcement signal buried beyond the -6 window should not trigger
+        msgs = [
+            _human("Yes, exactly right."),
+            _ai("Noted."),
+            _human("Let's discuss tests."),
+            _ai("Sure."),
+            _human("What about linting?"),
+            _ai("Use ruff."),
+            _human("And formatting?"),
+            _ai("Use make format."),
+        ]
+
+        assert detect_reinforcement(msgs) is False
+
+    def test_does_not_conflict_with_correction(self):
+        # A message can trigger correction but not reinforcement
+        msgs = [
+            _human("That's wrong, try again."),
+            _ai("Corrected."),
+        ]
+
+        assert detect_reinforcement(msgs) is False

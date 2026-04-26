@@ -1,38 +1,4 @@
-"""沙箱审计中间件 - bash命令安全审计
-
-===================
-设计思路说明
-===================
-
-**核心职责**：
-为每个bash工具调用执行安全审计：
-1. **命令分类**：使用正则表达式和shlex分析将命令分级为
-   高风险（阻止）、中风险（警告）或安全（通过）
-2. **审计日志**：每次bash调用记录为结构化JSON条目，
-   通过标准日志记录器记录（在langgraph.log中可见）
-
-**为什么需要这个中间件**：
-1. **安全防护**：防止代理执行危险命令破坏系统
-2. **审计追踪**：记录所有命令执行，便于事后审查
-3. **风险提示**：对中风险命令给出警告，让代理 aware
-4. **优雅降级**：阻止命令时返回错误消息，允许代理继续
-
-**设计决策**：
-- **分级响应**：高风险阻止，中风险警告，低风险通过
-- **模式匹配**：使用正则表达式检测危险命令模式
-- **结构化日志**：JSON格式便于解析和分析
-- **同步/异步**：同时支持同步和异步执行路径
-
-**为什么只审计bash命令**：
-- bash是最强大的工具，也是最危险的
-- 其他工具（如read_file）相对安全
-- 聚焦于最高风险的攻击面
-
-**架构说明**：
-- 在wrap_tool_call钩子中检查：工具调用前拦截
-- 使用正则表达式匹配：快速识别危险模式
-- 返回ToolMessage：优雅地报告错误
-"""
+"""SandboxAuditMiddleware - bash command security auditing."""
 
 import json
 import logging
@@ -52,70 +18,124 @@ from deerflow.agents.thread_state import ThreadState
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 命令分类规则
+# Command classification rules
 # ---------------------------------------------------------------------------
 
-# 为什么在导入时预编译正则表达式：
-# - 性能优化：避免重复编译
-# - 错误检查：启动时验证模式有效性
-# - 全局复用：所有实例共享编译后的模式
-
-# 高风险命令模式：匹配这些模式将被阻止
-# 为什么这些是高风险：
-# - rm -rf /: 删除系统文件，破坏性极强
-# - curl|sh: 下载并执行脚本，可能执行恶意代码
-# - dd: 直接写磁盘，可能破坏文件系统
-# - mkfs: 格式化文件系统，会删除所有数据
-# - cat /etc/shadow: 读取敏感密码文件
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),  # rm -rf / /* ~ /home /root
-    re.compile(r"(curl|wget).+\|\s*(ba)?sh"),  # curl|sh, wget|sh
+    # --- original rules (retained) ---
+    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
     re.compile(r"cat\s+/etc/shadow"),
-    re.compile(r">\s+/etc/"),  # overwrite /etc/ files
+    re.compile(r">+\s*/etc/"),
+    # --- pipe to sh/bash (generalised, replaces old curl|sh rule) ---
+    re.compile(r"\|\s*(ba)?sh\b"),
+    # --- command substitution (targeted – only dangerous executables) ---
+    re.compile(r"[`$]\(?\s*(curl|wget|bash|sh|python|ruby|perl|base64)"),
+    # --- base64 decode piped to execution ---
+    re.compile(r"base64\s+.*-d.*\|"),
+    # --- overwrite system binaries ---
+    re.compile(r">+\s*(/usr/bin/|/bin/|/sbin/)"),
+    # --- overwrite shell startup files ---
+    re.compile(r">+\s*~/?\.(bashrc|profile|zshrc|bash_profile)"),
+    # --- process environment leakage ---
+    re.compile(r"/proc/[^/]+/environ"),
+    # --- dynamic linker hijack (one-step escalation) ---
+    re.compile(r"\b(LD_PRELOAD|LD_LIBRARY_PATH)\s*="),
+    # --- bash built-in networking (bypasses tool allowlists) ---
+    re.compile(r"/dev/tcp/"),
+    # --- fork bomb ---
+    re.compile(r"\S+\(\)\s*\{[^}]*\|\s*\S+\s*&"),  # :(){ :|:& };:
+    re.compile(r"while\s+true.*&\s*done"),  # while true; do bash & done
 ]
 
-# 中风险命令模式：匹配这些模式将触发警告
-# 为什么这些是中风险而非高风险：
-# - chmod 777: 权限过宽但可逆
-# - pip install: 修改环境但非破坏性
-# - apt install: 安装软件但需要权限
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"chmod\s+777"),  # overly permissive, but reversible
-    re.compile(r"pip\s+install"),
-    re.compile(r"pip3\s+install"),
+    re.compile(r"chmod\s+777"),
+    re.compile(r"pip3?\s+install"),
     re.compile(r"apt(-get)?\s+install"),
+    # sudo/su: no-op under Docker root; warn so LLM is aware
+    re.compile(r"\b(sudo|su)\b"),
+    # PATH modification: long attack chain, warn rather than block
+    re.compile(r"\bPATH\s*="),
 ]
 
 
-def _classify_command(command: str) -> str:
-    """返回'block'、'warn'或'pass'
+def _split_compound_command(command: str) -> list[str]:
+    """Split a compound command into sub-commands (quote-aware).
 
-    **为什么需要分类函数**：
-    - **标准化评估**：统一的风险评估标准
-    - **可扩展性**：便于添加新的检测规则
-    - **性能优化**：先高风险再中风险，快速失败
-
-    **检测策略**：
-    1. 规范化命令（压缩空白）
-    2. 匹配高风险模式
-    3. 尝试shlex解析后再匹配（更精确）
-    4. 匹配中风险模式
-    5. 默认通过
-
-    **为什么使用两种匹配方式**：
-    - 正则匹配：快速但可能有误报
-    - shlex解析：更精确但可能失败
-    - 结合使用：兼顾速度和准确性
-
-    **返回值**：
-        'block': 高风险，阻止执行
-        'warn': 中风险，记录警告
-        'pass': 低风险，正常执行
+    Scans the raw command string so unquoted shell control operators are
+    recognised even when they are not surrounded by whitespace
+    (e.g. ``safe;rm -rf /`` or ``rm -rf /&&echo ok``). Operators inside
+    quotes are ignored. If the command ends with an unclosed quote or a
+    dangling escape, return the whole command unchanged (fail-closed —
+    safer to classify the unsplit string than silently drop parts).
     """
-    # Normalize for matching (collapse whitespace)
+    parts: list[str] = []
+    current: list[str] = []
+    in_single_quote = False
+    in_double_quote = False
+    escaping = False
+    index = 0
+
+    while index < len(command):
+        char = command[index]
+
+        if escaping:
+            current.append(char)
+            escaping = False
+            index += 1
+            continue
+
+        if char == "\\" and not in_single_quote:
+            current.append(char)
+            escaping = True
+            index += 1
+            continue
+
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(char)
+            index += 1
+            continue
+
+        if char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(char)
+            index += 1
+            continue
+
+        if not in_single_quote and not in_double_quote:
+            if command.startswith("&&", index) or command.startswith("||", index):
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                index += 2
+                continue
+            if char == ";":
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                index += 1
+                continue
+
+        current.append(char)
+        index += 1
+
+    # Unclosed quote or dangling escape → fail-closed, return whole command
+    if in_single_quote or in_double_quote or escaping:
+        return [command]
+
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+    return parts if parts else [command]
+
+
+def _classify_single_command(command: str) -> str:
+    """Classify a single (non-compound) command. Return 'block', 'warn', or 'pass'."""
     normalized = " ".join(command.split())
 
     for pattern in _HIGH_RISK_PATTERNS:
@@ -140,37 +160,55 @@ def _classify_command(command: str) -> str:
     return "pass"
 
 
+def _classify_command(command: str) -> str:
+    """Return 'block', 'warn', or 'pass'.
+
+    Strategy:
+    1. First scan the *whole* raw command against high-risk patterns. This
+       catches structural attacks like ``while true; do bash & done`` or
+       ``:(){ :|:& };:`` that span multiple shell statements — splitting them
+       on ``;`` would destroy the pattern context.
+    2. Then split compound commands (e.g. ``cmd1 && cmd2 ; cmd3``) and
+       classify each sub-command independently. The most severe verdict wins.
+    """
+    # Pass 1: whole-command high-risk scan (catches multi-statement patterns)
+    normalized = " ".join(command.split())
+    for pattern in _HIGH_RISK_PATTERNS:
+        if pattern.search(normalized):
+            return "block"
+
+    # Pass 2: per-sub-command classification
+    sub_commands = _split_compound_command(command)
+    worst = "pass"
+    for sub in sub_commands:
+        verdict = _classify_single_command(sub)
+        if verdict == "block":
+            return "block"  # short-circuit: can't get worse
+        if verdict == "warn":
+            worst = "warn"
+    return worst
+
+
 # ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
 
 
 class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
-    """Bash命令安全审计中间件
+    """Bash command security auditing middleware.
 
-    **为什么需要这个中间件**：
-    - **安全第一**：防止代理执行危险命令
-    - **审计追踪**：记录所有命令执行
-    - **风险提示**：让代理 aware 中风险操作
+    For every ``bash`` tool call:
+    1. **Command classification**: regex + shlex analysis grades commands as
+       high-risk (block), medium-risk (warn), or safe (pass).
+    2. **Audit log**: every bash call is recorded as a structured JSON entry
+       via the standard logger (visible in langgraph.log).
 
-    **工作流程**：
-    对于每个``bash``工具调用：
-    1. **命令分类**：正则表达式+shlex分析将命令分级为
-       高风险（阻止）、中风险（警告）或安全（通过）
-    2. **审计日志**：每次bash调用记录为结构化JSON条目
-       通过标准日志记录器（在langgraph.log中可见）
+    High-risk commands (e.g. ``rm -rf /``, ``curl url | bash``) are blocked:
+    the handler is not called and an error ``ToolMessage`` is returned so the
+    agent loop can continue gracefully.
 
-    **分级响应**：
-    - **高风险命令**（如``rm -rf /``、``curl url | bash``）被阻止：
-      不调用处理程序，返回错误``ToolMessage``，使代理循环可以优雅地继续
-
-    - **中风险命令**（如``pip install``、``chmod 777``）正常执行：
-      警告附加到工具结果，让LLM aware
-
-    **为什么这样设计**：
-    - **预防为主**：阻止而非修复
-    - **透明审计**：所有命令都有记录
-    - **教育意义**：警告帮助代理学习安全实践
+    Medium-risk commands (e.g. ``pip install``, ``chmod 777``) are executed
+    normally; a warning is appended to the tool result so the LLM is aware.
     """
 
     state_schema = ThreadState
@@ -190,11 +228,16 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
             thread_id = cfg.get("configurable", {}).get("thread_id")
         return thread_id
 
-    def _write_audit(self, thread_id: str | None, command: str, verdict: str) -> None:
+    _AUDIT_COMMAND_LIMIT = 200
+
+    def _write_audit(self, thread_id: str | None, command: str, verdict: str, *, truncate: bool = False) -> None:
+        audited_command = command
+        if truncate and len(command) > self._AUDIT_COMMAND_LIMIT:
+            audited_command = f"{command[: self._AUDIT_COMMAND_LIMIT]}... ({len(command)} chars)"
         record = {
             "timestamp": datetime.now(UTC).isoformat(),
             "thread_id": thread_id or "unknown",
-            "command": command,
+            "command": audited_command,
             "verdict": verdict,
         }
         logger.info("[SandboxAudit] %s", json.dumps(record, ensure_ascii=False))
@@ -225,22 +268,51 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         )
 
     # ------------------------------------------------------------------
+    # Input sanitisation
+    # ------------------------------------------------------------------
+
+    # Normal bash commands rarely exceed a few hundred characters.  10 000 is
+    # well above any legitimate use case yet a tiny fraction of Linux ARG_MAX.
+    # Anything longer is almost certainly a payload injection or base64-encoded
+    # attack string.
+    _MAX_COMMAND_LENGTH = 10_000
+
+    def _validate_input(self, command: str) -> str | None:
+        """Return ``None`` if *command* is acceptable, else a rejection reason."""
+        if not command.strip():
+            return "empty command"
+        if len(command) > self._MAX_COMMAND_LENGTH:
+            return "command too long"
+        if "\x00" in command:
+            return "null byte detected"
+        return None
+
+    # ------------------------------------------------------------------
     # Core logic (shared between sync and async paths)
     # ------------------------------------------------------------------
 
-    def _pre_process(self, request: ToolCallRequest) -> tuple[str, str | None, str]:
+    def _pre_process(self, request: ToolCallRequest) -> tuple[str, str | None, str, str | None]:
         """
-        Returns (command, thread_id, verdict).
+        Returns (command, thread_id, verdict, reject_reason).
         verdict is 'block', 'warn', or 'pass'.
+        reject_reason is non-None only for input sanitisation rejections.
         """
         args = request.tool_call.get("args", {})
-        command: str = args.get("command", "")
+        raw_command = args.get("command")
+        command = raw_command if isinstance(raw_command, str) else ""
         thread_id = self._get_thread_id(request)
 
-        # ① classify command
+        # ① input sanitisation — reject malformed input before regex analysis
+        reject_reason = self._validate_input(command)
+        if reject_reason:
+            self._write_audit(thread_id, command, "block", truncate=True)
+            logger.warning("[SandboxAudit] INVALID INPUT thread=%s reason=%s", thread_id, reject_reason)
+            return command, thread_id, "block", reject_reason
+
+        # ② classify command
         verdict = _classify_command(command)
 
-        # ② audit log
+        # ③ audit log
         self._write_audit(thread_id, command, verdict)
 
         if verdict == "block":
@@ -248,7 +320,7 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         elif verdict == "warn":
             logger.warning("[SandboxAudit] WARN (medium-risk) thread=%s cmd=%r", thread_id, command)
 
-        return command, thread_id, verdict
+        return command, thread_id, verdict, None
 
     # ------------------------------------------------------------------
     # wrap_tool_call hooks
@@ -263,9 +335,10 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         if request.tool_call.get("name") != "bash":
             return handler(request)
 
-        command, _, verdict = self._pre_process(request)
+        command, _, verdict, reject_reason = self._pre_process(request)
         if verdict == "block":
-            return self._build_block_message(request, "security violation detected")
+            reason = reject_reason or "security violation detected"
+            return self._build_block_message(request, reason)
         result = handler(request)
         if verdict == "warn":
             result = self._append_warn_to_result(result, command)
@@ -280,9 +353,10 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         if request.tool_call.get("name") != "bash":
             return await handler(request)
 
-        command, _, verdict = self._pre_process(request)
+        command, _, verdict, reject_reason = self._pre_process(request)
         if verdict == "block":
-            return self._build_block_message(request, "security violation detected")
+            reason = reject_reason or "security violation detected"
+            return self._build_block_message(request, reason)
         result = await handler(request)
         if verdict == "warn":
             result = self._append_warn_to_result(result, command)

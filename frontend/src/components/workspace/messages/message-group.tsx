@@ -215,7 +215,7 @@ function ToolCall({
           <ChainOfThoughtSearchResults>
             {result.map((item) => (
               <ChainOfThoughtSearchResult key={item.url}>
-                <a href={item.url} target="_blank" rel="noreferrer">
+                <a href={item.url} target="_blank" rel="noopener noreferrer">
                   {item.title}
                 </a>
               </ChainOfThoughtSearchResult>
@@ -250,7 +250,7 @@ function ToolCall({
                     className="size-24 overflow-hidden rounded-lg object-cover"
                     href={item.source_url}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer"
                   >
                     <div className="bg-accent size-24">
                       <img
@@ -280,16 +280,17 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
         label={t.toolCalls.viewWebPage}
         icon={GlobeIcon}
-        onClick={() => {
-          window.open(url, "_blank");
-        }}
       >
         <ChainOfThoughtSearchResult>
           {url && (
-            <a href={url} target="_blank" rel="noreferrer">
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="cursor-pointer"
+            >
               {title}
             </a>
           )}
@@ -335,7 +336,7 @@ function ToolCall({
       description = t.toolCalls.writeFile;
     }
     const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path) {
+    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
       setTimeout(() => {
         const url = new URL(
           `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,

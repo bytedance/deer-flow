@@ -1,7 +1,5 @@
 # Middleware 执行流程
 
-> **文档目的**：详细说明DeerFlow中Middleware的执行顺序、设计模式和关键决策点
-
 ## Middleware 列表
 
 `create_deerflow_agent` 通过 `RuntimeFeatures` 组装的完整 middleware 链（默认全开时）：
@@ -23,23 +21,13 @@
 | 12 | LoopDetectionMiddleware | | | ✓ | | | ✓ | ✗ | 始终开启 |
 | 13 | ClarificationMiddleware | | | ✓ | | | ✓ | ✗ | 始终最后 |
 
-**设计思路说明**：
-
-- **主 Agent 14 个 middleware**：`make_lead_agent` 创建的完整链
-- **Subagent 4 个 middleware**：ThreadData、Sandbox、Guardrail、ToolErrorHandling
-- **为什么 Subagent 链更短**：
-  - 不需要上传处理（UploadsMiddleware）- 子代理不处理用户上传
-  - 不需要标题生成（TitleMiddleware）- 只在主对话生成
-  - 不需要记忆（MemoryMiddleware）- 记忆由主代理管理
-  - 不需要循环检测（LoopDetectionMiddleware）- 简化子代理逻辑
+主 agent **14 个** middleware（`make_lead_agent`），subagent **4 个**（ThreadData、Sandbox、Guardrail、ToolErrorHandling）。`create_deerflow_agent` Phase 1 实现 **13 个**（Guardrail 仅支持自定义实例，无内置默认）。
 
 ## 执行流程
 
-### LangChain `create_agent` 的规则
-
-**为什么这样设计**：
-- **`before_*` 正序执行**（列表位置 0 → N）：确保初始化按依赖顺序进行
-- **`after_*` 反序执行**（列表位置 N → 0）：实现类似洋葱模型的清理顺序
+LangChain `create_agent` 的规则：
+- **`before_*` 正序执行**（列表位置 0 → N）
+- **`after_*` 反序执行**（列表位置 N → 0）
 
 ```mermaid
 graph TB
@@ -85,11 +73,6 @@ graph TB
     class SBR,MEM afterAgentNode
     class START,END terminalNode
 ```
-
-**关键设计点**：
-- ClarificationMiddleware 在列表最后，但 `after_model` 反序时最先执行
-- 这样设计是为了**第一个拦截** `ask_clarification` tool call
-- 其他 middleware 的 `after_model` 不会执行（中断机制）
 
 ## 时序图
 
@@ -172,7 +155,7 @@ sequenceDiagram
 
 ## 洋葱模型
 
-**列表位置决定在洋葱中的层级** — 位置 0 最外层，位置 N 最内层：
+列表位置决定在洋葱中的层级 — 位置 0 最外层，位置 N 最内层：
 
 ```
 进入 before_*：   [0] → [1] → [2] → ... → [10] → MODEL
@@ -183,11 +166,6 @@ sequenceDiagram
 > [!important] 核心规则
 > 列表最后的 middleware，其 `after_model` **最先执行**。
 > ClarificationMiddleware 在列表末尾，所以它第一个拦截 model 输出。
-
-**为什么这样设计**：
-- Clarification 需要第一个看到 model 输出
-- 如果检测到 `ask_clarification`，立即中断（`Command(goto=END)`）
-- 后续 middleware 的 `after_model` 不再执行
 
 ## 对比：真正的洋葱 vs DeerFlow 的实际情况
 
@@ -238,7 +216,7 @@ sequenceDiagram
 
 ### DeerFlow 的实际情况
 
-**不是洋葱，是管道**。大部分 middleware 只用一个钩子，不存在对称嵌套。多轮对话时 before_model / after_model 循环执行：
+不是洋葱，是管道。大部分 middleware 只用一个钩子，不存在对称嵌套。多轮对话时 before_model / after_model 循环执行：
 
 ```mermaid
 sequenceDiagram
@@ -284,7 +262,7 @@ sequenceDiagram
 > [!warning] 不是洋葱
 > 14 个 middleware 中只有 SandboxMiddleware 有 before/after 对称（获取/释放）。其余都是单向的：要么只在 `before_*` 做事，要么只在 `after_*` 做事。`before_agent` / `after_agent` 只跑一次，`before_model` / `after_model` 每轮循环都跑。
 
-**硬依赖只有 2 处**：
+硬依赖只有 2 处：
 
 1. **ThreadData 在 Sandbox 之前** — sandbox 需要线程目录
 2. **Clarification 在列表最后** — `after_model` 反序时最先执行，第一个拦截 `ask_clarification`
@@ -298,36 +276,16 @@ sequenceDiagram
 | 反序的意义 | 清理与初始化配对 | 仅影响 after_model 的执行优先级 |
 | 典型例子 | Auth: 校验 token / 清理上下文 | ThreadData: 只创建目录，没有清理 |
 
-**为什么 DeerFlow 不用纯洋葱模型**：
-- **职责单一**：每个 middleware 只做一件事，不需要对称操作
-- **性能优化**：避免不必要的嵌套调用
-- **灵活性**：middleware 可以独立选择执行阶段
-
 ## 关键设计点
 
 ### ClarificationMiddleware 为什么在列表最后？
 
-**位置最后 = `after_model` 最先执行**。它需要**第一个**看到 model 输出，检查是否有 `ask_clarification` tool call。如果有，立即中断（`Command(goto=END)`），后续 middleware 的 `after_model` 不再执行。
-
-**为什么这样设计**：
-- Clarification 是最高优先级的中断机制
-- 需要在其他 middleware 处理之前拦截
-- 一旦确认需要澄清，立即停止处理
+位置最后 = `after_model` 最先执行。它需要**第一个**看到 model 输出，检查是否有 `ask_clarification` tool call。如果有，立即中断（`Command(goto=END)`），后续 middleware 的 `after_model` 不再执行。
 
 ### SandboxMiddleware 的对称性
 
 `before_agent`（正序第 3 个）获取沙箱，`after_agent`（反序第 1 个）释放沙箱。外层进入 → 外层退出，天然的洋葱对称。
 
-**为什么需要对称**：
-- 资源获取和释放必须配对
-- 确保沙箱在整个请求期间可用
-- 即使发生异常也能正确释放
-
 ### 大部分 middleware 只用一个钩子
 
 14 个 middleware 中，只有 SandboxMiddleware 同时用了 `before_agent` + `after_agent`（获取/释放）。其余都只在一个阶段执行。洋葱模型的反序特性主要影响 `after_model` 阶段的执行顺序。
-
-**为什么这样设计**：
-- **简化逻辑**：每个 middleware 只关注一个阶段
-- **减少依赖**：不需要维护跨阶段的状态
-- **易于理解**：职责清晰，行为可预测

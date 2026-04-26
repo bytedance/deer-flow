@@ -1,33 +1,13 @@
 # 文件上传功能
 
-===================
-设计思路说明
-===================
-
-**为什么需要文件上传功能**：
-1. AI Agent处理任务时经常需要参考用户提供的文档
-2. 用户上传的文件需要被Agent安全地访问和使用
-3. Office文档和PDF需要转换为Markdown才能被LLM理解
-
-**核心设计原则**：
-- 线程隔离：每个线程的文件相互独立，避免跨线程访问
-- 自动转换：Office文档和PDF自动转为Markdown，提高可读性
-- 路径映射：虚拟路径让Agent在沙箱中能访问文件
-- 安全验证：防止目录遍历攻击，确保文件安全
-
-**为什么使用"线程目录优先"策略**：
-- 权威存储在线程目录，便于管理
-- 本地沙箱直接使用，避免重复存储
-- 远程沙箱自动同步，确保运行时可见
-
 ## 概述
 
-DeerFlow 后端提供了完整的文件上传功能，支持多文件上传，并自动将 Office 文档和 PDF 转换为 Markdown 格式。
+DeerFlow 后端提供了完整的文件上传功能，支持多文件上传，并可选地将 Office 文档和 PDF 转换为 Markdown 格式。
 
 ## 功能特性
 
 - ✅ 支持多文件同时上传
-- ✅ 自动转换文档为 Markdown（PDF、PPT、Excel、Word）
+- ✅ 可选地转换文档为 Markdown（PDF、PPT、Excel、Word）
 - ✅ 文件存储在线程隔离的目录中
 - ✅ Agent 自动感知已上传的文件
 - ✅ 支持文件列表查询和删除
@@ -68,11 +48,6 @@ POST /api/threads/{thread_id}/uploads
 - `virtual_path`: Agent 在沙箱中使用的虚拟路径
 - `artifact_url`: 前端通过 HTTP 访问文件的 URL
 
-**为什么需要三种路径表示**：
-- `path`: 开发调试时查看实际存储位置
-- `virtual_path`: Agent在沙箱中的统一视图，屏蔽底层实现
-- `artifact_url`: 前端直接访问文件的HTTP端点
-
 ### 2. 列出已上传文件
 ```
 GET /api/threads/{thread_id}/uploads/list
@@ -111,18 +86,15 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 
 ## 支持的文档格式
 
-以下格式会自动转换为 Markdown：
+以下格式在显式启用 `uploads.auto_convert_documents: true` 时会自动转换为 Markdown：
 - PDF (`.pdf`)
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-**为什么选择这些格式**：
-- PDF: 最常见的文档交换格式
-- Office三件套: 企业用户最常用的办公软件
-- 转换为Markdown后，LLM能更好地理解内容
-
 转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名。
+
+默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
 ## Agent 集成
 
@@ -144,11 +116,6 @@ You can read these files using the `read_file` tool with the paths shown above.
 </uploaded_files>
 ```
 
-**为什么使用XML格式**：
-- LLM对XML标签有良好的理解能力
-- 清晰的结构便于Agent解析
-- 与系统提示词的风格一致
-
 ### 使用上传的文件
 
 Agent 在沙箱中运行，使用虚拟路径访问文件。Agent 可以直接使用 `read_file` 工具读取上传的文件：
@@ -166,20 +133,10 @@ read_file(path="/mnt/user-data/uploads/document.md")
 - 实际存储：`backend/.deer-flow/threads/{thread_id}/user-data/uploads/document.pdf`
 - 前端访问：`/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/document.pdf`（HTTP URL）
 
-**为什么使用虚拟路径**：
-- 屏蔽底层存储细节
-- 便于沙箱环境的统一管理
-- 支持不同后端实现（本地/远程）
-
-上传流程采用"线程目录优先"策略：
+上传流程采用“线程目录优先”策略：
 - 先写入 `backend/.deer-flow/threads/{thread_id}/user-data/uploads/` 作为权威存储
 - 本地沙箱（`sandbox_id=local`）直接使用线程目录内容
 - 非本地沙箱会额外同步到 `/mnt/user-data/uploads/*`，确保运行时可见
-
-**为什么采用"线程目录优先"**：
-1. 权威存储单一化，避免数据不一致
-2. 本地沙箱零开销，直接访问
-3. 远程沙箱按需同步，减少网络传输
 
 ## 测试示例
 
@@ -247,21 +204,12 @@ backend/.deer-flow/threads/
             └── ...
 ```
 
-**为什么这样组织目录结构**：
-- thread_id隔离：每个线程的文件互不干扰
-- user-data子目录：与Agent工作区结构一致
-- uploads专用目录：明确区分用户上传和Agent生成的文件
-
 ## 限制
 
 - 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
 - 线程隔离：每个线程的上传文件相互隔离，无法跨线程访问
-
-**为什么限制100MB**：
-- 平衡用户体验和服务器资源
-- 大文件处理时间长，影响交互体验
-- 可通过配置调整，满足不同场景需求
+- 自动文档转换默认关闭；如需启用，需在 `config.yaml` 中显式设置 `uploads.auto_convert_documents: true`
 
 ## 技术实现
 
@@ -284,11 +232,6 @@ backend/.deer-flow/threads/
 - `markitdown>=0.0.1a2` - 文档转换
 - `python-multipart>=0.0.20` - 文件上传处理
 
-**为什么选择markitdown**：
-- 微软开源，支持多种格式
-- 转换质量高，输出标准Markdown
-- 活跃维护，兼容性好
-
 ## 故障排查
 
 ### 文件上传失败
@@ -303,11 +246,6 @@ backend/.deer-flow/threads/
 1. 检查 markitdown 是否正确安装：`uv run python -c "import markitdown"`
 2. 查看日志中的具体错误信息
 3. 某些损坏或加密的文档可能无法转换，但原文件仍会保存
-
-**为什么转换失败时仍保存原文件**：
-- 用户可能需要原始文件
-- 便于后续手动处理
-- 避免因转换问题导致上传失败
 
 ### Agent 看不到上传的文件
 

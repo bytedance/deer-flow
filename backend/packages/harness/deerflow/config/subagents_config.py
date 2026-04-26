@@ -1,39 +1,3 @@
-"""
-子代理（Subagent）系统配置模块
-
-====================
-设计思路说明
-====================
-
-**核心职责**：
-1. 定义子代理超时配置
-2. 支持全局和单个代理超时设置
-3. 管理子代理执行时间限制
-
-**什么是子代理（Subagent）**：
-- 由主代理调用的辅助代理
-- 处理特定任务（如搜索、计算）
-- 独立的执行上下文和超时
-- 实现任务分解和并行
-
-**为什么需要超时配置**：
-- 防止子代理无限期运行
-- 控制资源使用
-- 提供用户响应性
-- 避免僵尸进程
-
-**为什么需要单个代理覆盖**：
-- 不同任务需要不同时间限制
-- 搜索任务可能很快
-    - 复杂计算可能需要更长时间
-- 灵活适应各种场景
-
-**配置优先级**：
-1. 单个代理覆盖（agents[agent_name]）
-2. 全局默认（timeout_seconds）
-3. 硬编码默认值（900秒=15分钟）
-"""
-
 """Configuration for the subagent system loaded from config.yaml."""
 
 import logging
@@ -44,114 +8,180 @@ logger = logging.getLogger(__name__)
 
 
 class SubagentOverrideConfig(BaseModel):
-    """单个代理的配置覆盖
-
-    **timeout_seconds字段**：
-    - 该子代理的超时时间（秒）
-    - None表示使用全局默认值
-    - 最小值1秒
-
-    **为什么使用None表示未设置**：
-    - 区分"显式使用默认"和"未设置"
-    - 支持未来扩展
-    - 配置文件更清晰
-    """
+    """Per-agent configuration overrides."""
 
     timeout_seconds: int | None = Field(
         default=None,
         ge=1,
         description="Timeout in seconds for this subagent (None = use global default)",
     )
+    max_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum turns for this subagent (None = use global or builtin default)",
+    )
+    model: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Model name for this subagent (None = inherit from parent agent)",
+    )
+    skills: list[str] | None = Field(
+        default=None,
+        description="Skill names whitelist for this subagent (None = inherit all enabled skills, [] = no skills)",
+    )
+
+
+class CustomSubagentConfig(BaseModel):
+    """User-defined subagent type declared in config.yaml."""
+
+    description: str = Field(
+        description="When the lead agent should delegate to this subagent",
+    )
+    system_prompt: str = Field(
+        description="System prompt that guides the subagent's behavior",
+    )
+    tools: list[str] | None = Field(
+        default=None,
+        description="Tool names whitelist (None = inherit all tools from parent)",
+    )
+    disallowed_tools: list[str] | None = Field(
+        default_factory=lambda: ["task", "ask_clarification", "present_files"],
+        description="Tool names to deny",
+    )
+    skills: list[str] | None = Field(
+        default=None,
+        description="Skill names whitelist (None = inherit all enabled skills, [] = no skills)",
+    )
+    model: str = Field(
+        default="inherit",
+        description="Model to use - 'inherit' uses parent's model",
+    )
+    max_turns: int = Field(
+        default=50,
+        ge=1,
+        description="Maximum number of agent turns before stopping",
+    )
+    timeout_seconds: int = Field(
+        default=900,
+        ge=1,
+        description="Maximum execution time in seconds",
+    )
 
 
 class SubagentsAppConfig(BaseModel):
-    """子代理系统配置
-
-    **timeout_seconds字段**：
-    - 所有子代理的默认超时（秒）
-    - 默认900秒（15分钟）
-    - 最小值1秒
-    - 可被单个代理覆盖
-
-    **agents字段**：
-    - 按代理名称键入的覆盖配置
-    - 允许为特定代理设置不同超时
-    - 字典结构便于查找
-
-    **为什么默认15分钟**：
-    - 足够完成大多数任务
-    - 不会让用户等待太久
-    - 可根据需要调整
-    """
+    """Configuration for the subagent system."""
 
     timeout_seconds: int = Field(
         default=900,
         ge=1,
         description="Default timeout in seconds for all subagents (default: 900 = 15 minutes)",
     )
+    max_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional default max-turn override for all subagents (None = keep builtin defaults)",
+    )
     agents: dict[str, SubagentOverrideConfig] = Field(
         default_factory=dict,
         description="Per-agent configuration overrides keyed by agent name",
     )
+    custom_agents: dict[str, CustomSubagentConfig] = Field(
+        default_factory=dict,
+        description="User-defined subagent types keyed by agent name",
+    )
 
     def get_timeout_for(self, agent_name: str) -> int:
-        """获取特定代理的有效超时时间
-
-        **解析优先级**：
-        1. 检查是否有该代理的覆盖配置
-        2. 如果有且设置了超时，使用覆盖值
-        3. 否则使用全局默认值
-
-        **使用场景**：
-        - 启动子代理前获取超时
-        - 应用时间限制
-        - 日志记录
+        """Get the effective timeout for a specific agent.
 
         Args:
-            agent_name: 子代理名称
+            agent_name: The name of the subagent.
 
         Returns:
-            超时时间（秒），优先使用代理覆盖，否则全局默认
+            The timeout in seconds, using per-agent override if set, otherwise global default.
         """
         override = self.agents.get(agent_name)
         if override is not None and override.timeout_seconds is not None:
             return override.timeout_seconds
         return self.timeout_seconds
 
+    def get_model_for(self, agent_name: str) -> str | None:
+        """Get the model override for a specific agent.
+
+        Args:
+            agent_name: The name of the subagent.
+
+        Returns:
+            Model name if overridden, None otherwise (subagent will inherit parent model).
+        """
+        override = self.agents.get(agent_name)
+        if override is not None and override.model is not None:
+            return override.model
+        return None
+
+    def get_max_turns_for(self, agent_name: str, builtin_default: int) -> int:
+        """Get the effective max_turns for a specific agent."""
+        override = self.agents.get(agent_name)
+        if override is not None and override.max_turns is not None:
+            return override.max_turns
+        if self.max_turns is not None:
+            return self.max_turns
+        return builtin_default
+
+    def get_skills_for(self, agent_name: str) -> list[str] | None:
+        """Get the skills override for a specific agent.
+
+        Args:
+            agent_name: The name of the subagent.
+
+        Returns:
+            Skill names whitelist if overridden, None otherwise (subagent will inherit all enabled skills).
+        """
+        override = self.agents.get(agent_name)
+        if override is not None and override.skills is not None:
+            return override.skills
+        return None
+
 
 _subagents_config: SubagentsAppConfig = SubagentsAppConfig()
 
 
 def get_subagents_app_config() -> SubagentsAppConfig:
-    """获取当前子代理配置
-
-    Returns:
-        全局子代理配置实例
-    """
+    """Get the current subagents configuration."""
     return _subagents_config
 
 
 def load_subagents_config_from_dict(config_dict: dict) -> None:
-    """从字典加载子代理配置
-
-    **加载后处理**：
-    - 生成配置摘要日志
-    - 显示全局默认和覆盖
-    - 帮助用户理解配置
-
-    **为什么需要日志**：
-    - 确认配置正确加载
-    - 调试超时问题
-    - 审计配置更改
-
-    Args:
-        config_dict: 包含子代理配置的字典
-    """
+    """Load subagents configuration from a dictionary."""
     global _subagents_config
     _subagents_config = SubagentsAppConfig(**config_dict)
 
-    overrides_summary = {name: f"{override.timeout_seconds}s" for name, override in _subagents_config.agents.items() if override.timeout_seconds is not None}
-    if overrides_summary:
-        logger.info(f"Subagents config loaded: default timeout={_subagents_config.timeout_seconds}s, per-agent overrides={overrides_summary}")
+    overrides_summary = {}
+    for name, override in _subagents_config.agents.items():
+        parts = []
+        if override.timeout_seconds is not None:
+            parts.append(f"timeout={override.timeout_seconds}s")
+        if override.max_turns is not None:
+            parts.append(f"max_turns={override.max_turns}")
+        if override.model is not None:
+            parts.append(f"model={override.model}")
+        if override.skills is not None:
+            parts.append(f"skills={override.skills}")
+        if parts:
+            overrides_summary[name] = ", ".join(parts)
+
+    custom_agents_names = list(_subagents_config.custom_agents.keys())
+
+    if overrides_summary or custom_agents_names:
+        logger.info(
+            "Subagents config loaded: default timeout=%ss, default max_turns=%s, per-agent overrides=%s, custom_agents=%s",
+            _subagents_config.timeout_seconds,
+            _subagents_config.max_turns,
+            overrides_summary or "none",
+            custom_agents_names or "none",
+        )
     else:
-        logger.info(f"Subagents config loaded: default timeout={_subagents_config.timeout_seconds}s, no per-agent overrides")
+        logger.info(
+            "Subagents config loaded: default timeout=%ss, default max_turns=%s, no per-agent overrides",
+            _subagents_config.timeout_seconds,
+            _subagents_config.max_turns,
+        )
