@@ -264,7 +264,7 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 2. **Install dependencies**:
    ```bash
-   make install  # Install backend + frontend dependencies
+   make install  # Install backend + frontend dependencies + pre-commit hooks
    ```
 
 3. **(Optional) Pre-pull sandbox image**:
