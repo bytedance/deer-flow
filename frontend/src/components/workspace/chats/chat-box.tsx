@@ -18,15 +18,52 @@ import {
   ArtifactFileList,
   useArtifacts,
 } from "../artifacts";
+import {
+  CanvasPanel,
+  CanvasProvider,
+  useCanvasContext,
+} from "../canvas";
 import { useThread } from "../messages/context";
 
 const CLOSE_MODE = { chat: 100, artifacts: 0 };
 const OPEN_MODE = { chat: 60, artifacts: 40 };
+const CANVAS_CLOSE_MODE = { chat: 100, canvas: 0 };
+const CANVAS_OPEN_MODE = { chat: 50, canvas: 50 };
 
-const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
-  children,
-  threadId,
-}) => {
+// Canvas 面板内部组件
+const CanvasPanelWrapper: React.FC = () => {
+  const { open: canvasOpen, setOpen: setCanvasOpen } = useCanvasContext();
+
+  return (
+    <div
+      className={cn(
+        "h-full transition-transform duration-300 ease-in-out",
+        canvasOpen ? "translate-x-0" : "translate-x-full",
+      )}
+    >
+      <div className="relative flex size-full flex-col">
+        <div className="absolute top-1 right-1 z-30">
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            onClick={() => {
+              setCanvasOpen(false);
+            }}
+          >
+            <XIcon />
+          </Button>
+        </div>
+        <CanvasPanel />
+      </div>
+    </div>
+  );
+};
+
+// 内层面板组件 - 处理 artifacts 和 canvas
+const InnerPanels: React.FC<{
+  children: React.ReactNode;
+  threadId: string;
+}> = ({ children, threadId }) => {
   const { thread } = useThread();
   const pathname = usePathname();
   const threadIdRef = useRef(threadId);
@@ -42,6 +79,8 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     selectedArtifact,
   } = useArtifacts();
 
+  const { open: canvasOpen, setOpen: setCanvasOpen } = useCanvasContext();
+
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   useEffect(() => {
     if (threadIdRef.current !== threadId) {
@@ -51,14 +90,6 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
 
     // Update artifacts from the current thread
     setArtifacts(thread.values.artifacts);
-
-    // DO NOT automatically deselect the artifact when switching threads, because the artifacts auto discovering is not work now.
-    // if (
-    //   selectedArtifact &&
-    //   !thread.values.artifacts?.includes(selectedArtifact)
-    // ) {
-    //   deselect();
-    // }
 
     if (
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
@@ -90,15 +121,35 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     return pathname.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   }, [pathname]);
 
+  // 计算布局：canvas 优先于 artifacts
+  const layout = useMemo(() => {
+    if (canvasOpen) {
+      return CANVAS_OPEN_MODE;
+    }
+    if (artifactPanelOpen) {
+      return OPEN_MODE;
+    }
+    return CLOSE_MODE;
+  }, [canvasOpen, artifactPanelOpen]);
+
   useEffect(() => {
     if (layoutRef.current) {
-      if (artifactPanelOpen) {
-        layoutRef.current.setLayout(OPEN_MODE);
-      } else {
-        layoutRef.current.setLayout(CLOSE_MODE);
-      }
+      layoutRef.current.setLayout(layout);
     }
-  }, [artifactPanelOpen]);
+  }, [layout]);
+
+  // 当 canvas 打开时关闭 artifacts，反之亦然
+  useEffect(() => {
+    if (canvasOpen && artifactsOpen) {
+      setArtifactsOpen(false);
+    }
+  }, [canvasOpen, artifactsOpen, setArtifactsOpen]);
+
+  useEffect(() => {
+    if (artifactPanelOpen && canvasOpen) {
+      setCanvasOpen(false);
+    }
+  }, [artifactPanelOpen, canvasOpen, setCanvasOpen]);
 
   return (
     <ResizablePanelGroup
@@ -114,66 +165,81 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
         id={`${resizableIdBase}-separator`}
         className={cn(
           "opacity-33 hover:opacity-100",
-          !artifactPanelOpen && "pointer-events-none opacity-0",
+          !artifactPanelOpen && !canvasOpen && "pointer-events-none opacity-0",
         )}
       />
       <ResizablePanel
         className={cn(
           "transition-all duration-300 ease-in-out",
-          !artifactsOpen && "opacity-0",
+          !artifactsOpen && !canvasOpen && "opacity-0",
         )}
-        id="artifacts"
+        id={canvasOpen ? "canvas" : "artifacts"}
       >
-        <div
-          className={cn(
-            "h-full p-4 transition-transform duration-300 ease-in-out",
-            artifactPanelOpen ? "translate-x-0" : "translate-x-full",
-          )}
-        >
-          {selectedArtifact ? (
-            <ArtifactFileDetail
-              className="size-full"
-              filepath={selectedArtifact}
-              threadId={threadId}
-            />
-          ) : (
-            <div className="relative flex size-full justify-center">
-              <div className="absolute top-1 right-1 z-30">
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  onClick={() => {
-                    setArtifactsOpen(false);
-                  }}
-                >
-                  <XIcon />
-                </Button>
-              </div>
-              {thread.values.artifacts?.length === 0 ? (
-                <ConversationEmptyState
-                  icon={<FilesIcon />}
-                  title="No artifact selected"
-                  description="Select an artifact to view its details"
-                />
-              ) : (
-                <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
-                  <header className="shrink-0">
-                    <h2 className="text-lg font-medium">Artifacts</h2>
-                  </header>
-                  <main className="min-h-0 grow">
-                    <ArtifactFileList
-                      className="max-w-(--container-width-sm) p-4 pt-12"
-                      files={thread.values.artifacts ?? []}
-                      threadId={threadId}
-                    />
-                  </main>
+        {canvasOpen ? (
+          <CanvasPanelWrapper />
+        ) : (
+          <div
+            className={cn(
+              "h-full p-4 transition-transform duration-300 ease-in-out",
+              artifactPanelOpen ? "translate-x-0" : "translate-x-full",
+            )}
+          >
+            {selectedArtifact ? (
+              <ArtifactFileDetail
+                className="size-full"
+                filepath={selectedArtifact}
+                threadId={threadId}
+              />
+            ) : (
+              <div className="relative flex size-full justify-center">
+                <div className="absolute top-1 right-1 z-30">
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setArtifactsOpen(false);
+                    }}
+                  >
+                    <XIcon />
+                  </Button>
                 </div>
-              )}
-            </div>
-          )}
-        </div>
+                {thread.values.artifacts?.length === 0 ? (
+                  <ConversationEmptyState
+                    icon={<FilesIcon />}
+                    title="No artifact selected"
+                    description="Select an artifact to view its details"
+                  />
+                ) : (
+                  <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
+                    <header className="shrink-0">
+                      <h2 className="text-lg font-medium">Artifacts</h2>
+                    </header>
+                    <main className="min-h-0 grow">
+                      <ArtifactFileList
+                        className="max-w-(--container-width-sm) p-4 pt-12"
+                        files={thread.values.artifacts ?? []}
+                        threadId={threadId}
+                      />
+                    </main>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </ResizablePanel>
     </ResizablePanelGroup>
+  );
+};
+
+const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
+  children,
+  threadId,
+}) => {
+  return (
+    <CanvasProvider>
+      <InnerPanels threadId={threadId}>{children}</InnerPanels>
+    </CanvasProvider>
   );
 };
 
