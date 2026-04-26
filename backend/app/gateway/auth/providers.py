@@ -12,12 +12,12 @@ class AuthProvider(ABC):
 
         Returns User if authentication succeeds, None otherwise.
         """
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     async def get_user(self, user_id: str) -> "User | None":
         """Retrieve user by ID."""
-        ...
+        raise NotImplementedError
 
 
 # Import User at runtime to avoid circular imports

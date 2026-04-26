@@ -35,7 +35,7 @@ class UserRepository(ABC):
         Raises:
             ValueError: If email already exists
         """
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     async def get_user_by_id(self, user_id: str) -> User | None:
@@ -47,7 +47,7 @@ class UserRepository(ABC):
         Returns:
             User if found, None otherwise
         """
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     async def get_user_by_email(self, email: str) -> User | None:
@@ -59,7 +59,7 @@ class UserRepository(ABC):
         Returns:
             User if found, None otherwise
         """
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     async def update_user(self, user: User) -> User:
@@ -81,12 +81,12 @@ class UserRepository(ABC):
     @abstractmethod
     async def count_users(self) -> int:
         """Return total number of registered users."""
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     async def count_admin_users(self) -> int:
         """Return number of users with system_role == 'admin'."""
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     async def get_user_by_oauth(self, provider: str, oauth_id: str) -> User | None:
@@ -99,4 +99,4 @@ class UserRepository(ABC):
         Returns:
             User if found, None otherwise
         """
-        ...
+        raise NotImplementedError
