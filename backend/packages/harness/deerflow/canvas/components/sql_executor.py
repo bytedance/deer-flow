@@ -91,6 +91,7 @@ class SQLExecutorExecutor(ComponentExecutor):
 
     def _resolve_variables(self, sql: str, variables: dict[str, Any]) -> str:
         """Replace {{variable}} patterns with resolved values."""
+
         def replacer(match):
             var_name = match.group(1)
             return str(variables.get(var_name, match.group(0)))

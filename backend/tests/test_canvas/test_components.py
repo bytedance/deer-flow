@@ -1,7 +1,8 @@
 """Tests for canvas component executors."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from deerflow.canvas.components.base import (
     ComponentExecutor,
@@ -20,6 +21,7 @@ class TestComponentExecutor:
 
     def test_validate_returns_empty_list_by_default(self):
         """Default validate implementation returns empty errors list."""
+
         # Create a concrete implementation for testing
         class DummyExecutor(ComponentExecutor):
             @property
