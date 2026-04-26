@@ -13,8 +13,8 @@ import { sanitizeRunStreamOptions } from "./stream-mode";
  *
  * Reading the cookie per-request (rather than baking it into the SDK's
  * ``defaultHeaders`` at construction) handles login / logout / password
- * change cookie rotation transparently. Both the ``/langgraph-compat/*``
- * SDK path and the direct REST endpoints in ``fetcher.ts:fetchWithAuth``
+ * change cookie rotation transparently. Both the ``/api/langgraph/*`` SDK
+ * path and the direct REST endpoints in ``fetcher.ts:fetchWithAuth``
  * share :func:`readCsrfCookie` and :const:`STATE_CHANGING_METHODS` so
  * the contract stays in lockstep.
  */
@@ -32,8 +32,10 @@ function injectCsrfHeader(_url: URL, init: RequestInit): RequestInit {
 }
 
 function createCompatibleClient(isMock?: boolean): LangGraphClient {
+  const apiUrl = getLangGraphBaseURL(isMock);
+  console.log(`Creating API client with base URL: ${apiUrl}`);
   const client = new LangGraphClient({
-    apiUrl: getLangGraphBaseURL(isMock),
+    apiUrl,
     onRequest: injectCsrfHeader,
   });
 

@@ -7,15 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 DeerFlow is a LangGraph-based AI super agent system with a full-stack architecture. The backend provides a "super agent" with sandbox execution, persistent memory, subagent delegation, and extensible tool integration - all operating in per-thread isolated environments.
 
 **Architecture**:
-- **LangGraph Server** (port 2024): Agent runtime and workflow execution
-- **Gateway API** (port 8001): REST API for models, MCP, skills, memory, artifacts, uploads, and local thread cleanup
+- **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime
 - **Frontend** (port 3000): Next.js web interface
 - **Nginx** (port 2026): Unified reverse proxy entry point
 - **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
 
-**Runtime Modes**:
-- **Standard mode** (`make dev`): LangGraph Server handles agent execution as a separate process. 4 processes total.
-- **Gateway mode** (`make dev-pro`, experimental): Agent runtime embedded in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Service manages its own concurrency via async tasks. 3 processes total, no LangGraph Server.
+**Runtime**:
+- `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
 
 **Project Structure**:
 ```
@@ -25,7 +23,7 @@ deer-flow/
 ├── extensions_config.json      # MCP servers and skills configuration
 ├── backend/                    # Backend application (this directory)
 │   ├── Makefile               # Backend-only commands (dev, gateway, lint)
-│   ├── langgraph.json         # LangGraph server configuration
+│   ├── langgraph.json         # LangGraph Studio graph configuration
 │   ├── packages/
 │   │   └── harness/           # deerflow-harness package (import: deerflow.*)
 │   │       ├── pyproject.toml
@@ -83,16 +81,15 @@ When making code changes, you MUST update the relevant documentation:
 ```bash
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
-make dev        # Start all services (LangGraph + Gateway + Frontend + Nginx), with config.yaml preflight
-make dev-pro    # Gateway mode (experimental): skip LangGraph, agent runtime embedded in Gateway
-make start-pro  # Production + Gateway mode (experimental)
+make dev        # Start all services (Gateway + Frontend + Nginx), with config.yaml preflight
+make start      # Start production services locally
 make stop       # Stop all services
 ```
 
 **Backend directory** (for backend development only):
 ```bash
 make install    # Install backend dependencies
-make dev        # Run LangGraph server only (port 2024)
+make dev        # Run Gateway API with reload (port 8001)
 make gateway    # Run Gateway API only (port 8001)
 make test       # Run all backend tests
 make lint       # Lint with ruff
@@ -315,9 +312,9 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 
 ### IM Channels System (`app/channels/`)
 
-Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow agent via the LangGraph Server.
+Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow agent via Gateway's LangGraph-compatible API.
 
-**Architecture**: Channels communicate with the LangGraph Server through `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side.
+**Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side.
 
 **Components**:
 - `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
@@ -330,7 +327,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 **Message Flow**:
 1. External platform -> Channel impl -> `MessageBus.publish_inbound()`
 2. `ChannelManager._dispatch_loop()` consumes from queue
-3. For chat: look up/create thread on LangGraph Server
+3. For chat: look up/create thread through Gateway's LangGraph-compatible API
 4. Feishu chat: `runs.stream()` → accumulate AI text → publish multiple outbound updates (`is_final=False`) → publish final outbound (`is_final=True`)
 5. Slack/Telegram chat: `runs.wait()` → extract final response → publish outbound
 6. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
@@ -338,9 +335,9 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 8. Outbound → channel callbacks → platform reply
 
 **Configuration** (`config.yaml` -> `channels`):
-- `langgraph_url` - LangGraph Server URL (default: `http://localhost:2024`)
+- `langgraph_url` - LangGraph-compatible Gateway API base URL (default: `http://localhost:8001/api`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
-- In Docker Compose, IM channels run inside the `gateway` container, so `localhost` points back to that container. Use `http://langgraph:2024` / `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` / `DEER_FLOW_CHANNELS_GATEWAY_URL`.
+- In Docker Compose, IM channels run inside the `gateway` container, so `localhost` points back to that container. Use `http://gateway:8001/api` for `langgraph_url` and `http://gateway:8001` for `gateway_url`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` / `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token)
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
@@ -410,9 +407,9 @@ Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` me
 
 `DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
 
-**Architecture**: Imports the same `deerflow` modules that LangGraph Server and Gateway API use. Shares the same config files and data directories. No FastAPI dependency.
+**Architecture**: Imports the same `deerflow` modules that Gateway API uses. Shares the same config files and data directories. No FastAPI dependency.
 
-**Agent Conversation** (replaces LangGraph Server):
+**Agent Conversation**:
 - `chat(message, thread_id)` — synchronous, accumulates streaming deltas per message-id and returns the final AI text
 - `stream(message, thread_id)` — subscribes to LangGraph `stream_mode=["values", "messages", "custom"]` and yields `StreamEvent`:
   - `"values"` — full state snapshot (title, messages, artifacts); AI text already delivered via `messages` mode is **not** re-synthesized here to avoid duplicate deliveries
@@ -475,20 +472,15 @@ This starts all services and makes the application available at `http://localhos
 | | **Local Foreground** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
 |---|---|---|---|---|
 | **Dev** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
-| **Dev + Gateway** | `./scripts/serve.sh --dev --gateway`<br/>`make dev-pro` | `./scripts/serve.sh --dev --gateway --daemon`<br/>`make dev-daemon-pro` | `./scripts/docker.sh start --gateway`<br/>`make docker-start-pro` | — |
 | **Prod** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
-| **Prod + Gateway** | `./scripts/serve.sh --prod --gateway`<br/>`make start-pro` | `./scripts/serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `./scripts/deploy.sh --gateway`<br/>`make up-pro` |
 
 | Action | Local | Docker Dev | Docker Prod |
 |---|---|---|---|
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
-Gateway mode embeds the agent runtime in Gateway, no LangGraph server.
-
 **Nginx routing**:
-- Standard mode: `/api/langgraph/*` → LangGraph Server (2024)
-- Gateway mode: `/api/langgraph/*` → Gateway embedded runtime (8001) (via envsubst)
+- `/api/langgraph/*` → Gateway embedded runtime (8001), rewritten to `/api/*`
 - `/api/*` (other) → Gateway API (8001)
 - `/` (non-API) → Frontend (3000)
 
@@ -497,15 +489,11 @@ Gateway mode embeds the agent runtime in Gateway, no LangGraph server.
 From the **backend** directory:
 
 ```bash
-# Terminal 1: LangGraph server
-make dev
-
-# Terminal 2: Gateway API
+# Gateway API
 make gateway
 ```
 
 Direct access (without nginx):
-- LangGraph: `http://localhost:2024`
 - Gateway: `http://localhost:8001`
 
 ### Frontend Configuration

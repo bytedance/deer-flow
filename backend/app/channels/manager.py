@@ -1,4 +1,4 @@
-"""ChannelManager — consumes inbound messages and dispatches them to the DeerFlow agent via LangGraph Server."""
+"""ChannelManager — consumes inbound messages and dispatches them to the DeerFlow agent via Gateway."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
+DEFAULT_LANGGRAPH_URL = "http://localhost:8001/api"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
@@ -509,7 +509,7 @@ class ChannelManager:
     """Core dispatcher that bridges IM channels to the DeerFlow agent.
 
     It reads from the MessageBus inbound queue, creates/reuses threads on
-    the LangGraph Server, sends messages via ``runs.wait``, and publishes
+    Gateway's LangGraph-compatible API, sends messages via ``runs.wait``, and publishes
     outbound responses back through the bus.
     """
 
@@ -669,7 +669,7 @@ class ChannelManager:
     # -- chat handling -----------------------------------------------------
 
     async def _create_thread(self, client, msg: InboundMessage) -> str:
-        """Create a new thread on the LangGraph Server and store the mapping."""
+        """Create a new thread through Gateway and store the mapping."""
         thread = await client.threads.create()
         thread_id = thread["thread_id"]
         self.store.set_thread_id(
@@ -679,7 +679,7 @@ class ChannelManager:
             topic_id=msg.topic_id,
             user_id=msg.user_id,
         )
-        logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
+        logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
@@ -886,7 +886,7 @@ class ChannelManager:
             return
 
         if command == "new":
-            # Create a new thread on the LangGraph Server
+            # Create a new thread through Gateway
             client = self._get_client()
             thread = await client.threads.create()
             new_thread_id = thread["thread_id"]
