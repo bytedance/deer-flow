@@ -13,6 +13,7 @@ from app.gateway.routers import (
     assistants_compat,
     canvas,
     channels,
+    db_connections,
     mcp,
     memory,
     models,
@@ -226,6 +227,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Canvas API for data analysis DAG
     app.include_router(canvas.router)
+
+    # Database connections API
+    app.include_router(db_connections.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
