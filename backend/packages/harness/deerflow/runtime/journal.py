@@ -141,7 +141,7 @@ class RunJournal(BaseCallbackHandler):
         logger.info(f"on_chat_model_start {run_id}: tags={tags} serialized={serialized} messages={messages}")
 
         # Capture the first human message sent to any LLM in this run.
-        if not self._first_human_msg:
+        if not self._first_human_msg and not messages:
             for batch in messages.reversed():
                 for m in batch.reversed():
                     if isinstance(m, HumanMessage) and m.name != "summary":

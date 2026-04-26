@@ -18,6 +18,7 @@ from starlette.types import ASGIApp
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
+from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # Paths that never require authentication.
@@ -75,8 +76,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if _is_public(request.url.path):
             return await call_next(request)
 
+        internal_user = None
+        if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
+            internal_user = get_internal_user()
+
         # Non-public path: require session cookie
-        if not request.cookies.get("access_token"):
+        if internal_user is None and not request.cookies.get("access_token"):
             return JSONResponse(
                 status_code=401,
                 content={
@@ -100,10 +105,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # bubble up, so we catch and render it as JSONResponse here.
         from app.gateway.deps import get_current_user_from_request
 
-        try:
-            user = await get_current_user_from_request(request)
-        except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        if internal_user is not None:
+            user = internal_user
+        else:
+            try:
+                user = await get_current_user_from_request(request)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
         # Stamp both request.state.user (for the contextvar pattern)
         # and request.state.auth (so @require_permission's "auth is

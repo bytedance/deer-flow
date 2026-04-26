@@ -66,7 +66,10 @@ def _normalize_presented_filepath(
     virtual_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
 
     if stripped == virtual_prefix or stripped.startswith(virtual_prefix + "/"):
-        actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=get_effective_user_id())
+        try:
+            actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=get_effective_user_id())
+        except TypeError:
+            actual_path = get_paths().resolve_virtual_path(thread_id, filepath)
     else:
         actual_path = Path(filepath).expanduser().resolve()
 

@@ -17,6 +17,8 @@ from langgraph_sdk.errors import ConflictError
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
+from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
+from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -534,6 +536,7 @@ class ChannelManager:
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
         self._client = None  # lazy init — langgraph_sdk async client
+        self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
@@ -586,7 +589,14 @@ class ChannelManager:
         if self._client is None:
             from langgraph_sdk import get_client
 
-            self._client = get_client(url=self._langgraph_url)
+            self._client = get_client(
+                url=self._langgraph_url,
+                headers={
+                    **create_internal_auth_headers(),
+                    CSRF_HEADER_NAME: self._csrf_token,
+                    "Cookie": f"{CSRF_COOKIE_NAME}={self._csrf_token}",
+                },
+            )
         return self._client
 
     # -- lifecycle ---------------------------------------------------------

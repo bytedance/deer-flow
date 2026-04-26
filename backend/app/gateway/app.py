@@ -79,6 +79,11 @@ async def _ensure_admin_user(app: FastAPI) -> None:
         # Skip admin migration work rather than failing gateway startup.
         logger.warning("Auth persistence not ready; skipping admin bootstrap check")
         return
+
+    sf = get_session_factory()
+    if sf is None:
+        return
+
     admin_count = await provider.count_admin_users()
 
     if admin_count == 0:
@@ -90,10 +95,6 @@ async def _ensure_admin_user(app: FastAPI) -> None:
 
     # Admin already exists — run orphan thread migration for any
     # LangGraph thread metadata that pre-dates the auth module.
-    sf = get_session_factory()
-    if sf is None:
-        return
-
     async with sf() as session:
         stmt = select(UserRow).where(UserRow.system_role == "admin").limit(1)
         row = (await session.execute(stmt)).scalar_one_or_none()

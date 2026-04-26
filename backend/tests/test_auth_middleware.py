@@ -174,6 +174,20 @@ def test_protected_post_no_cookie_returns_401(client):
     assert res.status_code == 401
 
 
+def test_protected_post_with_internal_auth_header_passes():
+    from app.gateway.internal_auth import create_internal_auth_headers
+
+    app = _make_app()
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/threads/abc/runs/stream",
+        headers=create_internal_auth_headers(),
+    )
+
+    assert res.status_code == 200
+
+
 # ── Method matrix: PUT/DELETE/PATCH also protected ────────────────────────
 
 

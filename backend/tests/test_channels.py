@@ -414,6 +414,27 @@ def _make_async_iterator(items):
 
 
 class TestChannelManager:
+    def test_get_client_includes_csrf_header_and_cookie(self):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store, langgraph_url="http://localhost:8001")
+
+        with patch("langgraph_sdk.get_client") as get_client:
+            get_client.return_value = object()
+
+            manager._get_client()
+
+        get_client.assert_called_once()
+        kwargs = get_client.call_args.kwargs
+        assert kwargs["url"] == "http://localhost:8001"
+        headers = kwargs["headers"]
+        csrf_token = headers["X-CSRF-Token"]
+        assert csrf_token
+        assert headers["Cookie"] == f"csrf_token={csrf_token}"
+        assert headers["X-DeerFlow-Internal-Token"]
+
     def test_handle_chat_calls_channel_receive_file_for_inbound_files(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
