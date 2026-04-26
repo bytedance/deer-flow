@@ -34,6 +34,12 @@ def _bash_call(cmd="ls"):
     return {"name": "bash", "id": f"call_{cmd}", "args": {"command": cmd}}
 
 
+def _named_call(name, value):
+    if name == "read_file":
+        return {"name": name, "id": f"call_{name}_{value}", "args": {"path": f"/tmp/{value}.py"}}
+    return {"name": name, "id": f"call_{name}_{value}", "args": {"value": value}}
+
+
 class TestHashToolCalls:
     def test_same_calls_same_hash(self):
         a = _hash_tool_calls([_bash_call("ls")])
@@ -280,9 +286,12 @@ class TestLoopDetection:
         mw._apply(_make_state(tool_calls=call), runtime_new)
 
         assert "thread-0" not in mw._history
+        assert "thread-0" not in mw._name_history
         assert "thread-0" not in mw._tool_freq
         assert "thread-0" not in mw._tool_freq_warned
+        assert "thread-0" not in mw._cycle_warned
         assert "thread-new" in mw._history
+        assert "thread-new" in mw._name_history
         assert len(mw._history) == 3
 
     def test_thread_safe_mutations(self):
@@ -301,6 +310,100 @@ class TestLoopDetection:
 
         mw._apply(_make_state(tool_calls=call), runtime)
         assert "default" in mw._history
+
+
+class TestCycleDetection:
+    """Tests for alternating tool-name cycle detection (Layer 3)."""
+
+    def test_detect_cycle_static_helper(self):
+        assert LoopDetectionMiddleware._detect_cycle([], 2, 4, 3) is None
+        assert LoopDetectionMiddleware._detect_cycle(["a", "b", "a", "b"], 2, 4, 3) is None
+        assert LoopDetectionMiddleware._detect_cycle(["a", "b", "a", "b", "a", "b"], 2, 4, 3) == "a→b"
+        assert LoopDetectionMiddleware._detect_cycle(["a", "b", "a", "c", "a", "b"], 2, 4, 3) is None
+
+    def test_alternating_two_tools_warns_after_3_cycles(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        sequence = ["web_search", "web_fetch"] * 3
+
+        for i, name in enumerate(sequence[:-1]):
+            result = mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime)
+            assert result is None
+
+        result = mw._apply(_make_state(tool_calls=[_named_call(sequence[-1], len(sequence))]), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, HumanMessage)
+        assert "LOOP DETECTED" in msg.content
+
+    def test_alternating_two_tools_hard_stops_after_4_cycles(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        sequence = ["web_search", "web_fetch"] * 4
+
+        for i, name in enumerate(sequence[:-1]):
+            mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime)
+
+        result = mw._apply(_make_state(tool_calls=[_named_call(sequence[-1], len(sequence))]), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls == []
+        assert _HARD_STOP_MSG in msg.content
+
+    def test_three_tool_cycle_detected(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        sequence = ["a", "b", "c"] * 4
+
+        for i, name in enumerate(sequence[:-1]):
+            mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime)
+
+        result = mw._apply(_make_state(tool_calls=[_named_call(sequence[-1], len(sequence))]), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls == []
+        assert _HARD_STOP_MSG in msg.content
+
+    def test_mixed_pattern_does_not_trigger(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        sequence = ["a", "b", "a", "c", "a", "b"]
+
+        for i, name in enumerate(sequence):
+            result = mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime)
+            assert result is None
+
+    def test_existing_hash_detection_still_works(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(4):
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls == []
+        assert _HARD_STOP_MSG in msg.content
+
+    def test_per_tool_freq_detection_still_works(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+
+        for i in range(29):
+            result = mw._apply(_make_state(tool_calls=[_named_call("read_file", i)]), runtime)
+            assert result is None
+
+        result = mw._apply(_make_state(tool_calls=[_named_call("read_file", 29)]), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, HumanMessage)
+        assert "read_file" in msg.content
+        assert "LOOP DETECTED" in msg.content
 
 
 class TestAppendText:
