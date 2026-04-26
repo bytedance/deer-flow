@@ -72,7 +72,6 @@ class MemoryUpdateQueue:
                 agent_name=agent_name,
                 correction_detected=correction_detected,
                 reinforcement_detected=reinforcement_detected,
-                user_id=user_id,
             )
             self._reset_timer()
 
