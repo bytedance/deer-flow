@@ -8,9 +8,12 @@ import json
 import logging
 import math
 import re
+import threading
 import uuid
 from collections.abc import Awaitable
 from typing import Any
+
+import httpx
 
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
@@ -25,6 +28,32 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Dedicated event loop for memory-update async work.
+#
+# Using asyncio.run() would create a new event loop and CLOSE it after each
+# call.  langchain_openai caches a single httpx.AsyncClient per (base_url,
+# timeout) via @lru_cache (_cached_async_httpx_client).  Connections created
+# inside a short-lived asyncio.run() are bound to that temporary loop.  When
+# the loop closes, those connections become invalid.  The main agent later
+# reuses them from the pool and hits "RuntimeError: Event loop is closed".
+#
+# The fix: run all memory-update coroutines on a single, never-closing loop
+# and give that loop its OWN httpx.AsyncClient so its connections are
+# completely isolated from the main agent's cached client.
+# ---------------------------------------------------------------------------
+_MEMORY_LOOP: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+_MEMORY_LOOP_THREAD = threading.Thread(
+    target=_MEMORY_LOOP.run_forever,
+    name="memory-event-loop",
+    daemon=True,
+)
+_MEMORY_LOOP_THREAD.start()
+
+# Dedicated httpx client whose connections are always bound to _MEMORY_LOOP.
+_MEMORY_HTTP_CLIENT: httpx.AsyncClient = httpx.AsyncClient()
+atexit.register(lambda: asyncio.run_coroutine_threadsafe(_MEMORY_HTTP_CLIENT.aclose(), _MEMORY_LOOP))
 
 _SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
@@ -218,22 +247,20 @@ def _extract_text(content: Any) -> str:
 
 
 def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
-    """Run an async memory update from sync code, including nested-loop contexts."""
+    """Run an async memory update from sync code on the dedicated memory loop.
+
+    Uses a persistent dedicated event loop instead of asyncio.run() to prevent
+    closing the loop after each call.  asyncio.run() closes the loop on return,
+    which invalidates any connections the memory updater's httpx client created
+    in that loop — those stale connections then pollute the shared @lru_cache'd
+    client used by the main agent, causing 'Event loop is closed' errors on the
+    next LLM call.
+    """
     handed_off = False
-
     try:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is not None and loop.is_running():
-            future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(asyncio.run, coro)
-            handed_off = True
-            return future.result()
-
-        handed_off = True
-        return asyncio.run(coro)
+        future = asyncio.run_coroutine_threadsafe(coro, _MEMORY_LOOP)
+        handed_off = True  # coroutine is now owned by _MEMORY_LOOP
+        return future.result()
     except Exception:
         if not handed_off:
             close = getattr(coro, "close", None)
@@ -242,11 +269,10 @@ def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
                     close()
                 except Exception:
                     logger.debug(
-                        "Failed to close un-awaited memory update coroutine",
+                        "Failed to close un-scheduled memory update coroutine",
                         exc_info=True,
                     )
-
-        logger.exception("Failed to run async memory update from sync context")
+        logger.exception("Failed to run async memory update")
         return False
 
 
@@ -311,7 +337,10 @@ class MemoryUpdater:
         """Get the model for memory updates."""
         config = get_memory_config()
         model_name = self._model_name or config.model_name
-        return create_chat_model(name=model_name, thinking_enabled=False)
+        # Pass the dedicated httpx client so memory LLM calls never share the
+        # @lru_cache'd client used by the main agent, preventing cross-loop
+        # connection contamination.
+        return create_chat_model(name=model_name, thinking_enabled=False, http_async_client=_MEMORY_HTTP_CLIENT)
 
     def _build_correction_hint(
         self,

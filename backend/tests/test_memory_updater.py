@@ -682,8 +682,8 @@ class TestUpdateMemoryStructuredResponse:
 
         with (
             patch(
-                "deerflow.agents.memory.updater._SYNC_MEMORY_UPDATER_EXECUTOR.submit",
-                side_effect=RuntimeError("executor down"),
+                "deerflow.agents.memory.updater.asyncio.run_coroutine_threadsafe",
+                side_effect=RuntimeError("loop unavailable"),
             ),
         ):
             msg = MagicMock()
@@ -718,8 +718,8 @@ class TestRunAsyncUpdateSync:
         awaitable = CloseableAwaitable()
 
         with patch(
-            "deerflow.agents.memory.updater._SYNC_MEMORY_UPDATER_EXECUTOR.submit",
-            side_effect=RuntimeError("executor down"),
+            "deerflow.agents.memory.updater.asyncio.run_coroutine_threadsafe",
+            side_effect=RuntimeError("loop unavailable"),
         ):
 
             async def run_in_loop():
