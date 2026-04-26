@@ -6,8 +6,8 @@ from collections import defaultdict, deque
 from typing import Any
 
 from deerflow.canvas.components import (
-    DataSourceExecutor,
     DataOutputExecutor,
+    DataSourceExecutor,
     PythonScriptExecutor,
     SQLExecutorExecutor,
 )

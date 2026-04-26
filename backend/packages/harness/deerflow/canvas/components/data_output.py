@@ -121,7 +121,7 @@ class DataOutputExecutor(ComponentExecutor):
                 rows = cursor.fetchall()
 
             # Write output file
-            output_path = self._write_file(
+            _output_path = self._write_file(
                 columns=columns,
                 rows=rows,
                 output_format=output_format,

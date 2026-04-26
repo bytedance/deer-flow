@@ -304,7 +304,7 @@ def canvas_execute_tool(
         db_connections = {conn.name: conn.model_dump() for conn in config.db_connections}
 
     # Create engine and execute
-    engine = CanvasEngine(
+    _engine = CanvasEngine(
         canvas=canvas,
         db_connections=db_connections,
         sandbox=None,  # Sandbox will be provided by middleware

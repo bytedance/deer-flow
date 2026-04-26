@@ -7,8 +7,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.canvas import Canvas, CanvasStatus, ExecutionResult
-from deerflow.canvas.storage import CanvasStorage
 from deerflow.canvas.engine import CanvasEngine
+from deerflow.canvas.storage import CanvasStorage
 
 logger = logging.getLogger(__name__)
 
