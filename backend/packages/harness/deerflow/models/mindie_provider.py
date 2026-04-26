@@ -82,9 +82,20 @@ def _parse_xml_tool_call_to_dict(content: str) -> tuple[str, list[dict]]:
             continue
         function_name = func_match.group(1).strip()
 
+        # Ignore nested tool blocks when extracting parameters for this call.
+        # Nested `<tool_call>` sections represent separate invocations and
+        # their `<parameter>` tags must not leak into the current call args.
+        param_source_parts: list[str] = []
+        nested_cursor = 0
+        for nested_start, nested_end, _ in _iter_tool_call_blocks(inner_content):
+            param_source_parts.append(inner_content[nested_cursor:nested_start])
+            nested_cursor = nested_end
+        param_source_parts.append(inner_content[nested_cursor:])
+        param_source = "".join(param_source_parts)
+
         args = {}
         param_pattern = re.compile(r"<parameter=([^>]+)>(.*?)</parameter>", re.DOTALL)
-        for param_match in param_pattern.finditer(inner_content):
+        for param_match in param_pattern.finditer(param_source):
             key = param_match.group(1).strip()
             raw_value = param_match.group(2).strip()
 
