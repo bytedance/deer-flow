@@ -150,7 +150,7 @@ export function CodeEditorDialog({
         <DialogHeader>
           <DialogTitle>{getEditorTitle(nodeType)}</DialogTitle>
           <DialogDescription>
-            {node?.data?.table_name ?? node?.data?.query_name ?? node?.data?.script_name ?? "编辑代码内容"}
+            {String(node?.data?.table_name ?? node?.data?.query_name ?? node?.data?.script_name ?? "编辑代码内容")}
             {language !== "text" && (
               <span className="ml-2 text-xs bg-muted px-1.5 py-0.5 rounded">
                 {language.toUpperCase()}

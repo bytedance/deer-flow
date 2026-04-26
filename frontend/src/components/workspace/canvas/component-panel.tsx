@@ -64,7 +64,7 @@ export function ComponentPanel({
     (nodeType: NodeType) => {
       // 设置拖拽数据
       if (typeof window !== "undefined") {
-        window.__canvasDragNodeType = nodeType;
+        (window as unknown as { __canvasDragNodeType?: NodeType }).__canvasDragNodeType = nodeType;
       }
       onDragStart?.(nodeType);
     },
