@@ -11,6 +11,7 @@ from app.gateway.routers import (
     agents,
     artifacts,
     assistants_compat,
+    canvas,
     channels,
     mcp,
     memory,
@@ -171,6 +172,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
             },
             {
+                "name": "canvas",
+                "description": "Canvas API for data analysis DAG operations",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -218,6 +223,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
+
+    # Canvas API for data analysis DAG
+    app.include_router(canvas.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
