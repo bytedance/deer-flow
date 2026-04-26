@@ -22,7 +22,7 @@ interface SQLExecutorEditorProps {
   threadId: string;
   onUpdate: (data: Partial<SQLExecutorNodeData>) => void;
   onOpenCodeEditor: () => void;
-  onValidate?: () => Promise<{ valid: boolean; errors: string[] }>;
+  onValidate?: () => Promise<{ valid: boolean; errors: string[] } | undefined>;
   isValidating?: boolean;
   validationResult?: { valid: boolean; errors: string[] } | null;
 }
@@ -35,10 +35,11 @@ function extractVariables(sql: string): Variable[] {
   const variables: Variable[] = [];
   const seen = new Set<string>();
 
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(sql)) !== null) {
-    const varName = match[1].trim();
-    if (!seen.has(varName)) {
+  // 使用 matchAll 方法代替 exec 循环，更安全
+  const matches = sql.matchAll(regex);
+  for (const match of matches) {
+    const varName = match[1]?.trim();
+    if (varName && !seen.has(varName)) {
       seen.add(varName);
       variables.push({ name: varName });
     }
@@ -181,7 +182,7 @@ export function SQLExecutorEditor({
         <div className="flex items-center justify-between">
           <Label>变量</Label>
           <span className="text-xs text-muted-foreground">
-            使用 {{变量名}} 格式
+            使用 {"{{变量名}}"} 格式
           </span>
         </div>
         <ScrollArea className="h-20 border rounded-md">
@@ -198,7 +199,7 @@ export function SQLExecutorEditor({
             </div>
           ) : (
             <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-              暂无变量，在 SQL 中使用 {{变量名}} 格式添加
+              暂无变量，在 SQL 中使用 {"{{变量名}}"} 格式添加
             </div>
           )}
         </ScrollArea>
