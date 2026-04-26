@@ -148,13 +148,19 @@ Firecrawl 驱动的搜索和爬取。需要 [Firecrawl](https://firecrawl.dev) A
 
 <Tabs items={["Jina AI（默认）", "Exa"]}>
   <Tabs.Tab>
-    ```yaml tools: - use: deerflow.community.jina_ai.tools:web_fetch_tool
-    api_key: $JINA_API_KEY # 可选；匿名使用有速率限制 ``` 将网页转换为干净的
-    Markdown。无 API Key 也可使用，但有更严格的速率限制。
+```yaml
+tools:
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+    api_key: $JINA_API_KEY # 可选；匿名使用有速率限制
+```
+将网页转换为干净的 Markdown。无 API Key 也可使用，但有更严格的速率限制。
   </Tabs.Tab>
   <Tabs.Tab>
-    ```yaml tools: - use: deerflow.community.exa.tools:web_fetch_tool api_key:
-    $EXA_API_KEY ```
+```yaml
+tools:
+  - use: deerflow.community.exa.tools:web_fetch_tool
+    api_key: $EXA_API_KEY
+```
   </Tabs.Tab>
 </Tabs>
 

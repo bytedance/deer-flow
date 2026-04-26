@@ -162,22 +162,34 @@ Install: `cd backend && uv add 'deerflow-harness[firecrawl]'`
 
 <Tabs items={["Jina AI (default)", "Exa", "InfoQuest", "Firecrawl"]}>
   <Tabs.Tab>
-    ```yaml tools: - use: deerflow.community.jina_ai.tools:web_fetch_tool
-    api_key: $JINA_API_KEY # optional; anonymous usage has rate limits ```
-    Converts web pages to clean Markdown. Works without an API key at reduced
-    rate limits.
+```yaml
+tools:
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+    api_key: $JINA_API_KEY # optional; anonymous usage has rate limits
+```
+Converts web pages to clean Markdown. Works without an API key at reduced rate
+limits.
   </Tabs.Tab>
   <Tabs.Tab>
-    ```yaml tools: - use: deerflow.community.exa.tools:web_fetch_tool api_key:
-    $EXA_API_KEY ```
+```yaml
+tools:
+  - use: deerflow.community.exa.tools:web_fetch_tool
+    api_key: $EXA_API_KEY
+```
   </Tabs.Tab>
   <Tabs.Tab>
-    ```yaml tools: - use: deerflow.community.infoquest.tools:web_fetch_tool
-    api_key: $INFOQUEST_API_KEY ```
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:web_fetch_tool
+    api_key: $INFOQUEST_API_KEY
+```
   </Tabs.Tab>
   <Tabs.Tab>
-    ```yaml tools: - use: deerflow.community.firecrawl.tools:web_fetch_tool
-    api_key: $FIRECRAWL_API_KEY ```
+```yaml
+tools:
+  - use: deerflow.community.firecrawl.tools:web_fetch_tool
+    api_key: $FIRECRAWL_API_KEY
+```
   </Tabs.Tab>
 </Tabs>
 
