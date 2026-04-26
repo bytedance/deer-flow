@@ -9,7 +9,7 @@ import math
 import re
 import threading
 import uuid
-from collections.abc import Awaitable, Coroutine
+from collections.abc import Coroutine
 from typing import Any
 
 import httpx
@@ -30,55 +30,73 @@ from deerflow.models import create_chat_model
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Dedicated event loop for memory-update async work.
+# Dedicated event loop for memory-update async work — lazy-initialized.
 #
-# Using asyncio.run() would create a new event loop and CLOSE it after each
-# call.  langchain_openai caches a single httpx.AsyncClient per (base_url,
-# timeout) via @lru_cache (_cached_async_httpx_client).  Connections created
-# inside a short-lived asyncio.run() are bound to that temporary loop.  When
-# the loop closes, those connections become invalid.  The main agent later
-# reuses them from the pool and hits "RuntimeError: Event loop is closed".
+# The loop, thread, and httpx client are created on first call to
+# _run_async_update_sync() (i.e. only when a memory update is actually
+# triggered), so import-time overhead is zero in processes/tests that never
+# execute memory updates.
 #
-# The fix: run all memory-update coroutines on a single, never-closing loop
-# and give that loop its OWN httpx.AsyncClient so its connections are
-# completely isolated from the main agent's cached client.
+# Background: asyncio.run() creates a new event loop and CLOSES it after
+# each call.  langchain_openai caches a single httpx.AsyncClient per
+# (base_url, timeout) via @lru_cache.  Connections created inside the
+# short-lived loop are bound to that loop; once it closes they become
+# invalid but stay in the pool, causing "RuntimeError: Event loop is
+# closed" when the main agent reuses them.
 # ---------------------------------------------------------------------------
-_MEMORY_LOOP: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+_MEMORY_LOOP: asyncio.AbstractEventLoop | None = None
+_MEMORY_HTTP_CLIENT: httpx.AsyncClient | None = None
+_MEMORY_INIT_LOCK = threading.Lock()
+_MEMORY_ATEXIT_REGISTERED = False
 
 
-def _run_memory_loop() -> None:
+def _start_memory_loop(loop: asyncio.AbstractEventLoop) -> None:
     """Thread target: register the loop for this thread, then run it forever."""
-    asyncio.set_event_loop(_MEMORY_LOOP)
-    _MEMORY_LOOP.run_forever()
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
 
 
-_MEMORY_LOOP_THREAD = threading.Thread(
-    target=_run_memory_loop,
-    name="memory-event-loop",
-    daemon=True,
-)
-_MEMORY_LOOP_THREAD.start()
-
-# Dedicated httpx client whose connections are always bound to _MEMORY_LOOP.
-_MEMORY_HTTP_CLIENT: httpx.AsyncClient = httpx.AsyncClient()
+def _ensure_memory_loop() -> tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]:
+    """Lazily create the dedicated memory event loop and HTTP client on first use."""
+    global _MEMORY_LOOP, _MEMORY_HTTP_CLIENT, _MEMORY_ATEXIT_REGISTERED
+    if _MEMORY_LOOP is not None:
+        return _MEMORY_LOOP, _MEMORY_HTTP_CLIENT  # type: ignore[return-value]
+    with _MEMORY_INIT_LOCK:
+        if _MEMORY_LOOP is not None:
+            return _MEMORY_LOOP, _MEMORY_HTTP_CLIENT  # type: ignore[return-value]
+        loop = asyncio.new_event_loop()
+        client = httpx.AsyncClient()
+        threading.Thread(
+            target=_start_memory_loop,
+            args=(loop,),
+            name="memory-event-loop",
+            daemon=True,
+        ).start()
+        _MEMORY_LOOP = loop
+        _MEMORY_HTTP_CLIENT = client
+        if not _MEMORY_ATEXIT_REGISTERED:
+            atexit.register(_shutdown_memory_loop)
+            _MEMORY_ATEXIT_REGISTERED = True
+    return _MEMORY_LOOP, _MEMORY_HTTP_CLIENT  # type: ignore[return-value]
 
 
 def _shutdown_memory_loop() -> None:
     """Gracefully close the dedicated HTTP client and stop the memory loop."""
+    loop = _MEMORY_LOOP
+    client = _MEMORY_HTTP_CLIENT
+    if loop is None:
+        return
     try:
-        future = asyncio.run_coroutine_threadsafe(_MEMORY_HTTP_CLIENT.aclose(), _MEMORY_LOOP)
+        future = asyncio.run_coroutine_threadsafe(client.aclose(), loop)  # type: ignore[union-attr]
         future.result(timeout=5)
     except Exception:
         pass
     finally:
         try:
-            if not _MEMORY_LOOP.is_closed():
-                _MEMORY_LOOP.call_soon_threadsafe(_MEMORY_LOOP.stop)
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(loop.stop)
         except Exception:
             pass
-
-
-atexit.register(_shutdown_memory_loop)
 
 
 def _create_empty_memory() -> dict[str, Any]:
@@ -275,9 +293,10 @@ def _run_async_update_sync(coro: Coroutine[Any, Any, bool]) -> bool:
     client used by the main agent, causing 'Event loop is closed' errors on the
     next LLM call.
     """
+    loop, _ = _ensure_memory_loop()
     handed_off = False
     try:
-        future = asyncio.run_coroutine_threadsafe(coro, _MEMORY_LOOP)
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
         handed_off = True  # coroutine is now owned by _MEMORY_LOOP
         try:
             return future.result(timeout=60)
@@ -368,7 +387,8 @@ class MemoryUpdater:
         model_cfg = app_cfg.get_model_config(model_name)
         extra: dict = {}
         if model_cfg is not None and model_cfg.use.startswith("langchain_openai:"):
-            extra["http_async_client"] = _MEMORY_HTTP_CLIENT
+            _, client = _ensure_memory_loop()
+            extra["http_async_client"] = client
         return create_chat_model(name=model_name, thinking_enabled=False, **extra)
 
     def _build_correction_hint(
