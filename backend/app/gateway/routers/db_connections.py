@@ -63,13 +63,23 @@ async def list_db_connections():
 
     if hasattr(config, "db_connections") and config.db_connections:
         for conn in config.db_connections:
-            connections.append(
-                DbConnectionResponse(
-                    id=conn.name,
-                    name=conn.name,
-                    type=conn.type if hasattr(conn, "type") else "unknown",
+            # 支持 dict 和 Pydantic model 两种格式
+            if isinstance(conn, dict):
+                connections.append(
+                    DbConnectionResponse(
+                        id=conn.get("name", "unknown"),
+                        name=conn.get("name", "unknown"),
+                        type=conn.get("type", "unknown"),
+                    )
                 )
-            )
+            else:
+                connections.append(
+                    DbConnectionResponse(
+                        id=conn.name,
+                        name=conn.name,
+                        type=getattr(conn, "type", "unknown"),
+                    )
+                )
 
     return DbConnectionsListResponse(connections=connections)
 
@@ -85,7 +95,8 @@ async def list_tables(connection_id: str):
     # Find the connection
     conn = None
     for c in config.db_connections:
-        if c.name == connection_id:
+        conn_name = c.get("name") if isinstance(c, dict) else c.name
+        if conn_name == connection_id:
             conn = c
             break
 
@@ -114,7 +125,8 @@ async def get_table_schema(connection_id: str, table_name: str):
 
     conn = None
     for c in config.db_connections:
-        if c.name == connection_id:
+        conn_name = c.get("name") if isinstance(c, dict) else c.name
+        if conn_name == connection_id:
             conn = c
             break
 
@@ -167,7 +179,8 @@ async def preview_table(
 
     conn = None
     for c in config.db_connections:
-        if c.name == connection_id:
+        conn_name = c.get("name") if isinstance(c, dict) else c.name
+        if conn_name == connection_id:
             conn = c
             break
 
@@ -191,7 +204,7 @@ async def preview_table(
 async def _get_tables_from_connection(conn: Any) -> list[str]:
     """Get list of tables from a database connection."""
     # Import based on connection type
-    conn_type = conn.type if hasattr(conn, "type") else "unknown"
+    conn_type = _get_conn_attr(conn, "type", "unknown")
 
     if conn_type in ("mysql", "mariadb"):
         import sqlalchemy
@@ -255,32 +268,51 @@ async def _preview_table_data(conn: Any, table_name: str, limit: int) -> tuple[l
     from sqlalchemy import text
 
     engine = sqlalchemy.create_engine(_build_connection_url(conn))
+    conn_type = _get_conn_attr(conn, "type", "unknown")
+
+    # 根据数据库类型使用不同的引号
+    if conn_type in ("mysql", "mariadb"):
+        quote_char = "`"
+    else:
+        quote_char = '"'
 
     with engine.connect() as connection:
         # Get total count - 使用验证后的表名构建查询
         # 表名已通过 _validate_table_name 验证，只包含安全字符
-        count_result = connection.execute(text(f'SELECT COUNT(*) FROM "{table_name}"'))
+        count_result = connection.execute(text(f"SELECT COUNT(*) FROM {quote_char}{table_name}{quote_char}"))
         total_rows = count_result.scalar() or 0
 
         # Get preview rows - 使用参数化查询处理 LIMIT
-        result = connection.execute(text(f'SELECT * FROM "{table_name}" LIMIT :limit'), {"limit": limit})
+        result = connection.execute(
+            text(f"SELECT * FROM {quote_char}{table_name}{quote_char} LIMIT :limit"),
+            {"limit": limit},
+        )
         rows = [dict(row._mapping) for row in result]
 
         return rows, total_rows
 
 
+def _get_conn_attr(conn: Any, attr: str, default: Any = None) -> Any:
+    """Get attribute from connection config (supports both dict and object)."""
+    if isinstance(conn, dict):
+        return conn.get(attr, default)
+    return getattr(conn, attr, default)
+
+
 def _build_connection_url(conn: Any) -> str:
     """Build database connection URL from config."""
-    if hasattr(conn, "url"):
-        return conn.url
+    # 直接获取 url
+    url = _get_conn_attr(conn, "url")
+    if url:
+        return url
 
     # Build from components
-    conn_type = conn.type if hasattr(conn, "type") else "unknown"
-    host = getattr(conn, "host", "localhost")
-    port = getattr(conn, "port", None)
-    database = getattr(conn, "database", "")
-    username = getattr(conn, "username", "")
-    password = getattr(conn, "password", "")
+    conn_type = _get_conn_attr(conn, "type", "unknown")
+    host = _get_conn_attr(conn, "host", "localhost")
+    port = _get_conn_attr(conn, "port")
+    database = _get_conn_attr(conn, "database", "")
+    username = _get_conn_attr(conn, "username", "")
+    password = _get_conn_attr(conn, "password", "")
 
     if conn_type in ("mysql", "mariadb"):
         port = port or 3306
