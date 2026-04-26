@@ -99,12 +99,7 @@ class ChannelService:
                 continue
             if not channel_config.get("enabled", False):
                 cred_keys = _CHANNEL_CREDENTIAL_KEYS.get(name, [])
-                has_creds = any(
-                    not isinstance(channel_config.get(k), bool)
-                    and channel_config.get(k) is not None
-                    and str(channel_config[k]).strip()
-                    for k in cred_keys
-                )
+                has_creds = any(not isinstance(channel_config.get(k), bool) and channel_config.get(k) is not None and str(channel_config[k]).strip() for k in cred_keys)
                 if has_creds:
                     logger.warning(
                         "Channel '%s' has credentials configured but is disabled. Set enabled: true under channels.%s in config.yaml to activate it.",
