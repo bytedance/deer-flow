@@ -76,7 +76,7 @@ class UserRepository(ABC):
                 a hard failure (not a no-op) so callers cannot mistake a
                 concurrent-delete race for a successful update.
         """
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     async def count_users(self) -> int:
