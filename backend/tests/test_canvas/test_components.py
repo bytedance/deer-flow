@@ -1,6 +1,7 @@
 """Tests for canvas component executors."""
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from deerflow.canvas.components.base import (
     ComponentExecutor,
@@ -124,3 +125,95 @@ class TestDataSourceExecutor:
         # data_source does not output a table, it references existing table
         assert result.success is True
         assert result.output_table is None
+
+
+class TestSQLExecutorExecutor:
+    def test_node_type_is_sql_executor(self):
+        """SQLExecutor handles sql_executor nodes."""
+        from deerflow.canvas.components.sql_executor import SQLExecutorExecutor
+
+        executor = SQLExecutorExecutor()
+        assert executor.node_type == "sql_executor"
+
+    def test_validate_requires_sql(self):
+        """SQL executor requires sql in data."""
+        from deerflow.canvas.components.sql_executor import SQLExecutorExecutor
+
+        executor = SQLExecutorExecutor()
+        node = CanvasNode(
+            id="n1",
+            type=NodeType.SQL_EXECUTOR,
+            position={"x": 0, "y": 0},
+            data={"output_table": "result"},  # missing sql
+        )
+        errors = executor.validate(node)
+        assert len(errors) == 1
+        assert "sql" in errors[0]
+
+    def test_validate_requires_output_table(self):
+        """SQL executor requires output_table in data."""
+        from deerflow.canvas.components.sql_executor import SQLExecutorExecutor
+
+        executor = SQLExecutorExecutor()
+        node = CanvasNode(
+            id="n2",
+            type=NodeType.SQL_EXECUTOR,
+            position={"x": 0, "y": 0},
+            data={"sql": "SELECT 1"},  # missing output_table
+        )
+        errors = executor.validate(node)
+        assert len(errors) == 1
+        assert "output_table" in errors[0]
+
+    def test_validate_returns_empty_for_valid_node(self):
+        """Valid SQL executor node passes validation."""
+        from deerflow.canvas.components.sql_executor import SQLExecutorExecutor
+
+        executor = SQLExecutorExecutor()
+        node = CanvasNode(
+            id="n3",
+            type=NodeType.SQL_EXECUTOR,
+            position={"x": 0, "y": 0},
+            data={"sql": "SELECT * FROM users", "output_table": "result"},
+        )
+        errors = executor.validate(node)
+        assert errors == []
+
+    @pytest.mark.asyncio
+    async def test_execute_resolves_variables_and_runs_sql(self):
+        """SQL executor resolves variables and executes SQL."""
+        from deerflow.canvas.components.sql_executor import SQLExecutorExecutor
+
+        executor = SQLExecutorExecutor()
+        node = CanvasNode(
+            id="n4",
+            type=NodeType.SQL_EXECUTOR,
+            position={"x": 0, "y": 0},
+            data={
+                "sql": "CREATE TABLE {{output_table}} AS SELECT * FROM {{source_table}}",
+                "output_table": "my_result",
+            },
+        )
+
+        # Mock database connection
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.rowcount = 100
+
+        context = ExecutionContext(
+            canvas_id="canvas-1",
+            thread_id="thread-1",
+            db_connections={"conn-1": {"connection": mock_conn, "type": "postgres"}},
+            sandbox=None,
+            resolved_variables={
+                "source_table": "raw_data",
+            },
+        )
+
+        with patch.object(executor, "_get_connection_info", return_value={"connection": mock_conn, "type": "postgres"}):
+            result = await executor.execute(node, context)
+
+        assert result.success is True
+        assert result.output_table == "my_result"
+        assert result.rows_affected == 100
