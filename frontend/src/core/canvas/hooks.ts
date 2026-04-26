@@ -9,10 +9,21 @@ import {
   executeCanvas,
   getCanvas,
   getComponents,
+  getDbConnections,
   getExecutionStatus,
+  getTableSchema,
+  getTables,
+  previewNodeOutput,
+  previewTable,
+  stopCanvasExecution,
   updateCanvas,
+  validateSQL,
 } from "./api";
-import type { CanvasExecuteRequest, CanvasUpdateRequest } from "./types";
+import type {
+  CanvasExecuteRequest,
+  CanvasUpdateRequest,
+  ValidateSQLRequest,
+} from "./types";
 
 /**
  * 获取线程 canvas 的 hook。
@@ -64,8 +75,8 @@ export function useExecuteCanvas(threadId: string) {
     mutationFn: (request?: CanvasExecuteRequest) => executeCanvas(threadId, request),
     onSuccess: () => {
       // 使 canvas 缓存失效以获取更新后的状态
-      queryClient.invalidateQueries({ queryKey: ["canvas", threadId] });
-      queryClient.invalidateQueries({ queryKey: ["canvas-status", threadId] });
+      void queryClient.invalidateQueries({ queryKey: ["canvas", threadId] });
+      void queryClient.invalidateQueries({ queryKey: ["canvas-status", threadId] });
     },
   });
 
@@ -132,6 +143,143 @@ export function useComponents(enabled = true) {
   return {
     components: data?.components ?? [],
     isLoading,
+    error,
+  };
+}
+
+/**
+ * 获取数据库连接列表的 hook。
+ */
+export function useDbConnections(enabled = true) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["db-connections"],
+    queryFn: getDbConnections,
+    enabled,
+    staleTime: 5 * 60 * 1000, // 5 分钟
+  });
+
+  return {
+    connections: data?.connections ?? [],
+    isLoading,
+    error,
+  };
+}
+
+/**
+ * 获取表列表的 hook。
+ */
+export function useTables(connectionId: string | null, enabled = true) {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ["tables", connectionId],
+    queryFn: () => connectionId ? getTables(connectionId) : Promise.resolve({ tables: [] }),
+    enabled: enabled && !!connectionId,
+    staleTime: 60 * 1000, // 1 分钟
+  });
+
+  return {
+    tables: data?.tables ?? [],
+    isLoading,
+    error,
+    refetch,
+  };
+}
+
+/**
+ * 获取表结构的 hook。
+ */
+export function useTableSchema(
+  connectionId: string | null,
+  tableName: string | null,
+  enabled = true
+) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["table-schema", connectionId, tableName],
+    queryFn: () =>
+      connectionId && tableName
+        ? getTableSchema(connectionId, tableName)
+        : Promise.resolve({ columns: [] }),
+    enabled: enabled && !!connectionId && !!tableName,
+    staleTime: 60 * 1000,
+  });
+
+  return {
+    columns: data?.columns ?? [],
+    isLoading,
+    error,
+  };
+}
+
+/**
+ * 预览表数据的 mutation。
+ */
+export function usePreviewTable() {
+  const { mutateAsync, isPending, error } = useMutation({
+    mutationFn: ({
+      connectionId,
+      tableName,
+      limit,
+    }: {
+      connectionId: string;
+      tableName: string;
+      limit?: number;
+    }) => previewTable(connectionId, tableName, limit),
+  });
+
+  return {
+    previewTable: mutateAsync,
+    isPending,
+    error,
+  };
+}
+
+/**
+ * 验证SQL的 mutation。
+ */
+export function useValidateSQL(threadId: string) {
+  const { mutateAsync, isPending, error, data } = useMutation({
+    mutationFn: (request: ValidateSQLRequest) => validateSQL(threadId, request),
+  });
+
+  return {
+    validateSQL: mutateAsync,
+    isValidating: isPending,
+    error,
+    validationResult: data,
+  };
+}
+
+/**
+ * 预览节点输出的 mutation。
+ */
+export function usePreviewNodeOutput(threadId: string) {
+  const { mutateAsync, isPending, error } = useMutation({
+    mutationFn: (nodeId: string) => previewNodeOutput(threadId, nodeId, 100),
+  });
+
+  return {
+    previewNode: mutateAsync,
+    isPending,
+    error,
+  };
+}
+
+/**
+ * 停止Canvas执行的 mutation。
+ */
+export function useStopCanvas(threadId: string) {
+  const queryClient = useQueryClient();
+
+  const { mutate, mutateAsync, isPending, error } = useMutation({
+    mutationFn: () => stopCanvasExecution(threadId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["canvas-status", threadId] });
+    },
+  });
+
+  return {
+    stopCanvas: mutate,
+    stopCanvasAsync: mutateAsync,
+    isStopping: isPending,
     error,
   };
 }
