@@ -27,7 +27,6 @@ import { useThread } from "../messages/context";
 
 const CLOSE_MODE = { chat: 100, artifacts: 0 };
 const OPEN_MODE = { chat: 60, artifacts: 40 };
-const CANVAS_CLOSE_MODE = { chat: 100, canvas: 0 };
 const CANVAS_OPEN_MODE = { chat: 50, canvas: 50 };
 
 // Canvas 面板内部组件

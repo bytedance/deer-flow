@@ -384,6 +384,7 @@ class TestDataOutputExecutor:
             with patch.object(executor, "_get_outputs_dir") as mock_dir:
                 import tempfile
                 from pathlib import Path
+
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     mock_dir.return_value = Path(tmp_dir)
                     result = await executor.execute(node, context)

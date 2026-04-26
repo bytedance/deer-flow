@@ -1,14 +1,12 @@
 """Tests for canvas data models."""
 
-import pytest
-
 from deerflow.canvas.models import (
-    Canvas,
-    CanvasNode,
-    CanvasEdge,
-    NodeType,
-    CanvasStatus,
     AgentExecutionMode,
+    Canvas,
+    CanvasEdge,
+    CanvasNode,
+    CanvasStatus,
+    NodeType,
 )
 
 

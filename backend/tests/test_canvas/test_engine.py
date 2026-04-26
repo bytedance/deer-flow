@@ -1,17 +1,18 @@
 """Tests for canvas execution engine."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from deerflow.canvas.engine import CanvasEngine
 from deerflow.canvas.models import (
+    AgentExecutionMode,
     Canvas,
     CanvasEdge,
     CanvasNode,
     CanvasStatus,
-    NodeType,
-    AgentExecutionMode,
     NodeResult,
+    NodeType,
 )
 
 
@@ -136,9 +137,7 @@ class TestCanvasEngine:
         # Mock executors
         with patch("deerflow.canvas.engine.get_executor") as mock_get:
             mock_executor = MagicMock()
-            mock_executor.execute = AsyncMock(
-                return_value=NodeResult(success=True, output_table=None)
-            )
+            mock_executor.execute = AsyncMock(return_value=NodeResult(success=True, output_table=None))
             mock_get.return_value = mock_executor
 
             engine = CanvasEngine(canvas, db_connections={"conn-1": {}})

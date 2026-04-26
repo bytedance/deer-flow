@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -68,6 +68,16 @@ function getPlaceholder(nodeType: NodeType | null): string {
     default:
       return "输入代码...";
   }
+}
+
+// 获取节点显示名称
+function getNodeDisplayName(node: CanvasNode | null): string {
+  if (!node) return "编辑代码内容";
+  const data = node.data as Record<string, unknown>;
+  if (typeof data?.table_name === "string") return data.table_name;
+  if (typeof data?.query_name === "string") return data.query_name;
+  if (typeof data?.script_name === "string") return data.script_name;
+  return "编辑代码内容";
 }
 
 export function CodeEditorDialog({
@@ -150,7 +160,7 @@ export function CodeEditorDialog({
         <DialogHeader>
           <DialogTitle>{getEditorTitle(nodeType)}</DialogTitle>
           <DialogDescription>
-            {String(node?.data?.table_name ?? node?.data?.query_name ?? node?.data?.script_name ?? "编辑代码内容")}
+            {getNodeDisplayName(node)}
             {language !== "text" && (
               <span className="ml-2 text-xs bg-muted px-1.5 py-0.5 rounded">
                 {language.toUpperCase()}
@@ -228,7 +238,7 @@ export function CodeEditorDialog({
                   ))
                 ) : (
                   <span className="text-xs text-muted-foreground">
-                    暂无变量，点击"添加变量"创建
+                    暂无变量，点击&ldquo;添加变量&rdquo;创建
                   </span>
                 )}
               </div>

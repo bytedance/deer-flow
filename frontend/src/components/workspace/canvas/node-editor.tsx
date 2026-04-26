@@ -1,18 +1,16 @@
 "use client";
 
-import { useCallback, useState } from "react";
-
 import { X } from "lucide-react";
+import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useValidateSQL } from "@/core/canvas/hooks";
 import type { CanvasNode, NodeType } from "@/core/canvas/types";
-import { cn } from "@/lib/utils";
 
-import { useCanvasContext } from "./context";
 import { CodeEditorDialog } from "./code-editor-dialog";
+import { useCanvasContext } from "./context";
 import { DataPreviewDialog } from "./data-preview-dialog";
 import { DataSourceEditor, SQLExecutorEditor } from "./editors";
 
@@ -34,8 +32,8 @@ interface Variable {
  * 从上游节点获取可用变量
  */
 function getAvailableVariables(
-  node: CanvasNode,
-  canvasNodes: CanvasNode[]
+  _node: CanvasNode,
+  _canvasNodes: CanvasNode[]
 ): Variable[] {
   // TODO: 实现基于 DAG 依赖关系的变量提取
   // 目前返回空数组，后续可以根据边关系提取上游节点的输出变量
@@ -66,7 +64,7 @@ export function NodeEditor() {
   );
 
   // 获取节点类型
-  const nodeType = selectedNode?.type as NodeType | undefined;
+  const nodeType = selectedNode?.type;
 
   // 关闭编辑器
   const handleClose = useCallback(() => {
@@ -203,6 +201,15 @@ export function NodeEditor() {
     );
   }
 
+  // 获取节点显示名称
+  const getNodeDisplayName = (): string => {
+    const data = selectedNode.data as Record<string, unknown>;
+    if (typeof data?.table_name === "string") return data.table_name;
+    if (typeof data?.query_name === "string") return data.query_name;
+    if (typeof data?.script_name === "string") return data.script_name;
+    return "未选择";
+  };
+
   return (
     <div className="h-full overflow-hidden flex flex-col">
       {/* 标题栏 */}
@@ -256,7 +263,7 @@ export function NodeEditor() {
         title="数据预览"
         description={
           nodeType === "data_source"
-            ? `表: ${(selectedNode.data as Record<string, unknown>)?.table_name ?? "未选择"}`
+            ? `表: ${getNodeDisplayName()}`
             : `节点: ${selectedNode.id}`
         }
       />

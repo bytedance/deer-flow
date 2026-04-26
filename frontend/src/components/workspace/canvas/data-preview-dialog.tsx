@@ -53,23 +53,44 @@ function convertToCSV(
     return columns
       .map((col) => {
         const value = row[col.name];
+        const strValue = formatValueForCSV(value);
         // 处理特殊字符：逗号、引号、换行符
         if (
-          value === null ||
-          value === undefined ||
-          value === "" ||
-          String(value).includes(",") ||
-          String(value).includes('"') ||
-          String(value).includes("\n")
+          strValue.includes(",") ||
+          strValue.includes('"') ||
+          strValue.includes("\n")
         ) {
-          return `"${String(value ?? "").replace(/"/g, '""')}"`;
+          return `"${strValue.replace(/"/g, '""')}"`;
         }
-        return String(value ?? "");
+        return strValue;
       })
       .join(",");
   });
 
   return [header, ...dataRows].join("\n");
+}
+
+/**
+ * 格式化值用于 CSV
+ */
+function formatValueForCSV(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value.toString();
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  // 其他情况（bigint, symbol 等）使用 JSON.stringify
+  return JSON.stringify(value);
 }
 
 /**
@@ -99,7 +120,7 @@ export function DataPreviewDialog({
 }: DataPreviewDialogProps) {
   // 生成 CSV 数据
   const csvData = useMemo(() => {
-    if (!data || !data.rows || !data.columns) return null;
+    if (!data?.rows || !data?.columns) return null;
     return convertToCSV(data.rows, data.columns);
   }, [data]);
 
@@ -119,7 +140,17 @@ export function DataPreviewDialog({
     if (typeof value === "object") {
       return JSON.stringify(value);
     }
-    return String(value);
+    if (typeof value === "string") {
+      return value;
+    }
+    if (typeof value === "number") {
+      return value.toString();
+    }
+    if (typeof value === "boolean") {
+      return value ? "true" : "false";
+    }
+    // 其他情况（bigint, symbol 等）使用 JSON.stringify
+    return JSON.stringify(value);
   }, []);
 
   // 获取单元格样式

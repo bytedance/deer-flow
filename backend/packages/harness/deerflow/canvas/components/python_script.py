@@ -48,9 +48,7 @@ class PythonScriptExecutor(ComponentExecutor):
         db_url = self._get_db_url(context)
 
         # Resolve input table references
-        resolved_input_tables = [
-            context.resolved_variables.get(t, t) for t in input_tables
-        ]
+        resolved_input_tables = [context.resolved_variables.get(t, t) for t in input_tables]
 
         logs = []
 
@@ -98,7 +96,7 @@ class PythonScriptExecutor(ComponentExecutor):
         """
         env_setup = f"""
 import os
-os.environ['INPUT_TABLES'] = {repr(','.join(input_tables))}
+os.environ['INPUT_TABLES'] = {repr(",".join(input_tables))}
 os.environ['OUTPUT_TABLE'] = {repr(output_table)}
 os.environ['DB_URL'] = {repr(db_url)}
 

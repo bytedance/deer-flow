@@ -2,9 +2,8 @@
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
-import { cn } from "@/lib/utils";
-
 import type { CanvasNode, SQLExecutorNodeData } from "@/core/canvas/types";
+import { cn } from "@/lib/utils";
 
 export function SQLExecutorNode({ data, selected }: NodeProps<CanvasNode>) {
   const nodeData = data as SQLExecutorNodeData;

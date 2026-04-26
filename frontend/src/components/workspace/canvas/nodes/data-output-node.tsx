@@ -2,9 +2,8 @@
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
-import { cn } from "@/lib/utils";
-
 import type { CanvasNode, DataOutputNodeData } from "@/core/canvas/types";
+import { cn } from "@/lib/utils";
 
 export function DataOutputNode({ data, selected }: NodeProps<CanvasNode>) {
   const nodeData = data as DataOutputNodeData;

@@ -208,9 +208,7 @@ async def _get_tables_from_connection(conn: Any) -> list[str]:
 
         engine = sqlalchemy.create_engine(_build_connection_url(conn))
         with engine.connect() as connection:
-            result = connection.execute(
-                text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
-            )
+            result = connection.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"))
             return [row[0] for row in result]
 
     else:

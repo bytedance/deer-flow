@@ -14,7 +14,6 @@ import {
   type NodeChange,
   type EdgeChange,
   applyNodeChanges,
-  applyEdgeChanges,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { nanoid } from "nanoid";
@@ -59,7 +58,6 @@ export function CanvasPanel() {
     canvasMode,
     setCanvas,
     nodeResults,
-    setNodeResults,
   } = useCanvasContext();
 
   // 确保 edges 有唯一 id
@@ -89,13 +87,6 @@ export function CanvasPanel() {
     }
   }, [canvas, setNodes, setEdges, ensureNodeIds, ensureEdgeIds]);
 
-  const onConnect = useCallback(
-    (connection: Connection) => {
-      setEdges((eds) => addEdge(connection, eds));
-    },
-    [setEdges],
-  );
-
   const onSelectionChange = useCallback(
     ({ nodes: selectedNodes, edges: selectedEdges }: OnSelectionChangeParams<CanvasNode, CanvasEdge>) => {
       setSelectedNodes(selectedNodes.map((n) => n.id));
@@ -114,9 +105,8 @@ export function CanvasPanel() {
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
 
   // 拖拽开始处理
-  const handleDragStart = useCallback((nodeType: NodeType) => {
-    // 设置拖拽数据到 dataTransfer
-    // 这个回调由 ComponentPanel 触发
+  const handleDragStart = useCallback((_nodeType: NodeType) => {
+    // 设置拖拽数据到 dataTransfer（由 ComponentPanel 处理）
   }, []);
 
   // 添加节点到画布

@@ -5,7 +5,7 @@ import { Play, Square, Save, Trash2, Edit, Eye, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Toggle } from "@/components/ui/toggle";
-import type { CanvasMode, CanvasStatus } from "@/core/canvas/types";
+import type { CanvasStatus } from "@/core/canvas/types";
 import { cn } from "@/lib/utils";
 
 import { useCanvasContext } from "./context";
@@ -40,11 +40,6 @@ export function CanvasToolbar({ onExecute, onStop, onSave, onDelete, isExecuting
   const { canvas, canvasMode, setCanvasMode, executionStatus } = useCanvasContext();
 
   const status = executionStatus?.status ?? canvas?.status ?? "idle";
-
-  // 切换编辑/运行模式
-  const handleModeToggle = () => {
-    setCanvasMode(canvasMode === "edit" ? "run" : "edit");
-  };
 
   return (
     <div className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 shadow-sm">

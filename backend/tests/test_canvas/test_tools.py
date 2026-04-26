@@ -1,10 +1,9 @@
 """Tests for canvas Agent tools."""
 
-import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from deerflow.canvas.tools import canvas_plan_tool, canvas_execute_tool
+from deerflow.canvas.tools import canvas_execute_tool, canvas_plan_tool
 
 
 def make_runtime(thread_id: str = "thread-1") -> SimpleNamespace:
@@ -41,7 +40,7 @@ class TestCanvasPlanTool:
 
     def test_canvas_plan_uses_existing_canvas(self):
         """canvas_plan can update existing canvas."""
-        from deerflow.canvas.models import Canvas, CanvasStatus, AgentExecutionMode
+        from deerflow.canvas.models import AgentExecutionMode, Canvas, CanvasStatus
 
         runtime = make_runtime()
         existing_canvas = Canvas(

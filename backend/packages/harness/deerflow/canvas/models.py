@@ -1,13 +1,13 @@
 """Canvas data models for data analysis DAG."""
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class NodeType(str, Enum):
+class NodeType(StrEnum):
     """Type of canvas node component."""
 
     DATA_SOURCE = "data_source"
@@ -16,7 +16,7 @@ class NodeType(str, Enum):
     DATA_OUTPUT = "data_output"
 
 
-class CanvasStatus(str, Enum):
+class CanvasStatus(StrEnum):
     """Status of canvas execution."""
 
     IDLE = "idle"
@@ -26,14 +26,14 @@ class CanvasStatus(str, Enum):
     FAILED = "failed"
 
 
-class AgentExecutionMode(str, Enum):
+class AgentExecutionMode(StrEnum):
     """How agent participates in execution."""
 
     INTERACTIVE = "interactive"
     READONLY = "readonly"
 
 
-class AgentDecision(str, Enum):
+class AgentDecision(StrEnum):
     """Agent decision after node execution (interactive mode only)."""
 
     CONTINUE = "continue"

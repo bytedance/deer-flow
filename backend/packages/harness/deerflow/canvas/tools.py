@@ -100,9 +100,7 @@ def canvas_plan_tool(
         update={
             "messages": [
                 ToolMessage(
-                    f"Canvas '{canvas.name}' ready with description: {description}\n"
-                    f"Canvas ID: {canvas.id}\n"
-                    f"Agent Mode: {mode.value}",
+                    f"Canvas '{canvas.name}' ready with description: {description}\nCanvas ID: {canvas.id}\nAgent Mode: {mode.value}",
                     tool_call_id=tool_call_id,
                 )
             ],
@@ -138,9 +136,7 @@ def canvas_add_node_tool(
 
     if canvas is None:
         return Command(
-            update={
-                "messages": [ToolMessage("Error: No canvas exists. Use canvas_plan first.", tool_call_id=tool_call_id)]
-            },
+            update={"messages": [ToolMessage("Error: No canvas exists. Use canvas_plan first.", tool_call_id=tool_call_id)]},
         )
 
     try:
@@ -150,8 +146,7 @@ def canvas_add_node_tool(
             update={
                 "messages": [
                     ToolMessage(
-                        f"Error: Invalid node type '{node_type}'. "
-                        f"Valid types: {[t.value for t in NodeType]}",
+                        f"Error: Invalid node type '{node_type}'. Valid types: {[t.value for t in NodeType]}",
                         tool_call_id=tool_call_id,
                     )
                 ]
@@ -180,8 +175,7 @@ def canvas_add_node_tool(
         update={
             "messages": [
                 ToolMessage(
-                    f"Added {node_type} node '{node_id}' to canvas.\n"
-                    f"Total nodes: {len(canvas.nodes)}",
+                    f"Added {node_type} node '{node_id}' to canvas.\nTotal nodes: {len(canvas.nodes)}",
                     tool_call_id=tool_call_id,
                 )
             ],
@@ -215,9 +209,7 @@ def canvas_add_edge_tool(
 
     if canvas is None:
         return Command(
-            update={
-                "messages": [ToolMessage("Error: No canvas exists. Use canvas_plan first.", tool_call_id=tool_call_id)]
-            },
+            update={"messages": [ToolMessage("Error: No canvas exists. Use canvas_plan first.", tool_call_id=tool_call_id)]},
         )
 
     # Validate nodes exist
@@ -248,8 +240,7 @@ def canvas_add_edge_tool(
         update={
             "messages": [
                 ToolMessage(
-                    f"Added edge: {source} -> {target}\n"
-                    f"Total edges: {len(canvas.edges)}",
+                    f"Added edge: {source} -> {target}\nTotal edges: {len(canvas.edges)}",
                     tool_call_id=tool_call_id,
                 )
             ],
@@ -282,9 +273,7 @@ def canvas_execute_tool(
 
     if canvas is None:
         return Command(
-            update={
-                "messages": [ToolMessage("Error: No canvas exists. Use canvas_plan first.", tool_call_id=tool_call_id)]
-            },
+            update={"messages": [ToolMessage("Error: No canvas exists. Use canvas_plan first.", tool_call_id=tool_call_id)]},
         )
 
     if not canvas.nodes:
@@ -318,11 +307,7 @@ def canvas_execute_tool(
         update={
             "messages": [
                 ToolMessage(
-                    f"Canvas execution started.\n"
-                    f"Canvas ID: {canvas.id}\n"
-                    f"Nodes: {len(canvas.nodes)}\n"
-                    f"Edges: {len(canvas.edges)}\n"
-                    f"Use canvas_status to check progress.",
+                    f"Canvas execution started.\nCanvas ID: {canvas.id}\nNodes: {len(canvas.nodes)}\nEdges: {len(canvas.edges)}\nUse canvas_status to check progress.",
                     tool_call_id=tool_call_id,
                 )
             ],

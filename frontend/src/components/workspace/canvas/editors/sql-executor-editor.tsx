@@ -1,16 +1,14 @@
 "use client";
 
-import { useCallback, useState } from "react";
-
 import { CheckCircle2, XCircle } from "lucide-react";
+import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { cn } from "@/lib/utils";
-
 import type { CanvasNode, SQLExecutorNodeData } from "@/core/canvas/types";
+import { cn } from "@/lib/utils";
 
 interface Variable {
   name: string;
@@ -50,7 +48,7 @@ function extractVariables(sql: string): Variable[] {
 
 export function SQLExecutorEditor({
   node,
-  threadId,
+  threadId: _threadId,
   onUpdate,
   onOpenCodeEditor,
   onValidate,

@@ -209,7 +209,7 @@ export async function getTableSchema(
 export async function previewTable(
   connectionId: string,
   tableName: string,
-  limit: number = 100
+  limit = 100
 ): Promise<TablePreviewResponse> {
   const response = await fetch(
     `${getBaseUrl()}/api/db-connections/${connectionId}/tables/${tableName}/preview?limit=${limit}`
@@ -253,7 +253,7 @@ export async function validateSQL(
 export async function previewNodeOutput(
   threadId: string,
   nodeId: string,
-  limit: number = 100
+  limit = 100
 ): Promise<NodePreviewResponse> {
   const response = await fetch(
     `${getBaseUrl()}/api/threads/${threadId}/canvas/nodes/${nodeId}/preview?limit=${limit}`
