@@ -2011,6 +2011,65 @@ class TestChannelService:
         assert service.manager._langgraph_url == "http://custom-langgraph:2024"
         assert service.manager._gateway_url == "http://custom-gateway:8001"
 
+    def test_disabled_channel_with_string_creds_emits_warning(self, caplog):
+        """Warning is emitted when a channel has string credentials but enabled=false."""
+        import logging
+
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "wecom": {"enabled": False, "bot_id": "corp123", "bot_secret": "secret"},
+                }
+            )
+            with caplog.at_level(logging.WARNING, logger="app.channels.service"):
+                await service.start()
+            await service.stop()
+
+        _run(go())
+        assert any("wecom" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_disabled_channel_with_int_creds_emits_warning(self, caplog):
+        """Warning is emitted even when YAML-parsed integer credentials are present."""
+        import logging
+
+        from app.channels.service import ChannelService
+
+        async def go():
+            # Simulate YAML parsing a numeric token/ID as an int
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": False, "bot_token": 123456789},
+                }
+            )
+            with caplog.at_level(logging.WARNING, logger="app.channels.service"):
+                await service.start()
+            await service.stop()
+
+        _run(go())
+        assert any("telegram" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_disabled_channel_without_creds_emits_info(self, caplog):
+        """Only an info log (no warning) is emitted when a channel is disabled with no credentials."""
+        import logging
+
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": False},
+                }
+            )
+            with caplog.at_level(logging.DEBUG, logger="app.channels.service"):
+                await service.start()
+            await service.stop()
+
+        _run(go())
+        warning_records = [r for r in caplog.records if "telegram" in r.message and r.levelno == logging.WARNING]
+        assert not warning_records
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests
@@ -2046,6 +2105,11 @@ class TestSlackSendRetry:
 
 
 class TestSlackAllowedUsers:
+    @staticmethod
+    def _submit_coro(coro, loop):
+        coro.close()
+        return MagicMock()
+
     def test_numeric_allowed_users_match_string_event_user_id(self):
         from app.channels.slack import SlackChannel
 
@@ -2067,13 +2131,9 @@ class TestSlackAllowedUsers:
             "ts": "1710000000.000100",
         }
 
-        def submit_coro(coro, loop):
-            coro.close()
-            return MagicMock()
-
         with patch(
             "app.channels.slack.asyncio.run_coroutine_threadsafe",
-            side_effect=submit_coro,
+            side_effect=self._submit_coro,
         ) as submit:
             channel._handle_message_event(event)
 
@@ -2084,6 +2144,74 @@ class TestSlackAllowedUsers:
         assert inbound.user_id == "123456"
         assert inbound.chat_id == "C123"
         assert inbound.text == "hello from slack"
+
+    def test_string_allowed_users_match_event_user_id(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(
+            bus=bus,
+            config={"allowed_users": "U123456"},
+        )
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "user": "U123456",
+            "text": "hello from slack",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ) as submit:
+            channel._handle_message_event(event)
+
+        channel._add_reaction.assert_called_once_with("C123", "1710000000.000100", "eyes")
+        channel._send_running_reply.assert_called_once_with("C123", "1710000000.000100")
+        submit.assert_called_once()
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.user_id == "U123456"
+        assert inbound.chat_id == "C123"
+        assert inbound.text == "hello from slack"
+
+    def test_scalar_allowed_users_warns_and_matches_stringified_event_user_id(self, caplog):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        with caplog.at_level("WARNING"):
+            channel = SlackChannel(
+                bus=bus,
+                config={"allowed_users": 123456},
+            )
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "user": "123456",
+            "text": "hello from slack",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ) as submit:
+            channel._handle_message_event(event)
+
+        assert "Slack allowed_users should be a list" in caplog.text
+        submit.assert_called_once()
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.user_id == "123456"
 
     def test_raises_after_all_retries_exhausted(self):
         from app.channels.slack import SlackChannel

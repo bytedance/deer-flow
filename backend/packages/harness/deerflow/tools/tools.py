@@ -59,7 +59,22 @@ def get_available_tools(
     if not is_host_bash_allowed(config):
         tool_configs = [tool for tool in tool_configs if not _is_host_bash_tool(tool)]
 
-    loaded_tools = [resolve_variable(tool.use, BaseTool) for tool in tool_configs]
+    loaded_tools_raw = [(cfg, resolve_variable(cfg.use, BaseTool)) for cfg in tool_configs]
+
+    # Warn when the config ``name`` field and the tool object's ``.name``
+    # attribute diverge — this mismatch is the root cause of issue #1803 where
+    # the LLM receives one name in its tool schema but the runtime router
+    # recognises a different name, producing "not a valid tool" errors.
+    for cfg, loaded in loaded_tools_raw:
+        if cfg.name != loaded.name:
+            logger.warning(
+                "Tool name mismatch: config name %r does not match tool .name %r (use: %s). The tool's own .name will be used for binding.",
+                cfg.name,
+                loaded.name,
+                cfg.use,
+            )
+
+    loaded_tools = [t for _, t in loaded_tools_raw]
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
@@ -134,4 +149,20 @@ def get_available_tools(
         logger.warning(f"Failed to load ACP tool: {e}")
 
     logger.info(f"Total tools loaded: {len(loaded_tools)}, built-in tools: {len(builtin_tools)}, MCP tools: {len(mcp_tools)}, ACP tools: {len(acp_tools)}")
-    return loaded_tools + builtin_tools + mcp_tools + acp_tools
+
+    # Deduplicate by tool name — config-loaded tools take priority, followed by
+    # built-ins, MCP tools, and ACP tools.  Duplicate names cause the LLM to
+    # receive ambiguous or concatenated function schemas (issue #1803).
+    all_tools = loaded_tools + builtin_tools + mcp_tools + acp_tools
+    seen_names: set[str] = set()
+    unique_tools: list[BaseTool] = []
+    for t in all_tools:
+        if t.name not in seen_names:
+            unique_tools.append(t)
+            seen_names.add(t.name)
+        else:
+            logger.warning(
+                "Duplicate tool name %r detected and skipped — check your config.yaml and MCP server registrations (issue #1803).",
+                t.name,
+            )
+    return unique_tools

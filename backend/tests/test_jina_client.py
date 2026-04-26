@@ -81,6 +81,28 @@ async def test_crawl_network_error(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_crawl_transient_failure_logs_without_traceback(jina_client, monkeypatch, caplog):
+    """Transient network failures must log at WARNING without a traceback and include the exception type."""
+
+    async def mock_post(self, url, **kwargs):
+        raise httpx.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.jina_ai.jina_client"):
+        result = await jina_client.crawl("https://example.com")
+
+    jina_records = [r for r in caplog.records if r.name == "deerflow.community.jina_ai.jina_client"]
+    assert len(jina_records) == 1, f"expected exactly one log record, got {len(jina_records)}"
+    record = jina_records[0]
+    assert record.levelno == logging.WARNING, f"expected WARNING, got {record.levelname}"
+    assert record.exc_info is None, "transient failures must not attach a traceback"
+    assert "ConnectTimeout" in record.getMessage()
+    assert result.startswith("Error:")
+    assert "ConnectTimeout" in result
+
+
+@pytest.mark.anyio
 async def test_crawl_passes_headers(jina_client, monkeypatch):
     """Test that correct headers are sent."""
     captured_headers = {}
@@ -175,3 +197,30 @@ async def test_web_fetch_tool_returns_markdown_on_success(monkeypatch):
     result = await web_fetch_tool.ainvoke("https://example.com")
     assert "Hello world" in result
     assert not result.startswith("Error:")
+
+
+@pytest.mark.anyio
+async def test_web_fetch_tool_offloads_extraction_to_thread(monkeypatch):
+    """Test that readability extraction is offloaded via asyncio.to_thread to avoid blocking the event loop."""
+    import asyncio
+
+    async def mock_crawl(self, url, **kwargs):
+        return "<html><body><p>threaded</p></body></html>"
+
+    mock_config = MagicMock()
+    mock_config.get_tool_config.return_value = None
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: mock_config)
+    monkeypatch.setattr(JinaClient, "crawl", mock_crawl)
+
+    to_thread_called = False
+    original_to_thread = asyncio.to_thread
+
+    async def tracking_to_thread(func, *args, **kwargs):
+        nonlocal to_thread_called
+        to_thread_called = True
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.asyncio.to_thread", tracking_to_thread)
+    result = await web_fetch_tool.ainvoke("https://example.com")
+    assert to_thread_called, "extract_article must be called via asyncio.to_thread to avoid blocking the event loop"
+    assert "threaded" in result

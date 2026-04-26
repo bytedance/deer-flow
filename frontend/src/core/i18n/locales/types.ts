@@ -229,9 +229,12 @@ export interface Translations {
   // Token Usage
   tokenUsage: {
     title: string;
+    label: string;
     input: string;
     output: string;
     total: string;
+    unavailable: string;
+    unavailableShort: string;
   };
 
   // Shortcuts

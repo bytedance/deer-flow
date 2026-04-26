@@ -166,7 +166,7 @@ Required tools:
 
 1. **Configure the application** (same as Docker setup above)
 
-2. **Install dependencies**:
+2. **Install dependencies** (this also sets up pre-commit hooks):
    ```bash
    make install
    ```
@@ -298,19 +298,24 @@ Nginx (port 2026) ← Unified entry point
 ```bash
 # Backend tests
 cd backend
-uv run pytest
+make test
 
-# Frontend checks
+# Frontend unit tests
 cd frontend
-pnpm check
+make test
+
+# Frontend E2E tests (requires Chromium; builds and auto-starts the Next.js production server)
+cd frontend
+make test-e2e
 ```
 
 ### PR Regression Checks
 
-Every pull request runs the backend regression workflow at [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml), including:
+Every pull request triggers the following CI workflows:
 
-- `tests/test_provisioner_kubeconfig.py`
-- `tests/test_docker_sandbox_mode_detection.py`
+- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
+- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
+- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
 
 ## Code Style
 
