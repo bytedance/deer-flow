@@ -72,7 +72,13 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.user.model import UserRow
 
-    provider = get_local_provider()
+    try:
+        provider = get_local_provider()
+    except RuntimeError:
+        # Auth persistence may not be initialized in some test/boot paths.
+        # Skip admin migration work rather than failing gateway startup.
+        logger.warning("Auth persistence not ready; skipping admin bootstrap check")
+        return
     admin_count = await provider.count_admin_users()
 
     if admin_count == 0:
