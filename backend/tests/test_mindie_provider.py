@@ -191,7 +191,8 @@ class TestParseXmlToolCalls:
         assert clean == ""
         assert len(calls) == 1
         assert calls[0]["name"] == "outer"
-        assert calls[0]["args"]["q"] == 1
+        assert calls[0]["args"] == {"q": 1}
+        assert "x" not in calls[0]["args"]
 
     def test_text_before_tool_call_preserved(self):
         content = "Here is the answer.\n<tool_call><function=f><parameter=k>v</parameter></function></tool_call>"
