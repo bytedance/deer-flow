@@ -18,7 +18,8 @@ from deerflow.persistence.base import Base
 
 # Import all models so metadata is populated.
 try:
-    import deerflow.persistence.models  # noqa: F401 — register ORM models with Base.metadata
+    import deerflow.persistence.models as models  # register ORM models with Base.metadata
+    _ = models
 except ImportError:
     # Models not available — migration will work with existing metadata only.
     logging.getLogger(__name__).warning("Could not import deerflow.persistence.models; Alembic may not detect all tables")
