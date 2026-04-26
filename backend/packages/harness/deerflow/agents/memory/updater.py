@@ -9,7 +9,7 @@ import math
 import re
 import threading
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from typing import Any
 
 import httpx
@@ -71,7 +71,11 @@ def _shutdown_memory_loop() -> None:
     except Exception:
         pass
     finally:
-        _MEMORY_LOOP.call_soon_threadsafe(_MEMORY_LOOP.stop)
+        try:
+            if not _MEMORY_LOOP.is_closed():
+                _MEMORY_LOOP.call_soon_threadsafe(_MEMORY_LOOP.stop)
+        except Exception:
+            pass
 
 
 atexit.register(_shutdown_memory_loop)
@@ -261,7 +265,7 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
-def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
+def _run_async_update_sync(coro: Coroutine[Any, Any, bool]) -> bool:
     """Run an async memory update from sync code on the dedicated memory loop.
 
     Uses a persistent dedicated event loop instead of asyncio.run() to prevent
@@ -275,7 +279,12 @@ def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
     try:
         future = asyncio.run_coroutine_threadsafe(coro, _MEMORY_LOOP)
         handed_off = True  # coroutine is now owned by _MEMORY_LOOP
-        return future.result()
+        try:
+            return future.result(timeout=60)
+        except TimeoutError:
+            future.cancel()
+            logger.warning("Memory update timed out after 60 s; cancelled")
+            return False
     except Exception:
         if not handed_off:
             close = getattr(coro, "close", None)
