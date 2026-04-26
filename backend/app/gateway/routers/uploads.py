@@ -12,6 +12,7 @@ from deerflow.config.paths import get_paths
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
     PathTraversalError,
+    claim_unique_filename,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
@@ -106,6 +107,9 @@ async def upload_files(
         sandbox = sandbox_provider.get(sandbox_id)
     auto_convert_documents = _auto_convert_documents_enabled()
 
+    # Track filenames to prevent overwrites from duplicates in the same request.
+    claimed_filenames: set[str] = set()
+
     for file in files:
         if not file.filename:
             continue
@@ -115,6 +119,8 @@ async def upload_files(
         except ValueError:
             logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
             continue
+
+        safe_filename = claim_unique_filename(safe_filename, claimed_filenames)
 
         try:
             content = await file.read()
