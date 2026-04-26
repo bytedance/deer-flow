@@ -171,7 +171,7 @@ def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
             if "request" in inspect.signature(func).parameters:
                 kwargs["request"] = _make_test_request_stub()
             else:
-                return await func(*args, **kwargs)
+                raise ValueError("require_auth decorator requires 'request' parameter")
             request = kwargs["request"]
 
         if getattr(request, "_deerflow_test_bypass_auth", False):
