@@ -33,6 +33,12 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+CONFIG_FILE_DATABASE_DEFAULTS = {
+    "backend": "sqlite",
+    "sqlite_dir": ".deer-flow/data",
+}
+
+
 class CircuitBreakerConfig(BaseModel):
     """Configuration for the LLM Circuit Breaker."""
 
@@ -118,6 +124,7 @@ class AppConfig(BaseModel):
         cls._check_config_version(config_data, resolved_path)
 
         config_data = cls.resolve_env_variables(config_data)
+        cls._apply_database_defaults(config_data)
 
         # Load title config if present
         if "title" in config_data:
@@ -168,6 +175,18 @@ class AppConfig(BaseModel):
 
         result = cls.model_validate(config_data)
         return result
+
+    @classmethod
+    def _apply_database_defaults(cls, config_data: dict[str, Any]) -> None:
+        """Apply config.yaml defaults for persistence when the section is absent."""
+        database_config = config_data.get("database")
+        if database_config is None:
+            database_config = {}
+            config_data["database"] = database_config
+        if not isinstance(database_config, dict):
+            return
+        for key, value in CONFIG_FILE_DATABASE_DEFAULTS.items():
+            database_config.setdefault(key, value)
 
     @classmethod
     def _check_config_version(cls, config_data: dict, config_path: Path) -> None:

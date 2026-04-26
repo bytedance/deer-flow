@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.app_config import get_app_config, reset_app_config
+from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
 
 
 def _write_config(path: Path, *, model_name: str, supports_thinking: bool) -> None:
@@ -55,6 +55,42 @@ def _write_config_with_agents_api(
 
 def _write_extensions_config(path: Path) -> None:
     path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+
+
+def test_app_config_defaults_missing_database_to_sqlite(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config(config_path, model_name="first-model", supports_thinking=False)
+
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.database.backend == "sqlite"
+    assert config.database.sqlite_dir == ".deer-flow/data"
+
+
+def test_app_config_defaults_empty_database_to_sqlite(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "database": {},
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.database.backend == "sqlite"
+    assert config.database.sqlite_dir == ".deer-flow/data"
 
 
 def test_get_app_config_reloads_when_file_changes(tmp_path, monkeypatch):

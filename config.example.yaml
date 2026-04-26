@@ -816,9 +816,13 @@ skill_evolution:
 # Unified storage backend for LangGraph checkpointer and DeerFlow
 # application data (runs, threads metadata, feedback, etc.).
 #
-# backend: memory  -- No persistence, data lost on restart (default)
+# backend: memory  -- No persistence, data lost on restart
 # backend: sqlite  -- Single-node deployment, files in sqlite_dir
 # backend: postgres -- Production multi-node deployment
+#
+# If this section is omitted or empty in config.yaml, DeerFlow uses:
+#   backend: sqlite
+#   sqlite_dir: .deer-flow/data
 #
 # SQLite mode uses a single deerflow.db file with WAL journal mode
 # for both checkpointer and application data.
