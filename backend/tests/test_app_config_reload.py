@@ -3,9 +3,16 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
 import yaml
 
+import deerflow.config.app_config as app_config_module
+import deerflow.config.extensions_config as extensions_config_module
+import deerflow.config.paths as paths_module
+import deerflow.config.skills_config as skills_config_module
+import deerflow.skills.loader as skills_loader_module
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.app_config import get_app_config, reset_app_config
 
@@ -139,3 +146,148 @@ def test_get_app_config_resets_agents_api_config_when_section_removed(tmp_path, 
         assert get_agents_api_config().enabled is False
     finally:
         reset_app_config()
+
+
+# --- Cross-platform path resolution — Path.resolve() must not appear in hot paths ---
+# blockbuster on Windows raises BlockingError when resolve() calls os.getcwd().
+# Guard: patch Path.resolve to fail; any accidental call breaks the test immediately.
+
+
+def _fail_resolve(self: Path, *_args, **_kwargs) -> Path:
+    raise AssertionError(f"Path.resolve() must not be called (called on {self!r})")
+
+
+@pytest.mark.parametrize(
+    "app_config_file",
+    [
+        "/Users/runner/deer-flow/backend/packages/harness/deerflow/config/app_config.py",
+        "C:/Users/runner/deer-flow/backend/packages/harness/deerflow/config/app_config.py",
+    ],
+)
+def test_default_config_candidates_no_resolve(monkeypatch: pytest.MonkeyPatch, app_config_file: str) -> None:
+    monkeypatch.setattr(app_config_module, "__file__", app_config_file)
+    with patch.object(Path, "resolve", _fail_resolve):
+        backend_yaml, root_yaml = app_config_module._default_config_candidates()
+    assert backend_yaml.name == "config.yaml"
+    assert root_yaml.name == "config.yaml"
+
+
+@pytest.mark.parametrize(
+    "paths_file",
+    [
+        "/Users/runner/deer-flow/backend/packages/harness/deerflow/config/paths.py",
+        "C:/Users/runner/deer-flow/backend/packages/harness/deerflow/config/paths.py",
+    ],
+)
+def test_default_local_base_dir_no_resolve(monkeypatch: pytest.MonkeyPatch, paths_file: str) -> None:
+    monkeypatch.setattr(paths_module, "__file__", paths_file)
+    with patch.object(Path, "resolve", _fail_resolve):
+        base = paths_module._default_local_base_dir()
+    assert base.name == ".deer-flow"
+
+
+def test_paths_base_dir_deer_flow_home_no_resolve(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    with patch.object(Path, "resolve", _fail_resolve):
+        assert paths_module.Paths().base_dir == tmp_path
+
+
+def test_paths_constructor_no_resolve(tmp_path: Path) -> None:
+    with patch.object(Path, "resolve", _fail_resolve):
+        assert paths_module.Paths(base_dir=tmp_path).base_dir == tmp_path
+
+
+def test_paths_resolve_virtual_path_no_resolve(tmp_path: Path) -> None:
+    p = paths_module.Paths(base_dir=tmp_path)
+    thread_id = "test-thread-1"
+    p.ensure_thread_dirs(thread_id)
+    with patch.object(Path, "resolve", _fail_resolve):
+        result = p.resolve_virtual_path(thread_id, "/mnt/user-data/workspace/file.txt")
+    assert result.name == "file.txt"
+
+
+def test_paths_resolve_path_no_resolve(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(paths_module, "_paths", paths_module.Paths(base_dir=tmp_path))
+    with patch.object(Path, "resolve", _fail_resolve):
+        result = paths_module.resolve_path("memory.json")
+    assert result.is_absolute()
+
+
+def test_extensions_resolve_prefers_backend_extensions_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    layout_root = tmp_path / "deer-flow"
+    backend = layout_root / "backend"
+    cfg_dir = backend / "packages" / "harness" / "deerflow" / "config"
+    cfg_dir.mkdir(parents=True)
+    ext_backend = backend / "extensions_config.json"
+    ext_backend.write_text("{}", encoding="utf-8")
+    fake_file = cfg_dir / "extensions_config.py"
+    fake_file.write_text("# test\n", encoding="utf-8")
+
+    monkeypatch.setattr(extensions_config_module, "__file__", str(fake_file))
+    monkeypatch.delenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", raising=False)
+
+    with patch.object(Path, "resolve", _fail_resolve):
+        resolved = extensions_config_module.ExtensionsConfig.resolve_config_path()
+
+    assert resolved == ext_backend
+
+
+def test_extensions_resolve_falls_back_to_repo_root_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    layout_root = tmp_path / "deer-flow"
+    backend = layout_root / "backend"
+    cfg_dir = backend / "packages" / "harness" / "deerflow" / "config"
+    cfg_dir.mkdir(parents=True)
+    ext_repo = layout_root / "extensions_config.json"
+    ext_repo.write_text("{}", encoding="utf-8")
+    fake_file = cfg_dir / "extensions_config.py"
+    fake_file.write_text("# test\n", encoding="utf-8")
+
+    monkeypatch.setattr(extensions_config_module, "__file__", str(fake_file))
+    monkeypatch.delenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", raising=False)
+
+    with patch.object(Path, "resolve", _fail_resolve):
+        resolved = extensions_config_module.ExtensionsConfig.resolve_config_path()
+
+    assert resolved == ext_repo
+
+
+def test_skills_config_default_repo_root_is_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout_root = tmp_path / "deer-flow"
+    cfg_dir = layout_root / "backend" / "packages" / "harness" / "deerflow" / "config"
+    cfg_dir.mkdir(parents=True)
+    fake_file = cfg_dir / "skills_config.py"
+    fake_file.write_text("# test\n", encoding="utf-8")
+    monkeypatch.setattr(skills_config_module, "__file__", str(fake_file))
+
+    with patch.object(Path, "resolve", _fail_resolve):
+        root = skills_config_module._default_repo_root()
+
+    assert root == layout_root
+
+
+def test_skills_config_get_skills_path_relative_resolves_under_repo_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout_root = tmp_path / "deer-flow"
+    cfg_dir = layout_root / "backend" / "packages" / "harness" / "deerflow" / "config"
+    cfg_dir.mkdir(parents=True)
+    fake_file = cfg_dir / "skills_config.py"
+    fake_file.write_text("# test\n", encoding="utf-8")
+    monkeypatch.setattr(skills_config_module, "__file__", str(fake_file))
+
+    with patch.object(Path, "resolve", _fail_resolve):
+        resolved = skills_config_module.SkillsConfig(path="skills").get_skills_path()
+
+    assert resolved.name == "skills"
+
+
+@pytest.mark.parametrize(
+    "loader_file",
+    [
+        "/Users/runner/deer-flow/backend/packages/harness/deerflow/skills/loader.py",
+        "C:/Users/runner/deer-flow/backend/packages/harness/deerflow/skills/loader.py",
+    ],
+)
+def test_get_skills_root_path_no_resolve(monkeypatch: pytest.MonkeyPatch, loader_file: str) -> None:
+    monkeypatch.setattr(skills_loader_module, "__file__", loader_file)
+    with patch.object(Path, "resolve", _fail_resolve):
+        root_skills = skills_loader_module.get_skills_root_path()
+    assert root_skills.name == "skills"

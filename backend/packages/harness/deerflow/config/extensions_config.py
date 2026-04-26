@@ -100,7 +100,7 @@ class ExtensionsConfig(BaseModel):
                 raise FileNotFoundError(f"Extensions config file specified by environment variable `DEER_FLOW_EXTENSIONS_CONFIG_PATH` not found at {path}")
             return path
         else:
-            backend_dir = Path(__file__).resolve().parents[4]
+            backend_dir = Path(__file__).parent.parents[3]
             repo_root = backend_dir.parent
             for path in (
                 backend_dir / "extensions_config.json",
