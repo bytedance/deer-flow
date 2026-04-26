@@ -2011,6 +2011,65 @@ class TestChannelService:
         assert service.manager._langgraph_url == "http://custom-langgraph:2024"
         assert service.manager._gateway_url == "http://custom-gateway:8001"
 
+    def test_disabled_channel_with_string_creds_emits_warning(self, caplog):
+        """Warning is emitted when a channel has string credentials but enabled=false."""
+        import logging
+
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "wecom": {"enabled": False, "bot_id": "corp123", "bot_secret": "secret"},
+                }
+            )
+            with caplog.at_level(logging.WARNING, logger="app.channels.service"):
+                await service.start()
+            await service.stop()
+
+        _run(go())
+        assert any("wecom" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_disabled_channel_with_int_creds_emits_warning(self, caplog):
+        """Warning is emitted even when YAML-parsed integer credentials are present."""
+        import logging
+
+        from app.channels.service import ChannelService
+
+        async def go():
+            # Simulate YAML parsing a numeric token/ID as an int
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": False, "bot_token": 123456789},
+                }
+            )
+            with caplog.at_level(logging.WARNING, logger="app.channels.service"):
+                await service.start()
+            await service.stop()
+
+        _run(go())
+        assert any("telegram" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_disabled_channel_without_creds_emits_info(self, caplog):
+        """Only an info log (no warning) is emitted when a channel is disabled with no credentials."""
+        import logging
+
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": False},
+                }
+            )
+            with caplog.at_level(logging.DEBUG, logger="app.channels.service"):
+                await service.start()
+            await service.stop()
+
+        _run(go())
+        warning_records = [r for r in caplog.records if "telegram" in r.message and r.levelno == logging.WARNING]
+        assert not warning_records
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests
