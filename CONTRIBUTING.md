@@ -166,7 +166,7 @@ Required tools:
 
 1. **Configure the application** (same as Docker setup above)
 
-2. **Install dependencies**:
+2. **Install dependencies** (this also sets up pre-commit hooks):
    ```bash
    make install
    ```
