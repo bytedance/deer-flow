@@ -13,12 +13,12 @@ This page covers day-to-day operational tasks and solutions to common problems w
 
 All services write logs to the `logs/` directory when started with `make dev`:
 
-| File | Service |
-|---|---|
+| File                 | Service                              |
+| -------------------- | ------------------------------------ |
 | `logs/langgraph.log` | LangGraph / DeerFlow Harness runtime |
-| `logs/gateway.log` | FastAPI Gateway API |
-| `logs/frontend.log` | Next.js frontend dev server |
-| `logs/nginx.log` | nginx reverse proxy |
+| `logs/gateway.log`   | FastAPI Gateway API                  |
+| `logs/frontend.log`  | Next.js frontend dev server          |
+| `logs/nginx.log`     | nginx reverse proxy                  |
 
 Tail logs in real time:
 
@@ -30,7 +30,7 @@ tail -f logs/gateway.log
 Adjust the runtime log level in `config.yaml`:
 
 ```yaml
-log_level: debug  # debug | info | warning | error
+log_level: debug # debug | info | warning | error
 ```
 
 ## Health checks
@@ -171,6 +171,9 @@ make dev
 Individual service restart scripts are in `scripts/`. For targeted restarts, you can kill and relaunch individual processes manually using the PIDs in the log files.
 
 <Cards num={2}>
-  <Cards.Card title="Deployment Guide" href="/docs/application/deployment-guide" />
+  <Cards.Card
+    title="Deployment Guide"
+    href="/docs/application/deployment-guide"
+  />
   <Cards.Card title="Configuration" href="/docs/application/configuration" />
 </Cards>

@@ -8,7 +8,9 @@ import { Callout, Cards, Steps } from "nextra/components";
 # Lead Agent
 
 <Callout type="info" emoji="🧠">
-  Lead Agent 是每个 DeerFlow 线程中的主要推理和编排单元。它决定要做什么、调用工具、委派子 Agent，并返回产出物。
+  Lead Agent 是每个 DeerFlow
+  线程中的主要推理和编排单元。它决定要做什么、调用工具、委派子
+  Agent，并返回产出物。
 </Callout>
 
 Lead Agent 是 DeerFlow 线程中的核心执行者。每个对话、任务和工作流都通过它进行。理解它的工作方式有助于你有效地配置它，并在需要时扩展它。
@@ -122,7 +124,8 @@ models:
 自定义 Agent 通过 DeerFlow 应用界面或 `/api/agents` 端点创建。其配置存储在后端目录的 `agents/{name}/config.yaml` 中。
 
 <Callout type="tip">
-  当在线程中选择自定义 Agent 时，Lead Agent 在运行时加载该 Agent 的配置。为特定 Agent 切换模型或技能不需要重启服务器。
+  当在线程中选择自定义 Agent 时，Lead Agent 在运行时加载该 Agent 的配置。为特定
+  Agent 切换模型或技能不需要重启服务器。
 </Callout>
 
 <Cards num={2}>

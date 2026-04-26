@@ -24,13 +24,13 @@ make check
 
 Required:
 
-| Tool | Minimum version |
-|---|---|
-| Python | 3.12 |
-| uv | latest |
-| Node.js | 22 |
-| pnpm | 10 |
-| nginx | any recent version |
+| Tool    | Minimum version    |
+| ------- | ------------------ |
+| Python  | 3.12               |
+| uv      | latest             |
+| Node.js | 22                 |
+| pnpm    | 10                 |
+| nginx   | any recent version |
 
 On macOS, install with `brew install python uv node pnpm nginx`. On Linux, use your distribution's package manager.
 
@@ -87,6 +87,7 @@ make dev
 ```
 
 This starts:
+
 - LangGraph server on port `2024`
 - Gateway API on port `8001`
 - Frontend on port `3000`
@@ -110,12 +111,12 @@ make stop
 
 Log files:
 
-| Service | Log file |
-|---|---|
+| Service   | Log file             |
+| --------- | -------------------- |
 | LangGraph | `logs/langgraph.log` |
-| Gateway | `logs/gateway.log` |
-| Frontend | `logs/frontend.log` |
-| nginx | `logs/nginx.log` |
+| Gateway   | `logs/gateway.log`   |
+| Frontend  | `logs/frontend.log`  |
+| nginx     | `logs/nginx.log`     |
 
 <Callout type="tip">
   If something is not working, check the log files first. Most startup errors
@@ -124,6 +125,9 @@ Log files:
 </Callout>
 
 <Cards num={2}>
-  <Cards.Card title="Deployment Guide" href="/docs/application/deployment-guide" />
+  <Cards.Card
+    title="Deployment Guide"
+    href="/docs/application/deployment-guide"
+  />
   <Cards.Card title="Configuration" href="/docs/application/configuration" />
 </Cards>

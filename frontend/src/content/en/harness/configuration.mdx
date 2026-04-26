@@ -81,7 +81,7 @@ models:
     use: langchain_openai:ChatOpenAI
     model: gpt-4o
     api_key: $OPENAI_API_KEY
-    some_provider_specific_option: value  # passed through to ChatOpenAI constructor
+    some_provider_specific_option: value # passed through to ChatOpenAI constructor
 ```
 
 ## Configuration version
@@ -104,27 +104,27 @@ This merges new fields from `config.example.yaml` into your existing `config.yam
 
 The following table maps each top-level `config.yaml` section to its documentation page:
 
-| Section | Description | Documentation |
-|---|---|---|
-| `log_level` | Logging level (`debug`/`info`/`warning`/`error`) | — |
-| `models` | Available LLM models | [Lead Agent](/docs/harness/lead-agent) |
-| `token_usage` | Token tracking per model call | [Middlewares](/docs/harness/middlewares) |
-| `tools` | Available agent tools | [Tools](/docs/harness/tools) |
-| `tool_groups` | Named groups of tools | [Tools](/docs/harness/tools) |
-| `tool_search` | Deferred/on-demand tool loading | [Tools](/docs/harness/tools) |
-| `sandbox` | Sandbox provider and options | [Sandbox](/docs/harness/sandbox) |
-| `skills` | Skills directory and container path | [Skills](/docs/harness/skills) |
-| `skill_evolution` | Agent-managed skill creation | [Skills](/docs/harness/skills) |
-| `subagents` | Subagent timeouts and max turns | [Subagents](/docs/harness/subagents) |
-| `acp_agents` | External ACP agent integrations | [Subagents](/docs/harness/subagents) |
-| `memory` | Cross-session memory storage | [Memory](/docs/harness/memory) |
-| `summarization` | Conversation summarization | [Middlewares](/docs/harness/middlewares) |
-| `title` | Automatic thread title generation | [Middlewares](/docs/harness/middlewares) |
-| `checkpointer` | Thread state persistence | [Agents & Threads](/docs/application/agents-and-threads) |
-| `guardrails` | Tool call authorization | — |
-| `stream_bridge` | Streaming configuration | — |
-| `uploads` | File upload settings (PDF converter) | — |
-| `channels` | IM channel integrations (Feishu, Slack, etc.) | — |
+| Section           | Description                                      | Documentation                                            |
+| ----------------- | ------------------------------------------------ | -------------------------------------------------------- |
+| `log_level`       | Logging level (`debug`/`info`/`warning`/`error`) | —                                                        |
+| `models`          | Available LLM models                             | [Lead Agent](/docs/harness/lead-agent)                   |
+| `token_usage`     | Token tracking per model call                    | [Middlewares](/docs/harness/middlewares)                 |
+| `tools`           | Available agent tools                            | [Tools](/docs/harness/tools)                             |
+| `tool_groups`     | Named groups of tools                            | [Tools](/docs/harness/tools)                             |
+| `tool_search`     | Deferred/on-demand tool loading                  | [Tools](/docs/harness/tools)                             |
+| `sandbox`         | Sandbox provider and options                     | [Sandbox](/docs/harness/sandbox)                         |
+| `skills`          | Skills directory and container path              | [Skills](/docs/harness/skills)                           |
+| `skill_evolution` | Agent-managed skill creation                     | [Skills](/docs/harness/skills)                           |
+| `subagents`       | Subagent timeouts and max turns                  | [Subagents](/docs/harness/subagents)                     |
+| `acp_agents`      | External ACP agent integrations                  | [Subagents](/docs/harness/subagents)                     |
+| `memory`          | Cross-session memory storage                     | [Memory](/docs/harness/memory)                           |
+| `summarization`   | Conversation summarization                       | [Middlewares](/docs/harness/middlewares)                 |
+| `title`           | Automatic thread title generation                | [Middlewares](/docs/harness/middlewares)                 |
+| `checkpointer`    | Thread state persistence                         | [Agents & Threads](/docs/application/agents-and-threads) |
+| `guardrails`      | Tool call authorization                          | —                                                        |
+| `stream_bridge`   | Streaming configuration                          | —                                                        |
+| `uploads`         | File upload settings (PDF converter)             | —                                                        |
+| `channels`        | IM channel integrations (Feishu, Slack, etc.)    | —                                                        |
 
 ## Minimal config to get started
 
@@ -157,6 +157,12 @@ tools:
 Start from `config.example.yaml` in the repository root and uncomment the sections you need.
 
 <Cards num={2}>
-  <Cards.Card title="Deployment Guide" href="/docs/application/deployment-guide" />
-  <Cards.Card title="Application Configuration" href="/docs/application/configuration" />
+  <Cards.Card
+    title="Deployment Guide"
+    href="/docs/application/deployment-guide"
+  />
+  <Cards.Card
+    title="Application Configuration"
+    href="/docs/application/configuration"
+  />
 </Cards>

@@ -8,7 +8,8 @@ import { Callout, Cards } from "nextra/components";
 # 子 Agent
 
 <Callout type="info" emoji="👥">
-  子 Agent 是 Lead Agent 委派子任务的专注执行者。它们以隔离的上下文运行，在处理并行或专业工作的同时保持主对话清晰。
+  子 Agent 是 Lead Agent
+  委派子任务的专注执行者。它们以隔离的上下文运行，在处理并行或专业工作的同时保持主对话清晰。
 </Callout>
 
 当一个任务对单个推理线程来说太宽泛，或者部分任务可以并行完成时，Lead Agent 将工作委派给**子 Agent**。子 Agent 是一个独立的 Agent 调用，接收特定任务、执行并返回结果。
@@ -73,10 +74,10 @@ subagents:
   # 可选：按 Agent 覆盖
   agents:
     general-purpose:
-      timeout_seconds: 1800  # 复杂任务 30 分钟
+      timeout_seconds: 1800 # 复杂任务 30 分钟
       max_turns: 160
     bash:
-      timeout_seconds: 300   # 快速命令 5 分钟
+      timeout_seconds: 300 # 快速命令 5 分钟
       max_turns: 80
 ```
 
@@ -115,7 +116,9 @@ acp_agents:
 Lead Agent 通过 `invoke_acp_agent` 内置工具调用 ACP Agent。
 
 <Callout type="tip">
-  ACP Agent 作为 DeerFlow 管理的子进程运行，通过 ACP 协议通信。标准 CLI 工具（如原始的 `claude` 或 `codex` 命令）默认不兼容 ACP——请使用上面列出的适配器包或兼容的 ACP 封装器。
+  ACP Agent 作为 DeerFlow 管理的子进程运行，通过 ACP 协议通信。标准 CLI
+  工具（如原始的 `claude` 或 `codex` 命令）默认不兼容
+  ACP——请使用上面列出的适配器包或兼容的 ACP 封装器。
 </Callout>
 
 <Cards num={2}>

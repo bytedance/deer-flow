@@ -11,10 +11,10 @@ DeerFlow App is configured through two files and a set of environment variables.
 
 ## Configuration files
 
-| File | Purpose |
-|---|---|
-| `config.yaml` | Backend configuration: models, sandbox, tools, skills, memory, and all Harness settings |
-| `extensions_config.json` | MCP servers and skill enable/disable state (managed by the App UI and Gateway API) |
+| File                     | Purpose                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------- |
+| `config.yaml`            | Backend configuration: models, sandbox, tools, skills, memory, and all Harness settings |
+| `extensions_config.json` | MCP servers and skill enable/disable state (managed by the App UI and Gateway API)      |
 
 Frontend environment variables control the Next.js build and runtime behavior.
 
@@ -144,6 +144,7 @@ sandbox:
 ```
 
 Install: `cd backend && uv add 'deerflow-harness[aio-sandbox]'`
+
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
@@ -161,7 +162,7 @@ Configure which tools the agent has access to. The defaults use DuckDuckGo (no A
 ```yaml
 tools:
   # Web search (choose one)
-  - use: deerflow.community.ddg_search.tools:web_search_tool  # default, no key required
+  - use: deerflow.community.ddg_search.tools:web_search_tool # default, no key required
   # - use: deerflow.community.tavily.tools:web_search_tool
   #   api_key: $TAVILY_API_KEY
 
@@ -188,7 +189,7 @@ By default, DeerFlow uses an SQLite checkpointer for thread state persistence:
 ```yaml
 checkpointer:
   type: sqlite
-  connection_string: checkpoints.db  # stored in backend/.deer-flow/
+  connection_string: checkpoints.db # stored in backend/.deer-flow/
 ```
 
 For production deployments with multiple processes:
@@ -224,12 +225,12 @@ memory:
 
 Set these before running `pnpm build` or starting the frontend in production:
 
-| Variable | Required | Description |
-|---|---|---|
-| `BETTER_AUTH_SECRET` | **Required** in production | Secret for session signing. Use `openssl rand -base64 32`. |
-| `BETTER_AUTH_URL` | Recommended | Public-facing base URL (e.g., `https://your-domain.com`) |
-| `SKIP_ENV_VALIDATION` | Optional | Set to `1` to skip env validation during build (not recommended) |
-| `NEXT_PUBLIC_API_URL` | Optional | Override the API base URL for the frontend |
+| Variable              | Required                   | Description                                                      |
+| --------------------- | -------------------------- | ---------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET`  | **Required** in production | Secret for session signing. Use `openssl rand -base64 32`.       |
+| `BETTER_AUTH_URL`     | Recommended                | Public-facing base URL (e.g., `https://your-domain.com`)         |
+| `SKIP_ENV_VALIDATION` | Optional                   | Set to `1` to skip env validation during build (not recommended) |
+| `NEXT_PUBLIC_API_URL` | Optional                   | Override the API base URL for the frontend                       |
 
 In development, set these in a `.env` file at the repo root:
 
@@ -268,6 +269,12 @@ make config-upgrade
 ```
 
 <Cards num={2}>
-  <Cards.Card title="Deployment Guide" href="/docs/application/deployment-guide" />
-  <Cards.Card title="Harness Configuration" href="/docs/harness/configuration" />
+  <Cards.Card
+    title="Deployment Guide"
+    href="/docs/application/deployment-guide"
+  />
+  <Cards.Card
+    title="Harness Configuration"
+    href="/docs/harness/configuration"
+  />
 </Cards>

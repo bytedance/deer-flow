@@ -8,7 +8,8 @@ import { Callout, Cards, Tabs } from "nextra/components";
 # 工具
 
 <Callout type="info" emoji="🔧">
-  工具是 Lead Agent 可以采取的行动。DeerFlow 提供内置工具、社区集成、MCP 工具和技能工具——全部通过 <code>config.yaml</code> 控制。
+  工具是 Lead Agent 可以采取的行动。DeerFlow 提供内置工具、社区集成、MCP
+  工具和技能工具——全部通过 <code>config.yaml</code> 控制。
 </Callout>
 
 Lead Agent 是一个工具调用 Agent。工具是它与世界交互的方式：搜索网络、读写文件、运行命令、委派任务以及向用户呈现输出。
@@ -74,15 +75,15 @@ task(agent="general-purpose", task="...", context="...")
 
 以下工具与沙箱文件系统交互，需要配置并激活沙箱。
 
-| 工具 | 描述 |
-|---|---|
-| `ls` | 列出目录中的文件 |
-| `read_file` | 读取文件内容 |
-| `glob` | 查找匹配模式的文件 |
-| `grep` | 搜索文件内容 |
-| `write_file` | 向文件写入内容 |
-| `str_replace` | 替换文件中的字符串 |
-| `bash` | 执行 Shell 命令（需要 `allow_host_bash: true` 或容器沙箱） |
+| 工具          | 描述                                                       |
+| ------------- | ---------------------------------------------------------- |
+| `ls`          | 列出目录中的文件                                           |
+| `read_file`   | 读取文件内容                                               |
+| `glob`        | 查找匹配模式的文件                                         |
+| `grep`        | 搜索文件内容                                               |
+| `write_file`  | 向文件写入内容                                             |
+| `str_replace` | 替换文件中的字符串                                         |
+| `bash`        | 执行 Shell 命令（需要 `allow_host_bash: true` 或容器沙箱） |
 
 在 `config.yaml` 的 `tools:` 下配置：
 
@@ -120,6 +121,7 @@ tools:
 高质量搜索，带结构化结果。需要 [Tavily](https://tavily.com) API Key。
 
 安装：`cd backend && uv add 'deerflow-harness[tavily]'`
+
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
@@ -130,6 +132,7 @@ tools:
 带神经检索的语义搜索。需要 [Exa](https://exa.ai) API Key。
 
 安装：`cd backend && uv add 'deerflow-harness[exa]'`
+
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
@@ -145,19 +148,13 @@ Firecrawl 驱动的搜索和爬取。需要 [Firecrawl](https://firecrawl.dev) A
 
 <Tabs items={["Jina AI（默认）", "Exa"]}>
   <Tabs.Tab>
-```yaml
-tools:
-  - use: deerflow.community.jina_ai.tools:web_fetch_tool
-    api_key: $JINA_API_KEY  # 可选；匿名使用有速率限制
-```
-将网页转换为干净的 Markdown。无 API Key 也可使用，但有更严格的速率限制。
+    ```yaml tools: - use: deerflow.community.jina_ai.tools:web_fetch_tool
+    api_key: $JINA_API_KEY # 可选；匿名使用有速率限制 ``` 将网页转换为干净的
+    Markdown。无 API Key 也可使用，但有更严格的速率限制。
   </Tabs.Tab>
   <Tabs.Tab>
-```yaml
-tools:
-  - use: deerflow.community.exa.tools:web_fetch_tool
-    api_key: $EXA_API_KEY
-```
+    ```yaml tools: - use: deerflow.community.exa.tools:web_fetch_tool api_key:
+    $EXA_API_KEY ```
   </Tabs.Tab>
 </Tabs>
 

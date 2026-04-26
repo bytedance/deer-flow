@@ -85,15 +85,15 @@ agent = create_deerflow_agent(
 
 Common parameters:
 
-| Parameter | Description |
-|---|---|
-| `tools` | Additional tools available to the agent |
-| `system_prompt` | Custom system prompt |
-| `features` | Enable or replace built-in runtime features |
+| Parameter          | Description                                     |
+| ------------------ | ----------------------------------------------- |
+| `tools`            | Additional tools available to the agent         |
+| `system_prompt`    | Custom system prompt                            |
+| `features`         | Enable or replace built-in runtime features     |
 | `extra_middleware` | Insert custom middleware into the default chain |
-| `plan_mode` | Enable Todo-style task tracking |
-| `checkpointer` | Persist agent state across runs |
-| `name` | Logical agent name |
+| `plan_mode`        | Enable Todo-style task tracking                 |
+| `checkpointer`     | Persist agent state across runs                 |
+| `name`             | Logical agent name                              |
 
 ## When to use DeerFlowClient instead
 
@@ -109,7 +109,10 @@ Use `DeerFlowClient` when you want the higher-level embedded app interface, such
 ## Next steps
 
 <Cards num={3}>
-  <Cards.Card title="Design Principles" href="/docs/harness/design-principles" />
+  <Cards.Card
+    title="Design Principles"
+    href="/docs/harness/design-principles"
+  />
   <Cards.Card title="Lead Agent" href="/docs/harness/lead-agent" />
   <Cards.Card title="Configuration" href="/docs/harness/configuration" />
 </Cards>

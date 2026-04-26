@@ -75,10 +75,10 @@ subagents:
   # Optional: per-agent overrides
   agents:
     general-purpose:
-      timeout_seconds: 1800  # 30 minutes for complex tasks
+      timeout_seconds: 1800 # 30 minutes for complex tasks
       max_turns: 160
     bash:
-      timeout_seconds: 300   # 5 minutes for quick commands
+      timeout_seconds: 300 # 5 minutes for quick commands
       max_turns: 80
 ```
 
@@ -122,8 +122,8 @@ The Lead Agent invokes ACP agents through the `invoke_acp_agent` built-in tool.
 <Callout type="tip">
   ACP agents run as child processes managed by DeerFlow. They communicate over
   the ACP wire protocol. The standard CLI tools (like the plain `claude` or
-  `codex` commands) are not ACP-compatible by default — use the adapter
-  packages listed above or a compatible ACP wrapper.
+  `codex` commands) are not ACP-compatible by default — use the adapter packages
+  listed above or a compatible ACP wrapper.
 </Callout>
 
 ## Custom agents as subagents

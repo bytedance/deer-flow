@@ -8,7 +8,8 @@ import { Callout, Cards, Steps } from "nextra/components";
 # 快速上手
 
 <Callout type="info" emoji="⚡">
-  大约 10 分钟即可在本地运行 DeerFlow 应用。你需要一台安装了 Python 3.12+、Node.js 22+ 的机器，以及至少一个 LLM API Key。
+  大约 10 分钟即可在本地运行 DeerFlow 应用。你需要一台安装了 Python
+  3.12+、Node.js 22+ 的机器，以及至少一个 LLM API Key。
 </Callout>
 
 本指南引导你使用 `make dev` 工作流在本地机器上启动 DeerFlow 应用。所有四个服务（LangGraph、Gateway、前端、nginx）一起启动，通过单个 URL 访问。
@@ -23,13 +24,13 @@ make check
 
 必需工具：
 
-| 工具 | 最低版本 |
-|---|---|
-| Python | 3.12 |
-| uv | 最新版 |
-| Node.js | 22 |
-| pnpm | 10 |
-| nginx | 任何近期版本 |
+| 工具    | 最低版本     |
+| ------- | ------------ |
+| Python  | 3.12         |
+| uv      | 最新版       |
+| Node.js | 22           |
+| pnpm    | 10           |
+| nginx   | 任何近期版本 |
 
 在 macOS 上，使用 `brew install python uv node pnpm nginx` 安装。在 Linux 上，使用你的发行版包管理器。
 
@@ -86,6 +87,7 @@ make dev
 ```
 
 这会启动：
+
 - LangGraph 服务，端口 `2024`
 - Gateway API，端口 `8001`
 - 前端，端口 `3000`
@@ -109,15 +111,17 @@ make stop
 
 日志文件：
 
-| 服务 | 日志文件 |
-|---|---|
+| 服务      | 日志文件             |
+| --------- | -------------------- |
 | LangGraph | `logs/langgraph.log` |
-| Gateway | `logs/gateway.log` |
-| 前端 | `logs/frontend.log` |
-| nginx | `logs/nginx.log` |
+| Gateway   | `logs/gateway.log`   |
+| 前端      | `logs/frontend.log`  |
+| nginx     | `logs/nginx.log`     |
 
 <Callout type="tip">
-  如果有问题，先检查日志文件。大多数启动错误（缺失 API Key、配置解析失败）会出现在 <code>logs/langgraph.log</code> 或 <code>logs/gateway.log</code> 中。
+  如果有问题，先检查日志文件。大多数启动错误（缺失 API
+  Key、配置解析失败）会出现在 <code>logs/langgraph.log</code> 或{" "}
+  <code>logs/gateway.log</code> 中。
 </Callout>
 
 <Cards num={2}>

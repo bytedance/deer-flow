@@ -89,7 +89,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null  # use default model
+  model_name: null # use default model
 ```
 
 ---
@@ -159,7 +159,7 @@ summarization:
 
   # Trigger conditions — summarization runs when ANY threshold is met
   trigger:
-    - type: tokens      # trigger when context exceeds N tokens
+    - type: tokens # trigger when context exceeds N tokens
       value: 15564
     # - type: messages  # trigger when there are more than N messages
     #   value: 50
@@ -169,7 +169,7 @@ summarization:
   # How much recent history to keep after summarization
   keep:
     type: messages
-    value: 10           # keep the 10 most recent messages
+    value: 10 # keep the 10 most recent messages
     # Alternative: keep by tokens
     # type: tokens
     # value: 3000
@@ -182,6 +182,7 @@ summarization:
 ```
 
 **Trigger types**:
+
 - `tokens`: triggers when the total token count in the conversation exceeds `value`.
 - `messages`: triggers when the number of messages exceeds `value`.
 - `fraction`: triggers when the context reaches `value` fraction of the model's maximum input token limit.
@@ -189,6 +190,7 @@ summarization:
 Multiple triggers can be listed; summarization runs when **any** of them fires.
 
 **Keep types**:
+
 - `messages`: keep the last `value` messages after summarization.
 - `tokens`: keep up to `value` tokens of recent history.
 - `fraction`: keep up to `value` fraction of the model's max input token limit.

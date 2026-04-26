@@ -8,7 +8,8 @@ import { Callout, Cards, Tabs } from "nextra/components";
 # 沙箱
 
 <Callout type="info" emoji="📦">
-  沙箱是 Agent 进行文件和命令操作的隔离工作区。它让 DeerFlow 能够采取真实行动，而不仅仅是对话。
+  沙箱是 Agent 进行文件和命令操作的隔离工作区。它让 DeerFlow
+  能够采取真实行动，而不仅仅是对话。
 </Callout>
 
 沙箱为 Lead Agent 提供一个受控环境，在其中可以读取文件、写入输出、运行 Shell 命令并生成产出物。没有沙箱，Agent 只能生成文本；有了沙箱，它可以编写和执行代码、处理数据文件、生成图表并构建交付物。
@@ -27,7 +28,7 @@ DeerFlow 支持三种沙箱模式，选择适合你部署的一种：
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  allow_host_bash: false  # 默认；仅对完全受信任的工作流设置为 true
+  allow_host_bash: false # 默认；仅对完全受信任的工作流设置为 true
 ```
 
 ### 基于容器的 AIO 沙箱
@@ -72,10 +73,10 @@ sandbox:
 
 沙箱使用路径映射来桥接主机文件系统和容器的虚拟文件系统。始终配置两个关键映射：
 
-| 主机路径 | 容器路径 | 访问权限 |
-|---|---|---|
-| `skills/`（来自 `skills.path`） | `/mnt/skills`（来自 `skills.container_path`） | 只读 |
-| `.deer-flow/threads/{thread_id}/user-data/` | `/mnt/user-data/` | 读写 |
+| 主机路径                                    | 容器路径                                      | 访问权限 |
+| ------------------------------------------- | --------------------------------------------- | -------- |
+| `skills/`（来自 `skills.path`）             | `/mnt/skills`（来自 `skills.container_path`） | 只读     |
+| `.deer-flow/threads/{thread_id}/user-data/` | `/mnt/user-data/`                             | 读写     |
 
 技能目录始终以只读方式挂载。线程将其工作数据（上传文件、输出、中间文件）写入 `/mnt/user-data/`。
 
@@ -94,7 +95,8 @@ sandbox:
 
 <Callout type="warning">
   自定义挂载的 <code>container_path</code> 不能与保留前缀冲突：
-  <code>/mnt/skills</code>、<code>/mnt/acp-workspace</code> 或 <code>/mnt/user-data</code>。
+  <code>/mnt/skills</code>、<code>/mnt/acp-workspace</code> 或{" "}
+  <code>/mnt/user-data</code>。
 </Callout>
 
 ## 输出截断
@@ -125,7 +127,7 @@ sandbox:
 
 ```yaml
 sandbox:
-  allow_host_bash: true  # 危险：授予 Agent 对你机器的 Shell 访问权限
+  allow_host_bash: true # 危险：授予 Agent 对你机器的 Shell 访问权限
 ```
 
 即使没有 `bash`，Agent 也可以通过专用文件工具读写文件。

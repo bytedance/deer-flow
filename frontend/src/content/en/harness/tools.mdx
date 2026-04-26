@@ -78,15 +78,15 @@ Searches for tools by name or description and loads them into the agent's contex
 
 The following tools interact with the sandbox filesystem. They require a sandbox to be configured and active.
 
-| Tool | Description |
-|---|---|
-| `ls` | List files in a directory |
-| `read_file` | Read file contents |
-| `glob` | Find files matching a pattern |
-| `grep` | Search file contents |
-| `write_file` | Write content to a file |
-| `str_replace` | Replace a string in a file |
-| `bash` | Execute a shell command (requires `allow_host_bash: true` or a container sandbox) |
+| Tool          | Description                                                                       |
+| ------------- | --------------------------------------------------------------------------------- |
+| `ls`          | List files in a directory                                                         |
+| `read_file`   | Read file contents                                                                |
+| `glob`        | Find files matching a pattern                                                     |
+| `grep`        | Search file contents                                                              |
+| `write_file`  | Write content to a file                                                           |
+| `str_replace` | Replace a string in a file                                                        |
+| `bash`        | Execute a shell command (requires `allow_host_bash: true` or a container sandbox) |
 
 These are configured in `config.yaml` under `tools:`:
 
@@ -98,7 +98,7 @@ tools:
   - use: deerflow.sandbox.tools:grep_tool
   - use: deerflow.sandbox.tools:write_file_tool
   - use: deerflow.sandbox.tools:str_replace_tool
-  - use: deerflow.sandbox.tools:bash_tool  # requires host bash or container sandbox
+  - use: deerflow.sandbox.tools:bash_tool # requires host bash or container sandbox
 ```
 
 ## Community tools
@@ -124,6 +124,7 @@ tools:
 High-quality search with structured results. Requires a [Tavily](https://tavily.com) API key.
 
 Install: `cd backend && uv add 'deerflow-harness[tavily]'`
+
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
@@ -134,6 +135,7 @@ tools:
 Semantic search with neural retrieval. Requires an [Exa](https://exa.ai) API key.
 
 Install: `cd backend && uv add 'deerflow-harness[exa]'`
+
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
@@ -152,6 +154,7 @@ tools:
 Firecrawl-powered search and crawl. Requires a [Firecrawl](https://firecrawl.dev) API key.
 
 Install: `cd backend && uv add 'deerflow-harness[firecrawl]'`
+
   </Tabs.Tab>
 </Tabs>
 
@@ -159,33 +162,22 @@ Install: `cd backend && uv add 'deerflow-harness[firecrawl]'`
 
 <Tabs items={["Jina AI (default)", "Exa", "InfoQuest", "Firecrawl"]}>
   <Tabs.Tab>
-```yaml
-tools:
-  - use: deerflow.community.jina_ai.tools:web_fetch_tool
-    api_key: $JINA_API_KEY  # optional; anonymous usage has rate limits
-```
-Converts web pages to clean Markdown. Works without an API key at reduced rate limits.
+    ```yaml tools: - use: deerflow.community.jina_ai.tools:web_fetch_tool
+    api_key: $JINA_API_KEY # optional; anonymous usage has rate limits ```
+    Converts web pages to clean Markdown. Works without an API key at reduced
+    rate limits.
   </Tabs.Tab>
   <Tabs.Tab>
-```yaml
-tools:
-  - use: deerflow.community.exa.tools:web_fetch_tool
-    api_key: $EXA_API_KEY
-```
+    ```yaml tools: - use: deerflow.community.exa.tools:web_fetch_tool api_key:
+    $EXA_API_KEY ```
   </Tabs.Tab>
   <Tabs.Tab>
-```yaml
-tools:
-  - use: deerflow.community.infoquest.tools:web_fetch_tool
-    api_key: $INFOQUEST_API_KEY
-```
+    ```yaml tools: - use: deerflow.community.infoquest.tools:web_fetch_tool
+    api_key: $INFOQUEST_API_KEY ```
   </Tabs.Tab>
   <Tabs.Tab>
-```yaml
-tools:
-  - use: deerflow.community.firecrawl.tools:web_fetch_tool
-    api_key: $FIRECRAWL_API_KEY
-```
+    ```yaml tools: - use: deerflow.community.firecrawl.tools:web_fetch_tool
+    api_key: $FIRECRAWL_API_KEY ```
   </Tabs.Tab>
 </Tabs>
 

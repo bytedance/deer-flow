@@ -44,6 +44,7 @@ The default location is the project root (same directory as `config.yaml`). The 
 ```
 
 Each server entry supports:
+
 - `command`: the executable to run (e.g., `npx`, `uvx`, `python`)
 - `args`: command arguments as an array
 - `enabled`: whether the server is active (can be toggled without removing the entry)
@@ -92,6 +93,7 @@ With tool search enabled, MCP tools are listed by name in the system prompt but 
 Some MCP servers require OAuth authentication. DeerFlow's `mcp/oauth.py` handles the OAuth flow for servers that declare OAuth requirements in their capability headers.
 
 When an OAuth-protected MCP server is connected, DeerFlow will:
+
 1. Detect the OAuth requirement from the server's capability headers
 2. Build the appropriate authorization headers using `get_initial_oauth_headers()`
 3. Wrap tool calls with an OAuth interceptor via `build_oauth_tool_interceptor()`

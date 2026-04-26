@@ -21,14 +21,15 @@ make dev
 
 启动的服务：
 
-| 服务 | 端口 | 描述 |
-|---|---|---|
-| LangGraph | 2024 | DeerFlow Harness 运行时 |
-| Gateway API | 8001 | FastAPI 后端 |
-| 前端 | 3000 | Next.js 界面 |
-| nginx | 2026 | 统一反向代理 |
+| 服务        | 端口 | 描述                    |
+| ----------- | ---- | ----------------------- |
+| LangGraph   | 2024 | DeerFlow Harness 运行时 |
+| Gateway API | 8001 | FastAPI 后端            |
+| 前端        | 3000 | Next.js 界面            |
+| nginx       | 2026 | 统一反向代理            |
 
 访问地址：**http://localhost:2026**
+
   </Tabs.Tab>
   <Tabs.Tab>
 ```bash
@@ -36,6 +37,7 @@ make stop
 ```
 
 停止所有四个服务。即使某个服务没有运行也可以安全执行。
+
   </Tabs.Tab>
   <Tabs.Tab>
 ```
@@ -46,9 +48,11 @@ logs/nginx.log       # nginx 访问/错误日志
 ```
 
 实时追踪日志：
+
 ```bash
 tail -f logs/langgraph.log
 ```
+
   </Tabs.Tab>
 </Tabs>
 
@@ -86,7 +90,8 @@ BETTER_AUTH_SECRET=your-secret-here-min-32-chars
 `docker-compose*.yaml` 文件包含 `env_file: ../.env` 指令，会自动加载该文件。
 
 <Callout type="warning">
-  在部署前始终将 <code>BETTER_AUTH_SECRET</code> 设置为强随机字符串。没有它，前端构建会使用一个公开已知的默认值。
+  在部署前始终将 <code>BETTER_AUTH_SECRET</code>{" "}
+  设置为强随机字符串。没有它，前端构建会使用一个公开已知的默认值。
 </Callout>
 
 ### 数据持久化
@@ -104,11 +109,11 @@ BETTER_AUTH_SECRET=your-secret-here-min-32-chars
 
 ### 沙箱模式选择
 
-| 沙箱 | 使用场景 |
-|---|---|
-| `LocalSandboxProvider` | 单用户、受信任的本地工作流 |
-| `AioSandboxProvider`（Docker） | 多用户、中等隔离需求 |
-| `AioSandboxProvider` + K8s Provisioner | 生产环境、强隔离、多用户 |
+| 沙箱                                   | 使用场景                   |
+| -------------------------------------- | -------------------------- |
+| `LocalSandboxProvider`                 | 单用户、受信任的本地工作流 |
+| `AioSandboxProvider`（Docker）         | 多用户、中等隔离需求       |
+| `AioSandboxProvider` + K8s Provisioner | 生产环境、强隔离、多用户   |
 
 对于有多个并发用户的任何部署，使用基于容器的沙箱，防止用户之间的执行环境相互干扰。
 
@@ -153,10 +158,10 @@ SKILLS_PVC_NAME=deer-flow-skills-pvc
 
 nginx 路由所有流量，控制路由的关键环境变量：
 
-| 变量 | 默认值 | 描述 |
-|---|---|---|
-| `LANGGRAPH_UPSTREAM` | `langgraph:2024` | LangGraph 服务地址 |
-| `LANGGRAPH_REWRITE` | `/` | LangGraph 路由的 URL 重写前缀 |
+| 变量                 | 默认值           | 描述                          |
+| -------------------- | ---------------- | ----------------------------- |
+| `LANGGRAPH_UPSTREAM` | `langgraph:2024` | LangGraph 服务地址            |
+| `LANGGRAPH_REWRITE`  | `/`              | LangGraph 路由的 URL 重写前缀 |
 
 这些在 Docker Compose 环境中设置，并在容器启动时由 `envsubst` 处理。
 
@@ -174,12 +179,12 @@ openssl rand -base64 32
 
 ### 资源建议
 
-| 服务 | 最低配置 | 推荐配置 |
-|---|---|---|
+| 服务                      | 最低配置         | 推荐配置         |
+| ------------------------- | ---------------- | ---------------- |
 | LangGraph（Agent 运行时） | 2 vCPU、4 GB RAM | 4 vCPU、8 GB RAM |
-| Gateway | 0.5 vCPU、512 MB | 1 vCPU、1 GB |
-| 前端 | 0.5 vCPU、512 MB | 1 vCPU、1 GB |
-| 沙箱容器（每会话） | 1 vCPU、1 GB | 2 vCPU、2 GB |
+| Gateway                   | 0.5 vCPU、512 MB | 1 vCPU、1 GB     |
+| 前端                      | 0.5 vCPU、512 MB | 1 vCPU、1 GB     |
+| 沙箱容器（每会话）        | 1 vCPU、1 GB     | 2 vCPU、2 GB     |
 
 ## 部署后验证
 
@@ -200,5 +205,8 @@ curl http://localhost:2026/api/models
 
 <Cards num={2}>
   <Cards.Card title="配置" href="/docs/application/configuration" />
-  <Cards.Card title="运维与排障" href="/docs/application/operations-and-troubleshooting" />
+  <Cards.Card
+    title="运维与排障"
+    href="/docs/application/operations-and-troubleshooting"
+  />
 </Cards>

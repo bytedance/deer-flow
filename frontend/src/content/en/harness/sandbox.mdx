@@ -9,8 +9,8 @@ import { Callout, Cards, Tabs } from "nextra/components";
 
 <Callout type="info" emoji="📦">
   The sandbox is the isolated workspace where the agent does file and
-  command-based work. It is what makes DeerFlow capable of real action, not
-  just conversation.
+  command-based work. It is what makes DeerFlow capable of real action, not just
+  conversation.
 </Callout>
 
 The sandbox gives the Lead Agent a controlled environment where it can read files, write outputs, run shell commands, and produce artifacts. Without a sandbox, the agent can only generate text. With a sandbox, it can write and execute code, process data files, generate charts, and build deliverables.
@@ -29,7 +29,7 @@ Commands run directly on the host machine's filesystem. There is no container is
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  allow_host_bash: false  # default; set to true only for fully trusted workflows
+  allow_host_bash: false # default; set to true only for fully trusted workflows
 ```
 
 ### Container-based AIO Sandbox
@@ -83,10 +83,10 @@ The provisioner service is included in `docker/docker-compose-dev.yaml` and mana
 
 The sandbox uses path mappings to bridge the host filesystem and the container's virtual filesystem. Two key mappings are always configured:
 
-| Host path | Container path | Access |
-|---|---|---|
-| `skills/` (from `skills.path`) | `/mnt/skills` (from `skills.container_path`) | Read-only |
-| `.deer-flow/threads/{thread_id}/user-data/` | `/mnt/user-data/` | Read-write |
+| Host path                                   | Container path                               | Access     |
+| ------------------------------------------- | -------------------------------------------- | ---------- |
+| `skills/` (from `skills.path`)              | `/mnt/skills` (from `skills.container_path`) | Read-only  |
+| `.deer-flow/threads/{thread_id}/user-data/` | `/mnt/user-data/`                            | Read-write |
 
 The skills directory is always mounted read-only. Threads write their working data (uploads, outputs, intermediate files) to `/mnt/user-data/`.
 
@@ -136,7 +136,7 @@ The `LocalSandbox` runs commands directly on the host. By default, the `bash` to
 
 ```yaml
 sandbox:
-  allow_host_bash: true  # Dangerous: grants the agent shell access to your machine
+  allow_host_bash: true # Dangerous: grants the agent shell access to your machine
 ```
 
 Even without `bash`, the agent can still read and write files through the dedicated file tools.

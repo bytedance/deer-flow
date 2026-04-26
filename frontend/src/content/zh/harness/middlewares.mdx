@@ -8,7 +8,9 @@ import { Callout } from "nextra/components";
 # 中间件
 
 <Callout type="info" emoji="🔌">
-  中间件包裹 Lead Agent 中的每次 LLM 调用。它们是添加跨领域行为（如记忆、摘要压缩、澄清和 token 追踪）的主要扩展点。
+  中间件包裹 Lead Agent 中的每次 LLM
+  调用。它们是添加跨领域行为（如记忆、摘要压缩、澄清和 token
+  追踪）的主要扩展点。
 </Callout>
 
 每次 Lead Agent 调用 LLM 时，都会先后执行一条**中间件链**。中间件可以读取和修改 Agent 的状态、向系统提示注入内容、拦截工具调用，并对模型输出做出反应。
@@ -87,7 +89,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null  # 使用默认模型
+  model_name: null # 使用默认模型
 ```
 
 ---
@@ -149,7 +151,7 @@ summarization:
 
   # 触发条件——满足任意一个条件时运行摘要
   trigger:
-    - type: tokens      # 当上下文超过 N 个 token 时触发
+    - type: tokens # 当上下文超过 N 个 token 时触发
       value: 15564
     # - type: messages  # 当消息数超过 N 时触发
     #   value: 50
@@ -159,7 +161,7 @@ summarization:
   # 摘要后保留多少最近历史
   keep:
     type: messages
-    value: 10           # 保留最近 10 条消息
+    value: 10 # 保留最近 10 条消息
     # 或者按 token 保留：
     # type: tokens
     # value: 3000
@@ -172,11 +174,13 @@ summarization:
 ```
 
 **触发类型**：
+
 - `tokens`：当对话中总 token 数超过 `value` 时触发。
 - `messages`：当消息数超过 `value` 时触发。
 - `fraction`：当上下文达到模型最大输入 token 限制的 `value` 比例时触发。
 
 **保留类型**：
+
 - `messages`：摘要后保留最后 `value` 条消息。
 - `tokens`：保留最近 `value` 个 token 的历史。
 - `fraction`：保留模型最大输入 token 限制的 `value` 比例的最近历史。
