@@ -74,7 +74,7 @@ install:
 	@echo "Installing frontend dependencies..."
 	@cd frontend && pnpm install
 	@echo "Installing pre-commit hooks..."
-	@pip install -q pre-commit 2>/dev/null; pre-commit install 2>/dev/null || echo "  (pre-commit skipped — install it with: pip install pre-commit && pre-commit install)"
+	@$(BACKEND_UV_RUN) --with pre-commit pre-commit install
 	@echo "✓ All dependencies installed"
 	@echo ""
 	@echo "=========================================="

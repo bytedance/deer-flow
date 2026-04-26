@@ -1,12 +1,19 @@
 repos:
-  # Backend: ruff lint + format
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.10
+  # Backend: ruff lint + format via uv (uses the same ruff version as backend deps)
+  - repo: local
     hooks:
       - id: ruff
         name: ruff lint
-        args: [--fix]
+        entry: bash -c 'cd backend && uv run ruff check --fix "${@/#backend\//}"' --
+        language: system
+        types_or: [python]
+        files: ^backend/
       - id: ruff-format
+        name: ruff format
+        entry: bash -c 'cd backend && uv run ruff format "${@/#backend\//}"' --
+        language: system
+        types_or: [python]
+        files: ^backend/
 
   # Frontend: eslint + prettier (must run from frontend/ for node_modules resolution)
   - repo: local
