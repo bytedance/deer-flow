@@ -241,8 +241,11 @@ class AioSandboxProvider(SandboxProvider):
 
         Ensures all processes derive the same sandbox_id for a given thread,
         enabling cross-process sandbox discovery without shared memory.
+
+        Uses 128 bits (32 hex chars) of the SHA-256 hash to avoid collisions
+        at scale.
         """
-        return hashlib.sha256(thread_id.encode()).hexdigest()[:8]
+        return hashlib.sha256(thread_id.encode()).hexdigest()[:32]
 
     # ── Mount helpers ────────────────────────────────────────────────────
 
