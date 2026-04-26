@@ -1054,3 +1054,112 @@ def test_file_operation_lock_memory_cleanup() -> None:
 
     # 检查特定 key 是否被清理（而不是检查总长度）
     assert lock_key not in _FILE_OPERATION_LOCKS
+
+
+class TestStrReplaceUniquenessCheck:
+    """Tests for str_replace enforcing unique-match when replace_all=False."""
+
+    def _make_runtime(self, sandbox: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            state={},
+            context={"thread_id": "test-thread"},
+            config={},
+        )
+
+    def _patch(self, monkeypatch, sandbox: object) -> None:
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+        monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    def test_unique_match_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class Sandbox:
+            id = "test-sandbox"
+            content = "alpha\nbeta\ngamma\n"
+
+            def read_file(self, path: str) -> str:
+                return self.content
+
+            def write_file(self, path: str, content: str, append: bool = False) -> None:
+                self.content = content
+
+        sandbox = Sandbox()
+        self._patch(monkeypatch, sandbox)
+        result = str_replace_tool.func(
+            runtime=self._make_runtime(sandbox),
+            description="replace unique string",
+            path="/mnt/user-data/workspace/test.txt",
+            old_str="beta",
+            new_str="BETA",
+        )
+        assert result == "OK"
+        assert sandbox.content == "alpha\nBETA\ngamma\n"
+
+    def test_multiple_matches_returns_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class Sandbox:
+            id = "test-sandbox"
+            content = "foo\nbar\nfoo\n"
+
+            def read_file(self, path: str) -> str:
+                return self.content
+
+            def write_file(self, path: str, content: str, append: bool = False) -> None:
+                self.content = content
+
+        sandbox = Sandbox()
+        self._patch(monkeypatch, sandbox)
+        result = str_replace_tool.func(
+            runtime=self._make_runtime(sandbox),
+            description="replace non-unique string",
+            path="/mnt/user-data/workspace/test.txt",
+            old_str="foo",
+            new_str="FOO",
+        )
+        assert result.startswith("Error:")
+        assert "2 times" in result
+        assert sandbox.content == "foo\nbar\nfoo\n"
+
+    def test_replace_all_succeeds_with_multiple_matches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class Sandbox:
+            id = "test-sandbox"
+            content = "foo\nbar\nfoo\n"
+
+            def read_file(self, path: str) -> str:
+                return self.content
+
+            def write_file(self, path: str, content: str, append: bool = False) -> None:
+                self.content = content
+
+        sandbox = Sandbox()
+        self._patch(monkeypatch, sandbox)
+        result = str_replace_tool.func(
+            runtime=self._make_runtime(sandbox),
+            description="replace all occurrences",
+            path="/mnt/user-data/workspace/test.txt",
+            old_str="foo",
+            new_str="FOO",
+            replace_all=True,
+        )
+        assert result == "OK"
+        assert sandbox.content == "FOO\nbar\nFOO\n"
+
+    def test_zero_matches_returns_not_found_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class Sandbox:
+            id = "test-sandbox"
+            content = "alpha\nbeta\n"
+
+            def read_file(self, path: str) -> str:
+                return self.content
+
+            def write_file(self, path: str, content: str, append: bool = False) -> None:
+                self.content = content
+
+        sandbox = Sandbox()
+        self._patch(monkeypatch, sandbox)
+        result = str_replace_tool.func(
+            runtime=self._make_runtime(sandbox),
+            description="replace missing string",
+            path="/mnt/user-data/workspace/test.txt",
+            old_str="nonexistent",
+            new_str="REPLACED",
+        )
+        assert "not found" in result
