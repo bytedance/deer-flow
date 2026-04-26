@@ -139,7 +139,7 @@ export function extractTextFromMessage(message: Message) {
   if (Array.isArray(message.content)) {
     return message.content
       .map((content) => (content.type === "text" ? content.text : ""))
-      .join("\n")
+      .join("")
       .trim();
   }
   return "";
@@ -187,12 +187,12 @@ export function extractContentFromMessage(message: Message) {
             return content.text;
           case "image_url":
             const imageURL = extractURLFromImageURLContent(content.image_url);
-            return `![image](${imageURL})`;
+            return `\n![image](${imageURL})\n`;
           default:
             return "";
         }
       })
-      .join("\n")
+      .join("")
       .trim();
   }
   return "";
