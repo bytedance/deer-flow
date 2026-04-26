@@ -38,8 +38,12 @@ markers = [
     "no_auto_user: disable the conftest autouse contextvar fixture for this test",
 ]
 
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
 [tool.uv.workspace]
 members = ["packages/harness"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
+
