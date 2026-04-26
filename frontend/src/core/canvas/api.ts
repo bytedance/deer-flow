@@ -10,15 +10,29 @@ import type {
   CanvasResponse,
   CanvasUpdateRequest,
   ComponentsListResponse,
+  DbConnectionsListResponse,
   ExecutionStatusResponse,
+  NodePreviewResponse,
+  TablesListResponse,
+  TablePreviewResponse,
+  TableSchemaResponse,
+  ValidateSQLRequest,
+  ValidateSQLResponse,
 } from "./types";
+
+/**
+ * 获取API基础URL。
+ */
+function getBaseUrl(): string {
+  return env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "";
+}
 
 /**
  * 获取线程的 canvas。
  */
 export async function getCanvas(threadId: string): Promise<Canvas | null> {
   const response = await fetch(
-    `${env.NEXT_PUBLIC_BACKEND_BASE_URL}/api/threads/${threadId}/canvas`,
+    `${getBaseUrl()}/api/threads/${threadId}/canvas`,
   );
 
   if (response.status === 404) {
@@ -41,7 +55,7 @@ export async function updateCanvas(
   request: CanvasUpdateRequest,
 ): Promise<Canvas> {
   const response = await fetch(
-    `${env.NEXT_PUBLIC_BACKEND_BASE_URL}/api/threads/${threadId}/canvas`,
+    `${getBaseUrl()}/api/threads/${threadId}/canvas`,
     {
       method: "PUT",
       headers: {
@@ -67,7 +81,7 @@ export async function executeCanvas(
   request: CanvasExecuteRequest = {},
 ): Promise<ExecutionStatusResponse> {
   const response = await fetch(
-    `${env.NEXT_PUBLIC_BACKEND_BASE_URL}/api/threads/${threadId}/canvas/execute`,
+    `${getBaseUrl()}/api/threads/${threadId}/canvas/execute`,
     {
       method: "POST",
       headers: {
@@ -91,7 +105,7 @@ export async function getExecutionStatus(
   threadId: string,
 ): Promise<ExecutionStatusResponse> {
   const response = await fetch(
-    `${env.NEXT_PUBLIC_BACKEND_BASE_URL}/api/threads/${threadId}/canvas/status`,
+    `${getBaseUrl()}/api/threads/${threadId}/canvas/status`,
   );
 
   if (!response.ok) {
@@ -106,7 +120,7 @@ export async function getExecutionStatus(
  */
 export async function deleteCanvas(threadId: string): Promise<void> {
   const response = await fetch(
-    `${env.NEXT_PUBLIC_BACKEND_BASE_URL}/api/threads/${threadId}/canvas`,
+    `${getBaseUrl()}/api/threads/${threadId}/canvas`,
     {
       method: "DELETE",
     },
@@ -122,7 +136,7 @@ export async function deleteCanvas(threadId: string): Promise<void> {
  */
 export async function getComponents(): Promise<ComponentsListResponse> {
   const response = await fetch(
-    `${env.NEXT_PUBLIC_BACKEND_BASE_URL}/api/canvas/components`,
+    `${getBaseUrl()}/api/canvas/components`,
   );
 
   if (!response.ok) {
@@ -141,4 +155,129 @@ function mapCanvasResponse(response: CanvasResponse): Canvas {
     created_at: response.created_at ?? new Date().toISOString(),
     updated_at: response.updated_at ?? new Date().toISOString(),
   };
+}
+
+/**
+ * 获取可用的数据库连接。
+ */
+export async function getDbConnections(): Promise<DbConnectionsListResponse> {
+  const response = await fetch(`${getBaseUrl()}/api/db-connections`);
+
+  if (!response.ok) {
+    throw new Error(`Failed to get db connections: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * 获取连接的表列表。
+ */
+export async function getTables(connectionId: string): Promise<TablesListResponse> {
+  const response = await fetch(
+    `${getBaseUrl()}/api/db-connections/${connectionId}/tables`
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to get tables: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * 获取表结构。
+ */
+export async function getTableSchema(
+  connectionId: string,
+  tableName: string
+): Promise<TableSchemaResponse> {
+  const response = await fetch(
+    `${getBaseUrl()}/api/db-connections/${connectionId}/tables/${tableName}/schema`
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to get table schema: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * 预览表数据。
+ */
+export async function previewTable(
+  connectionId: string,
+  tableName: string,
+  limit: number = 100
+): Promise<TablePreviewResponse> {
+  const response = await fetch(
+    `${getBaseUrl()}/api/db-connections/${connectionId}/tables/${tableName}/preview?limit=${limit}`
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to preview table: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * 验证SQL。
+ */
+export async function validateSQL(
+  threadId: string,
+  request: ValidateSQLRequest
+): Promise<ValidateSQLResponse> {
+  const response = await fetch(
+    `${getBaseUrl()}/api/threads/${threadId}/canvas/validate-sql`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to validate SQL: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * 预览节点输出。
+ */
+export async function previewNodeOutput(
+  threadId: string,
+  nodeId: string,
+  limit: number = 100
+): Promise<NodePreviewResponse> {
+  const response = await fetch(
+    `${getBaseUrl()}/api/threads/${threadId}/canvas/nodes/${nodeId}/preview?limit=${limit}`
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to preview node output: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * 停止Canvas执行。
+ */
+export async function stopCanvasExecution(threadId: string): Promise<void> {
+  const response = await fetch(
+    `${getBaseUrl()}/api/threads/${threadId}/canvas/stop`,
+    {
+      method: "POST",
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to stop canvas: ${response.statusText}`);
+  }
 }

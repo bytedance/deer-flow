@@ -140,3 +140,62 @@ export interface CanvasExecuteRequest {
 export interface ComponentsListResponse {
   components: ComponentInfo[];
 }
+
+// 数据库连接类型
+export interface DbConnection {
+  id: string;
+  name: string;
+  type: string;
+}
+
+export interface DbConnectionsListResponse {
+  connections: DbConnection[];
+}
+
+export interface TableColumn {
+  name: string;
+  type: string;
+  nullable: boolean;
+}
+
+export interface TableSchemaResponse {
+  columns: TableColumn[];
+}
+
+export interface TablesListResponse {
+  tables: string[];
+}
+
+export interface TablePreviewResponse {
+  rows: Record<string, unknown>[];
+  total_rows: number;
+}
+
+// SQL验证
+export interface ValidateSQLRequest {
+  sql: string;
+  variables?: Record<string, string>;
+}
+
+export interface ValidateSQLResponse {
+  valid: boolean;
+  resolved_sql?: string;
+  errors: string[];
+}
+
+// 节点预览
+export interface NodePreviewResponse {
+  rows: Record<string, unknown>[];
+  columns: { name: string; type: string }[];
+  rows_count: number;
+}
+
+// Canvas模式
+export type CanvasMode = "edit" | "run";
+
+// 节点编辑状态
+export interface NodeEditState {
+  hasUnsavedChanges: boolean;
+  isValid: boolean;
+  validationErrors: string[];
+}
