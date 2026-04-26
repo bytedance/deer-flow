@@ -390,6 +390,15 @@ def canvas_status_tool(
     )
 
 
+# Import extended tools for canvas-analysis skill (at end to avoid circular imports)
+from deerflow.canvas.tools_ext import (  # noqa: E402
+    CANVAS_EXT_TOOLS,
+    canvas_inspect_tool,
+    canvas_list_tables_tool,
+    canvas_preview_data_tool,
+    canvas_table_schema_tool,
+)
+
 # Export all tools
 CANVAS_TOOLS = [
     canvas_plan_tool,
@@ -397,6 +406,11 @@ CANVAS_TOOLS = [
     canvas_add_edge_tool,
     canvas_execute_tool,
     canvas_status_tool,
+    # Extended tools
+    canvas_inspect_tool,
+    canvas_list_tables_tool,
+    canvas_table_schema_tool,
+    canvas_preview_data_tool,
 ]
 
 __all__ = [
@@ -405,5 +419,11 @@ __all__ = [
     "canvas_add_edge_tool",
     "canvas_execute_tool",
     "canvas_status_tool",
+    # Extended tools
+    "canvas_inspect_tool",
+    "canvas_list_tables_tool",
+    "canvas_table_schema_tool",
+    "canvas_preview_data_tool",
     "CANVAS_TOOLS",
+    "CANVAS_EXT_TOOLS",
 ]
