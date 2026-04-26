@@ -25,6 +25,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
     "readabilipy>=0.3.0",
+    "requests>=2.32.0",
     "tavily-python>=0.7.17",
     "firecrawl-py>=1.15.0",
     "tiktoken>=0.8.0",
