@@ -19,6 +19,7 @@ from deerflow.persistence.base import Base
 # Import all models so metadata is populated.
 try:
     import deerflow.persistence.models as models  # register ORM models with Base.metadata
+
     _ = models
 except ImportError:
     # Models not available — migration will work with existing metadata only.
