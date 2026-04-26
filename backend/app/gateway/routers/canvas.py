@@ -267,3 +267,177 @@ async def delete_canvas(thread_id: str):
     storage = CanvasStorage()
     storage.delete(thread_id)
     return {"success": True}
+
+
+class ValidateSQLRequest(BaseModel):
+    """Request model for SQL validation."""
+
+    sql: str = Field(..., description="SQL statement to validate")
+    variables: dict[str, str] = Field(default_factory=dict, description="Variable substitutions")
+
+
+class ValidateSQLResponse(BaseModel):
+    """Response model for SQL validation."""
+
+    valid: bool
+    resolved_sql: str | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
+class NodePreviewResponse(BaseModel):
+    """Response model for node data preview."""
+
+    rows: list[dict[str, Any]]
+    columns: list[dict[str, str]]
+    rows_count: int
+
+
+@router.post(
+    "/threads/{thread_id}/canvas/validate-sql",
+    response_model=ValidateSQLResponse,
+)
+async def validate_sql(thread_id: str, request: ValidateSQLRequest):
+    """Validate SQL statement with variable substitution."""
+    import re
+
+    storage = CanvasStorage()
+    canvas = storage.load(thread_id)
+
+    if canvas is None:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+
+    # Resolve variables
+    resolved_sql = request.sql
+    var_pattern = re.compile(r"\{\{(node-\d+)\.(\w+)\}\}")
+
+    def replace_var(match):
+        node_id = match.group(1)
+        field = match.group(2)
+        if node_id in request.variables:
+            return request.variables[node_id]
+        # Try to find from canvas nodes
+        for node in canvas.nodes:
+            if node.id == node_id and field in node.data:
+                return str(node.data[field])
+        return match.group(0)
+
+    resolved_sql = var_pattern.sub(replace_var, resolved_sql)
+
+    # Basic validation - check for common SQL injection patterns
+    errors = []
+
+    # Check for balanced quotes
+    single_quotes = resolved_sql.count("'")
+    double_quotes = resolved_sql.count('"')
+    if single_quotes % 2 != 0:
+        errors.append("Unbalanced single quotes")
+    if double_quotes % 2 != 0:
+        errors.append("Unbalanced double quotes")
+
+    # Check for basic SQL keywords
+    sql_keywords = ["SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP"]
+    has_valid_keyword = any(kw in resolved_sql.upper() for kw in sql_keywords)
+    if not has_valid_keyword:
+        errors.append("No valid SQL keyword found")
+
+    return ValidateSQLResponse(
+        valid=len(errors) == 0,
+        resolved_sql=resolved_sql if errors else None,
+        errors=errors,
+    )
+
+
+@router.get(
+    "/threads/{thread_id}/canvas/nodes/{node_id}/preview",
+    response_model=NodePreviewResponse,
+)
+async def preview_node_output(thread_id: str, node_id: str, limit: int = 100):
+    """Preview output data from a specific node."""
+    import json
+    from pathlib import Path
+
+    storage = CanvasStorage()
+    canvas = storage.load(thread_id)
+
+    if canvas is None:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+
+    # Find the node
+    node = None
+    for n in canvas.nodes:
+        if n.id == node_id:
+            node = n
+            break
+
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
+
+    # Find execution log for this node
+    exec_log = None
+    for log in canvas.execution_log:
+        if log.node_id == node_id and log.success:
+            exec_log = log
+            break
+
+    if exec_log is None:
+        raise HTTPException(status_code=404, detail=f"No execution result for node '{node_id}'")
+
+    # Load output file if available
+    if exec_log.output_file:
+        output_path = Path(exec_log.output_file)
+        if not output_path.is_absolute():
+            # Resolve relative path
+            from deerflow.config.paths import get_paths
+
+            base_dir = get_paths().base_dir
+            output_path = base_dir / "threads" / thread_id / "outputs" / output_path.name
+
+        if output_path.exists():
+            # Read based on format
+            suffix = output_path.suffix.lower()
+            if suffix == ".json":
+                with open(output_path) as f:
+                    data = json.load(f)
+                    rows = data if isinstance(data, list) else [data]
+            elif suffix == ".csv":
+                import csv
+
+                with open(output_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
+            else:
+                rows = [{"content": output_path.read_text()}]
+
+            columns = [{"name": k, "type": type(v).__name__} for k, v in (rows[0] if rows else {}).items()]
+
+            return NodePreviewResponse(
+                rows=rows[:limit],
+                columns=columns,
+                rows_count=len(rows),
+            )
+
+    # Return output table info if available
+    if exec_log.output_table:
+        return NodePreviewResponse(
+            rows=[{"output_table": exec_log.output_table}],
+            columns=[{"name": "output_table", "type": "string"}],
+            rows_count=exec_log.rows_affected,
+        )
+
+    raise HTTPException(status_code=404, detail=f"No preview available for node '{node_id}'")
+
+
+@router.post("/threads/{thread_id}/canvas/stop")
+async def stop_canvas_execution(thread_id: str):
+    """Stop canvas execution."""
+    storage = CanvasStorage()
+    canvas = storage.load(thread_id)
+
+    if canvas is None:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+
+    # Update status to paused (stopped by user)
+    canvas.status = CanvasStatus.PAUSED
+    storage.save(canvas)
+
+    return {"success": True}
