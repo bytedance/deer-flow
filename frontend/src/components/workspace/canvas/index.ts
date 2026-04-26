@@ -5,3 +5,4 @@ export { CanvasToolbar } from "./canvas-toolbar";
 export { NodeEditor } from "./node-editor";
 export { ExecutionStatus } from "./execution-status";
 export { ComponentPanel, componentList } from "./component-panel";
+export { CodeEditorDialog } from "./code-editor-dialog";
