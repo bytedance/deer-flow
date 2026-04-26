@@ -10,6 +10,18 @@ const SSR_AUTH_TIMEOUT_MS = 5_000;
  * Returns a tagged AuthResult — callers use exhaustive switch, no try/catch.
  */
 export async function getServerSideUser(): Promise<AuthResult> {
+  if (process.env.DEER_FLOW_AUTH_DISABLED === "1") {
+    return {
+      tag: "authenticated",
+      user: {
+        id: "e2e-user",
+        email: "e2e@test.local",
+        system_role: "admin",
+        needs_setup: false,
+      },
+    };
+  }
+
   const cookieStore = await cookies();
   const sessionCookie = cookieStore.get("access_token");
 
