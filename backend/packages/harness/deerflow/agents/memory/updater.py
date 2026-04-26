@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import concurrent.futures
 import copy
 import json
 import logging
@@ -60,10 +61,13 @@ def _ensure_memory_loop() -> tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]
     """Lazily create the dedicated memory event loop and HTTP client on first use."""
     global _MEMORY_LOOP, _MEMORY_HTTP_CLIENT, _MEMORY_ATEXIT_REGISTERED
     if _MEMORY_LOOP is not None:
-        return _MEMORY_LOOP, _MEMORY_HTTP_CLIENT  # type: ignore[return-value]
+        # Already initialized — both globals are non-None at this point.
+        assert _MEMORY_HTTP_CLIENT is not None
+        return _MEMORY_LOOP, _MEMORY_HTTP_CLIENT
     with _MEMORY_INIT_LOCK:
         if _MEMORY_LOOP is not None:
-            return _MEMORY_LOOP, _MEMORY_HTTP_CLIENT  # type: ignore[return-value]
+            assert _MEMORY_HTTP_CLIENT is not None
+            return _MEMORY_LOOP, _MEMORY_HTTP_CLIENT
         loop = asyncio.new_event_loop()
         client = httpx.AsyncClient()
         threading.Thread(
@@ -77,7 +81,7 @@ def _ensure_memory_loop() -> tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]
         if not _MEMORY_ATEXIT_REGISTERED:
             atexit.register(_shutdown_memory_loop)
             _MEMORY_ATEXIT_REGISTERED = True
-    return _MEMORY_LOOP, _MEMORY_HTTP_CLIENT  # type: ignore[return-value]
+    return loop, client
 
 
 def _shutdown_memory_loop() -> None:
@@ -300,7 +304,7 @@ def _run_async_update_sync(coro: Coroutine[Any, Any, bool]) -> bool:
         handed_off = True  # coroutine is now owned by _MEMORY_LOOP
         try:
             return future.result(timeout=60)
-        except TimeoutError:
+        except concurrent.futures.TimeoutError:
             future.cancel()
             logger.warning("Memory update timed out after 60 s; cancelled")
             return False
