@@ -294,3 +294,99 @@ class TestPythonScriptExecutor:
         assert result.output_table == "processed_data"
         # Verify sandbox was called
         assert mock_sandbox.execute_command.called
+
+
+class TestDataOutputExecutor:
+    def test_node_type_is_data_output(self):
+        """DataOutputExecutor handles data_output nodes."""
+        from deerflow.canvas.components.data_output import DataOutputExecutor
+
+        executor = DataOutputExecutor()
+        assert executor.node_type == "data_output"
+
+    def test_validate_requires_input_table(self):
+        """Data output requires input_table in data."""
+        from deerflow.canvas.components.data_output import DataOutputExecutor
+
+        executor = DataOutputExecutor()
+        node = CanvasNode(
+            id="n1",
+            type=NodeType.DATA_OUTPUT,
+            position={"x": 0, "y": 0},
+            data={"output_format": "csv", "filename": "out.csv"},  # missing input_table
+        )
+        errors = executor.validate(node)
+        assert len(errors) == 1
+        assert "input_table" in errors[0]
+
+    def test_validate_requires_filename(self):
+        """Data output requires filename in data."""
+        from deerflow.canvas.components.data_output import DataOutputExecutor
+
+        executor = DataOutputExecutor()
+        node = CanvasNode(
+            id="n2",
+            type=NodeType.DATA_OUTPUT,
+            position={"x": 0, "y": 0},
+            data={"input_table": "data", "output_format": "csv"},  # missing filename
+        )
+        errors = executor.validate(node)
+        assert len(errors) == 1
+        assert "filename" in errors[0]
+
+    def test_validate_defaults_output_format_to_csv(self):
+        """Data output defaults output_format to csv."""
+        from deerflow.canvas.components.data_output import DataOutputExecutor
+
+        executor = DataOutputExecutor()
+        node = CanvasNode(
+            id="n3",
+            type=NodeType.DATA_OUTPUT,
+            position={"x": 0, "y": 0},
+            data={"input_table": "data", "filename": "out.csv"},  # no output_format
+        )
+        errors = executor.validate(node)
+        assert errors == []  # valid, will use default csv
+
+    @pytest.mark.asyncio
+    async def test_execute_exports_table_to_csv(self):
+        """Data output exports table to CSV file."""
+        from deerflow.canvas.components.data_output import DataOutputExecutor
+
+        executor = DataOutputExecutor()
+        node = CanvasNode(
+            id="n4",
+            type=NodeType.DATA_OUTPUT,
+            position={"x": 0, "y": 0},
+            data={
+                "input_table": "result_data",
+                "output_format": "csv",
+                "filename": "report.csv",
+            },
+        )
+
+        # Mock database connection
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.description = [("col1",), ("col2",)]
+        mock_cursor.fetchall.return_value = [("val1", "val2")]
+
+        context = ExecutionContext(
+            canvas_id="canvas-1",
+            thread_id="thread-1",
+            db_connections={"conn-1": {"connection": mock_conn, "type": "postgres"}},
+            sandbox=None,
+            resolved_variables={"result_data": "actual_result_table"},
+        )
+
+        with patch.object(executor, "_get_connection_info", return_value={"connection": mock_conn, "type": "postgres"}):
+            with patch.object(executor, "_get_outputs_dir") as mock_dir:
+                import tempfile
+                from pathlib import Path
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    mock_dir.return_value = Path(tmp_dir)
+                    result = await executor.execute(node, context)
+
+        assert result.success is True
+        assert result.output_file == "report.csv"
