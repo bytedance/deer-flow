@@ -100,7 +100,7 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
     description="Generate short follow-up questions a user might ask next, based on recent conversation context.",
 )
 @require_permission("threads", "read", owner_check=True)
-async def generate_suggestions(thread_id: str, body: SuggestionsRequest) -> SuggestionsResponse:
+async def generate_suggestions(thread_id: str, body: SuggestionsRequest, request: Request) -> SuggestionsResponse:
     if not body.messages:
         return SuggestionsResponse(suggestions=[])
 
