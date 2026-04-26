@@ -1,6 +1,6 @@
 """Tests for canvas component executors."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -219,3 +219,78 @@ class TestSQLExecutorExecutor:
         assert result.success is True
         assert result.output_table == "my_result"
         assert result.rows_affected == 100
+
+
+class TestPythonScriptExecutor:
+    def test_node_type_is_python_script(self):
+        """PythonScriptExecutor handles python_script nodes."""
+        from deerflow.canvas.components.python_script import PythonScriptExecutor
+
+        executor = PythonScriptExecutor()
+        assert executor.node_type == "python_script"
+
+    def test_validate_requires_script(self):
+        """Python script requires script in data."""
+        from deerflow.canvas.components.python_script import PythonScriptExecutor
+
+        executor = PythonScriptExecutor()
+        node = CanvasNode(
+            id="n1",
+            type=NodeType.PYTHON_SCRIPT,
+            position={"x": 0, "y": 0},
+            data={"output_table": "result"},  # missing script
+        )
+        errors = executor.validate(node)
+        assert len(errors) == 1
+        assert "script" in errors[0]
+
+    def test_validate_requires_output_table(self):
+        """Python script requires output_table in data."""
+        from deerflow.canvas.components.python_script import PythonScriptExecutor
+
+        executor = PythonScriptExecutor()
+        node = CanvasNode(
+            id="n2",
+            type=NodeType.PYTHON_SCRIPT,
+            position={"x": 0, "y": 0},
+            data={"script": "print('hello')"},  # missing output_table
+        )
+        errors = executor.validate(node)
+        assert len(errors) == 1
+        assert "output_table" in errors[0]
+
+    @pytest.mark.asyncio
+    async def test_execute_runs_script_in_sandbox(self):
+        """Python script executes in sandbox with environment variables."""
+        from deerflow.canvas.components.python_script import PythonScriptExecutor
+
+        executor = PythonScriptExecutor()
+        node = CanvasNode(
+            id="n3",
+            type=NodeType.PYTHON_SCRIPT,
+            position={"x": 0, "y": 0},
+            data={
+                "script": "import os\nprint(os.environ.get('OUTPUT_TABLE'))",
+                "input_tables": ["input_data"],
+                "output_table": "processed_data",
+            },
+        )
+
+        # Mock sandbox
+        mock_sandbox = MagicMock()
+        mock_sandbox.execute_command = AsyncMock(return_value="processed_data\n")
+
+        context = ExecutionContext(
+            canvas_id="canvas-1",
+            thread_id="thread-1",
+            db_connections={"conn-1": {"type": "postgres", "url": "postgresql://localhost/test"}},
+            sandbox=mock_sandbox,
+            resolved_variables={"input_data": "raw_table"},
+        )
+
+        result = await executor.execute(node, context)
+
+        assert result.success is True
+        assert result.output_table == "processed_data"
+        # Verify sandbox was called
+        assert mock_sandbox.execute_command.called

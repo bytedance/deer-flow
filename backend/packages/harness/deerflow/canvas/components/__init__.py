@@ -2,6 +2,7 @@
 
 from .base import ComponentExecutor, ExecutionContext, NodeResult
 from .data_source import DataSourceExecutor
+from .python_script import PythonScriptExecutor
 from .sql_executor import SQLExecutorExecutor
 
 __all__ = [
@@ -9,5 +10,6 @@ __all__ = [
     "ExecutionContext",
     "NodeResult",
     "DataSourceExecutor",
+    "PythonScriptExecutor",
     "SQLExecutorExecutor",
 ]
