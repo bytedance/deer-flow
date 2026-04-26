@@ -14,6 +14,8 @@ from langgraph.config import get_config
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
+from deerflow.utils.runtime import get_thread_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,18 +35,6 @@ class BeforeSummarizationHook(Protocol):
     """Hook invoked before summarization removes messages from state."""
 
     def __call__(self, event: SummarizationEvent) -> None: ...
-
-
-def _resolve_thread_id(runtime: Runtime) -> str | None:
-    """Resolve the current thread ID from runtime context or LangGraph config."""
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        try:
-            config_data = get_config()
-        except RuntimeError:
-            return None
-        thread_id = config_data.get("configurable", {}).get("thread_id")
-    return thread_id
 
 
 def _resolve_agent_name(runtime: Runtime) -> str | None:
@@ -334,7 +324,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         event = SummarizationEvent(
             messages_to_summarize=tuple(messages_to_summarize),
             preserved_messages=tuple(preserved_messages),
-            thread_id=_resolve_thread_id(runtime),
+            thread_id=get_thread_id(runtime),
             agent_name=_resolve_agent_name(runtime),
             runtime=runtime,
         )

@@ -23,7 +23,7 @@ class TestThreadDataMiddleware:
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         runtime = Runtime(context=None)
         monkeypatch.setattr(
-            "deerflow.agents.middlewares.thread_data_middleware.get_config",
+            "langgraph.config.get_config",
             lambda: {"configurable": {"thread_id": "thread-from-config"}},
         )
 
@@ -37,7 +37,7 @@ class TestThreadDataMiddleware:
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         runtime = Runtime(context={})
         monkeypatch.setattr(
-            "deerflow.agents.middlewares.thread_data_middleware.get_config",
+            "langgraph.config.get_config",
             lambda: {"configurable": {"thread_id": "thread-from-config"}},
         )
 
@@ -50,7 +50,7 @@ class TestThreadDataMiddleware:
     def test_before_agent_raises_clear_error_when_thread_id_missing_everywhere(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         monkeypatch.setattr(
-            "deerflow.agents.middlewares.thread_data_middleware.get_config",
+            "langgraph.config.get_config",
             lambda: {"configurable": {}},
         )
 

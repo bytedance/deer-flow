@@ -14,6 +14,7 @@ from deerflow.agents.thread_state import ThreadState
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result, request_cancel_background_task
+from deerflow.utils.runtime import get_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +106,7 @@ async def task_tool(
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
-        thread_id = runtime.context.get("thread_id") if runtime.context else None
-        if thread_id is None:
-            thread_id = runtime.config.get("configurable", {}).get("thread_id")
+        thread_id = get_thread_id(runtime)
 
         # Try to get parent model from configurable
         metadata = runtime.config.get("metadata", {})

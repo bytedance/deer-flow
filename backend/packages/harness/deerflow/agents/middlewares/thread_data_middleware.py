@@ -3,11 +3,11 @@ from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import Paths, get_paths
+from deerflow.utils.runtime import get_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -75,11 +75,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
-        context = runtime.context or {}
-        thread_id = context.get("thread_id")
-        if thread_id is None:
-            config = get_config()
-            thread_id = config.get("configurable", {}).get("thread_id")
+        thread_id = get_thread_id(runtime)
 
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")

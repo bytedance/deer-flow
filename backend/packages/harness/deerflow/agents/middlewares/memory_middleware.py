@@ -5,12 +5,12 @@ from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.config.memory_config import get_memory_config
+from deerflow.utils.runtime import get_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +57,10 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         if not config.enabled:
             return None
 
-        # Get thread ID from runtime context first, then fall back to LangGraph's configurable metadata
-        thread_id = runtime.context.get("thread_id") if runtime.context else None
-        if thread_id is None:
-            config_data = get_config()
-            thread_id = config_data.get("configurable", {}).get("thread_id")
+        # Resolve thread ID from the runtime or configured fallback sources
+        thread_id = get_thread_id(runtime)
         if not thread_id:
-            logger.debug("No thread_id in context, skipping memory update")
+            logger.debug("No thread_id could be resolved from runtime/config, skipping memory update")
             return None
 
         # Get messages from state

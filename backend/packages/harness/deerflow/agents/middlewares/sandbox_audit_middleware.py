@@ -14,6 +14,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.utils.runtime import get_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -218,15 +219,7 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
     # ------------------------------------------------------------------
 
     def _get_thread_id(self, request: ToolCallRequest) -> str | None:
-        runtime = request.runtime  # ToolRuntime; may be None-like in tests
-        if runtime is None:
-            return None
-        ctx = getattr(runtime, "context", None) or {}
-        thread_id = ctx.get("thread_id") if isinstance(ctx, dict) else None
-        if thread_id is None:
-            cfg = getattr(runtime, "config", None) or {}
-            thread_id = cfg.get("configurable", {}).get("thread_id")
-        return thread_id
+        return get_thread_id(request.runtime)
 
     _AUDIT_COMMAND_LIMIT = 200
 

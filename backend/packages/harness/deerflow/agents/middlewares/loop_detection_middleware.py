@@ -25,6 +25,8 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.utils.runtime import get_thread_id
+
 logger = logging.getLogger(__name__)
 
 # Defaults — can be overridden via constructor
@@ -183,10 +185,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""
-        thread_id = runtime.context.get("thread_id") if runtime.context else None
-        if thread_id:
-            return thread_id
-        return "default"
+        return get_thread_id(runtime) or "default"
 
     def _evict_if_needed(self) -> None:
         """Evict least recently used threads if over the limit.

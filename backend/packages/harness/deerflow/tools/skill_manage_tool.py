@@ -28,6 +28,7 @@ from deerflow.skills.manager import (
     validate_skill_name,
 )
 from deerflow.skills.security_scanner import scan_skill_content
+from deerflow.utils.runtime import get_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +41,6 @@ def _get_lock(name: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _skill_locks[name] = lock
     return lock
-
-
-def _get_thread_id(runtime: ToolRuntime[ContextT, ThreadState] | None) -> str | None:
-    if runtime is None:
-        return None
-    if runtime.context and runtime.context.get("thread_id"):
-        return runtime.context.get("thread_id")
-    return runtime.config.get("configurable", {}).get("thread_id")
 
 
 def _history_record(*, action: str, file_path: str, prev_content: str | None, new_content: str | None, thread_id: str | None, scanner: dict[str, Any]) -> dict[str, Any]:
@@ -98,7 +91,7 @@ async def _skill_manage_impl(
     """
     name = validate_skill_name(name)
     lock = _get_lock(name)
-    thread_id = _get_thread_id(runtime)
+    thread_id = get_thread_id(runtime)
 
     async with lock:
         if action == "create":

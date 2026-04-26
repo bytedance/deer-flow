@@ -11,6 +11,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.config.paths import Paths, get_paths
 from deerflow.utils.file_conversion import extract_outline
+from deerflow.utils.runtime import get_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -213,14 +214,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             return None
 
         # Resolve uploads directory for existence checks
-        thread_id = (runtime.context or {}).get("thread_id")
-        if thread_id is None:
-            try:
-                from langgraph.config import get_config
-
-                thread_id = get_config().get("configurable", {}).get("thread_id")
-            except RuntimeError:
-                pass  # get_config() raises outside a runnable context (e.g. unit tests)
+        thread_id = get_thread_id(runtime)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
