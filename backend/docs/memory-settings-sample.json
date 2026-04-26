@@ -1,0 +1,193 @@
+{
+  "_comment": "记忆设置示例数据文件",
+
+  "version": "1.0",
+  "_comment_version": "数据格式版本，用于验证和兼容性检查",
+
+  "lastUpdated": "2026-03-28T10:30:00Z",
+  "_comment_lastUpdated": "最后更新时间（ISO 8601格式）",
+
+  "user": {
+    "_comment": "用户上下文信息，包含工作、个人和当前关注点",
+
+    "workContext": {
+      "_comment": "工作上下文：用户当前的工作内容和项目",
+      "summary": "Working on DeerFlow memory management UX, including local search, local filters, clear-all, and single-fact deletion in Settings > Memory.",
+      "_comment_summary": "工作内容的简要描述",
+      "updatedAt": "2026-03-28T10:30:00Z",
+      "_comment_updatedAt": "该上下文的最后更新时间"
+    },
+
+    "personalContext": {
+      "_comment": "个人上下文：用户的个人偏好和习惯",
+      "summary": "Prefers Chinese during collaboration, but wants GitHub PR titles and bodies written in English with a Chinese translation provided alongside them.",
+      "_comment_summary": "个人偏好：协作时使用中文，但 PR 标题和正文使用英文并附中文翻译",
+      "updatedAt": "2026-03-28T10:28:00Z"
+    },
+
+    "topOfMind": {
+      "_comment": "当前关注点：用户最近最关心的事情",
+      "summary": "Wants reviewers to be able to reproduce the memory search and filter flow quickly with pre-populated sample data.",
+      "_comment_summary": "希望审查者能够使用预填充的示例数据快速重现记忆搜索和过滤流程",
+      "updatedAt": "2026-03-28T10:26:00Z"
+    }
+  },
+
+  "history": {
+    "_comment": "历史记录：包含最近月份、早期上下文和长期背景",
+
+    "recentMonths": {
+      "_comment": "最近月份：用户最近几个月的活动和贡献",
+      "summary": "Recently contributed multiple DeerFlow pull requests covering memory, uploads, and compatibility fixes.",
+      "_comment_summary": "最近提交了多个 DeerFlow PR，涵盖记忆、上传和兼容性修复",
+      "updatedAt": "2026-03-28T10:24:00Z"
+    },
+
+    "earlierContext": {
+      "_comment": "早期上下文：用户之前的工作方式和偏好",
+      "summary": "Often prefers shipping smaller, reviewable changes with explicit validation notes.",
+      "_comment_summary": "通常倾向于提交小的、可审查的更改，并附明确的验证说明",
+      "updatedAt": "2026-03-28T10:22:00Z"
+    },
+
+    "longTermBackground": {
+      "_comment": "长期背景：用户的长期目标和背景",
+      "summary": "Actively building open-source contribution experience and improving end-to-end delivery quality.",
+      "_comment_summary": "积极构建开源贡献经验，提高端到端交付质量",
+      "updatedAt": "2026-03-28T10:20:00Z"
+    }
+  },
+
+  "facts": [
+    {
+      "_comment": "事实列表：每个事实代表一条具体的知识或偏好",
+
+      "id": "fact_review_001",
+      "_comment_id": "事实的唯一标识符",
+
+      "content": "User prefers Chinese for day-to-day collaboration.",
+      "_comment_content": "事实的具体内容",
+
+      "category": "preference",
+      "_comment_category": "事实类别：preference（偏好）/ knowledge（知识）/ context（上下文）/ behavior（行为）/ goal（目标）/ project（项目）/ workflow（工作流）/ testing（测试）",
+
+      "confidence": 0.95,
+      "_comment_confidence": "置信度：0-1 之间的值，表示事实的可信程度",
+
+      "createdAt": "2026-03-28T09:50:00Z",
+      "_comment_createdAt": "事实创建时间",
+
+      "source": "thread_pref_cn",
+      "_comment_source": "事实来源：可以是线程 ID 或 'manual'（手动添加）"
+    },
+
+    {
+      "id": "fact_review_002",
+      "content": "PR titles and bodies should be drafted in English and accompanied by a Chinese translation.",
+      "category": "workflow",
+      "confidence": 0.93,
+      "createdAt": "2026-03-28T09:52:00Z",
+      "source": "thread_pr_style"
+    },
+
+    {
+      "id": "fact_review_003",
+      "content": "User implemented memory search and filter improvements in the DeerFlow settings page.",
+      "category": "project",
+      "confidence": 0.91,
+      "createdAt": "2026-03-28T09:54:00Z",
+      "source": "thread_memory_filters"
+    },
+
+    {
+      "id": "fact_review_004",
+      "content": "User added clear-all memory support through the gateway memory API.",
+      "category": "project",
+      "confidence": 0.89,
+      "createdAt": "2026-03-28T09:56:00Z",
+      "source": "thread_memory_clear"
+    },
+
+    {
+      "id": "fact_review_005",
+      "content": "User added single-fact deletion support for persisted memory entries.",
+      "category": "project",
+      "confidence": 0.9,
+      "createdAt": "2026-03-28T09:58:00Z",
+      "source": "thread_memory_delete"
+    },
+
+    {
+      "id": "fact_review_006",
+      "content": "Reviewer can search for keyword memory to see multiple matching facts.",
+      "category": "testing",
+      "confidence": 0.84,
+      "createdAt": "2026-03-28T10:00:00Z",
+      "source": "thread_review_demo",
+      "_comment": "用于测试搜索功能的事实"
+    },
+
+    {
+      "id": "fact_review_007",
+      "content": "Reviewer can search for keyword Chinese to verify cross-category matching.",
+      "category": "testing",
+      "confidence": 0.82,
+      "createdAt": "2026-03-28T10:02:00Z",
+      "source": "thread_review_demo",
+      "_comment": "用于测试跨类别搜索"
+    },
+
+    {
+      "id": "fact_review_008",
+      "content": "Reviewer can search for workflow to verify category text is included in local filtering.",
+      "category": "testing",
+      "confidence": 0.81,
+      "createdAt": "2026-03-28T10:04:00Z",
+      "source": "thread_review_demo",
+      "_comment": "用于验证类别文本在本地过滤中包含"
+    },
+
+    {
+      "id": "fact_review_009",
+      "content": "Delete fact testing can target this disposable sample entry.",
+      "category": "testing",
+      "confidence": 0.78,
+      "createdAt": "2026-03-28T10:06:00Z",
+      "source": "thread_delete_demo",
+      "_comment": "可丢弃的示例条目，用于删除功能测试"
+    },
+
+    {
+      "id": "fact_review_010",
+      "content": "This sample fact is intended for edit testing.",
+      "category": "testing",
+      "confidence": 0.8,
+      "createdAt": "2026-03-28T10:08:00Z",
+      "source": "manual",
+      "_comment": "用于编辑测试的示例事实"
+    }
+  ],
+
+  "_structure_notes": {
+    "purpose": "此文件用于记忆设置功能的开发和测试",
+    "usage": "通过 scripts/load_memory_sample.py 加载到运行时记忆文件",
+    "target": "backend/.deer-flow/memory.json",
+    "backup": "加载时会自动创建时间戳备份",
+    "categories_explained": {
+      "preference": "用户偏好和习惯",
+      "knowledge": "用户拥有的知识",
+      "context": "背景上下文信息",
+      "behavior": "行为模式",
+      "goal": "目标和计划",
+      "project": "项目相关信息",
+      "workflow": "工作流程和方式",
+      "testing": "测试相关（仅示例数据）"
+    },
+    "confidence_guide": {
+      "range": "0.0 - 1.0",
+      "high": "0.8+ - 高度可信",
+      "medium": "0.5-0.8 - 中等可信",
+      "low": "0.5- - 低可信度"
+    }
+  }
+}

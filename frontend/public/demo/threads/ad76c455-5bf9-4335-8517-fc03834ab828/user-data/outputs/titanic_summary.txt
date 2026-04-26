@@ -1,0 +1,35 @@
+=== TITANIC DATASET ANALYSIS SUMMARY ===
+
+Dataset shape: (891, 20)
+Total passengers: 891
+Survivors: 342 (38.38%)
+
+KEY FINDINGS:
+1. Gender disparity: Female survival rate was much higher than male.
+   - Female: 74.20%
+   - Male: 18.89%
+
+2. Class disparity: Higher classes had better survival rates.
+   - Class 1: 62.96% (136/216)
+   - Class 2: 47.28% (87/184)
+   - Class 3: 24.24% (119/491)
+
+3. Children had better survival rates than adults.
+   - Child (0-12): 57.97% (40/69)
+   - Teen (13-18): 42.86% (30/70)
+   - Young Adult (19-30): 35.56% (96/270)
+   - Adult (31-50): 42.32% (102/241)
+   - Senior (51+): 34.38% (22/64)
+
+4. Passengers with cabins had much higher survival rates.
+   - With cabin: 66.67%
+   - Without cabin: 29.99%
+
+5. Family size affected survival.
+   - Alone: 30.35%
+   - With family: 50.56%
+
+6. Embarkation port correlated with survival.
+   - Port C: 55.36% (93/168)
+   - Port Q: 38.96% (30/77)
+   - Port S: 33.70% (217/644)

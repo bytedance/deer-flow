@@ -1,0 +1,46 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "python-envs.pythonProjects": [
+      {
+        "path": "backend",
+        "envManager": "ms-python.python:venv",
+        "packageManager": "ms-python.python:pip",
+        "workspace": "deer-flow"
+      }
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Debug Lead Agent",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/backend/debug.py",
+        "console": "integratedTerminal",
+        "cwd": "${workspaceFolder}/backend",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}/backend"
+        },
+        "justMyCode": false
+      },
+      {
+        "name": "Debug Lead Agent (justMyCode)",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/backend/debug.py",
+        "console": "integratedTerminal",
+        "cwd": "${workspaceFolder}/backend",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}/backend"
+        },
+        "justMyCode": true
+      }
+    ]
+  }
+}

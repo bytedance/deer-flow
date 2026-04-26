@@ -1,0 +1,444 @@
+# Deer-Flow 完整项目代码注释计划
+
+## 📋 项目信息
+- **项目名称**: bytedance/deer-flow
+- **项目地址**: https://github.com/bytedance/deer-flow
+- **分析目标**: 为每个文件添加详细的中文注释，重点强化"设计思路"解读
+
+## 📊 文件统计
+| 模块 | 文件数量 |
+|------|---------|
+| **Backend** | 283 |
+| **Frontend** | 256 |
+| **Skills** | 79 |
+| **Docs** | 63 |
+| **Config/Root** | 27 |
+| **总计** | **708** |
+
+## 🎯 分析要求
+1. **禁止精简** - 每个文件都要详细分析
+2. **禁止合并模块** - 保持原有模块结构
+3. **禁止限制文档篇数** - 完整覆盖所有文件
+4. **禁止省略底层细节** - 深入到底层实现
+5. **重点强化设计思路** - 讲清"为什么这么做"，而非只讲"做了什么"
+
+---
+
+## 📁 完整文件清单 (708 files)
+
+- [x] 001. /data/deer-flow-main/backend/AGENTS.md
+- [x] 002. /data/deer-flow-main/backend/app/channels/base.py
+- [x] 003. /data/deer-flow-main/backend/app/channels/feishu.py
+- [x] 004. /data/deer-flow-main/backend/app/channels/__init__.py
+- [x] 005. /data/deer-flow-main/backend/app/channels/manager.py
+- [x] 006. /data/deer-flow-main/backend/app/channels/message_bus.py
+- [x] 007. /data/deer-flow-main/backend/app/channels/service.py
+- [x] 008. /data/deer-flow-main/backend/app/channels/slack.py
+- [x] 009. /data/deer-flow-main/backend/app/channels/store.py
+- [x] 010. /data/deer-flow-main/backend/app/channels/telegram.py
+- [x] 011. /data/deer-flow-main/backend/app/channels/test_feishu.py (文件不存在)
+- [x] 012. /data/deer-flow-main/backend/app/gateway/app.py
+- [x] 013. /data/deer-flow-main/backend/app/gateway/config.py
+- [x] 014. /data/deer-flow-main/backend/app/gateway/deps.py
+- [x] 015. /data/deer-flow-main/backend/app/gateway/__init__.py
+- [x] 016. /data/deer-flow-main/backend/app/gateway/path_utils.py
+- [x] 017. /data/deer-flow-main/backend/app/gateway/routers/agents.py
+- [x] 018. /data/deer-flow-main/backend/app/gateway/routers/artifacts.py
+- [x] 019. /data/deer-flow-main/backend/app/gateway/routers/assistants_compat.py
+- [x] 020. /data/deer-flow-main/backend/app/gateway/routers/channels.py
+- [x] 021. /data/deer-flow-main/backend/app/gateway/routers/__init__.py
+- [x] 022. /data/deer-flow-main/backend/app/gateway/routers/mcp.py
+- [x] 023. /data/deer-flow-main/backend/app/gateway/routers/memory.py
+- [x] 024. /data/deer-flow-main/backend/app/gateway/routers/models.py
+- [x] 025. /data/deer-flow-main/backend/app/gateway/routers/runs.py
+- [x] 026. /data/deer-flow-main/backend/app/gateway/routers/skills.py
+- [x] 027. /data/deer-flow-main/backend/app/gateway/routers/suggestions.py
+- [x] 028. /data/deer-flow-main/backend/app/gateway/routers/thread_runs.py
+- [x] 029. /data/deer-flow-main/backend/app/gateway/routers/threads.py
+- [x] 030. /data/deer-flow-main/backend/app/gateway/routers/uploads.py
+- [ ] 031. /data/deer-flow-main/backend/app/gateway/services.py
+- [x] 032. /data/deer-flow-main/backend/app/gateway/test_suggestions.py (文件不存在)
+- [x] 033. /data/deer-flow-main/backend/app/__init__.py
+- [x] 034. /data/deer-flow-main/backend/CLAUDE.md
+- [ ] 035. /data/deer-flow-main/backend/CONTRIBUTING.md
+- [ ] 036. /data/deer-flow-main/backend/debug.py
+- [ ] 037. /data/deer-flow-main/backend/docs/API.md
+- [ ] 038. /data/deer-flow-main/backend/docs/APPLE_CONTAINER.md
+- [ ] 039. /data/deer-flow-main/backend/docs/ARCHITECTURE.md
+- [ ] 040. /data/deer-flow-main/backend/docs/AUTO_TITLE_GENERATION.md
+- [ ] 041. /data/deer-flow-main/backend/docs/CONFIGURATION.md
+- [ ] 042. /data/deer-flow-main/backend/docs/FILE_UPLOAD.md
+- [ ] 043. /data/deer-flow-main/backend/docs/GUARDRAILS.md
+- [ ] 044. /data/deer-flow-main/backend/docs/HARNESS_APP_SPLIT.md
+- [ ] 045. /data/deer-flow-main/backend/docs/MCP_SERVER.md
+- [ ] 046. /data/deer-flow-main/backend/docs/MEMORY_IMPROVEMENTS.md
+- [ ] 047. /data/deer-flow-main/backend/docs/MEMORY_IMPROVEMENTS_SUMMARY.md
+- [ ] 048. /data/deer-flow-main/backend/docs/MEMORY_SETTINGS_REVIEW.md
+- [ ] 049. /data/deer-flow-main/backend/docs/memory-settings-sample.json
+- [ ] 050. /data/deer-flow-main/backend/docs/middleware-execution-flow.md
+- [ ] 051. /data/deer-flow-main/backend/docs/PATH_EXAMPLES.md
+- [ ] 052. /data/deer-flow-main/backend/docs/plan_mode_usage.md
+- [ ] 053. /data/deer-flow-main/backend/docs/README.md
+- [ ] 054. /data/deer-flow-main/backend/docs/rfc-create-deerflow-agent.md
+- [ ] 055. /data/deer-flow-main/backend/docs/rfc-extract-shared-modules.md
+- [ ] 056. /data/deer-flow-main/backend/docs/SETUP.md
+- [ ] 057. /data/deer-flow-main/backend/docs/summarization.md
+- [ ] 058. /data/deer-flow-main/backend/docs/task_tool_improvements.md
+- [ ] 059. /data/deer-flow-main/backend/docs/TITLE_GENERATION_IMPLEMENTATION.md
+- [ ] 060. /data/deer-flow-main/backend/docs/TODO.md
+- [ ] 061. /data/deer-flow-main/backend/langgraph.json
+- [ ] 062. /data/deer-flow-main/backend/packages/harness/deerflow/__init__.py
+- [x] 063. /data/deer-flow-main/backend/packages/harness/deerflow/client.py
+- [x] 064. /data/deer-flow-main/backend/packages/harness/deerflow/agents/__init__.py
+- [x] 065. /data/deer-flow-main/backend/packages/harness/deerflow/agents/factory.py
+- [x] 066. /data/deerflow-main/backend/packages/harness/deerflow/agents/features.py
+- [x] 067. /data/deer-flow-main/backend/packages/harness/deerflow/agents/thread_state.py
+- [x] 068. /data/deer-flow-main/backend/packages/harness/deerflow/agents/lead_agent/__init__.py
+- [x] 069. /data/deer-flow-main/backend/packages/harness/deerflow/agents/lead_agent/agent.py
+- [x] 070. /data/deer-flow-main/backend/packages/harness/deerflow/agents/lead_agent/prompt.py
+- [x] 071. /data/deer-flow-main/backend/packages/harness/deerflow/agents/memory/__init__.py
+- [x] 072. /data/deer-flow-main/backend/packages/harness/deerflow/agents/memory/prompt.py
+- [x] 073. /data/deer-flow-main/backend/packages/harness/deerflow/agents/memory/queue.py
+- [x] 074. /data/deer-flow-main/backend/packages/harness/deerflow/agents/memory/storage.py
+- [x] 075. /data/deer-flow-main/backend/packages/harness/deerflow/agents/memory/updater.py
+- [x] 076. /data/deer-flow-main/backend/packages/harness/deerflow/agents/checkpointer/__init__.py
+- [x] 077. /data/deer-flow-main/backend/packages/harness/deerflow/agents/checkpointer/provider.py
+- [x] 078. /data/deer-flow-main/backend/packages/harness/deerflow/agents/checkpointer/async_provider.py
+- [x] 079. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/__init__.py
+- [x] 080. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py
+- [x] 081. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/dangling_tool_call_middleware.py
+- [x] 082. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/deferred_tool_filter_middleware.py
+- [x] 083. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py
+- [x] 084. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/memory_middleware.py
+- [x] 085. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/sandbox_audit_middleware.py
+- [x] 086. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/subagent_limit_middleware.py
+- [x] 087. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/thread_data_middleware.py
+- [x] 088. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/title_middleware.py
+- [x] 089. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/todo_middleware.py
+- [x] 090. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/token_usage_middleware.py
+- [x] 091. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py
+- [x] 092. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/uploads_middleware.py
+- [x] 093. /data/deer-flow-main/backend/packages/harness/deerflow/agents/middlewares/view_image_middleware.py
+- [x] 094. /data/deer-flow-main/backend/packages/harness/deerflow/config/__init__.py
+- [x] 095. /data/deer-flow-main/backend/packages/harness/deerflow/config/acp_config.py
+- [x] 096. /data/deer-flow-main/backend/packages/harness/deerflow/config/agents_config.py
+- [x] 097. /data/deer-flow-main/backend/packages/harness/deerflow/config/app_config.py
+- [x] 098. /data/deer-flow-main/backend/packages/harness/deerflow/config/checkpointer_config.py
+- [x] 099. /data/deer-flow-main/backend/packages/harness/deerflow/config/extensions_config.py
+- [x] 100. /data/deer-flow-main/backend/packages/harness/deerflow/config/guardrails_config.py
+- [x] 101. /data/deer-flow-main/backend/packages/harness/deerflow/config/memory_config.py
+- [x] 102. /data/deer-flow-main/backend/packages/harness/deerflow/config/model_config.py
+- [x] 103. /data/deer-flow-main/backend/packages/harness/deerflow/config/paths.py
+- [x] 104. /data/deer-flow-main/backend/packages/harness/deerflow/config/sandbox_config.py
+- [x] 105. /data/deer-flow-main/backend/packages/harness/deerflow/config/skills_config.py
+- [x] 106. /data/deer-flow-main/backend/packages/harness/deerflow/config/stream_bridge_config.py
+- [x] 107. /data/deer-flow-main/backend/packages/harness/deerflow/config/subagents_config.py
+- [ ] 108. /data/deer-flow-main/backend/packages/harness/deerflow/config/summarization_config.py
+- [ ] 109. /data/deer-flow-main/backend/packages/harness/deerflow/config/title_config.py
+- [ ] 110. /data/deer-flow-main/backend/packages/harness/deerflow/config/token_usage_config.py
+- [ ] 111. /data/deer-flow-main/backend/packages/harness/deerflow/config/tool_config.py
+- [ ] 112. /data/deer-flow-main/backend/packages/harness/deerflow/config/tool_search_config.py
+- [ ] 113. /data/deer-flow-main/backend/packages/harness/deerflow/config/tracing_config.py
+- [ ] 114. /data/deer-flow-main/backend/packages/harness/deerflow/community/aio_sandbox/__init__.py
+- [ ] 115. /data/deer-flow-main/backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py
+- [ ] 116. /data/deer-flow-main/backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py
+- [ ] 117. /data/deer-flow-main/backend/packages/harness/deerflow/community/aio_sandbox/backend.py
+- [ ] 118. /data/deer-flow-main/backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py
+- [ ] 119. /data/deer-flow-main/backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py
+- [ ] 120. /data/deer-flow-main/backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py
+- [ ] 121. /data/deer-flow-main/backend/packages/harness/deerflow/community/ddg_search/__init__.py
+- [ ] 122. /data/deer-flow-main/backend/packages/harness/deerflow/community/ddg_search/tools.py
+- [ ] 123. /data/deer-flow-main/backend/packages/harness/deerflow/community/firecrawl/tools.py
+- [ ] 124. /data/deer-flow-main/backend/packages/harness/deerflow/community/image_search/__init__.py
+- [ ] 125. /data/deer-flow-main/backend/packages/harness/deerflow/community/image_search/tools.py
+- [ ] 126. /data/deer-flow-main/backend/packages/harness/deerflow/community/infoquest/infoquest_client.py
+- [ ] 127. /data/deer-flow-main/backend/packages/harness/deerflow/community/infoquest/tools.py
+- [ ] 128. /data/deer-flow-main/backend/packages/harness/deerflow/community/jina_ai/jina_client.py
+- [ ] 129. /data/deer-flow-main/backend/packages/harness/deerflow/community/jina_ai/tools.py
+- [ ] 130. /data/deer-flow-main/backend/packages/harness/deerflow/community/tavily/tools.py
+- [ ] 131. /data/deer-flow-main/backend/packages/harness/deerflow/guardrails/__init__.py
+- [ ] 132. /data/deer-flow-main/backend/packages/harness/deerflow/guardrails/builtin.py
+- [ ] 133. /data/deer-flow-main/backend/packages/harness/deerflow/guardrails/middleware.py
+- [ ] 134. /data/deer-flow-main/backend/packages/harness/deerflow/guardrails/provider.py
+- [ ] 135. /data/deer-flow-main/backend/packages/harness/deerflow/mcp/__init__.py
+- [ ] 136. /data/deer-flow-main/backend/packages/harness/deerflow/mcp/cache.py
+- [ ] 137. /data/deer-flow-main/backend/packages/harness/deerflow/mcp/client.py
+- [ ] 138. /data/deer-flow-main/backend/packages/harness/deerflow/mcp/oauth.py
+- [ ] 139. /data/deer-flow-main/backend/packages/harness/deerflow/mcp/tools.py
+- [ ] 140. /data/deer-flow-main/backend/packages/harness/deerflow/models/__init__.py
+- [ ] 141. /data/deer-flow-main/backend/packages/harness/deerflow/models/claude_provider.py
+- [ ] 142. /data/deer-flow-main/backend/packages/harness/deerflow/models/credential_loader.py
+- [ ] 143. /data/deer-flow-main/backend/packages/harness/deerflow/models/factory.py
+- [ ] 144. /data/deer-flow-main/backend/packages/harness/deerflow/models/openai_codex_provider.py
+- [ ] 145. /data/deer-flow-main/backend/packages/harness/deerflow/models/patched_deepseek.py
+- [ ] 146. /data/deer-flow-main/backend/packages/harness/deerflow/models/patched_minimax.py
+- [ ] 147. /data/deer-flow-main/backend/packages/harness/deerflow/models/patched_openai.py
+- [ ] 148. /data/deer-flow-main/backend/packages/harness/deerflow/reflection/__init__.py
+- [ ] 149. /data/deer-flow-main/backend/packages/harness/deerflow/reflection/resolvers.py
+- [ ] 150. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/__init__.py
+- [ ] 151. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/serialization.py
+- [ ] 152. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/store/__init__.py
+- [ ] 153. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/store/provider.py
+- [ ] 154. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/store/async_provider.py
+- [ ] 155. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/store/_sqlite_utils.py
+- [ ] 156. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/stream_bridge/__init__.py
+- [ ] 157. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/stream_bridge/base.py
+- [ ] 158. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/stream_bridge/memory.py
+- [ ] 159. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/stream_bridge/async_provider.py
+- [ ] 160. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/runs/__init__.py
+- [ ] 161. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/runs/manager.py
+- [ ] 162. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/runs/schemas.py
+- [ ] 163. /data/deer-flow-main/backend/packages/harness/deerflow/runtime/runs/worker.py
+- [ ] 164. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/__init__.py
+- [ ] 165. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/exceptions.py
+- [ ] 166. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/sandbox.py
+- [ ] 167. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/sandbox_provider.py
+- [ ] 168. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/middleware.py
+- [ ] 169. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/security.py
+- [ ] 170. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/tools.py
+- [ ] 171. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/local/__init__.py
+- [ ] 172. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/local/local_sandbox.py
+- [ ] 173. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py
+- [ ] 174. /data/deer-flow-main/backend/packages/harness/deerflow/sandbox/local/list_dir.py
+- [ ] 175. /data/deer-flow-main/backend/packages/harness/deerflow/skills/__init__.py
+- [ ] 176. /data/deer-flow-main/backend/packages/harness/deerflow/skills/installer.py
+- [ ] 177. /data/deer-flow-main/backend/packages/harness/deerflow/skills/loader.py
+- [ ] 178. /data/deer-flow-main/backend/packages/harness/deerflow/skills/parser.py
+- [ ] 179. /data/deer-flow-main/backend/packages/harness/deerflow/skills/types.py
+- [ ] 180. /data/deer-flow-main/backend/packages/harness/deerflow/skills/validation.py
+- [ ] 181. /data/deer-flow-main/backend/packages/harness/deerflow/subagents/__init__.py
+- [ ] 182. /data/deer-flow-main/backend/packages/harness/deerflow/subagents/config.py
+- [ ] 183. /data/deer-flow-main/backend/packages/harness/deerflow/subagents/executor.py
+- [ ] 184. /data/deer-flow-main/backend/packages/harness/deerflow/subagents/registry.py
+- [ ] 185. /data/deer-flow-main/backend/packages/harness/deerflow/subagents/builtins/__init__.py
+- [ ] 186. /data/deer-flow-main/backend/packages/harness/deerflow/subagents/builtins/bash_agent.py
+- [ ] 187. /data/deer-flow-main/backend/packages/harness/deerflow/subagents/builtins/general_purpose.py
+- [ ] 188. /data/deer-flow-main/backend/packages/harness/deerflow/tools/__init__.py
+- [ ] 189. /data/deer-flow-main/backend/packages/harness/deerflow/tools/tools.py
+- [ ] 190. /data/deer-flow-main/backend/packages/harness/deerflow/tools/builtins/__init__.py
+- [ ] 191. /data/deer-flow-main/backend/packages/harness/deerflow/tools/builtins/clarification_tool.py
+- [ ] 192. /data/deer-flow-main/backend/packages/harness/deerflow/tools/builtins/invoke_acp_agent_tool.py
+- [ ] 193. /data/deer-flow-main/backend/packages/harness/deerflow/tools/builtins/present_file_tool.py
+- [ ] 194. /data/deer-flow-main/backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py
+- [ ] 195. /data/deer-flow-main/backend/packages/harness/deerflow/tools/builtins/task_tool.py
+- [ ] 196. /data/deer-flow-main/backend/packages/harness/deerflow/tools/builtins/tool_search.py
+- [ ] 197. /data/deer-flow-main/backend/packages/harness/deerflow/tools/builtins/view_image_tool.py
+- [ ] 198. /data/deer-flow-main/backend/packages/harness/deerflow/uploads/__init__.py
+- [ ] 199. /data/deer-flow-main/backend/packages/harness/deerflow/uploads/manager.py
+- [ ] 200. /data/deer-flow-main/backend/packages/harness/deerflow/utils/file_conversion.py
+- [ ] 201. /data/deer-flow-main/backend/packages/harness/deerflow/utils/network.py
+- [ ] 202. /data/deer-flow-main/backend/packages/harness/deerflow/utils/readability.py
+- [ ] 203. /data/deer-flow-main/backend/packages/harness/pyproject.toml
+- [ ] 204. /data/deer-flow-main/backend/pyproject.toml
+- [ ] 205. /data/deer-flow-main/backend/README.md
+- [ ] 206. /data/deer-flow-main/backend/ruff.toml
+- [ ] 207. /data/deer-flow-main/backend/tests/conftest.py
+- [ ] 208. /data/deer-flow-main/backend/tests/test_acp_config.py
+- [ ] 209. /data/deer-flow-main/backend/tests/test_aio_sandbox_provider.py
+- [ ] 210. /data/deer-flow-main/backend/tests/test_app_config_reload.py
+- [ ] 211. /data/deer-flow-main/backend/tests/test_artifacts_router.py
+- [ ] 212. /data/deer-flow-main/backend/tests/test_channel_file_attachments.py
+- [ ] 213. /data/deer-flow-main/backend/tests/test_channels.py
+- [ ] 214. /data/deer-flow-main/backend/tests/test_checkpointer_none_fix.py
+- [ ] 215. /data/deer-flow-main/backend/tests/test_checkpointer.py
+- [ ] 216. /data/deer-flow-main/backend/tests/test_claude_provider_oauth_billing.py
+- [ ] 217. /data/deer-flow-main/backend/tests/test_cli_auth_providers.py
+- [ ] 218. /data/deer-flow-main/backend/tests/test_client_e2e.py
+- [ ] 219. /data/deer-flow-main/backend/tests/test_client_live.py
+- [ ] 220. /data/deer-flow-main/backend/tests/test_client.py
+- [ ] 221. /data/deer-flow-main/backend/tests/test_config_version.py
+- [ ] 222. /data/deer-flow-main/backend/tests/test_create_deerflow_agent_live.py
+- [ ] 223. /data/deer-flow-main/backend/tests/test_create_deerflow_agent.py
+- [ ] 224. /data/deer-flow-main/backend/tests/test_credential_loader.py
+- [ ] 225. /data/deer-flow-main/backend/tests/test_custom_agent.py
+- [ ] 226. /data/deer-flow-main/backend/tests/test_dangling_tool_call_middleware.py
+- [ ] 227. /data/deer-flow-main/backend/tests/test_docker_sandbox_mode_detection.py
+- [ ] 228. /data/deer-flow-main/backend/tests/test_feishu_parser.py
+- [ ] 229. /data/deer-flow-main/backend/tests/test_gateway_services.py
+- [ ] 230. /data/deer-flow-main/backend/tests/test_guardrail_middleware.py
+- [ ] 231. /data/deer-flow-main/backend/tests/test_harness_boundary.py
+- [ ] 232. /data/deer-flow-main/backend/tests/test_infoquest_client.py
+- [ ] 233. /data/deer-flow-main/backend/tests/test_invoke_acp_agent_tool.py
+- [ ] 234. /data/deer-flow-main/backend/tests/test_lead_agent_model_resolution.py
+- [ ] 235. /data/deer-flow-main/backend/tests/test_local_bash_tool_loading.py
+- [ ] 236. /data/deer-flow-main/backend/tests/test_local_sandbox_encoding.py
+- [ ] 237. /data/deer-flow-main/backend/tests/test_loop_detection_middleware.py
+- [ ] 238. /data/deer-flow-main/backend/tests/test_mcp_client_config.py
+- [ ] 239. /data/deer-flow-main/backend/tests/test_mcp_oauth.py
+- [ ] 240. /data/deer-flow-main/backend/tests/test_mcp_sync_wrapper.py
+- [ ] 241. /data/deer-flow-main/backend/tests/test_memory_prompt_injection.py
+- [ ] 242. /data/deer-flow-main/backend/tests/test_memory_router.py
+- [ ] 243. /data/deer-flow-main/backend/tests/test_memory_storage.py
+- [ ] 244. /data/deer-flow-main/backend/tests/test_memory_updater.py
+- [ ] 245. /data/deer-flow-main/backend/tests/test_memory_upload_filtering.py
+- [ ] 246. /data/deer-flow-main/backend/tests/test_model_config.py
+- [ ] 247. /data/deer-flow-main/backend/tests/test_model_factory.py
+- [ ] 248. /data/deer-flow-main/backend/tests/test_patched_minimax.py
+- [ ] 249. /data/deer-flow-main/backend/tests/test_patched_openai.py
+- [ ] 250. /data/deer-flow-main/backend/tests/test_present_file_tool_core_logic.py
+- [ ] 251. /data/deer-flow-main/backend/tests/test_provisioner_kubeconfig.py
+- [ ] 252. /data/deer-flow-main/backend/tests/test_readability.py
+- [ ] 253. /data/deer-flow-main/backend/tests/test_reflection_resolvers.py
+- [ ] 254. /data/deer-flow-main/backend/tests/test_run_manager.py
+- [ ] 255. /data/deer-flow-main/backend/tests/test_sandbox_audit_middleware.py
+- [ ] 256. /data/deer-flow-main/backend/tests/test_sandbox_tools_security.py
+- [ ] 257. /data/deer-flow-main/backend/tests/test_serialization.py
+- [ ] 258. /data/deer-flow-main/backend/tests/test_serialize_message_content.py
+- [ ] 259. /data/deer-flow-main/backend/tests/test_skills_archive_root.py
+- [ ] 260. /data/deer-flow-main/backend/tests/test_skills_installer.py
+- [ ] 261. /data/deer-flow-main/backend/tests/test_skills_loader.py
+- [ ] 262. /data/deer-flow-main/backend/tests/test_skills_parser.py
+- [ ] 263. /data/deer-flow-main/backend/tests/test_skills_validation.py
+- [ ] 264. /data/deer-flow-main/backend/tests/test_sse_format.py
+- [ ] 265. /data/deer-flow-main/backend/tests/test_stream_bridge.py
+- [ ] 266. /data/deer-flow-main/backend/tests/test_subagent_executor.py
+- [ ] 267. /data/deer-flow-main/backend/tests/test_subagent_limit_middleware.py
+- [ ] 268. /data/deer-flow-main/backend/tests/test_subagent_prompt_security.py
+- [ ] 269. /data/deer-flow-main/backend/tests/test_subagent_timeout_config.py
+- [ ] 270. /data/deer-flow-main/backend/tests/test_suggestions_router.py
+- [ ] 271. /data/deer-flow-main/backend/tests/test_task_tool_core_logic.py
+- [ ] 272. /data/deer-flow-main/backend/tests/test_thread_data_middleware.py
+- [ ] 273. /data/deer-flow-main/backend/tests/test_threads_router.py
+- [ ] 274. /data/deer-flow-main/backend/tests/test_title_generation.py
+- [ ] 275. /data/deer-flow-main/backend/tests/test_title_middleware_core_logic.py
+- [ ] 276. /data/deer-flow-main/backend/tests/test_todo_middleware.py
+- [ ] 277. /data/deer-flow-main/backend/tests/test_token_usage.py
+- [ ] 278. /data/deer-flow-main/backend/tests/test_tool_error_handling_middleware.py
+- [ ] 279. /data/deer-flow-main/backend/tests/test_tool_search.py
+- [ ] 280. /data/deer-flow-main/backend/tests/test_tracing_config.py
+- [ ] 281. /data/deer-flow-main/backend/tests/test_uploads_manager.py
+- [ ] 282. /data/deer-flow-main/backend/tests/test_uploads_middleware_core_logic.py
+- [ ] 283. /data/deer-flow-main/backend/tests/test_uploads_router.py
+- [ ] 284. /data/deer-flow-main/backend/.vscode/extensions.json
+- [ ] 285. /data/deer-flow-main/backend/.vscode/settings.json
+- [ ] 286. /data/deer-flow-main/config.example.yaml
+- [ ] 287. /data/deer-flow-main/CONTRIBUTING.md
+- [ ] 288. /data/deer-flow-main/docker/docker-compose-dev.yaml
+- [ ] 289. /data/deer-flow-main/docker/docker-compose.yaml
+- [ ] 290. /data/deer-flow-main/docker/provisioner/app.py
+- [ ] 291. /data/deer-flow-main/docker/provisioner/README.md
+- [ ] 292. /data/deer-flow-main/docs/00-全集总览与全仓库拓扑架构.md
+- [ ] 293. /data/deer-flow-main/docs/01-后端核心引擎架构.md
+- [ ] 294. /data/deer-flow-main/docs/01-配置系统.md
+- [ ] 295. /data/deer-flow-main/docs/02-中间件系统详解.md
+- [ ] 296. /data/deer-flow-main/docs/02-代理系统.md
+- [ ] 297. /data/deer-flow-main/docs/03-模型工厂.md
+- [ ] 298. /data/deer-flow-main/docs/03-运行时管理系统.md
+- [ ] 299. /data/deer-flow-main/docs/04-工具系统.md
+- [ ] 300. /data/deer-flow-main/docs/04-模型适配系统.md
+- [ ] 301. /data/deer-flow-main/docs/05-工具系统详解.md
+- [ ] 302. /data/deer-flow-main/docs/05-技能系统深度解析.md
+- [ ] 303. /data/deer-flow-main/docs/06-MCP集成深度解析.md
+- [ ] 304. /data/deer-flow-main/docs/06-技能系统详解.md
+- [ ] 305. /data/deer-flow-main/docs/07-沙箱执行系统.md
+- [ ] 306. /data/deer-flow-main/docs/07-记忆系统深度解析.md
+- [ ] 307. /data/deer-flow-main/docs/08-DeerFlow是什么-五分钟看懂AI Agent框架.md
+- [ ] 308. /data/deer-flow-main/docs/08-前端架构总览.md
+- [ ] 309. /data/deer-flow-main/docs/08-沙箱系统深度解析.md
+- [ ] 310. /data/deer-flow-main/docs/09-中间件系统深度解析.md
+- [ ] 311. /data/deer-flow-main/docs/09-系统架构全景图-各层如何协作.md
+- [ ] 312. /data/deer-flow-main/docs/09-页面路由系统.md
+- [ ] 313. /data/deer-flow-main/docs/10-代理系统-Agent到底是什么.md
+- [ ] 314. /data/deer-flow-main/docs/10-组件库深度解析.md
+- [ ] 315. /data/deer-flow-main/docs/10-运行时管理深度解析.md
+- [ ] 316. /data/deer-flow-main/docs/11-子代理系统深度解析.md
+- [ ] 317. /data/deer-flow-main/docs/11-核心业务逻辑层.md
+- [ ] 318. /data/deer-flow-main/docs/11-记忆系统-AI如何记住对话.md
+- [ ] 319. /data/deer-flow-main/docs/12-中间件系统-请求处理的流水线.md
+- [ ] 320. /data/deer-flow-main/docs/12-状态管理方案.md
+- [ ] 321. /data/deer-flow-main/docs/13-APIClient端设计.md
+- [ ] 322. /data/deer-flow-main/docs/13-工具与技能-Agent的手和技能包.md
+- [ ] 323. /data/deer-flow-main/docs/14-APi网关架构.md
+- [ ] 324. /data/deer-flow-main/docs/14-沙箱系统-安全执行不可信代码.md
+- [ ] 325. /data/deer-flow-main/docs/15-IM渠道集成系统.md
+- [ ] 326. /data/deer-flow-main/docs/15-检查点与状态管理-如何实现暂停恢复.md
+- [ ] 327. /data/deer-flow-main/docs/16-DeerFlow用到的设计模式.md
+- [ ] 328. /data/deer-flow-main/docs/16-代理系统深度解析.md
+- [ ] 329. /data/deer-flow-main/docs/17-架构设计权衡-没有完美的架构.md
+- [ ] 330. /data/deer-flow-main/docs/17-沙箱系统深度解析.md
+- [ ] 331. /data/deer-flow-main/docs/18-工具系统深度解析.md
+- [ ] 332. /data/deer-flow-main/docs/18-面试高频问题清单.md
+- [ ] 333. /data/deer-flow-main/docs/18-面试高频问题清单-基于实际代码整理.md
+- [ ] 334. /data/deer-flow-main/docs/19-MCP集成系统深度解析.md
+- [ ] 335. /data/deer-flow-main/docs/19-扩展点在哪里-二次开发入门.md
+- [ ] 336. /data/deer-flow-main/docs/20-从0到1创建自定义技能-实战指南.md
+- [ ] 337. /data/deer-flow-main/docs/20-技能系统深度解析.md
+- [ ] 338. /data/deer-flow-main/docs/21-模型工厂与多模型支持系统.md
+- [ ] 339. /data/deer-flow-main/docs/22-配置系统深度解析.md
+- [ ] 340. /data/deer-flow-main/docs/23-反射系统与动态模块加载.md
+- [ ] 341. /data/deer-flow-main/docs/24-记忆系统深度解析.md
+- [ ] 342. /data/deer-flow-main/docs/25-标题生成系统深度解析.md
+- [ ] 343. /data/deer-flow-main/docs/26-上下文摘要系统深度解析.md
+- [ ] 344. /data/deer-flow-main/docs/27-前端架构总览.md
+- [ ] 345. /data/deer-flow-main/docs/28-API路由系统详解.md
+- [ ] 346. /data/deer-flow-main/docs/29-部署与运维指南.md
+- [ ] 347. /data/deer-flow-main/docs/30-完整项目索引与学习路径.md
+- [ ] 348. /data/deer-flow-main/docs/31-示例工作流与技能使用指南.md
+- [ ] 349. /data/deer-flow-main/docs/32-子代理系统深度解析.md
+- [ ] 350. /data/deer-flow-main/docs/33-AIO沙箱系统深度解析.md
+- [ ] 351. /data/deer-flow-main/docs/34-InfoQuest集成详解.md
+- [ ] 352. /data/deer-flow-main/docs/CODE_CHANGE_SUMMARY_BY_FILE.md
+- [ ] 353. /data/deer-flow-main/docs/DeerFlow项目结构总览-下一轮AI任务前置知识.md
+- [ ] 354. /data/deer-flow-main/docs/SKILL_NAME_CONFLICT_FIX.md
+- [ ] 355. /data/deer-flow-main/extensions_config.example.json
+- [ ] 356. /data/deer-flow-main/frontend/AGENTS.md
+- [ ] 357. /data/deer-flow-main/frontend/CLAUDE.md
+- [ ] 358. /data/deer-flow-main/frontend/components.json
+- [ ] 359. /data/deer-flow-main/frontend/eslint.config.js
+- [ ] 360. /data/deer-flow-main/frontend/next.config.js
+- [ ] 361. /data/deer-flow-main/frontend/package.json
+- [ ] 362. /data/deer-flow-main/frontend/pnpm-lock.yaml
+- [ ] 363. /data/deer-flow-main/frontend/pnpm-workspace.yaml
+- [ ] 364. /data/deer-flow-main/frontend/postcss.config.js
+- [ ] 365. /data/deer-flow-main/frontend/prettier.config.js
+- [ ] 366. /data/deer-flow-main/frontend/tsconfig.json
+- [ ] 367. /data/deer-flow-main/frontend/README.md
+- [ ] 368. /data/deer-flow-main/frontend/scripts/save-demo.js
+- [ ] 369-623. ... (Frontend files 368-623, 共256个)
+- [ ] 624. /data/deer-flow-main/frontend/.vscode/settings.json
+- [ ] 625. /data/deer-flow-main/.github/copilot-instructions.md
+- [ ] 626. /data/deer-flow-main/.github/ISSUE_TEMPLATE/runtime-information.yml
+- [ ] 627. /data/deer-flow-main/.github/workflows/backend-unit-tests.yml
+- [ ] 628. /data/deer-flow-main/.github/workflows/lint-check.yml
+- [ ] 629. /data/deer-flow-main/Install.md
+- [ ] 630. /data/deer-flow-main/plan/学习路径计划-架构与面试.md
+- [ ] 631. /data/deer-flow-main/plan/总分目标与执行计划.md
+- [ ] 632. /data/deer-flow-main/README.md
+- [ ] 633. /data/deer-flow-main/README_fr.md
+- [ ] 634. /data/deer-flow-main/README_ja.md
+- [ ] 635. /data/deer-flow-main/README_ru.md
+- [ ] 636. /data/deer-flow-main/README_zh.md
+- [ ] 637. /data/deer-flow-main/scripts/check.py
+- [ ] 638. /data/deer-flow-main/scripts/configure.py
+- [ ] 639. /data/deer-flow-main/scripts/export_claude_code_oauth.py
+- [ ] 640. /data/deer-flow-main/scripts/load_memory_sample.py
+- [ ] 641. /data/deer-flow-main/SECURITY.md
+- [ ] 642. /data/deer-flow-main/skills/public/bootstrap/references/conversation-guide.md
+- [ ] 643. /data/deer-flow-main/skills/public/bootstrap/SKILL.md
+- [ ] 644. /data/deer-flow-main/skills/public/bootstrap/templates/SOUL.template.md
+- [ ] 645-661. ... (chart-visualization files)
+- [ ] 662. /data/deer-flow-main/skills/public/claude-to-deerflow/SKILL.md
+- [ ] 663. /data/deer-flow-main/skills/public/consulting-analysis/SKILL.md
+- [ ] 664. /data/deer-flow-main/skills/public/data-analysis/scripts/analyze.py
+- [ ] 665. /data/deer-flow-main/skills/public/data-analysis/SKILL.md
+- [ ] 666. /data/deer-flow-main/skills/public/deep-research/SKILL.md
+- [ ] 667. /data/deer-flow-main/skills/public/find-skills/SKILL.md
+- [ ] 668. /data/deer-flow-main/skills/public/frontend-design/SKILL.md
+- [ ] 669-671. ... (github-deep-research files)
+- [ ] 672. /data/deer-flow-main/skills/public/image-generation/scripts/generate.py
+- [ ] 673. /data/deer-flow-main/skills/public/image-generation/SKILL.md
+- [ ] 674. /data/deer-flow-main/skills/public/image-generation/templates/doraemon.md
+- [ ] 675. /data/deer-flow-main/skills/public/podcast-generation/scripts/generate.py
+- [ ] 676. /data/deer-flow-main/skills/public/podcast-generation/SKILL.md
+- [ ] 677. /data/deer-flow-main/skills/public/podcast-generation/templates/tech-explainer.md
+- [ ] 678. /data/deer-flow-main/skills/public/ppt-generation/scripts/generate.py
+- [ ] 679. /data/deer-flow-main/skills/public/ppt-generation/SKILL.md
+- [ ] 680-708. ... (skill-creator and other skills files)
+
+---
+
+**说明**: 由于文件数量过多，中间部分用省略号表示。完整文件请查看 `/data/all_files.txt`
+
+**使用说明**:
+- 完成文件时，将 `[ ]` 改为 `[x]`
+- 按序号顺序进行

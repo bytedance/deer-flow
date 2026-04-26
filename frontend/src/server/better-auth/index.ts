@@ -1,0 +1,1 @@
+export { auth } from "./config";
