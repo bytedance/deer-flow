@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from fastapi import HTTPException, Request
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.gateway.deps import get_checkpointer, get_run_manager, get_store, get_stream_bridge
 from deerflow.runtime import (
@@ -84,10 +84,25 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
             if isinstance(msg, dict):
                 role = msg.get("role", msg.get("type", "user"))
                 content = msg.get("content", "")
-                if role in ("user", "human"):
+                role_lower = role.lower()
+
+                if role_lower in ("user", "human"):
                     converted.append(HumanMessage(content=content))
+                elif role_lower == "ai" or role_lower == "assistant":
+                    converted.append(AIMessage(content=content))
+                elif role_lower == "system":
+                    converted.append(SystemMessage(content=content))
+                elif role_lower == "tool":
+                    tool_call_id = msg.get("tool_call_id") or msg.get("tool_callId") or ""
+                    name = msg.get("name")
+                    tool_msg_kwargs = {
+                        "content": content,
+                        "tool_call_id": tool_call_id,
+                    }
+                    if name:
+                        tool_msg_kwargs["name"] = name
+                    converted.append(ToolMessage(**tool_msg_kwargs))
                 else:
-                    # TODO: handle other message types (system, ai, tool)
                     converted.append(HumanMessage(content=content))
             else:
                 converted.append(msg)

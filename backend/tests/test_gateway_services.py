@@ -81,6 +81,118 @@ def test_normalize_input_passthrough():
     assert result == {"custom_key": "value"}
 
 
+def test_normalize_input_ai_message():
+    from langchain_core.messages import AIMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input({"messages": [{"role": "ai", "content": "I'm an AI"}]})
+    assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], AIMessage)
+    assert result["messages"][0].content == "I'm an AI"
+
+
+def test_normalize_input_assistant_message():
+    from langchain_core.messages import AIMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input({"messages": [{"role": "assistant", "content": "I'm an assistant"}]})
+    assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], AIMessage)
+    assert result["messages"][0].content == "I'm an assistant"
+
+
+def test_normalize_input_system_message():
+    from langchain_core.messages import SystemMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input({"messages": [{"role": "system", "content": "You are a helpful assistant"}]})
+    assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], SystemMessage)
+    assert result["messages"][0].content == "You are a helpful assistant"
+
+
+def test_normalize_input_tool_message():
+    from langchain_core.messages import ToolMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input({
+        "messages": [{
+            "role": "tool",
+            "content": "tool result",
+            "tool_call_id": "call_123",
+            "name": "my_tool"
+        }]
+    })
+    assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], ToolMessage)
+    assert result["messages"][0].content == "tool result"
+    assert result["messages"][0].tool_call_id == "call_123"
+    assert result["messages"][0].name == "my_tool"
+
+
+def test_normalize_input_tool_message_with_tool_callId():
+    from langchain_core.messages import ToolMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input({
+        "messages": [{
+            "role": "tool",
+            "content": "tool result",
+            "tool_callId": "call_456"
+        }]
+    })
+    assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], ToolMessage)
+    assert result["messages"][0].tool_call_id == "call_456"
+
+
+def test_normalize_input_mixed_messages():
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input({
+        "messages": [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Hello"},
+            {"role": "ai", "content": "Hi there"},
+            {"role": "tool", "content": "result", "tool_call_id": "call_1"},
+        ]
+    })
+    assert len(result["messages"]) == 4
+    assert isinstance(result["messages"][0], SystemMessage)
+    assert isinstance(result["messages"][1], HumanMessage)
+    assert isinstance(result["messages"][2], AIMessage)
+    assert isinstance(result["messages"][3], ToolMessage)
+
+
+def test_normalize_input_role_case_insensitive():
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input({
+        "messages": [
+            {"role": "USER", "content": "uppercase user"},
+            {"role": "AI", "content": "uppercase ai"},
+            {"role": "System", "content": "mixed case system"},
+            {"role": "Human", "content": "mixed case human"},
+            {"role": "ASSISTANT", "content": "uppercase assistant"},
+        ]
+    })
+    assert len(result["messages"]) == 5
+    assert isinstance(result["messages"][0], HumanMessage)
+    assert isinstance(result["messages"][1], AIMessage)
+    assert isinstance(result["messages"][2], SystemMessage)
+    assert isinstance(result["messages"][3], HumanMessage)
+    assert isinstance(result["messages"][4], AIMessage)
+
+
 def test_build_run_config_basic():
     from app.gateway.services import build_run_config
 
