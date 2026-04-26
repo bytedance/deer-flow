@@ -2,6 +2,8 @@
  * Canvas 数据类型定义，用于数据分析 DAG。
  */
 
+import type { Node, Edge } from "@xyflow/react";
+
 // 节点类型
 export type NodeType = "data_source" | "sql_executor" | "python_script" | "data_output";
 
@@ -11,25 +13,46 @@ export type CanvasStatus = "idle" | "running" | "paused" | "completed" | "failed
 // Agent 执行模式
 export type AgentExecutionMode = "interactive" | "readonly";
 
-// 节点位置
-export interface Position {
-  x: number;
-  y: number;
+// Data Source 节点数据
+export interface DataSourceNodeData {
+  table_name?: string;
+  db_connection_id?: string;
+  [key: string]: unknown;
 }
 
-// Canvas 节点
-export interface CanvasNode {
-  id: string;
-  type: NodeType;
-  position: Position;
-  data: Record<string, unknown>;
+// SQL Executor 节点数据
+export interface SQLExecutorNodeData {
+  query_name?: string;
+  sql_query?: string;
+  [key: string]: unknown;
 }
 
-// Canvas 边
-export interface CanvasEdge {
-  source: string;
-  target: string;
+// Python Script 节点数据
+export interface PythonScriptNodeData {
+  script_name?: string;
+  code?: string;
+  [key: string]: unknown;
 }
+
+// Data Output 节点数据
+export interface DataOutputNodeData {
+  output_name?: string;
+  output_type?: string;
+  [key: string]: unknown;
+}
+
+// 所有节点数据的联合类型
+export type CanvasNodeData =
+  | DataSourceNodeData
+  | SQLExecutorNodeData
+  | PythonScriptNodeData
+  | DataOutputNodeData;
+
+// Canvas 节点 - 扩展 React Flow 的 Node 类型
+export type CanvasNode = Node<CanvasNodeData, NodeType>;
+
+// Canvas 边 - 扩展 React Flow 的 Edge 类型
+export type CanvasEdge = Edge;
 
 // 执行日志条目
 export interface ExecutionLogEntry {
