@@ -1,5 +1,7 @@
 """Canvas module for data analysis DAG functionality."""
 
+from deerflow.canvas.engine import CanvasEngine, get_executor
+
 from .models import (
     AgentDecision,
     AgentExecutionMode,
@@ -19,10 +21,12 @@ __all__ = [
     "AgentExecutionMode",
     "Canvas",
     "CanvasEdge",
+    "CanvasEngine",
     "CanvasNode",
     "CanvasStatus",
     "ExecutionLogEntry",
     "ExecutionResult",
+    "get_executor",
     "NodeResult",
     "NodeType",
     "Position",
