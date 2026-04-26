@@ -69,7 +69,11 @@ def _ensure_memory_loop() -> tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]
             assert _MEMORY_HTTP_CLIENT is not None
             return _MEMORY_LOOP, _MEMORY_HTTP_CLIENT
         loop = asyncio.new_event_loop()
-        client = httpx.AsyncClient()
+        # timeout=None: no httpx-level timeout — defer to the LangChain/OpenAI
+        # SDK's own timeout settings (configured per model in config.yaml).  A
+        # hard httpx default (5 s) would override those and cause spurious failures
+        # on models with intentionally high latencies.
+        client = httpx.AsyncClient(timeout=None)
         threading.Thread(
             target=_start_memory_loop,
             args=(loop,),
@@ -296,6 +300,11 @@ def _run_async_update_sync(coro: Coroutine[Any, Any, bool]) -> bool:
     in that loop — those stale connections then pollute the shared @lru_cache'd
     client used by the main agent, causing 'Event loop is closed' errors on the
     next LLM call.
+
+    Note: this function blocks the calling thread.  In production it is only
+    invoked from a threading.Timer callback (a plain OS thread, not an asyncio
+    event loop thread), so blocking is safe.  Callers in async contexts should
+    use aupdate_memory() instead.
     """
     loop, _ = _ensure_memory_loop()
     handed_off = False
@@ -303,10 +312,10 @@ def _run_async_update_sync(coro: Coroutine[Any, Any, bool]) -> bool:
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         handed_off = True  # coroutine is now owned by _MEMORY_LOOP
         try:
-            return future.result(timeout=60)
+            return future.result(timeout=300)
         except concurrent.futures.TimeoutError:
             future.cancel()
-            logger.warning("Memory update timed out after 60 s; cancelled")
+            logger.warning("Memory update timed out after 300 s; cancelled")
             return False
     except Exception:
         if not handed_off:
@@ -389,7 +398,7 @@ class MemoryUpdater:
         # and would raise TypeError.
         app_cfg = get_app_config()
         model_cfg = app_cfg.get_model_config(model_name)
-        extra: dict = {}
+        extra: dict[str, Any] = {}
         if model_cfg is not None and model_cfg.use.startswith("langchain_openai:"):
             _, client = _ensure_memory_loop()
             extra["http_async_client"] = client
