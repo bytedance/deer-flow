@@ -3,6 +3,7 @@
 import csv
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,9 @@ from deerflow.canvas.components.base import ComponentExecutor, ExecutionContext,
 from deerflow.canvas.models import CanvasNode
 
 logger = logging.getLogger(__name__)
+
+# Regex pattern for valid SQL table names (alphanumeric and underscore, must start with letter or underscore)
+TABLE_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 # Supported output formats
 SUPPORTED_FORMATS = ["csv", "json"]
@@ -25,6 +29,39 @@ class DataOutputExecutor(ComponentExecutor):
     @property
     def node_type(self) -> str:
         return "data_output"
+
+    def _validate_table_name(self, table_name: str) -> str:
+        """Validate table name to prevent SQL injection.
+
+        Args:
+            table_name: The table name to validate.
+
+        Returns:
+            The validated table name.
+
+        Raises:
+            ValueError: If the table name contains invalid characters.
+        """
+        if not TABLE_NAME_PATTERN.match(table_name):
+            raise ValueError(f"Invalid table name: {table_name}")
+        return table_name
+
+    def _validate_filename(self, filename: str) -> str:
+        """Validate filename to prevent path traversal.
+
+        Args:
+            filename: The filename to validate.
+
+        Returns:
+            The sanitized filename.
+        """
+        # Remove any path separators
+        safe_filename = filename.replace("/", "_").replace("\\", "_")
+        # Remove parent directory references
+        safe_filename = safe_filename.replace("..", "_")
+        if safe_filename != filename:
+            logger.warning(f"Sanitized filename: {filename} -> {safe_filename}")
+        return safe_filename
 
     async def execute(
         self,
@@ -44,8 +81,20 @@ class DataOutputExecutor(ComponentExecutor):
         output_format = node.data.get("output_format", "csv")
         filename = node.data.get("filename", "output.csv")
 
+        # Validate filename for path traversal prevention
+        filename = self._validate_filename(filename)
+
         # Resolve input table reference
         input_table = context.resolved_variables.get(input_table_ref, input_table_ref)
+
+        # Validate table name for SQL injection prevention
+        try:
+            input_table = self._validate_table_name(input_table)
+        except ValueError as e:
+            return NodeResult(
+                success=False,
+                error=str(e),
+            )
 
         # Get database connection
         conn_info = self._get_connection_info(node, context)
