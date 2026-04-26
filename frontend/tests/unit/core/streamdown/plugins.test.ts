@@ -1,13 +1,16 @@
-import rehypeRaw from "rehype-raw";
 import { expect, test } from "vitest";
 
 import { reasoningPlugins, streamdownPlugins } from "@/core/streamdown/plugins";
 
-test("streamdownPlugins includes rehypeRaw", () => {
-  expect(streamdownPlugins.rehypePlugins).toContain(rehypeRaw);
+test("streamdownPlugins does not include rehypeRaw", () => {
+  const flat = streamdownPlugins.rehypePlugins?.flat();
+  expect(flat).toBeDefined();
+  // rehypeRaw should not be present — it renders LLM-hallucinated HTML tags
+  for (const entry of flat ?? []) {
+    expect(typeof entry).not.toBe("function" as never);
+  }
 });
 
-test("reasoningPlugins does not include rehypeRaw", () => {
-  const flat = reasoningPlugins.rehypePlugins?.flat();
-  expect(flat).not.toContain(rehypeRaw);
+test("reasoningPlugins is the same as streamdownPlugins", () => {
+  expect(reasoningPlugins).toBe(streamdownPlugins);
 });
