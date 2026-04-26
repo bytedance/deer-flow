@@ -112,10 +112,10 @@ def canvas_plan_tool(
 @tool("canvas_add_node", parse_docstring=True)
 def canvas_add_node_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
-    node_type: str | dict,
-    config: dict | None = None,
-    node_id: str = "",
+    node_type: str,
+    config: dict,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
+    node_id: str = "",
 ) -> Command:
     """Add a node to the current canvas.
 
@@ -126,13 +126,6 @@ def canvas_add_node_tool(
         config: Node configuration (varies by type).
         node_id: Optional custom node ID (auto-generated if not provided).
     """
-    # Handle dict payload for node_type
-    if isinstance(node_type, dict):
-        payload = node_type
-        node_type = str(payload.get("node_type", ""))
-        config = payload.get("config")
-        if not node_id:
-            node_id = str(payload.get("node_id", ""))
 
     if config is None:
         return Command(

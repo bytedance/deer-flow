@@ -613,6 +613,22 @@ async def _get_table_schema(conn: Any, table_name: str) -> list[TableColumnInfo]
     return await asyncio.to_thread(_get_table_schema_sync, conn, table_name)
 
 
+def _serialize_value(obj: Any) -> Any:
+    """Convert non-JSON-serializable types to serializable ones."""
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    if obj is None:
+        return None
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    return obj
+
+
 def _preview_table_data_sync(conn: Any, table_name: str, limit: int) -> tuple[list[dict[str, Any]], int]:
     """Synchronous helper to get preview data from a table."""
     import sqlalchemy
@@ -638,7 +654,7 @@ def _preview_table_data_sync(conn: Any, table_name: str, limit: int) -> tuple[li
             text(f"SELECT * FROM {quote_char}{table_name}{quote_char} LIMIT :limit"),
             {"limit": limit},
         )
-        rows = [dict(row._mapping) for row in result]
+        rows = [{k: _serialize_value(v) for k, v in row._mapping.items()} for row in result]
 
         return rows, total_rows
 
