@@ -1,6 +1,7 @@
 import posixpath
 import re
 import shlex
+import logging
 from pathlib import Path
 
 from langchain.tools import ToolRuntime, tool
@@ -20,8 +21,11 @@ from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 
-_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+logger = logging.getLogger(__name__)
+
+_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"';&|<>()]+)")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
+
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -861,7 +865,10 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
     sandbox_id = provider.acquire(thread_id)
 
     # Update runtime state - this persists across tool calls
-    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+    if runtime.state is not None:
+        runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+    else:
+        logger.warning("[DEERFLOW_DEBUG] runtime.state is None when setting sandbox, thread_id=%s", thread_id)
 
     # Retrieve and return the sandbox
     sandbox = provider.get(sandbox_id)
@@ -895,7 +902,7 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
         return
 
     # Check if directories have already been created
-    if runtime.state.get("thread_directories_created"):
+    if runtime.state is not None and runtime.state.get("thread_directories_created"):
         return
 
     # Create the three directories
@@ -907,7 +914,10 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
             os.makedirs(path, exist_ok=True)
 
     # Mark as created to avoid redundant operations
-    runtime.state["thread_directories_created"] = True
+    if runtime.state is not None:
+        runtime.state["thread_directories_created"] = True
+    else:
+        logger.warning("[DEERFLOW_DEBUG] runtime.state is None when marking dirs created")
 
 
 def _truncate_bash_output(output: str, max_chars: int) -> str:
@@ -1000,6 +1010,11 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         command: The bash command to execute. Always use absolute paths for files and directories.
     """
     try:
+        # Diagnostic logging for runtime.state issues
+        thread_id = runtime.context.get("thread_id") if runtime and runtime.context else "unknown"
+        logger.debug("[DEERFLOW_DEBUG] bash_tool start, thread_id=%s, runtime=%s, runtime.state=%s",
+                     thread_id, runtime is not None, runtime.state is not None if runtime else False)
+
         sandbox = ensure_sandbox_initialized(runtime)
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
@@ -1044,6 +1059,11 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         path: The **absolute** path to the directory to list.
     """
     try:
+        # Diagnostic logging for runtime.state issues
+        thread_id = runtime.context.get("thread_id") if runtime and runtime.context else "unknown"
+        logger.debug("[DEERFLOW_DEBUG] ls_tool start, thread_id=%s, runtime=%s, runtime.state=%s",
+                     thread_id, runtime is not None, runtime.state is not None if runtime else False)
+
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
@@ -1219,6 +1239,11 @@ def read_file_tool(
         end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
     """
     try:
+        # Diagnostic logging for runtime.state issues
+        thread_id = runtime.context.get("thread_id") if runtime and runtime.context else "unknown"
+        logger.debug("[DEERFLOW_DEBUG] read_file_tool start, thread_id=%s, runtime=%s, runtime.state=%s",
+                     thread_id, runtime is not None, runtime.state is not None if runtime else False)
+
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
@@ -1273,6 +1298,11 @@ def write_file_tool(
         content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
     """
     try:
+        # Diagnostic logging for runtime.state issues
+        thread_id = runtime.context.get("thread_id") if runtime and runtime.context else "unknown"
+        logger.debug("[DEERFLOW_DEBUG] write_file_tool start, thread_id=%s, runtime=%s, runtime.state=%s",
+                     thread_id, runtime is not None, runtime.state is not None if runtime else False)
+
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
