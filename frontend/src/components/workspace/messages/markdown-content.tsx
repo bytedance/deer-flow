@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import type { AnchorHTMLAttributes } from "react";
 
 import {
@@ -26,7 +26,7 @@ export type MarkdownContentProps = {
 };
 
 /** Renders markdown content. */
-export function MarkdownContent({
+function MarkdownContent_({
   content,
   rehypePlugins,
   className,
@@ -74,3 +74,10 @@ export function MarkdownContent({
     </MessageResponse>
   );
 }
+
+// Memoized so that re-renders of the enclosing MessageContent (or further up
+// the tree) don't re-enter the Streamdown setup path — setting up the
+// Markdown/KaTeX/rehype pipeline is expensive on long responses. Relies on
+// the caller passing stable references for rehypePlugins/remarkPlugins/
+// components (see message-list-item.tsx's combinedRehypePlugins useMemo).
+export const MarkdownContent = memo(MarkdownContent_);

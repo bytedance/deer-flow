@@ -314,7 +314,17 @@ export const MessageResponse = memo(
       {...props}
     />
   ),
-  (prevProps, nextProps) => prevProps.children === nextProps.children,
+  // Children-only equality was too narrow: when a caller re-rendered with a
+  // fresh rehype/remark/components reference (even if semantically identical),
+  // Streamdown would tear down and rebuild its Markdown pipeline without any
+  // visible change. Compare those references too — callers are expected to
+  // memoize them upstream (see MarkdownContent / MessageContent).
+  (prevProps, nextProps) =>
+    prevProps.children === nextProps.children &&
+    prevProps.className === nextProps.className &&
+    prevProps.remarkPlugins === nextProps.remarkPlugins &&
+    prevProps.rehypePlugins === nextProps.rehypePlugins &&
+    prevProps.components === nextProps.components,
 );
 
 MessageResponse.displayName = "MessageResponse";
