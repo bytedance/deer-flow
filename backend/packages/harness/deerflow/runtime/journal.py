@@ -134,7 +134,12 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index += 1
         self._seen_llm_starts.add(rid)
 
-        logger.debug(f"on_chat_model_start {run_id}: tags={tags} messages={len(messages)} batch(es)")
+        logger.debug(
+            "on_chat_model_start %s: tags=%s messages=%d batch(es)",
+            run_id,
+            tags,
+            len(messages),
+        )
 
         # Capture the first human message sent to any LLM in this run.
         if not self._first_human_msg and messages:
@@ -157,7 +162,15 @@ class RunJournal(BaseCallbackHandler):
         # Fallback: on_chat_model_start is preferred. This just tracks latency.
         self._llm_start_times[str(run_id)] = time.monotonic()
 
-    def on_llm_end(self, response: Any, *, run_id: UUID, parent_run_id: UUID | None, tags: list[str] | None, **kwargs: Any) -> None:
+    def on_llm_end(
+        self,
+        response: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
         messages: list[AnyMessage] = []
         logger.debug(f"on_llm_end {run_id}: tags={tags}")
         for generation in response.generations:
@@ -185,6 +198,7 @@ class RunJournal(BaseCallbackHandler):
                 # Fallback: on_chat_model_start was not called
                 self._llm_call_index += 1
                 call_index = self._llm_call_index
+                self._seen_llm_starts.add(rid)
 
             # Trace event: llm_response (OpenAI completion format)
             self._put(
@@ -219,7 +233,7 @@ class RunJournal(BaseCallbackHandler):
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
         """Handle tool start event, cache tool call ID for later correlation"""
         tool_call_id = str(run_id)
-        logger.debug(f"Tool start for node {run_id}, tool_call_id={tool_call_id}, tags={tags}")
+        logger.debug("Tool start for node %s, tool_call_id=%s, tags=%s", run_id, tool_call_id, tags)
 
     def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
         """Handle tool end event, append message and clear node data"""
