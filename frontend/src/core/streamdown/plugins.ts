@@ -1,5 +1,6 @@
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { StreamdownProps } from "streamdown";
@@ -9,6 +10,7 @@ import { rehypeSplitWordsIntoSpans } from "../rehype";
 export const streamdownPlugins = {
   remarkPlugins: [
     remarkGfm,
+    remarkBreaks,
     [remarkMath, { singleDollarTextMath: true }],
   ] as StreamdownProps["remarkPlugins"],
   rehypePlugins: [
@@ -20,6 +22,7 @@ export const streamdownPlugins = {
 export const streamdownPluginsWithWordAnimation = {
   remarkPlugins: [
     remarkGfm,
+    remarkBreaks,
     [remarkMath, { singleDollarTextMath: true }],
   ] as StreamdownProps["remarkPlugins"],
   rehypePlugins: [

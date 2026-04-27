@@ -224,6 +224,9 @@ export interface Translations {
     in_progress: string;
     completed: string;
     failed: string;
+    taskAnalysis: string;
+    decomposedInto: (count: number) => string;
+    subagentType: (type: string) => string;
   };
 
   // Token Usage

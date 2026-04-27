@@ -12,7 +12,7 @@ import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
-import { useUpdateSubtask } from "../tasks/context";
+import { useAppendMessage, useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -190,6 +190,7 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const appendMessage = useAppendMessage();
   const runMetadataStorageRef = useRef<
     ReturnType<typeof getRunMetadataStorage> | undefined
   >(undefined);
@@ -269,7 +270,15 @@ export function useThreadStream({
           task_id: string;
           message: AIMessage;
         };
-        updateSubtask({ id: e.task_id, latestMessage: e.message });
+        updateSubtask({
+          id: e.task_id,
+          status: "in_progress",
+          description: "",
+          prompt: "",
+          subagent_type: "",
+          latestMessage: e.message,
+        });
+        appendMessage(e.task_id, e.message);
         return;
       }
 

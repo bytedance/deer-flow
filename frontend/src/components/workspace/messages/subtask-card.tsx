@@ -28,6 +28,7 @@ import { CitationLink } from "../citations/citation-link";
 import { FlipDisplay } from "../flip-display";
 
 import { MarkdownContent } from "./markdown-content";
+import { LightbulbIcon, ToolCall, convertToSteps } from "./message-steps";
 
 export function SubtaskCard({
   className,
@@ -41,8 +42,9 @@ export function SubtaskCard({
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const task = useSubtask(taskId)!;
+  const task = useSubtask(taskId);
   const icon = useMemo(() => {
+    if (!task) return undefined;
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
     } else if (task.status === "failed") {
@@ -50,7 +52,17 @@ export function SubtaskCard({
     } else if (task.status === "in_progress") {
       return <Loader2Icon className="size-3 animate-spin" />;
     }
-  }, [task.status]);
+  }, [task]);
+
+  const historySteps = useMemo(() => {
+    if (!task?.messageHistory || task.messageHistory.length === 0) {
+      return null;
+    }
+    return convertToSteps(task.messageHistory);
+  }, [task?.messageHistory]);
+
+  if (!task) return null;
+
   return (
     <ChainOfThought
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
@@ -123,6 +135,11 @@ export function SubtaskCard({
           </Button>
         </div>
         <ChainOfThoughtContent className="px-4 pb-4">
+          {task.subagent_type && (
+            <div className="text-muted-foreground mb-2 text-xs">
+              {t.subtasks.subagentType(task.subagent_type)}
+            </div>
+          )}
           {task.prompt && (
             <ChainOfThoughtStep
               label={
@@ -135,7 +152,29 @@ export function SubtaskCard({
               }
             ></ChainOfThoughtStep>
           )}
+          {historySteps && historySteps.length > 0 && (
+            <div className="mt-2 border-t pt-2">
+              {historySteps.map((step) =>
+                step.type === "reasoning" ? (
+                  <ChainOfThoughtStep
+                    key={step.id}
+                    label={
+                      <MarkdownContent
+                        content={step.reasoning ?? ""}
+                        isLoading={isLoading}
+                        rehypePlugins={rehypePlugins}
+                      />
+                    }
+                    icon={<LightbulbIcon className="size-4" />}
+                  />
+                ) : (
+                  <ToolCall key={step.id} {...step} isLoading={isLoading} />
+                ),
+              )}
+            </div>
+          )}
           {task.status === "in_progress" &&
+            (!historySteps || historySteps.length === 0) &&
             task.latestMessage &&
             hasToolCalls(task.latestMessage) && (
               <ChainOfThoughtStep

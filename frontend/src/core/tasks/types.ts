@@ -9,4 +9,5 @@ export interface Subtask {
   prompt: string;
   result?: string;
   error?: string;
+  messageHistory?: AIMessage[];
 }

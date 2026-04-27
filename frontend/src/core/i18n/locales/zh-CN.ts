@@ -279,6 +279,9 @@ export const zhCN: Translations = {
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",
+    taskAnalysis: "任务分析",
+    decomposedInto: (count: number) => `拆分为 ${count} 个子任务`,
+    subagentType: (type: string) => `智能体: ${type}`,
   },
 
   // Token Usage

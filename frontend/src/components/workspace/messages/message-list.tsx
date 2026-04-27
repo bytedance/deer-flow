@@ -1,4 +1,5 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
+import { useEffect, useRef } from "react";
 
 import {
   Conversation,
@@ -12,7 +13,6 @@ import {
   groupMessages,
   hasContent,
   hasPresentFiles,
-  hasReasoning,
   hasToolCalls,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
@@ -28,6 +28,7 @@ import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
 import { MessageTokenUsageList } from "./message-token-usage";
+import { OrchestratorThinking } from "./orchestrator-thinking";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
 
@@ -51,6 +52,59 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
+
+  // Sync subtask state from messages in useEffect to avoid setState during render
+  const syncedTaskIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const message of messages) {
+      if (message.type === "ai") {
+        for (const toolCall of message.tool_calls ?? []) {
+          if (toolCall.name === "task" && toolCall.id) {
+            if (!syncedTaskIdsRef.current.has(toolCall.id)) {
+              syncedTaskIdsRef.current.add(toolCall.id);
+              updateSubtask({
+                id: toolCall.id,
+                subagent_type: toolCall.args.subagent_type,
+                description: toolCall.args.description,
+                prompt: toolCall.args.prompt,
+                status: "in_progress",
+              });
+            }
+          }
+        }
+      } else if (message.type === "tool") {
+        const taskId = message.tool_call_id;
+        if (taskId) {
+          const result = extractTextFromMessage(message);
+          if (result.startsWith("Task Succeeded. Result:")) {
+            updateSubtask({
+              id: taskId,
+              status: "completed",
+              result: result.split("Task Succeeded. Result:")[1]?.trim(),
+            });
+          } else if (result.startsWith("Task failed.")) {
+            updateSubtask({
+              id: taskId,
+              status: "failed",
+              error: result.split("Task failed.")[1]?.trim(),
+            });
+          } else if (result.startsWith("Task timed out")) {
+            updateSubtask({
+              id: taskId,
+              status: "failed",
+              error: result,
+            });
+          } else {
+            updateSubtask({
+              id: taskId,
+              status: "in_progress",
+            });
+          }
+        }
+      }
+    }
+  }, [messages, updateSubtask]);
+
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
@@ -122,45 +176,12 @@ export function MessageList({
             for (const message of group.messages) {
               if (message.type === "ai") {
                 for (const toolCall of message.tool_calls ?? []) {
-                  if (toolCall.name === "task") {
-                    const task: Subtask = {
-                      id: toolCall.id!,
+                  if (toolCall.name === "task" && toolCall.id) {
+                    tasks.add({
+                      id: toolCall.id,
                       subagent_type: toolCall.args.subagent_type,
                       description: toolCall.args.description,
                       prompt: toolCall.args.prompt,
-                      status: "in_progress",
-                    };
-                    updateSubtask(task);
-                    tasks.add(task);
-                  }
-                }
-              } else if (message.type === "tool") {
-                const taskId = message.tool_call_id;
-                if (taskId) {
-                  const result = extractTextFromMessage(message);
-                  if (result.startsWith("Task Succeeded. Result:")) {
-                    updateSubtask({
-                      id: taskId,
-                      status: "completed",
-                      result: result
-                        .split("Task Succeeded. Result:")[1]
-                        ?.trim(),
-                    });
-                  } else if (result.startsWith("Task failed.")) {
-                    updateSubtask({
-                      id: taskId,
-                      status: "failed",
-                      error: result.split("Task failed.")[1]?.trim(),
-                    });
-                  } else if (result.startsWith("Task timed out")) {
-                    updateSubtask({
-                      id: taskId,
-                      status: "failed",
-                      error: result,
-                    });
-                  } else {
-                    updateSubtask({
-                      id: taskId,
                       status: "in_progress",
                     });
                   }
@@ -171,18 +192,16 @@ export function MessageList({
             for (const message of group.messages.filter(
               (message) => message.type === "ai",
             )) {
-              if (hasReasoning(message)) {
-                results.push(
-                  <MessageGroup
-                    key={"thinking-group-" + message.id}
-                    messages={[message]}
-                    isLoading={thread.isLoading}
-                  />,
-                );
-              }
+              results.push(
+                <OrchestratorThinking
+                  key={"thinking-group-" + message.id}
+                  message={message}
+                  isLoading={thread.isLoading}
+                />,
+              );
               results.push(
                 <div
-                  key="subtask-count"
+                  key={"subtask-count-" + message.id}
                   className="text-muted-foreground pt-2 text-sm font-normal"
                 >
                   {t.subtasks.executing(tasks.size)}
