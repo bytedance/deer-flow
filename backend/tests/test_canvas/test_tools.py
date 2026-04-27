@@ -1,7 +1,10 @@
 """Tests for canvas Agent tools."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+from langchain_core.messages import ToolMessage
 
 from deerflow.canvas.tools import canvas_add_node_tool, canvas_execute_tool, canvas_plan_tool
 
@@ -12,12 +15,38 @@ def make_runtime(thread_id: str = "thread-1") -> SimpleNamespace:
         state={},
         context={"thread_id": thread_id},
         config={},
+        tool_call_id="tool-call-1",
     )
 
 
 class TestCanvasPlanTool:
-    def test_canvas_add_node_accepts_packed_args_dict(self):
-        """canvas_add_node tolerates executors that pass the args object positionally."""
+    def test_canvas_add_node_schema_exposes_object_config(self):
+        """canvas_add_node publishes a structured object schema for config."""
+        config_schema = canvas_add_node_tool.args["config"]
+        assert config_schema["type"] == "object"
+        assert config_schema["description"] == "Node configuration (varies by type)."
+
+    def test_canvas_plan_returns_tool_message(self):
+        """canvas_plan returns a ToolMessage keyed by runtime.tool_call_id."""
+        runtime = make_runtime()
+        with patch("deerflow.canvas.tools.CanvasStorage") as mock_storage:
+            mock_storage.return_value.load.return_value = None
+            mock_storage.return_value.save = MagicMock()
+
+            result = canvas_plan_tool.func(
+                description="Analyze sales data",
+                name="Sales Analysis",
+                agent_execution_mode="readonly",
+                runtime=runtime,
+            )
+
+        message = result.update["messages"][0]
+        assert isinstance(message, ToolMessage)
+        assert message.tool_call_id == "tool-call-1"
+        assert "Canvas 'Sales Analysis' ready" in message.content
+
+    def test_canvas_add_node_adds_node(self):
+        """canvas_add_node adds a node using standard typed arguments."""
         runtime = make_runtime()
         with patch("deerflow.canvas.tools.CanvasStorage") as mock_storage:
             from deerflow.canvas.models import AgentExecutionMode, Canvas, CanvasStatus
@@ -35,22 +64,21 @@ class TestCanvasPlanTool:
             mock_storage.return_value.save = MagicMock()
 
             result = canvas_add_node_tool.func(
-                runtime,
-                {
-                    "node_type": "data_source",
-                    "config": {
-                        "connection_id": "dataflow",
-                        "table_name": "fact_sales",
-                        "display_name": "销售事实表",
-                    },
-                    "node_id": "node-1",
+                node_type="data_source",
+                config={
+                    "connection_id": "dataflow",
+                    "table_name": "fact_sales",
+                    "display_name": "销售事实表",
                 },
-                tool_call_id="tc-packed",
+                node_id="node-1",
+                runtime=runtime,
             )
 
         assert result is not None
         assert result.update is not None
-        assert "Added data_source node 'node-1'" in result.update["messages"][0].content
+        message = result.update["messages"][0]
+        assert isinstance(message, ToolMessage)
+        assert "Added data_source node 'node-1'" in message.content
         mock_storage.return_value.save.assert_called_once()
 
     def test_canvas_plan_creates_new_canvas(self):
@@ -62,16 +90,16 @@ class TestCanvasPlanTool:
             mock_storage.return_value.save = MagicMock()
 
             result = canvas_plan_tool.func(
-                runtime=runtime,
                 description="Analyze sales data",
                 name="Sales Analysis",
                 agent_execution_mode="readonly",
-                tool_call_id="tc-1",
+                runtime=runtime,
             )
 
         assert result is not None
         assert result.update is not None
         assert "messages" in result.update
+        assert isinstance(result.update["messages"][0], ToolMessage)
         # 验证 canvas 已创建
         mock_storage.return_value.save.assert_called_once()
 
@@ -96,15 +124,15 @@ class TestCanvasPlanTool:
             mock_storage.return_value.save = MagicMock()
 
             result = canvas_plan_tool.func(
-                runtime=runtime,
                 description="Add more analysis",
                 name="Updated Analysis",
                 agent_execution_mode="readonly",
-                tool_call_id="tc-2",
+                runtime=runtime,
             )
 
         assert result is not None
         assert result.update is not None
+        assert isinstance(result.update["messages"][0], ToolMessage)
         # 验证 canvas 已保存
         mock_storage.return_value.save.assert_called_once()
 
@@ -117,10 +145,7 @@ class TestCanvasExecuteTool:
         with patch("deerflow.canvas.tools.CanvasStorage") as mock_storage:
             mock_storage.return_value.load.return_value = None
 
-            result = canvas_execute_tool.func(
-                runtime=runtime,
-                tool_call_id="tc-3",
-            )
+            result = asyncio.run(canvas_execute_tool.coroutine(runtime=runtime))
 
         assert result is not None
         assert result.update is not None
@@ -128,4 +153,5 @@ class TestCanvasExecuteTool:
         # 应该有错误消息
         messages = result.update["messages"]
         assert len(messages) > 0
+        assert isinstance(messages[0], ToolMessage)
         assert "Error" in messages[0].content or "No canvas" in messages[0].content

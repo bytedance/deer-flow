@@ -4,12 +4,15 @@ import {
   Conversation,
   ConversationContent,
 } from "@/components/ai-elements/conversation";
+import { CanvasCard } from "@/components/workspace/canvas";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  extractCanvasFromMessage,
   extractContentFromMessage,
   extractPresentFilesFromMessage,
   extractTextFromMessage,
   groupMessages,
+  hasCanvas,
   hasContent,
   hasPresentFiles,
   hasReasoning,
@@ -110,6 +113,38 @@ export function MessageList({
                   />
                 )}
                 <ArtifactFileList files={files} threadId={threadId} />
+                <MessageTokenUsageList
+                  enabled={tokenUsageEnabled}
+                  isLoading={thread.isLoading}
+                  messages={group.messages}
+                />
+              </div>
+            );
+          } else if (group.type === "assistant:canvas") {
+            // 提取 canvas 信息
+            let canvasInfo: { name: string; description: string } | null = null;
+            for (const message of group.messages) {
+              if (hasCanvas(message)) {
+                canvasInfo = extractCanvasFromMessage(message);
+                break;
+              }
+            }
+            return (
+              <div className="w-full" key={group.id}>
+                {group.messages[0] && hasContent(group.messages[0]) && (
+                  <MarkdownContent
+                    content={extractContentFromMessage(group.messages[0])}
+                    isLoading={thread.isLoading}
+                    rehypePlugins={rehypePlugins}
+                    className="mb-4"
+                  />
+                )}
+                {canvasInfo && (
+                  <CanvasCard
+                    canvasName={canvasInfo.name}
+                    canvasDescription={canvasInfo.description}
+                  />
+                )}
                 <MessageTokenUsageList
                   enabled={tokenUsageEnabled}
                   isLoading={thread.isLoading}

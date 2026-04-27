@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
-import { CanvasTrigger } from "@/components/workspace/canvas";
+import { CanvasTrigger, useCanvasContext } from "@/components/workspace/canvas";
 import {
   ChatBox,
   useSpecificChatMode,
@@ -48,6 +48,7 @@ export default function ChatPage() {
 
   const { showNotification } = useNotification();
   const queryClient = useQueryClient();
+  const { setOpen: setCanvasOpen } = useCanvasContext();
 
   // Canvas 工具名称列表
   const CANVAS_TOOLS = [
@@ -91,6 +92,10 @@ export default function ChatPage() {
       // 当 canvas 工具执行完成后，invalidate canvas query 以触发刷新
       if (CANVAS_TOOLS.includes(event.name) && threadId) {
         void queryClient.invalidateQueries({ queryKey: ["canvas", threadId] });
+      }
+      // canvas_plan 调用后自动打开 Canvas 面板
+      if (event.name === "canvas_plan") {
+        setCanvasOpen(true);
       }
     },
   });
