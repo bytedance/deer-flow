@@ -106,6 +106,78 @@ def test_get_thread_mounts_preserves_windows_host_path_style(tmp_path, monkeypat
     assert container_paths["/mnt/acp-workspace"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\acp-workspace"
 
 
+# ── Network mode config plumbing (issue #2600) ───────────────────────────────
+
+
+def _load_config(monkeypatch, *, sandbox_attrs: dict, env_network: str | None | object = "__unset__"):
+    """Drive ``AioSandboxProvider._load_config`` with a synthetic sandbox config.
+
+    ``sandbox_attrs`` is merged onto a stub returned by ``get_app_config``.
+    ``env_network`` controls the ``DEER_FLOW_SANDBOX_NETWORK`` env var: pass
+    a string to set, ``None`` to set it to empty, or leave ``"__unset__"`` to
+    delete it. Returns the resolved config dict.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+    sandbox_stub = MagicMock(spec=[])
+    defaults = {
+        "image": None,
+        "port": None,
+        "container_prefix": None,
+        "idle_timeout": None,
+        "replicas": None,
+        "mounts": [],
+        "environment": {},
+        "network": None,
+        "provisioner_url": None,
+    }
+    defaults.update(sandbox_attrs)
+    for key, value in defaults.items():
+        setattr(sandbox_stub, key, value)
+
+    config_stub = MagicMock(spec=[])
+    config_stub.sandbox = sandbox_stub
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: config_stub)
+
+    if env_network == "__unset__":
+        monkeypatch.delenv("DEER_FLOW_SANDBOX_NETWORK", raising=False)
+    elif env_network is None:
+        monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "")
+    else:
+        monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", env_network)
+
+    return aio_mod.AioSandboxProvider._load_config(MagicMock())
+
+
+def test_load_config_network_defaults_to_none(monkeypatch):
+    config = _load_config(monkeypatch, sandbox_attrs={})
+    assert config["network"] is None
+
+
+def test_load_config_picks_up_network_from_config_field(monkeypatch):
+    config = _load_config(monkeypatch, sandbox_attrs={"network": "deer-flow"})
+    assert config["network"] == "deer-flow"
+
+
+def test_load_config_env_var_overrides_config_field(monkeypatch):
+    config = _load_config(
+        monkeypatch,
+        sandbox_attrs={"network": "from-config"},
+        env_network="from-env",
+    )
+    assert config["network"] == "from-env"
+
+
+def test_load_config_empty_env_var_explicitly_disables_network(monkeypatch):
+    """``DEER_FLOW_SANDBOX_NETWORK=`` (empty string) is the documented opt-out."""
+    config = _load_config(
+        monkeypatch,
+        sandbox_attrs={"network": "from-config"},
+        env_network=None,
+    )
+    assert config["network"] is None
+
+
 def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatch):
     """Unlock should not run if exclusive locking itself fails."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")

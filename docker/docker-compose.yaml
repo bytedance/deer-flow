@@ -106,6 +106,12 @@ services:
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
+      # Sandbox network mode: AioSandboxProvider attaches sandbox containers to
+      # the same Docker network so gateway/langgraph reach them via container
+      # name DNS instead of host-gateway. ``DEER_FLOW_SANDBOX_HOST`` is kept as
+      # a no-op fallback for users who explicitly disable network mode by
+      # setting ``DEER_FLOW_SANDBOX_NETWORK=`` (empty string).
+      - DEER_FLOW_SANDBOX_NETWORK=deer-flow
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     env_file:
       - ../.env
@@ -156,6 +162,8 @@ services:
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
+      # Sandbox network mode (see gateway service for details).
+      - DEER_FLOW_SANDBOX_NETWORK=deer-flow
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # LangSmith tracing: set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable.
     env_file:
@@ -199,4 +207,9 @@ services:
       retries: 6
 networks:
   deer-flow:
+    # Explicit ``name`` keeps the actual Docker network name stable
+    # (``deer-flow`` rather than ``<project>_deer-flow``) so sandbox
+    # containers attached via ``--network deer-flow`` always join the
+    # correct network regardless of the compose project prefix.
+    name: deer-flow
     driver: bridge

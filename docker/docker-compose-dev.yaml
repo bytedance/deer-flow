@@ -170,6 +170,12 @@ services:
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
+      # Sandbox network mode: AioSandboxProvider attaches sandbox containers to
+      # the same Docker network so gateway/langgraph reach them via container
+      # name DNS instead of host-gateway. ``DEER_FLOW_SANDBOX_HOST`` is kept as
+      # a no-op fallback for users who explicitly disable network mode by
+      # setting ``DEER_FLOW_SANDBOX_NETWORK=`` (empty string).
+      - DEER_FLOW_SANDBOX_NETWORK=deer-flow-dev
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     env_file:
       - ../.env
@@ -227,6 +233,8 @@ services:
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
+      # Sandbox network mode (see gateway service for details).
+      - DEER_FLOW_SANDBOX_NETWORK=deer-flow-dev
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     env_file:
       - ../.env
@@ -247,6 +255,11 @@ volumes:
 
 networks:
   deer-flow-dev:
+    # Explicit ``name`` keeps the actual Docker network name stable
+    # (``deer-flow-dev`` rather than ``<project>_deer-flow-dev``) so sandbox
+    # containers attached via ``--network deer-flow-dev`` always join the
+    # correct network regardless of the compose project prefix.
+    name: deer-flow-dev
     driver: bridge
     ipam:
       config:

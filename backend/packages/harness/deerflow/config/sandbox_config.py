@@ -25,6 +25,11 @@ class SandboxConfig(BaseModel):
         idle_timeout: Idle timeout in seconds before sandbox is released (default: 600 = 10 minutes). Set to 0 to disable.
         mounts: List of volume mounts to share directories with the container
         environment: Environment variables to inject into the container (values starting with $ are resolved from host env)
+        network: Optional Docker network to attach sandbox containers to. When set, the gateway/langgraph
+            container reaches the sandbox via ``http://<container_name>:<port>`` over the shared network
+            instead of mapping the sandbox port to the host and routing through ``host.docker.internal``.
+            Recommended for ``make docker-start`` deployments. Ignored on Apple Container, which does not
+            support Docker user-defined networks. Override at runtime with ``DEER_FLOW_SANDBOX_NETWORK``.
     """
 
     use: str = Field(
@@ -62,6 +67,15 @@ class SandboxConfig(BaseModel):
     environment: dict[str, str] = Field(
         default_factory=dict,
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
+    )
+    network: str | None = Field(
+        default=None,
+        description=(
+            "Optional Docker network to attach sandbox containers to. "
+            "When set, sandboxes are reachable at http://<container_name>:<port> "
+            "over the shared network instead of being port-mapped to the host. "
+            "Override with DEER_FLOW_SANDBOX_NETWORK."
+        ),
     )
 
     bash_output_max_chars: int = Field(

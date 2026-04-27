@@ -152,6 +152,7 @@ class AioSandboxProvider(SandboxProvider):
             container_prefix=self._config["container_prefix"],
             config_mounts=self._config["mounts"],
             environment=self._config["environment"],
+            network=self._config["network"],
         )
 
     # ── Configuration ────────────────────────────────────────────────────
@@ -164,6 +165,15 @@ class AioSandboxProvider(SandboxProvider):
         idle_timeout = getattr(sandbox_config, "idle_timeout", None)
         replicas = getattr(sandbox_config, "replicas", None)
 
+        # Network override priority: env var > config field > None (legacy port-mapped mode).
+        # ``DEER_FLOW_SANDBOX_NETWORK`` lets compose files inject the network without
+        # rewriting ``config.yaml``; an empty value explicitly opts out.
+        env_network = os.environ.get("DEER_FLOW_SANDBOX_NETWORK")
+        if env_network is not None:
+            network = env_network or None
+        else:
+            network = getattr(sandbox_config, "network", None) or None
+
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
             "port": sandbox_config.port or DEFAULT_PORT,
@@ -172,6 +182,7 @@ class AioSandboxProvider(SandboxProvider):
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
+            "network": network,
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
         }

@@ -107,6 +107,7 @@ class LocalContainerBackend(SandboxBackend):
         container_prefix: str,
         config_mounts: list,
         environment: dict[str, str],
+        network: str | None = None,
     ):
         """Initialize the local container backend.
 
@@ -116,6 +117,11 @@ class LocalContainerBackend(SandboxBackend):
             container_prefix: Prefix for container names (e.g., "deer-flow-sandbox").
             config_mounts: Volume mount configurations from config (list of VolumeMountConfig).
             environment: Environment variables to inject into containers.
+            network: Optional Docker network name. When set and the runtime is Docker,
+                sandbox containers are attached to this network (no host port mapping)
+                and reachable at ``http://<container_name>:8080``. Apple Container does
+                not support Docker user-defined networks, so this argument is ignored
+                with a warning when the runtime resolves to ``container``.
         """
         self._image = image
         self._base_port = base_port
@@ -123,6 +129,46 @@ class LocalContainerBackend(SandboxBackend):
         self._config_mounts = config_mounts
         self._environment = environment
         self._runtime = self._detect_runtime()
+        self._network = self._resolve_network(network)
+
+    def _resolve_network(self, network: str | None) -> str | None:
+        """Decide whether to use Docker network mode for this backend instance.
+
+        Returns the network name when usable, ``None`` otherwise. Logs at
+        ``warning`` when the user requested a network but the runtime cannot
+        honor it, so misconfiguration is visible without breaking startup.
+        """
+        if not network:
+            return None
+        if self._runtime != "docker":
+            logger.warning(
+                "Sandbox network=%r requested but runtime is %r; falling back to host port mapping. Apple Container does not support Docker user-defined networks.",
+                network,
+                self._runtime,
+            )
+            return None
+        if not self._docker_network_exists(network):
+            # Fail loud rather than silently falling back: a missing network
+            # almost always means a config or compose-file mistake. Operators
+            # need to see the error so they can either ``docker network create``
+            # it or unset ``DEER_FLOW_SANDBOX_NETWORK``.
+            raise RuntimeError(f"Configured sandbox network {network!r} does not exist. Create it (`docker network create {network}`) or unset DEER_FLOW_SANDBOX_NETWORK / sandbox.network in config.yaml.")
+        logger.info("Sandbox network mode enabled: containers will join Docker network %r and be reachable at http://<container_name>:%d", network, self._base_port)
+        return network
+
+    def _docker_network_exists(self, network: str) -> bool:
+        """Return ``True`` if ``docker network inspect`` succeeds for ``network``."""
+        try:
+            result = subprocess.run(
+                ["docker", "network", "inspect", network],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            logger.warning(f"docker network inspect failed for {network!r}: {e}")
+            return False
 
     @property
     def runtime(self) -> str:
@@ -174,13 +220,34 @@ class LocalContainerBackend(SandboxBackend):
         """
         container_name = f"{self._container_prefix}-{sandbox_id}"
 
+        if self._network:
+            # Network mode: no host port mapping, no port allocation, no port-conflict
+            # retry. Container-name conflicts (a sibling process beat us to start) are
+            # still possible and resolved via discover/adopt as in the legacy path.
+            try:
+                container_id = self._start_container(container_name, port=None, extra_mounts=extra_mounts)
+            except RuntimeError as exc:
+                err_lower = str(exc).lower()
+                if "is already in use by container" in err_lower or "conflict. the container name" in err_lower:
+                    logger.warning(f"Container name {container_name} already in use, attempting to discover existing sandbox instance")
+                    existing = self.discover(sandbox_id)
+                    if existing is not None:
+                        return existing
+                raise
+            return SandboxInfo(
+                sandbox_id=sandbox_id,
+                sandbox_url=f"http://{container_name}:{self._base_port}",
+                container_name=container_name,
+                container_id=container_id,
+            )
+
         # Retry loop: if Docker rejects the port (e.g. a stale container still
         # holds the binding after a process restart), skip that port and try the
         # next one.  The socket-bind check in get_free_port mirrors Docker's
         # 0.0.0.0 bind, but Docker's port-release can be slightly asynchronous,
         # so a reactive fallback here ensures we always make progress.
         _next_start = self._base_port
-        container_id: str | None = None
+        container_id = None
         port: int = 0
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
@@ -226,7 +293,12 @@ class LocalContainerBackend(SandboxBackend):
         stop_target = info.container_id or info.container_name
         if stop_target:
             self._stop_container(stop_target)
-        # Extract port from sandbox_url for release
+
+        # Network mode does not allocate host ports, so there is nothing to
+        # release. The legacy host-port path extracts the port from the URL
+        # and returns it to the global allocator.
+        if self._network:
+            return
         try:
             from urllib.parse import urlparse
 
@@ -259,12 +331,15 @@ class LocalContainerBackend(SandboxBackend):
         if not self._is_container_running(container_name):
             return None
 
-        port = self._get_container_port(container_name)
-        if port is None:
-            return None
+        if self._network:
+            sandbox_url = f"http://{container_name}:{self._base_port}"
+        else:
+            port = self._get_container_port(container_name)
+            if port is None:
+                return None
+            sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+            sandbox_url = f"http://{sandbox_host}:{port}"
 
-        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
-        sandbox_url = f"http://{sandbox_host}:{port}"
         if not wait_for_sandbox_ready(sandbox_url, timeout=5):
             return None
 
@@ -337,7 +412,12 @@ class LocalContainerBackend(SandboxBackend):
                 continue
             created_at, host_port = data
             sandbox_id = container_name[len(self._container_prefix) + 1 :]
-            sandbox_url = f"http://{sandbox_host}:{host_port}" if host_port else ""
+            if self._network:
+                # Network mode containers have no host port mapping; the URL is
+                # the container name on the shared Docker network.
+                sandbox_url = f"http://{container_name}:{self._base_port}"
+            else:
+                sandbox_url = f"http://{sandbox_host}:{host_port}" if host_port else ""
 
             infos.append(
                 SandboxInfo(
@@ -402,14 +482,15 @@ class LocalContainerBackend(SandboxBackend):
     def _start_container(
         self,
         container_name: str,
-        port: int,
+        port: int | None,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
     ) -> str:
         """Start a new container.
 
         Args:
             container_name: Name for the container.
-            port: Host port to map to container port 8080.
+            port: Host port to map to container port 8080. ``None`` in network
+                mode (no host port mapping; reach via container name DNS).
             extra_mounts: Additional volume mounts.
 
         Returns:
@@ -424,16 +505,17 @@ class LocalContainerBackend(SandboxBackend):
         if self._runtime == "docker":
             cmd.extend(["--security-opt", "seccomp=unconfined"])
 
-        cmd.extend(
-            [
-                "--rm",
-                "-d",
-                "-p",
-                f"{port}:8080",
-                "--name",
-                container_name,
-            ]
-        )
+        cmd.extend(["--rm", "-d", "--name", container_name])
+
+        if self._network:
+            cmd.extend(["--network", self._network])
+        else:
+            if port is None:
+                # Defensive: should never happen — caller passes a port unless
+                # network mode is on, and network mode is mutually exclusive
+                # with the legacy path.
+                raise RuntimeError("port must be provided when sandbox network mode is disabled")
+            cmd.extend(["-p", f"{port}:8080"])
 
         # Environment variables
         for key, value in self._environment.items():
