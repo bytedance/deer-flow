@@ -4,11 +4,12 @@ import logging
 import os
 import stat
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from app.gateway.authz import require_permission
-from deerflow.config.app_config import get_app_config
+from app.gateway.deps import get_config
+from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
@@ -60,23 +61,22 @@ def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
     return bool(getattr(sandbox_provider, "uses_thread_data_mounts", False))
 
 
-def _get_uploads_config_value(key: str, default: object) -> object:
+def _get_uploads_config_value(app_config: AppConfig, key: str, default: object) -> object:
     """Read a value from the uploads config, supporting dict and attribute access."""
-    cfg = get_app_config()
-    uploads_cfg = getattr(cfg, "uploads", None)
+    uploads_cfg = getattr(app_config, "uploads", None)
     if isinstance(uploads_cfg, dict):
         return uploads_cfg.get(key, default)
     return getattr(uploads_cfg, key, default)
 
 
-def _auto_convert_documents_enabled() -> bool:
+def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
     """Return whether automatic host-side document conversion is enabled.
 
     The secure default is disabled unless an operator explicitly opts in via
     uploads.auto_convert_documents in config.yaml.
     """
     try:
-        raw = _get_uploads_config_value("auto_convert_documents", False)
+        raw = _get_uploads_config_value(app_config, "auto_convert_documents", False)
         if isinstance(raw, str):
             return raw.strip().lower() in {"1", "true", "yes", "on"}
         return bool(raw)
@@ -90,6 +90,7 @@ async def upload_files(
     thread_id: str,
     request: Request,
     files: list[UploadFile] = File(...),
+    config: AppConfig = Depends(get_config),
 ) -> UploadResponse:
     """Upload multiple files to a thread's uploads directory."""
     if not files:
@@ -108,7 +109,7 @@ async def upload_files(
     if sync_to_sandbox:
         sandbox_id = sandbox_provider.acquire(thread_id)
         sandbox = sandbox_provider.get(sandbox_id)
-    auto_convert_documents = _auto_convert_documents_enabled()
+    auto_convert_documents = _auto_convert_documents_enabled(config)
 
     for file in files:
         if not file.filename:
