@@ -6,9 +6,14 @@ This module provides a global memory mechanism that:
 - Injects relevant memory into system prompts for personalized responses
 """
 
+from deerflow.agents.memory.metrics import (
+    RetrievalMetrics,
+    compute_retrieval_metrics,
+)
 from deerflow.agents.memory.prompt import (
     FACT_EXTRACTION_PROMPT,
     MEMORY_UPDATE_PROMPT,
+    build_memory_injection_result,
     format_conversation_for_update,
     format_memory_for_injection,
 )
@@ -17,6 +22,12 @@ from deerflow.agents.memory.queue import (
     MemoryUpdateQueue,
     get_memory_queue,
     reset_memory_queue,
+)
+from deerflow.agents.memory.retrieval_trace import (
+    InjectionResult,
+    RetrievalTrace,
+    emit_retrieval_trace,
+    resolve_trace_path,
 )
 from deerflow.agents.memory.storage import (
     FileMemoryStorage,
@@ -36,8 +47,16 @@ __all__ = [
     # Prompt utilities
     "MEMORY_UPDATE_PROMPT",
     "FACT_EXTRACTION_PROMPT",
+    "build_memory_injection_result",
     "format_memory_for_injection",
     "format_conversation_for_update",
+    "InjectionResult",
+    "RetrievalTrace",
+    "emit_retrieval_trace",
+    "resolve_trace_path",
+    # Metrics
+    "RetrievalMetrics",
+    "compute_retrieval_metrics",
     # Queue
     "ConversationContext",
     "MemoryUpdateQueue",

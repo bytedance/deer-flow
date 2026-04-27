@@ -774,6 +774,10 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+  retrieval_trace:
+    enabled: false # Whether to write retrieval decision traces for memory injection
+    storage_path: "" # Default: retrieval_traces.jsonl alongside the active memory file
+    max_file_bytes: 5242880 # Rotate trace file after 5MB (rotated files use timestamped names; clean up old files periodically)
 
 # ============================================================================
 # Custom Agent Management API

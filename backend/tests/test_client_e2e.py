@@ -758,6 +758,7 @@ class TestMemoryAccess:
         assert "fact_confidence_threshold" in result
         assert "injection_enabled" in result
         assert "max_injection_tokens" in result
+        assert "retrieval_trace" in result
 
     def test_get_memory_status_combines_config_and_data(self, e2e_env):
         """get_memory_status() returns both 'config' and 'data' keys."""
