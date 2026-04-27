@@ -18,6 +18,7 @@ from deerflow.agents.memory.queue import (
     get_memory_queue,
     reset_memory_queue,
 )
+from deerflow.agents.memory.sqlite_storage import SQLiteMemoryStorage
 from deerflow.agents.memory.storage import (
     FileMemoryStorage,
     MemoryStorage,
@@ -46,6 +47,7 @@ __all__ = [
     # Storage
     "MemoryStorage",
     "FileMemoryStorage",
+    "SQLiteMemoryStorage",
     "get_memory_storage",
     # Updater
     "MemoryUpdater",

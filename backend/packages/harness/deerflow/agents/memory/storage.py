@@ -60,7 +60,19 @@ class MemoryStorage(abc.ABC):
 
 
 class FileMemoryStorage(MemoryStorage):
-    """File-based memory storage provider."""
+    """File-based memory storage. **Single-writer only.**
+
+    Do not use in deployments running more than one worker process
+    (``uvicorn --workers N`` with ``N > 1``, ``gunicorn``, LangGraph Server
+    multi-worker mode, ``WEB_CONCURRENCY > 1``).  Concurrent saves from
+    different processes result in last-writer-wins with no error signal:
+    earlier LLM updates are silently overwritten.
+
+    For multi-worker deployments, use
+    :class:`deerflow.agents.memory.sqlite_storage.SQLiteMemoryStorage`
+    together with the single-writer queue
+    (``deerflow.agents.memory.writer_queue``).  See RFC #2283 for context.
+    """
 
     def __init__(self):
         """Initialize the file memory storage."""
@@ -178,6 +190,39 @@ _storage_instance: MemoryStorage | None = None
 _storage_lock = threading.Lock()
 
 
+def _warn_if_unsafe_multiworker(storage: MemoryStorage) -> None:
+    """Warn when ``FileMemoryStorage`` is used in a multi-worker deployment.
+
+    Checks the standard ``WEB_CONCURRENCY`` and ``UVICORN_WORKERS`` env vars.
+    This is best-effort advisory logging; the race condition (RFC #2283) is
+    silent and dangerous enough that users deserve a loud warning at startup.
+    """
+    if not isinstance(storage, FileMemoryStorage):
+        return
+    import os as _os
+
+    workers = 1
+    for env_var in ("WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        raw = _os.getenv(env_var)
+        if not raw:
+            continue
+        try:
+            workers = max(workers, int(raw))
+        except ValueError:
+            continue
+
+    if workers > 1:
+        logger.warning(
+            "FileMemoryStorage is configured with %s=%d; this is unsafe and "
+            "will silently lose memory updates under concurrent writes. "
+            "Switch memory.storage_class to "
+            "'deerflow.agents.memory.sqlite_storage.SQLiteMemoryStorage' "
+            "to use the single-writer queue (RFC #2283).",
+            "WEB_CONCURRENCY/UVICORN_WORKERS",
+            workers,
+        )
+
+
 def get_memory_storage() -> MemoryStorage:
     """Get the configured memory storage instance."""
     global _storage_instance
@@ -212,5 +257,7 @@ def get_memory_storage() -> MemoryStorage:
                 e,
             )
             _storage_instance = FileMemoryStorage()
+
+        _warn_if_unsafe_multiworker(_storage_instance)
 
     return _storage_instance

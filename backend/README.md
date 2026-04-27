@@ -98,7 +98,7 @@ LLM-powered persistent context retention across conversations:
 - **Structured storage**: User context (work, personal, top-of-mind), history, and confidence-scored facts
 - **Debounced updates**: Batches updates to minimize LLM calls (configurable wait time)
 - **System prompt injection**: Top facts + context injected into agent prompts
-- **Storage**: JSON file with mtime-based cache invalidation
+- **Storage**: Default file-backed storage for single-process setups, plus an optional SQLite single-writer queue + `seq` guard for multi-worker-safe updates
 
 ### Tool Ecosystem
 

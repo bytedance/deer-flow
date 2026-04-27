@@ -668,6 +668,8 @@ Across sessions, DeerFlow builds a persistent memory of your profile, preference
 
 Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
 
+For single-process setups, the default file-backed memory storage is usually sufficient. For multi-worker deployments, switch `memory.storage_class` to `deerflow.agents.memory.sqlite_storage.SQLiteMemoryStorage` so updates flow through the shared SQLite single-writer queue instead of risking silent last-writer-wins overwrites.
+
 ## Recommended Models
 
 DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-compatible API. That said, it performs best with models that support:

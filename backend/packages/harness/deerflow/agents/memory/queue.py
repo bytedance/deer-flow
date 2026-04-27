@@ -146,6 +146,7 @@ class MemoryUpdateQueue:
     def _process_queue(self) -> None:
         """Process all queued conversation contexts."""
         # Import here to avoid circular dependency
+        from deerflow.agents.memory.storage import get_memory_storage
         from deerflow.agents.memory.updater import MemoryUpdater
 
         with self._lock:
@@ -164,7 +165,52 @@ class MemoryUpdateQueue:
 
         logger.info("Processing %d queued memory updates", len(contexts_to_process))
 
+        # If the configured storage is the SQLite backend, hand every context
+        # off to the single-writer queue (RFC #2283).  This is the correctness
+        # fix for last-writer-wins in multi-worker deployments.
         try:
+            storage = get_memory_storage()
+        except Exception:  # pragma: no cover - defensive
+            storage = None
+
+        sqlite_storage = None
+        try:
+            from deerflow.agents.memory.sqlite_storage import SQLiteMemoryStorage
+
+            if isinstance(storage, SQLiteMemoryStorage):
+                sqlite_storage = storage
+        except Exception:  # pragma: no cover - defensive
+            sqlite_storage = None
+
+        try:
+            if sqlite_storage is not None:
+                from deerflow.agents.memory.writer_queue import schedule_memory_updates
+
+                # Hand the whole batch to the single-writer queue in one call
+                # so schema bootstrap / stuck-task reset / lease acquisition
+                # each happen once per tick instead of once per context.
+                try:
+                    schedule_memory_updates(
+                        db_path=sqlite_storage.db_path,
+                        contexts=[
+                            {
+                                "agent_name": context.agent_name,
+                                "messages": context.messages,
+                                "thread_id": context.thread_id,
+                                "correction_detected": context.correction_detected,
+                                "reinforcement_detected": context.reinforcement_detected,
+                            }
+                            for context in contexts_to_process
+                        ],
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to schedule batched memory updates (%d contexts): %s",
+                        len(contexts_to_process),
+                        e,
+                    )
+                return
+
             updater = MemoryUpdater()
 
             for context in contexts_to_process:
