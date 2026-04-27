@@ -235,6 +235,7 @@ class DeerFlowClient:
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
+                model_name=model_name,
             ),
             "state_schema": ThreadState,
         }
