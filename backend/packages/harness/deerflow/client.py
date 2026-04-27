@@ -40,6 +40,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime import serialize_channel_values
 from deerflow.skills.installer import install_skill_from_archive
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -459,6 +460,64 @@ class DeerFlowClient:
         checkpoints.sort(key=lambda x: x["ts"] if x["ts"] else "")
 
         return {"thread_id": thread_id, "checkpoints": checkpoints}
+
+    def get_thread_state(self, thread_id: str) -> dict:
+        """Get the latest state snapshot for a thread.
+
+        Args:
+            thread_id: Thread ID.
+
+        Returns:
+            Dict matching the Gateway ``ThreadStateResponse`` shape.
+
+        Raises:
+            ValueError: If the thread does not exist.
+            AttributeError: If the configured checkpointer cannot read thread state snapshots.
+        """
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.agents.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+
+        get_tuple = getattr(checkpointer, "get_tuple", None)
+        if get_tuple is None:
+            raise AttributeError("Configured checkpointer does not support get_tuple()")
+
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        checkpoint_tuple = get_tuple(config)
+        if checkpoint_tuple is None:
+            raise ValueError(f"Thread {thread_id} not found")
+
+        checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+        metadata = getattr(checkpoint_tuple, "metadata", {}) or {}
+        checkpoint_id = None
+        ckpt_config = getattr(checkpoint_tuple, "config", {}) or {}
+        if ckpt_config:
+            checkpoint_id = ckpt_config.get("configurable", {}).get("checkpoint_id")
+
+        channel_values = checkpoint.get("channel_values", {})
+
+        parent_config = getattr(checkpoint_tuple, "parent_config", None)
+        parent_checkpoint_id = None
+        if parent_config:
+            parent_checkpoint_id = parent_config.get("configurable", {}).get("checkpoint_id")
+
+        tasks_raw = getattr(checkpoint_tuple, "tasks", []) or []
+        next_tasks = [task.name for task in tasks_raw if hasattr(task, "name")]
+        tasks = [{"id": getattr(task, "id", ""), "name": getattr(task, "name", "")} for task in tasks_raw]
+
+        created_at = str(metadata.get("created_at", ""))
+        return {
+            "values": serialize_channel_values(channel_values),
+            "next": next_tasks,
+            "metadata": metadata,
+            "checkpoint": {"id": checkpoint_id, "ts": created_at},
+            "checkpoint_id": checkpoint_id,
+            "parent_checkpoint_id": parent_checkpoint_id,
+            "created_at": created_at,
+            "tasks": tasks,
+        }
 
     # ------------------------------------------------------------------
     # Public API — conversation
