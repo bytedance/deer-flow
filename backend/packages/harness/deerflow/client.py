@@ -40,6 +40,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime import serialize_channel_values
 from deerflow.skills.installer import install_skill_from_archive
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -459,6 +460,55 @@ class DeerFlowClient:
         checkpoints.sort(key=lambda x: x["ts"] if x["ts"] else "")
 
         return {"thread_id": thread_id, "checkpoints": checkpoints}
+
+    def get_thread_history(self, thread_id: str, *, limit: int = 10, before: str | None = None) -> list[dict]:
+        """Get checkpoint history entries for a thread.
+
+        Args:
+            thread_id: Thread ID.
+            limit: Maximum number of entries to return. Default is 10.
+            before: Optional checkpoint cursor for pagination.
+
+        Returns:
+            List of dicts matching the Gateway ``HistoryEntry`` shape.
+        """
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.agents.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+
+        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+        if before:
+            config["configurable"]["checkpoint_id"] = before
+
+        entries: list[dict] = []
+        for checkpoint_tuple in checkpointer.list(config, limit=limit):
+            ckpt_config = getattr(checkpoint_tuple, "config", {}) or {}
+            parent_config = getattr(checkpoint_tuple, "parent_config", None)
+            metadata = getattr(checkpoint_tuple, "metadata", {}) or {}
+            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+
+            checkpoint_id = ckpt_config.get("configurable", {}).get("checkpoint_id", "")
+            parent_id = None
+            if parent_config:
+                parent_id = parent_config.get("configurable", {}).get("checkpoint_id")
+
+            tasks_raw = getattr(checkpoint_tuple, "tasks", []) or []
+            next_tasks = [task.name for task in tasks_raw if hasattr(task, "name")]
+
+            entries.append(
+                {
+                    "checkpoint_id": checkpoint_id,
+                    "parent_checkpoint_id": parent_id,
+                    "metadata": metadata,
+                    "values": serialize_channel_values(checkpoint.get("channel_values", {})),
+                    "created_at": str(metadata.get("created_at", "")),
+                    "next": next_tasks,
+                }
+            )
+
+        return entries
 
     # ------------------------------------------------------------------
     # Public API — conversation
