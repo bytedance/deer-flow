@@ -1,0 +1,33 @@
+repos:
+  # Backend: ruff lint + format via uv (uses the same ruff version as backend deps)
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff lint
+        entry: bash -c 'cd backend && uv run ruff check --fix "${@/#backend\//}"' --
+        language: system
+        types_or: [python]
+        files: ^backend/
+      - id: ruff-format
+        name: ruff format
+        entry: bash -c 'cd backend && uv run ruff format "${@/#backend\//}"' --
+        language: system
+        types_or: [python]
+        files: ^backend/
+
+  # Frontend: eslint + prettier (must run from frontend/ for node_modules resolution)
+  - repo: local
+    hooks:
+      - id: frontend-eslint
+        name: eslint (frontend)
+        entry: bash -c 'cd frontend && npx eslint --fix "${@/#frontend\//}"' --
+        language: system
+        types_or: [javascript, tsx, ts]
+        files: ^frontend/
+
+      - id: frontend-prettier
+        name: prettier (frontend)
+        entry: bash -c 'cd frontend && npx prettier --write "${@/#frontend\//}"' --
+        language: system
+        files: ^frontend/
+        types_or: [javascript, tsx, ts, json, css]
