@@ -4,6 +4,15 @@ import math
 import re
 from typing import Any
 
+from deerflow.agents.memory.retrieval_trace import (
+    CandidateFact,
+    InjectionResult,
+    RetrievalDecisionReason,
+    SelectionResult,
+    build_empty_retrieval_trace,
+)
+from deerflow.config.memory_config import get_memory_config
+
 try:
     import tiktoken
 
@@ -198,20 +207,45 @@ def _coerce_confidence(value: Any, default: float = 0.0) -> float:
     return max(0.0, min(1.0, confidence))
 
 
-def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000) -> str:
-    """Format memory data for injection into system prompt.
+def _coerce_fact_id(fact: Any, index: int) -> str:
+    if isinstance(fact, dict):
+        raw_id = fact.get("id")
+        if isinstance(raw_id, str) and raw_id.strip():
+            return raw_id.strip()
+    return f"fact_{index}"
+
+
+def _build_content_preview(content: Any, max_chars: int = 80) -> str:
+    if not isinstance(content, str):
+        return ""
+    normalized = " ".join(content.strip().split())
+    return normalized[:max_chars]
+
+
+def _format_fact_line(fact: dict[str, Any], content: str, confidence: float) -> str:
+    """Format a single fact as a human-readable injection line."""
+    category = str(fact.get("category", "context")).strip() or "context"
+    source_error = fact.get("sourceError")
+    if category == "correction" and isinstance(source_error, str) and source_error.strip():
+        return f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
+    return f"- [{category} | {confidence:.2f}] {content}"
+
+
+def build_memory_injection_result(memory_data: dict[str, Any], max_tokens: int = 2000) -> InjectionResult:
+    """Build formatted memory injection text plus optional retrieval trace.
 
     Args:
         memory_data: The memory data dictionary.
         max_tokens: Maximum tokens to use (counted via tiktoken for accuracy).
 
     Returns:
-        Formatted memory string for system prompt injection.
+        Formatted memory string plus optional retrieval trace metadata.
     """
+    trace = build_empty_retrieval_trace(max_tokens) if get_memory_config().retrieval_trace.enabled else None
     if not memory_data:
-        return ""
+        return InjectionResult(text="", trace=trace)
 
-    sections = []
+    sections: list[str] = []
 
     # Format user context
     user_data = memory_data.get("user", {})
@@ -232,6 +266,8 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
 
         if user_sections:
             sections.append("User Context:\n" + "\n".join(f"- {s}" for s in user_sections))
+            if trace is not None:
+                trace.user_context_included = True
 
     # Format history
     history_data = memory_data.get("history", {})
@@ -241,26 +277,81 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         recent = history_data.get("recentMonths", {})
         if recent.get("summary"):
             history_sections.append(f"Recent: {recent['summary']}")
+            if trace is not None:
+                trace.history_sections_included.append("recentMonths")
 
         earlier = history_data.get("earlierContext", {})
         if earlier.get("summary"):
             history_sections.append(f"Earlier: {earlier['summary']}")
+            if trace is not None:
+                trace.history_sections_included.append("earlierContext")
 
         background = history_data.get("longTermBackground", {})
         if background.get("summary"):
             history_sections.append(f"Background: {background['summary']}")
+            if trace is not None:
+                trace.history_sections_included.append("longTermBackground")
 
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
 
+    if trace is not None and sections:
+        trace.context_tokens = _count_tokens("\n\n".join(sections))
+
     # Format facts (sorted by confidence; include as many as token budget allows)
     facts_data = memory_data.get("facts", [])
     if isinstance(facts_data, list) and facts_data:
-        ranked_facts = sorted(
-            (f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content").strip()),
-            key=lambda fact: _coerce_confidence(fact.get("confidence"), default=0.0),
-            reverse=True,
-        )
+        ranked_facts: list[tuple[str, dict[str, Any], str, float]] = []
+
+        if trace is None:
+            # Fast path: tracing disabled – use lightweight generator-based
+            # filtering identical to the original format_memory_for_injection
+            # to avoid extracting trace-only metadata (layer, created_at,
+            # content_preview, CandidateFact objects).
+            ranked_facts = sorted(
+                (
+                    (_coerce_fact_id(f, i), f, f.get("content", "").strip(), _coerce_confidence(f.get("confidence"), default=0.0))
+                    for i, f in enumerate(facts_data)
+                    if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()
+                ),
+                key=lambda item: item[3],
+                reverse=True,
+            )
+        else:
+            # Slow path: tracing enabled – extract per-fact metadata
+            # and record CandidateFact entries for valid candidates.
+            # Invalid facts (non-dict, non-string content, empty) are
+            # silently skipped, matching the fast-path behaviour.
+            for index, fact in enumerate(facts_data):
+                if not isinstance(fact, dict):
+                    continue
+                content_value = fact.get("content")
+                if not isinstance(content_value, str):
+                    continue
+                content = content_value.strip()
+                if not content:
+                    continue
+
+                fact_id = _coerce_fact_id(fact, index)
+                category = str(fact.get("category", "context")).strip() or "context"
+                confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
+                layer_value = fact.get("layer")
+                layer = (str(layer_value).strip() or None) if isinstance(layer_value, str) else None
+                created_at = fact.get("createdAt") if isinstance(fact.get("createdAt"), str) else None
+
+                trace.candidates.append(
+                    CandidateFact(
+                        fact_id=fact_id,
+                        content_preview=_build_content_preview(content_value),
+                        category=category,
+                        confidence=confidence,
+                        layer=layer,
+                        created_at=created_at,
+                    )
+                )
+                ranked_facts.append((fact_id, fact, content, confidence))
+
+            ranked_facts.sort(key=lambda item: item[3], reverse=True)
 
         # Compute token count for existing sections once, then account
         # incrementally for each fact line to avoid full-string re-tokenization.
@@ -272,20 +363,8 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         running_tokens = base_tokens + separator_tokens
 
         fact_lines: list[str] = []
-        for fact in ranked_facts:
-            content_value = fact.get("content")
-            if not isinstance(content_value, str):
-                continue
-            content = content_value.strip()
-            if not content:
-                continue
-            category = str(fact.get("category", "context")).strip() or "context"
-            confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
-            source_error = fact.get("sourceError")
-            if category == "correction" and isinstance(source_error, str) and source_error.strip():
-                line = f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
-            else:
-                line = f"- [{category} | {confidence:.2f}] {content}"
+        for rank_position, (fact_id, fact, content, confidence) in enumerate(ranked_facts):
+            line = _format_fact_line(fact, content, confidence)
 
             # Each additional line is preceded by a newline (except the first).
             line_text = ("\n" + line) if fact_lines else line
@@ -294,14 +373,55 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
             if running_tokens + line_tokens <= max_tokens:
                 fact_lines.append(line)
                 running_tokens += line_tokens
+                if trace is not None:
+                    trace.selections.append(
+                        SelectionResult(
+                            fact_id=fact_id,
+                            included=True,
+                            reason=RetrievalDecisionReason.SELECTED,
+                            rank_position=rank_position,
+                            token_cost=line_tokens,
+                            score_components={"confidence": confidence},
+                        )
+                    )
             else:
+                if trace is not None:
+                    trace.selections.append(
+                        SelectionResult(
+                            fact_id=fact_id,
+                            included=False,
+                            reason=RetrievalDecisionReason.BUDGET_EXCEEDED,
+                            rank_position=rank_position,
+                            token_cost=line_tokens,
+                            score_components={"confidence": confidence},
+                        )
+                    )
+                    for remainder_rank, (remainder_id, remainder_fact, remainder_content, remainder_confidence) in enumerate(
+                        ranked_facts[rank_position + 1 :],
+                        start=rank_position + 1,
+                    ):
+                        remainder_line = _format_fact_line(remainder_fact, remainder_content, remainder_confidence)
+                        trace.selections.append(
+                            SelectionResult(
+                                fact_id=remainder_id,
+                                included=False,
+                                reason=RetrievalDecisionReason.SKIPPED_AFTER_BUDGET_EXCEEDED,
+                                rank_position=remainder_rank,
+                                token_cost=_count_tokens("\n" + remainder_line),
+                                score_components={"confidence": remainder_confidence},
+                            )
+                        )
                 break
 
         if fact_lines:
             sections.append("Facts:\n" + "\n".join(fact_lines))
 
     if not sections:
-        return ""
+        if trace is not None:
+            trace.total_candidates = len(trace.candidates)
+            trace.selected_count = sum(1 for selection in trace.selections if selection.included)
+            trace.dropped_count = trace.total_candidates - trace.selected_count
+        return InjectionResult(text="", trace=trace)
 
     result = "\n\n".join(sections)
 
@@ -313,8 +433,26 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         char_per_token = len(result) / token_count
         target_chars = int(max_tokens * char_per_token * 0.95)  # 95% to leave margin
         result = result[:target_chars] + "\n..."
+        token_count = _count_tokens(result)
 
-    return result
+    if trace is not None:
+        trace.total_candidates = len(trace.candidates)
+        trace.selected_count = sum(1 for selection in trace.selections if selection.included)
+        trace.dropped_count = trace.total_candidates - trace.selected_count
+        trace.tokens_used = token_count
+        trace.tokens_remaining = max(0, max_tokens - token_count)
+
+    return InjectionResult(text=result, trace=trace)
+
+
+def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000) -> str:
+    """Format memory data for injection into system prompt.
+
+    This preserves the historical public interface and returns only the
+    formatted injection text. Call ``build_memory_injection_result`` when
+    retrieval trace metadata is needed alongside the text.
+    """
+    return build_memory_injection_result(memory_data, max_tokens=max_tokens).text
 
 
 def format_conversation_for_update(messages: list[Any]) -> str:

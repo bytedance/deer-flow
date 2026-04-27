@@ -3,6 +3,24 @@
 from pydantic import BaseModel, Field
 
 
+class RetrievalTraceConfig(BaseModel):
+    """Configuration for memory retrieval tracing."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to emit retrieval traces for memory injection decisions",
+    )
+    storage_path: str = Field(
+        default="",
+        description=("Path to store retrieval trace JSONL data. If empty, defaults to `retrieval_traces.jsonl` alongside the active memory file. Absolute paths are used as-is. Relative paths are resolved against `Paths.base_dir`."),
+    )
+    max_file_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        ge=1024,
+        description="Maximum size of the retrieval trace JSONL file before rotation",
+    )
+
+
 class MemoryConfig(BaseModel):
     """Configuration for global memory mechanism."""
 
@@ -58,6 +76,10 @@ class MemoryConfig(BaseModel):
         ge=100,
         le=8000,
         description="Maximum tokens to use for memory injection",
+    )
+    retrieval_trace: RetrievalTraceConfig = Field(
+        default_factory=RetrievalTraceConfig,
+        description="Configuration for memory retrieval observability",
     )
 
 
