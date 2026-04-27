@@ -252,7 +252,7 @@ class RunJournal(BaseCallbackHandler):
             else:
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
         finally:
-            logger.debug(f"Tool end for node {run_id}")
+            logger.debug("Tool end for node %s", run_id)
 
     # -- Internal methods --
 
