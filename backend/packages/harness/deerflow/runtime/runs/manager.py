@@ -43,6 +43,7 @@ class RunManager:
     def __init__(self) -> None:
         self._runs: dict[str, RunRecord] = {}
         self._lock = asyncio.Lock()
+        self._condition = asyncio.Condition(self._lock)
 
     async def create(
         self,
@@ -71,6 +72,7 @@ class RunManager:
         )
         async with self._lock:
             self._runs[run_id] = record
+            self._condition.notify_all()
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -96,6 +98,7 @@ class RunManager:
             record.updated_at = _now_iso()
             if error is not None:
                 record.error = error
+            self._condition.notify_all()
         logger.info("Run %s -> %s", run_id, status.value)
 
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> bool:
@@ -120,6 +123,7 @@ class RunManager:
                 record.task.cancel()
             record.status = RunStatus.interrupted
             record.updated_at = _now_iso()
+            self._condition.notify_all()
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True
 
@@ -136,8 +140,9 @@ class RunManager:
         """Atomically check for inflight runs and create a new one.
 
         For ``reject`` strategy, raises ``ConflictError`` if thread
-        already has a pending/running run.  For ``interrupt``/``rollback``,
-        cancels inflight runs before creating.
+        already has a pending/running run. For ``interrupt``/``rollback``,
+        cancels inflight runs before creating. For ``enqueue``, creates a
+        pending run that will wait for earlier runs on the same thread.
 
         This method holds the lock across both the check and the insert,
         eliminating the TOCTOU race in separate ``has_inflight`` + ``create``.
@@ -145,7 +150,7 @@ class RunManager:
         run_id = str(uuid.uuid4())
         now = _now_iso()
 
-        _supported_strategies = ("reject", "interrupt", "rollback")
+        _supported_strategies = ("reject", "interrupt", "rollback", "enqueue")
 
         async with self._lock:
             if multitask_strategy not in _supported_strategies:
@@ -184,9 +189,23 @@ class RunManager:
                 updated_at=now,
             )
             self._runs[run_id] = record
+            self._condition.notify_all()
 
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
+
+    async def wait_until_runnable(self, run_id: str) -> bool:
+        """Block until *run_id* reaches the front of its thread-local queue."""
+        async with self._condition:
+            while True:
+                record = self._runs.get(run_id)
+                if record is None:
+                    return False
+                if record.status != RunStatus.pending:
+                    return False
+                if self._is_runnable_locked(run_id):
+                    return True
+                await self._condition.wait()
 
     async def has_inflight(self, thread_id: str) -> bool:
         """Return ``True`` if *thread_id* has a pending or running run."""
@@ -199,7 +218,23 @@ class RunManager:
             await asyncio.sleep(delay)
         async with self._lock:
             self._runs.pop(run_id, None)
+            self._condition.notify_all()
         logger.debug("Run record %s cleaned up", run_id)
+
+    def _is_runnable_locked(self, run_id: str) -> bool:
+        """Return ``True`` when the run is the earliest active run in its thread."""
+        record = self._runs.get(run_id)
+        if record is None:
+            return False
+
+        for other in self._runs.values():
+            if other.thread_id != record.thread_id:
+                continue
+            if other.run_id == run_id:
+                return True
+            if other.status in (RunStatus.pending, RunStatus.running):
+                return False
+        return True
 
 
 class ConflictError(Exception):

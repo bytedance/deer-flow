@@ -1,5 +1,6 @@
 """Tests for RunManager."""
 
+import asyncio
 import re
 
 import pytest
@@ -141,3 +142,42 @@ async def test_create_defaults(manager: RunManager):
     assert record.kwargs == {}
     assert record.multitask_strategy == "reject"
     assert record.assistant_id is None
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_accepts_enqueue(manager: RunManager):
+    """enqueue should create a pending run instead of raising unsupported."""
+    first = await manager.create("thread-1")
+    queued = await manager.create_or_reject("thread-1", multitask_strategy="enqueue")
+
+    assert first.status == RunStatus.pending
+    assert queued.status == RunStatus.pending
+    assert queued.multitask_strategy == "enqueue"
+
+
+@pytest.mark.anyio
+async def test_wait_until_runnable_blocks_until_earlier_run_finishes(manager: RunManager):
+    """Queued runs should wait for the earlier thread-local run to finish."""
+    first = await manager.create("thread-1")
+    queued = await manager.create_or_reject("thread-1", multitask_strategy="enqueue")
+
+    waiter = asyncio.create_task(manager.wait_until_runnable(queued.run_id))
+    await asyncio.sleep(0)
+    assert waiter.done() is False
+
+    await manager.set_status(first.run_id, RunStatus.success)
+
+    assert await asyncio.wait_for(waiter, timeout=1) is True
+
+
+@pytest.mark.anyio
+async def test_wait_until_runnable_returns_false_when_queued_run_is_cancelled(manager: RunManager):
+    """Cancelling a queued run should unblock waiters without starting work."""
+    await manager.create("thread-1")
+    queued = await manager.create_or_reject("thread-1", multitask_strategy="enqueue")
+
+    waiter = asyncio.create_task(manager.wait_until_runnable(queued.run_id))
+    await asyncio.sleep(0)
+
+    assert await manager.cancel(queued.run_id) is True
+    assert await asyncio.wait_for(waiter, timeout=1) is False
