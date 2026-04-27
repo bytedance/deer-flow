@@ -4,6 +4,7 @@ import { Toaster } from "sonner";
 import { QueryClientProvider } from "@/components/query-client-provider";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { CommandPalette } from "@/components/workspace/command-palette";
+import { WorkspaceMobileHeader } from "@/components/workspace/workspace-mobile-header";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
 
 function parseSidebarOpenCookie(
@@ -26,7 +27,10 @@ export default async function WorkspaceLayout({
     <QueryClientProvider>
       <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
         <WorkspaceSidebar />
-        <SidebarInset className="min-w-0">{children}</SidebarInset>
+        <div className="flex flex-1 flex-col min-w-0">
+          <WorkspaceMobileHeader />
+          <SidebarInset className="min-w-0 flex-1">{children}</SidebarInset>
+        </div>
       </SidebarProvider>
       <CommandPalette />
       <Toaster position="top-center" />
