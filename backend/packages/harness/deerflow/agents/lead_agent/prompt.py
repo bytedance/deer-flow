@@ -546,7 +546,7 @@ def _get_memory_context(agent_name: str | None = None) -> str:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
     try:
-        from deerflow.agents.memory import format_memory_for_injection, get_memory_data
+        from deerflow.agents.memory import build_memory_injection_result, emit_retrieval_trace, get_memory_data
         from deerflow.config.memory_config import get_memory_config
 
         config = get_memory_config()
@@ -554,7 +554,9 @@ def _get_memory_context(agent_name: str | None = None) -> str:
             return ""
 
         memory_data = get_memory_data(agent_name)
-        memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
+        injection_result = build_memory_injection_result(memory_data, max_tokens=config.max_injection_tokens)
+        emit_retrieval_trace(injection_result.trace, agent_name=agent_name)
+        memory_content = injection_result.text
 
         if not memory_content.strip():
             return ""

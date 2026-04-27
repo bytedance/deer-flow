@@ -1015,6 +1015,11 @@ class DeerFlowClient:
             "fact_confidence_threshold": config.fact_confidence_threshold,
             "injection_enabled": config.injection_enabled,
             "max_injection_tokens": config.max_injection_tokens,
+            "retrieval_trace": {
+                "enabled": config.retrieval_trace.enabled,
+                "storage_path": config.retrieval_trace.storage_path,
+                "max_file_bytes": config.retrieval_trace.max_file_bytes,
+            },
         }
 
     def get_memory_status(self) -> dict:

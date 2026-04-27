@@ -87,6 +87,14 @@ class FactPatchRequest(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
 
+class MemoryRetrievalTraceConfigResponse(BaseModel):
+    """Response model for retrieval trace configuration."""
+
+    enabled: bool = Field(default=False, description="Whether retrieval tracing is enabled")
+    storage_path: str = Field(default="", description="Path to retrieval trace JSONL storage")
+    max_file_bytes: int = Field(default=5 * 1024 * 1024, description="Maximum retrieval trace file size before rotation")
+
+
 class MemoryConfigResponse(BaseModel):
     """Response model for memory configuration."""
 
@@ -97,6 +105,10 @@ class MemoryConfigResponse(BaseModel):
     fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
     injection_enabled: bool = Field(..., description="Whether memory injection is enabled")
     max_injection_tokens: int = Field(..., description="Maximum tokens for memory injection")
+    retrieval_trace: MemoryRetrievalTraceConfigResponse = Field(
+        default_factory=MemoryRetrievalTraceConfigResponse,
+        description="Retrieval trace observability configuration",
+    )
 
 
 class MemoryStatusResponse(BaseModel):
@@ -307,7 +319,12 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
             "max_facts": 100,
             "fact_confidence_threshold": 0.7,
             "injection_enabled": true,
-            "max_injection_tokens": 2000
+            "max_injection_tokens": 2000,
+            "retrieval_trace": {
+                "enabled": false,
+                "storage_path": "",
+                "max_file_bytes": 5242880
+            }
         }
         ```
     """
@@ -320,6 +337,11 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         fact_confidence_threshold=config.fact_confidence_threshold,
         injection_enabled=config.injection_enabled,
         max_injection_tokens=config.max_injection_tokens,
+        retrieval_trace=MemoryRetrievalTraceConfigResponse(
+            enabled=config.retrieval_trace.enabled,
+            storage_path=config.retrieval_trace.storage_path,
+            max_file_bytes=config.retrieval_trace.max_file_bytes,
+        ),
     )
 
 
@@ -348,6 +370,11 @@ async def get_memory_status() -> MemoryStatusResponse:
             fact_confidence_threshold=config.fact_confidence_threshold,
             injection_enabled=config.injection_enabled,
             max_injection_tokens=config.max_injection_tokens,
+            retrieval_trace=MemoryRetrievalTraceConfigResponse(
+                enabled=config.retrieval_trace.enabled,
+                storage_path=config.retrieval_trace.storage_path,
+                max_file_bytes=config.retrieval_trace.max_file_bytes,
+            ),
         ),
         data=MemoryResponse(**memory_data),
     )

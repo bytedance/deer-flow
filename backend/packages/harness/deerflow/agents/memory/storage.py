@@ -16,8 +16,24 @@ from deerflow.config.paths import get_paths
 logger = logging.getLogger(__name__)
 
 
+def get_memory_file_path(agent_name: str | None = None) -> Path:
+    """Resolve the effective memory file path for the given agent."""
+    if agent_name is not None:
+        if not agent_name:
+            raise ValueError("Agent name must be a non-empty string.")
+        if not AGENT_NAME_PATTERN.match(agent_name):
+            raise ValueError(f"Invalid agent name {agent_name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
+        return get_paths().agent_memory_file(agent_name)
+
+    config = get_memory_config()
+    if config.storage_path:
+        p = Path(config.storage_path)
+        return p if p.is_absolute() else get_paths().base_dir / p
+    return get_paths().memory_file
+
+
 def utc_now_iso_z() -> str:
-    """Current UTC time as ISO-8601 with ``Z`` suffix (matches prior naive-UTC output)."""
+    """Current UTC time as ISO-8601 with ``Z`` suffix."""
     return datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
 
 
@@ -54,7 +70,11 @@ class MemoryStorage(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    def save(
+        self,
+        memory_data: dict[str, Any],
+        agent_name: str | None = None,
+    ) -> bool:
         """Save memory data for the given agent."""
         pass
 
@@ -70,30 +90,14 @@ class FileMemoryStorage(MemoryStorage):
         # Guards all reads and writes to _memory_cache across concurrent callers.
         self._cache_lock = threading.Lock()
 
-    def _validate_agent_name(self, agent_name: str) -> None:
-        """Validate that the agent name is safe to use in filesystem paths.
-
-        Uses the repository's established AGENT_NAME_PATTERN to ensure consistency
-        across the codebase and prevent path traversal or other problematic characters.
-        """
-        if not agent_name:
-            raise ValueError("Agent name must be a non-empty string.")
-        if not AGENT_NAME_PATTERN.match(agent_name):
-            raise ValueError(f"Invalid agent name {agent_name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
-
     def _get_memory_file_path(self, agent_name: str | None = None) -> Path:
         """Get the path to the memory file."""
-        if agent_name is not None:
-            self._validate_agent_name(agent_name)
-            return get_paths().agent_memory_file(agent_name)
+        return get_memory_file_path(agent_name)
 
-        config = get_memory_config()
-        if config.storage_path:
-            p = Path(config.storage_path)
-            return p if p.is_absolute() else get_paths().base_dir / p
-        return get_paths().memory_file
-
-    def _load_memory_from_file(self, agent_name: str | None = None) -> dict[str, Any]:
+    def _load_memory_from_file(
+        self,
+        agent_name: str | None = None,
+    ) -> dict[str, Any]:
         """Load memory data from file."""
         file_path = self._get_memory_file_path(agent_name)
 
@@ -143,7 +147,11 @@ class FileMemoryStorage(MemoryStorage):
             self._memory_cache[agent_name] = (memory_data, mtime)
         return memory_data
 
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    def save(
+        self,
+        memory_data: dict[str, Any],
+        agent_name: str | None = None,
+    ) -> bool:
         """Save memory data to file and update cache."""
         file_path = self._get_memory_file_path(agent_name)
 
