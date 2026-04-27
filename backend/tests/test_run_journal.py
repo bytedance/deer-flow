@@ -381,3 +381,62 @@ class TestMiddlewareEvents:
         event_types = {e["event_type"] for e in events}
         assert "middleware:title" in event_types
         assert "middleware:guardrail" in event_types
+
+
+class TestChatModelStartHumanMessage:
+    """Tests for on_chat_model_start extracting the first human message."""
+
+    @pytest.mark.anyio
+    async def test_extracts_first_human_message(self, journal_setup):
+        """on_chat_model_start captures the first HumanMessage from prompts."""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        j, store = journal_setup
+        messages_batch = [
+            [HumanMessage(content="What is AI?"), AIMessage(content="Hi there")],
+        ]
+        j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "What is AI?"
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "What is AI?"
+
+    @pytest.mark.anyio
+    async def test_skips_summary_named_human_messages(self, journal_setup):
+        """HumanMessages with name='summary' are skipped."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        messages_batch = [
+            [HumanMessage(content="Summarized context", name="summary"), HumanMessage(content="Real question")],
+        ]
+        j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "Real question"
+
+    @pytest.mark.anyio
+    async def test_only_first_human_message_captured(self, journal_setup):
+        """Subsequent on_chat_model_start calls do not overwrite the first message."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        j.on_chat_model_start({}, [[HumanMessage(content="First question")]], run_id=uuid4(), tags=["lead_agent"])
+        j.on_chat_model_start({}, [[HumanMessage(content="Second question")]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "First question"
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+
+    @pytest.mark.anyio
+    async def test_empty_messages_no_crash(self, journal_setup):
+        """on_chat_model_start with empty messages does not crash."""
+        j, store = journal_setup
+        j.on_chat_model_start({}, [], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+        assert j._first_human_msg is None

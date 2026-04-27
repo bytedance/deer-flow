@@ -157,7 +157,7 @@ class RunJournal(BaseCallbackHandler):
         # Fallback: on_chat_model_start is preferred. This just tracks latency.
         self._llm_start_times[str(run_id)] = time.monotonic()
 
-    def on_llm_end(self, response, *, run_id, parent_run_id, tags, **kwargs) -> None:
+    def on_llm_end(self, response: Any, *, run_id: UUID, parent_run_id: UUID | None, tags: list[str] | None, **kwargs: Any) -> None:
         messages: list[AnyMessage] = []
         logger.debug(f"on_llm_end {run_id}: tags={tags}")
         for generation in response.generations:
@@ -303,8 +303,8 @@ class RunJournal(BaseCallbackHandler):
         if exc:
             logger.warning("Journal flush task failed: %s", exc)
 
-    def _identify_caller(self, tags: list[str] | None, **kwargs) -> str:
-        _tags = tags or kwargs.get("tags", [])
+    def _identify_caller(self, tags: list[str] | None) -> str:
+        _tags = tags or []
         for tag in _tags:
             if isinstance(tag, str) and (tag.startswith("subagent:") or tag.startswith("middleware:") or tag == "lead_agent"):
                 return tag
