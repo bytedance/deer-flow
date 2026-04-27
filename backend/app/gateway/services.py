@@ -34,6 +34,19 @@ from deerflow.runtime import (
 
 logger = logging.getLogger(__name__)
 
+_CONTEXT_CONFIGURABLE_KEYS = frozenset(
+    {
+        "model_name",
+        "mode",
+        "thinking_enabled",
+        "reasoning_effort",
+        "is_plan_mode",
+        "subagent_enabled",
+        "max_concurrent_subagents",
+        "agent_name",
+        "is_bootstrap",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # SSE formatting
@@ -279,8 +292,8 @@ async def start_run(
 
     try:
         record = await run_mgr.create_or_reject(
-            thread_id,
-            body.assistant_id,
+            thread_id=thread_id,
+            assistant_id=body.assistant_id,
             on_disconnect=disconnect,
             metadata=body.metadata or {},
             kwargs={"input": body.input, "config": body.config},
@@ -293,43 +306,36 @@ async def start_run(
 
     # Ensure the thread is visible in /threads/search, even for threads that
     # were never explicitly created via POST /threads (e.g. stateless runs).
-    store = get_store(request)
     if store is not None:
         await _upsert_thread_in_store(store, thread_id, body.metadata)
 
     agent_factory = resolve_agent_factory(body.assistant_id)
     graph_input = normalize_input(body.input)
-    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+    config = build_run_config(thread_id=thread_id, request_config=body.config, metadata=body.metadata, assistant_id=body.assistant_id)
 
     # Merge DeerFlow-specific context overrides into configurable.
     # The ``context`` field is a custom extension for the langgraph-compat layer
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
     context = getattr(body, "context", None)
-    if context:
-        _CONTEXT_CONFIGURABLE_KEYS = {
-            "model_name",
-            "mode",
-            "thinking_enabled",
-            "reasoning_effort",
-            "is_plan_mode",
-            "subagent_enabled",
-            "max_concurrent_subagents",
-            "agent_name",
-            "is_bootstrap",
-        }
-        configurable = config.setdefault("configurable", {})
-        for key in _CONTEXT_CONFIGURABLE_KEYS:
-            if key in context:
-                configurable.setdefault(key, context[key])
+    if context and isinstance(context, dict):
+        agent_keys = {k: v for k, v in context.items() if k in _CONTEXT_CONFIGURABLE_KEYS}
+        if "context" in config:
+            if isinstance(config["context"], dict):
+                for k, v in agent_keys.items():
+                    config["context"].setdefault(k, v)
+        else:
+            configurable = config.setdefault("configurable", {})
+            for k, v in agent_keys.items():
+                configurable.setdefault(k, v)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
     task = asyncio.create_task(
         run_agent(
-            bridge,
-            run_mgr,
-            record,
+            bridge=bridge,
+            run_manager=run_mgr,
+            record=record,
             checkpointer=checkpointer,
             store=store,
             agent_factory=agent_factory,
