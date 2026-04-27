@@ -107,7 +107,7 @@ class MemoryUpdateQueue:
         reinforcement_detected: bool,
     ) -> None:
         existing_context = next(
-            (context for context in self._queue if context.thread_id == thread_id),
+            (context for context in self._queue if context.thread_id == thread_id and context.agent_name == agent_name),
             None,
         )
         merged_correction_detected = correction_detected or (existing_context.correction_detected if existing_context is not None else False)
@@ -120,7 +120,7 @@ class MemoryUpdateQueue:
             reinforcement_detected=merged_reinforcement_detected,
         )
 
-        self._queue = [c for c in self._queue if c.thread_id != thread_id]
+        self._queue = [c for c in self._queue if not (c.thread_id == thread_id and c.agent_name == agent_name)]
         self._queue.append(context)
 
     def _reset_timer(self) -> None:
@@ -150,8 +150,10 @@ class MemoryUpdateQueue:
 
         with self._lock:
             if self._processing:
-                # Preserve immediate flush semantics even if another worker is active.
-                self._schedule_timer(0)
+                # Only reschedule if there is pending work; avoids spinning zero-delay
+                # timers when add_nowait/flush_nowait fire while the worker is busy.
+                if self._queue:
+                    self._schedule_timer(0)
                 return
 
             if not self._queue:
