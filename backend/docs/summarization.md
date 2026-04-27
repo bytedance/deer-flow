@@ -41,6 +41,13 @@ summarization:
 
   # Custom summary prompt (optional)
   summary_prompt: null
+
+  # Tool names treated as skill file reads for skill rescue
+  skill_file_read_tool_names:
+    - read_file
+    - read
+    - view
+    - cat
 ```
 
 ### Configuration Options
@@ -125,6 +132,26 @@ keep:
 - **Default**: `null` (uses LangChain's default prompt)
 - **Description**: Custom prompt template for generating summaries. The prompt should guide the model to extract the most important context.
 
+#### `preserve_recent_skill_count`
+- **Type**: Integer (≥ 0)
+- **Default**: `5`
+- **Description**: Number of most-recently-loaded skill files (tool results whose tool name is in `skill_file_read_tool_names` and whose target path is under `skills.container_path`, e.g. `/mnt/skills/...`) that are rescued from summarization. Prevents the agent from losing skill instructions after compression. Set to `0` to disable skill rescue entirely.
+
+#### `preserve_recent_skill_tokens`
+- **Type**: Integer (≥ 0)
+- **Default**: `25000`
+- **Description**: Total token budget reserved for rescued skill reads. Once this budget is exhausted, older skill bundles are allowed to be summarized.
+
+#### `preserve_recent_skill_tokens_per_skill`
+- **Type**: Integer (≥ 0)
+- **Default**: `5000`
+- **Description**: Per-skill token cap. Any individual skill read whose tool result exceeds this size is not rescued (it falls through to the summarizer like ordinary content).
+
+#### `skill_file_read_tool_names`
+- **Type**: List of strings
+- **Default**: `["read_file", "read", "view", "cat"]`
+- **Description**: Tool names treated as skill file reads during summarization rescue. A tool call is only eligible for skill rescue when its name appears in this list and its target path is under `skills.container_path`.
+
 **Default Prompt Behavior:**
 The default LangChain prompt instructs the model to:
 - Extract highest quality/most relevant context
@@ -147,6 +174,7 @@ The default LangChain prompt instructs the model to:
    - A single summary message is added
    - Recent messages are preserved
 6. **AI/Tool Pair Protection**: The system ensures AI messages and their corresponding tool messages stay together
+7. **Skill Rescue**: Before the summary is generated, the most recently loaded skill files (tool results whose tool name is in `skill_file_read_tool_names` and whose target path is under `skills.container_path`) are lifted out of the summarization set and prepended to the preserved tail. Selection walks newest-first under three budgets: `preserve_recent_skill_count`, `preserve_recent_skill_tokens`, and `preserve_recent_skill_tokens_per_skill`. The triggering AIMessage and all of its paired ToolMessages move together so tool_call ↔ tool_result pairing stays intact.
 
 ### Token Counting
 

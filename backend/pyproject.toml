@@ -20,7 +20,12 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=9.0.3", "ruff>=0.14.11"]
+dev = [
+    "prompt-toolkit>=3.0.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.14.11",
+]
 
 [tool.uv.workspace]
 members = ["packages/harness"]

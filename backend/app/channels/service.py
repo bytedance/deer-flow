@@ -23,6 +23,16 @@ _CHANNEL_REGISTRY: dict[str, str] = {
     "wecom": "app.channels.wecom:WeComChannel",
 }
 
+# Keys that indicate a user has configured credentials for a channel.
+_CHANNEL_CREDENTIAL_KEYS: dict[str, list[str]] = {
+    "discord": ["bot_token"],
+    "feishu": ["app_id", "app_secret"],
+    "slack": ["bot_token", "app_token"],
+    "telegram": ["bot_token"],
+    "wecom": ["bot_id", "bot_secret"],
+    "wechat": ["bot_token"],
+}
+
 _CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
 _CHANNELS_GATEWAY_URL_ENV = "DEER_FLOW_CHANNELS_GATEWAY_URL"
 
@@ -88,7 +98,16 @@ class ChannelService:
             if not isinstance(channel_config, dict):
                 continue
             if not channel_config.get("enabled", False):
-                logger.info("Channel %s is disabled, skipping", name)
+                cred_keys = _CHANNEL_CREDENTIAL_KEYS.get(name, [])
+                has_creds = any(not isinstance(channel_config.get(k), bool) and channel_config.get(k) is not None and str(channel_config[k]).strip() for k in cred_keys)
+                if has_creds:
+                    logger.warning(
+                        "Channel '%s' has credentials configured but is disabled. Set enabled: true under channels.%s in config.yaml to activate it.",
+                        name,
+                        name,
+                    )
+                else:
+                    logger.info("Channel %s is disabled, skipping", name)
                 continue
 
             await self._start_channel(name, channel_config)
