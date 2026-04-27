@@ -3,7 +3,7 @@
 import copy
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
@@ -151,7 +151,8 @@ class TestLoopDetection:
         assert result is not None
         msgs = result["messages"]
         assert len(msgs) == 1
-        assert isinstance(msgs[0], HumanMessage)
+        assert isinstance(msgs[0], AIMessage)
+        assert msgs[0].tool_calls == []
         assert "LOOP DETECTED" in msgs[0].content
 
     def test_warn_only_injected_once(self):
@@ -167,6 +168,8 @@ class TestLoopDetection:
         # Third — warning injected
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is not None
+        assert isinstance(result["messages"][0], AIMessage)
+        assert result["messages"][0].tool_calls == []
         assert "LOOP DETECTED" in result["messages"][0].content
 
         # Fourth — warning already injected, should return None
@@ -258,11 +261,15 @@ class TestLoopDetection:
         # Second call on thread A — triggers warning (2 >= warn_threshold)
         result = mw._apply(_make_state(tool_calls=call), runtime_a)
         assert result is not None
+        assert isinstance(result["messages"][0], AIMessage)
+        assert result["messages"][0].tool_calls == []
         assert "LOOP DETECTED" in result["messages"][0].content
 
         # Second call on thread B — also triggers (independent tracking)
         result = mw._apply(_make_state(tool_calls=call), runtime_b)
         assert result is not None
+        assert isinstance(result["messages"][0], AIMessage)
+        assert result["messages"][0].tool_calls == []
         assert "LOOP DETECTED" in result["messages"][0].content
 
     def test_lru_eviction(self):
