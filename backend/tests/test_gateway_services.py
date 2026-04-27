@@ -2,7 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
+
+import pytest
+
+
+def _make_gateway_request():
+    from deerflow.runtime import MemoryStreamBridge, RunManager
+
+    state = SimpleNamespace(
+        stream_bridge=MemoryStreamBridge(),
+        run_manager=RunManager(),
+        checkpointer=object(),
+        store=None,
+    )
+    return SimpleNamespace(app=SimpleNamespace(state=state)), state.stream_bridge, state.run_manager
 
 
 def test_format_sse_basic():
@@ -362,6 +378,87 @@ def test_build_run_config_context_plus_configurable_warns(caplog):
     assert config["context"]["user_id"] == "u-42"
     assert "configurable" not in config
     assert any("both 'context' and 'configurable'" in r.message for r in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_start_run_honors_after_seconds(monkeypatch: pytest.MonkeyPatch):
+    """Delayed runs should stay pending until the requested delay elapses."""
+    from app.gateway import services
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from deerflow.runtime import RunStatus
+
+    request, _bridge, _run_mgr = _make_gateway_request()
+    started = asyncio.Event()
+    delay_entered = asyncio.Event()
+    release_delay = asyncio.Event()
+
+    async def fake_run_agent(*args, **kwargs):
+        started.set()
+
+    async def fake_sleep(seconds: float):
+        assert seconds == 0.05
+        delay_entered.set()
+        await release_delay.wait()
+
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _assistant_id: object())
+    monkeypatch.setattr(services, "run_agent", fake_run_agent)
+    monkeypatch.setattr(services.asyncio, "sleep", fake_sleep)
+
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "hi"}]},
+        after_seconds=0.05,
+    )
+
+    record = await services.start_run(body, "thread-1", request)
+
+    await asyncio.wait_for(delay_entered.wait(), timeout=0.3)
+    assert record.status == RunStatus.pending
+    assert started.is_set() is False
+
+    release_delay.set()
+    await asyncio.wait_for(started.wait(), timeout=0.3)
+    await record.task
+
+
+@pytest.mark.anyio
+async def test_cancel_delayed_run_before_execution_publishes_end(monkeypatch: pytest.MonkeyPatch):
+    """Cancelling a delayed run before it starts should not invoke the agent and should close SSE."""
+    from app.gateway import services
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from deerflow.runtime import END_SENTINEL, RunStatus
+
+    request, bridge, run_mgr = _make_gateway_request()
+    run_calls = 0
+
+    async def fake_run_agent(*args, **kwargs):
+        nonlocal run_calls
+        run_calls += 1
+
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _assistant_id: object())
+    monkeypatch.setattr(services, "run_agent", fake_run_agent)
+
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "hi"}]},
+        after_seconds=30,
+    )
+
+    record = await services.start_run(body, "thread-1", request)
+
+    cancelled = await run_mgr.cancel(record.run_id)
+    assert cancelled is True
+
+    try:
+        await record.task
+    except asyncio.CancelledError:
+        pass
+
+    assert run_calls == 0
+    assert record.status == RunStatus.interrupted
+
+    stream = bridge.subscribe(record.run_id, heartbeat_interval=0.01)
+    entry = await anext(stream)
+    await stream.aclose()
+    assert entry is END_SENTINEL
 
 
 def test_build_run_config_context_passthrough_other_keys():

@@ -64,6 +64,17 @@ async def test_cancel(manager: RunManager):
 
 
 @pytest.mark.anyio
+async def test_cancel_pending_run(manager: RunManager):
+    """Pending runs should also be cancellable for delayed execution flows."""
+    record = await manager.create("thread-1")
+
+    cancelled = await manager.cancel(record.run_id)
+    assert cancelled is True
+    assert record.abort_event.is_set()
+    assert record.status == RunStatus.interrupted
+
+
+@pytest.mark.anyio
 async def test_cancel_not_inflight(manager: RunManager):
     """Cancelling a completed run should return False."""
     record = await manager.create("thread-1")
