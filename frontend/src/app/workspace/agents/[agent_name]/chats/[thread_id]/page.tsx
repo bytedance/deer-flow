@@ -48,7 +48,7 @@ export default function AgentChatPage() {
   const { tokenUsageEnabled } = useModels();
 
   const { showNotification } = useNotification();
-  const [thread, sendMessage] = useThreadStream({
+  const [thread, sendMessage, isUploading] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: { ...settings.context, agent_name: agent_name },
     onStart: (createdThreadId) => {
@@ -80,8 +80,8 @@ export default function AgentChatPage() {
   });
 
   const handleSubmit = useCallback(
-    (message: PromptInputMessage) => {
-      void sendMessage(threadId, message, { agent_name });
+    async (message: PromptInputMessage) => {
+      await sendMessage(threadId, message, { agent_name });
     },
     [sendMessage, threadId, agent_name],
   );
@@ -190,7 +190,10 @@ export default function AgentChatPage() {
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }
-                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  disabled={
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                    isUploading
+                  }
                   onContextChange={(context) => setSettings("context", context)}
                   onFollowupsVisibilityChange={setShowFollowups}
                   onSubmit={handleSubmit}

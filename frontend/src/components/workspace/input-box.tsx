@@ -138,7 +138,7 @@ export function InputBox({
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
-  onSubmit?: (message: PromptInputMessage) => void;
+  onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
 }) {
   const { t } = useI18n();
@@ -251,7 +251,9 @@ export function InputBox({
         onStop?.();
         return;
       }
-      if (!message.text) {
+      const hasText = message.text.trim().length > 0;
+      const hasFiles = message.files.length > 0;
+      if (!hasText && !hasFiles) {
         return;
       }
       setFollowups([]);
@@ -269,11 +271,14 @@ export function InputBox({
             selectedModel?.supports_thinking ?? false,
           ),
         });
-        setTimeout(() => onSubmit?.(message), 0);
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
+        await onSubmit?.(message);
         return;
       }
 
-      onSubmit?.(message);
+      await onSubmit?.(message);
     },
     [
       context,

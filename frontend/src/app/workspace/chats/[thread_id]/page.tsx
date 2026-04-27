@@ -75,8 +75,8 @@ export default function ChatPage() {
   });
 
   const handleSubmit = useCallback(
-    (message: PromptInputMessage) => {
-      void sendMessage(threadId, message);
+    async (message: PromptInputMessage) => {
+      await sendMessage(threadId, message);
     },
     [sendMessage, threadId],
   );
