@@ -14,23 +14,22 @@ ARG NODE_MAJOR=22
 ARG APT_MIRROR
 ARG UV_INDEX_URL
 
-# Optionally override apt mirror for restricted networks (e.g. APT_MIRROR=mirrors.aliyun.com)
-RUN if [ -n "${APT_MIRROR}" ]; then \
-      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
-      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
-    fi
+# Use Huawei Cloud apt mirror by default for better network performance in China
+RUN sed -i "s|deb.debian.org|mirrors.huaweicloud.com|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+    sed -i "s|deb.debian.org|mirrors.huaweicloud.com|g" /etc/apt/sources.list 2>/dev/null || true;
 
-# Install build tools + Node.js (build-essential needed for native Python extensions)
-RUN apt-get update && apt-get install -y \
+# Install build tools + Node.js (build-essential for native extensions; --no-install-recommends keeps the layer smaller)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     gnupg \
     ca-certificates \
     && mkdir -p /etc/apt/keyrings \
+    # Use official NodeSource repository
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
-    && apt-get install -y nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv (source image overridable via UV_IMAGE build arg)

@@ -1,12 +1,13 @@
 import logging
 import os
 from contextvars import ContextVar
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
@@ -68,6 +69,18 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
+    image_generate_model: ImageModelConfig | None = Field(default=None, description="Image generation models")
+
+    @field_validator("image_generate_model", mode="before")
+    @classmethod
+    def normalize_image_generate_model(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            if not value:
+                return None
+            if len(value) > 1:
+                raise ValueError("Only one image model is supported yet...")
+            return value[0]
+        return value
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
@@ -267,6 +280,16 @@ class AppConfig(BaseModel):
             The tool group config if found, otherwise None.
         """
         return next((group for group in self.tool_groups if group.name == name), None)
+
+    def get_image_generator(self) -> Callable[[str, list[dict], str], bytes] | None:
+        """Get the image generator for the default model.
+
+        Returns:
+            The image generator if found, otherwise None.
+        """
+        if self.image_generate_model is None:
+            return None
+        return get_image_generate_fn(self.image_generate_model)
 
 
 _app_config: AppConfig | None = None

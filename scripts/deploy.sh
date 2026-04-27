@@ -6,6 +6,8 @@
 #   deploy.sh [--MODE]           — build + start (default: --standard)
 #   deploy.sh build              — build all images (mode-agnostic)
 #   deploy.sh start [--MODE]     — start from pre-built images (default: --standard)
+#   deploy.sh launch             — docker compose start (resume stopped containers)
+#   deploy.sh terminate          — docker compose stop (stop without removing containers)
 #   deploy.sh down               — stop and remove containers
 #
 # Runtime modes:
@@ -20,6 +22,7 @@
 #   deploy.sh --gateway          # build + start in gateway mode
 #   deploy.sh build              # build all images
 #   deploy.sh start --gateway    # start pre-built images in gateway mode
+#   deploy.sh launch             # resume a stopped production stack
 #   deploy.sh down               # stop and remove containers
 #
 # Must be run from the repo root directory.
@@ -29,13 +32,13 @@ set -e
 RUNTIME_MODE="standard"
 
 case "${1:-}" in
-    build|start|down)
+    build|start|down|launch|terminate)
         CMD="$1"
         if [ -n "${2:-}" ]; then
             case "$2" in
                 --standard) RUNTIME_MODE="standard" ;;
                 --gateway)  RUNTIME_MODE="gateway" ;;
-                *) echo "Unknown mode: $2"; echo "Usage: deploy.sh [build|start|down] [--standard|--gateway]"; exit 1 ;;
+                *) echo "Unknown mode: $2"; echo "Usage: deploy.sh [build|start|down|launch|terminate] [--standard|--gateway]"; exit 1 ;;
             esac
         fi
         ;;
@@ -48,7 +51,7 @@ case "${1:-}" in
         ;;
     *)
         echo "Unknown argument: $1"
-        echo "Usage: deploy.sh [build|start|down] [--standard|--gateway]"
+        echo "Usage: deploy.sh [build|start|down|launch|terminate] [--standard|--gateway]"
         exit 1
         ;;
 esac
@@ -214,6 +217,33 @@ if [ "$CMD" = "build" ]; then
     echo ""
     echo "  Next: deploy.sh start [--gateway]"
     echo ""
+    exit 0
+fi
+
+# ── launch / terminate ────────────────────────────────────────────────────────
+# Thin wrappers around `docker compose start|stop` for an already-created project.
+
+if [ "$CMD" = "launch" ]; then
+    export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
+    export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
+    export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
+    export DEER_FLOW_DOCKER_SOCKET="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
+    export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
+    export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
+    echo "Starting existing containers..."
+    "${COMPOSE_CMD[@]}" start
+    exit 0
+fi
+
+if [ "$CMD" = "terminate" ]; then
+    export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
+    export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
+    export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
+    export DEER_FLOW_DOCKER_SOCKET="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
+    export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
+    export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
+    echo "Stopping existing containers..."
+    "${COMPOSE_CMD[@]}" stop
     exit 0
 fi
 

@@ -166,6 +166,30 @@ models:
 
 For Gemini accessed **without** thinking (e.g. via OpenRouter where thinking is not activated), the plain `langchain_openai:ChatOpenAI` with `supports_thinking: false` is sufficient and no patch is needed.
 
+### Image Generation Model
+
+You can configure an image generation model in `config.yaml`.
+Supported providers:
+- Seedream image generation
+- Google Gemini image generation
+
+Configuration steps:
+1. Open `config.yaml` and find the `image_generate_model` section.
+2. Uncomment the section and fill in the model you want to use. The sample values for `name` and `api_base` are prefilled and can be changed if needed.
+3. Find the `Sandbox Configuration` section, and set `sandbox.allow_host_bash: true` as the agent needs bash to run the Python image generation script.
+4. Save the file and reload the service.
+
+Note: `image_generate_model` can only be configured with a single model yet.
+
+```yaml
+image_generate_model:
+  - name: doubao-seedream
+    provider: seedream
+    model: doubao-seedream-5-0-260128
+    api_base: https://ark.cn-beijing.volces.com/api/v3/images/generations
+    api_key: $VOLCENGINE_API_KEY
+```
+
 ### Tool Groups
 
 Organize tools into logical groups:

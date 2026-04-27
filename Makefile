@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor dev dev-pro dev-daemon dev-daemon-pro start start-pro start-daemon start-daemon-pro stop up up-pro down clean docker-init docker-start docker-start-pro docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install setup doctor dev dev-pro dev-daemon dev-daemon-pro start start-pro start-daemon start-daemon-pro stop up up-pro launch terminate down clean docker-init docker-start docker-start-pro docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -39,6 +39,8 @@ help:
 	@echo "Docker Production Commands:"
 	@echo "  make up              - Build and start production Docker services (localhost:2026)"
 	@echo "  make up-pro          - Build and start production Docker in Gateway mode (experimental)"
+	@echo "  make launch          - Start existing production containers (no build; docker compose start)"
+	@echo "  make terminate       - Stop production containers without removing them"
 	@echo "  make down            - Stop and remove production Docker containers"
 	@echo ""
 	@echo "Docker Development Commands:"
@@ -211,6 +213,14 @@ up:
 # Build and start production services in Gateway mode
 up-pro:
 	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh --gateway
+
+# Start existing production containers (no build)
+launch:
+	@./scripts/deploy.sh launch
+
+# Stop production containers (no remove)
+terminate:
+	@./scripts/deploy.sh terminate
 
 # Stop and remove production containers
 down:

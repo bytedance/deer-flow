@@ -348,6 +348,26 @@ models:
   #   pool_timeout: 30.0
 
 # ============================================================================
+# Image Generation Model
+# ============================================================================
+# Configure your image generation model here.
+# Note that we only support a single model yet.
+image_generate_model:
+  # Example: Seedream Image generation
+  # - name: doubao-seedream
+  #   provider: seedream
+  #   model: doubao-seedream-5-0-260128
+  #   api_base: https://ark.cn-beijing.volces.com/api/v3/images/generations
+  #   api_key: $VOLCENGINE_API_KEY
+
+  # Example: Google Gemini Image Generation
+  # - name: gemini-image-gen
+  #   provider: gemini
+  #   model: gemini-3-flash-image
+  #   api_base: https://generativelanguage.googleapis.com/v1beta
+  #   api_key: $GEMINI_API_KEY
+
+# ============================================================================
 # Tool Groups Configuration
 # ============================================================================
 # Define groups of tools for organization and access control
