@@ -172,7 +172,7 @@ class RunJournal(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         messages: list[AnyMessage] = []
-        logger.debug(f"on_llm_end {run_id}: tags={tags}")
+        logger.debug("on_llm_end %s: tags=%s", run_id, tags)
         for generation in response.generations:
             for gen in generation:
                 if hasattr(gen, "message"):
