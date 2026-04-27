@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   Command,
   CommandEmpty,
@@ -40,12 +41,15 @@ import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 import type { ChatStatus } from "ai";
 import {
+  AlertCircleIcon,
   ArrowUpIcon,
+  CheckIcon,
   ImageIcon,
   Loader2Icon,
   MicIcon,
   PaperclipIcon,
   PlusIcon,
+  RotateCcwIcon,
   SquareIcon,
   UploadIcon,
   XIcon,
@@ -79,11 +83,18 @@ import { toast } from "sonner";
 // Provider Context & Types
 // ============================================================================
 
+type PromptInputAttachmentItem = PromptInputFilePart & { id: string };
+
 export type AttachmentsContext = {
-  files: (PromptInputFilePart & { id: string })[];
+  files: PromptInputAttachmentItem[];
   add: (files: File[] | FileList) => void;
   remove: (id: string) => void;
   clear: () => void;
+  update: (
+    id: string,
+    updater: (file: PromptInputAttachmentItem) => PromptInputAttachmentItem,
+  ) => void;
+  retry: (id: string) => void;
   openFileDialog: () => void;
   fileInputRef: RefObject<HTMLInputElement | null>;
 };
@@ -160,7 +171,7 @@ export function PromptInputProvider({
 
   // ----- attachments state (global when wrapped)
   const [attachmentFiles, setAttachmentFiles] = useState<
-    (PromptInputFilePart & { id: string })[]
+    PromptInputAttachmentItem[]
   >([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const openRef = useRef<() => void>(() => {});
@@ -180,6 +191,10 @@ export function PromptInputProvider({
           mediaType: file.type,
           filename: file.name,
           file,
+          upload: {
+            status: "pending",
+            progress: 0,
+          },
         })),
       ),
     );
@@ -204,6 +219,35 @@ export function PromptInputProvider({
       }
       return [];
     });
+  }, []);
+
+  const update = useCallback(
+    (
+      id: string,
+      updater: (file: PromptInputAttachmentItem) => PromptInputAttachmentItem,
+    ) => {
+      setAttachmentFiles((prev) =>
+        prev.map((file) => (file.id === id ? updater(file) : file)),
+      );
+    },
+    [],
+  );
+
+  const retry = useCallback((id: string) => {
+    setAttachmentFiles((prev) =>
+      prev.map((file) =>
+        file.id === id
+          ? {
+              ...file,
+              upload: {
+                status: "pending",
+                progress: 0,
+                storedFilename: file.upload?.storedFilename,
+              },
+            }
+          : file,
+      ),
+    );
   }, []);
 
   // Keep a ref to attachments for cleanup on unmount (avoids stale closure)
@@ -231,10 +275,12 @@ export function PromptInputProvider({
       add,
       remove,
       clear,
+      update,
+      retry,
       openFileDialog,
       fileInputRef,
     }),
-    [attachmentFiles, add, remove, clear, openFileDialog],
+    [attachmentFiles, add, remove, clear, update, retry, openFileDialog],
   );
 
   const __registerFileInput = useCallback(
@@ -287,7 +333,7 @@ export const usePromptInputAttachments = () => {
 };
 
 export type PromptInputAttachmentProps = HTMLAttributes<HTMLDivElement> & {
-  data: PromptInputFilePart & { id: string };
+  data: PromptInputAttachmentItem;
   className?: string;
 };
 
@@ -296,6 +342,7 @@ export function PromptInputAttachment({
   className,
   ...props
 }: PromptInputAttachmentProps) {
+  const { t } = useI18n();
   const attachments = usePromptInputAttachments();
 
   const filename = data.filename || "";
@@ -303,39 +350,67 @@ export function PromptInputAttachment({
   const mediaType =
     data.mediaType?.startsWith("image/") && data.url ? "image" : "file";
   const isImage = mediaType === "image";
+  const upload = data.upload;
+  const uploadStatus = upload?.status;
+  const progress = Math.min(100, Math.max(0, upload?.progress ?? 0));
+  const isUploading =
+    uploadStatus === "pending" || uploadStatus === "uploading";
+  const isUploaded = uploadStatus === "uploaded";
+  const isError = uploadStatus === "error";
 
   const attachmentLabel = filename || (isImage ? "Image" : "Attachment");
+  const uploadStatusLabel = isError
+    ? upload?.error || t.uploads.uploadFailed
+    : isUploading
+      ? `${t.uploads.uploading} ${progress}%`
+      : data.mediaType || "";
 
   return (
     <PromptInputHoverCard>
       <HoverCardTrigger asChild>
         <div
           className={cn(
-            "group border-border hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 relative flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-1.5 text-sm font-medium transition-all select-none",
+            "group border-border hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 relative flex min-h-10 cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-sm font-medium transition-all select-none",
+            isError && "border-destructive/50 bg-destructive/5",
             className,
           )}
           key={data.id}
           {...props}
         >
-          <div className="relative size-5 shrink-0">
-            <div className="bg-background absolute inset-0 flex size-5 items-center justify-center overflow-hidden rounded transition-opacity group-hover:opacity-0">
+          <div className="relative size-8 shrink-0">
+            <div className="bg-background absolute inset-0 flex size-8 items-center justify-center overflow-hidden rounded-md transition-opacity group-hover:opacity-0">
               {isImage ? (
                 <img
                   alt={filename || "attachment"}
-                  className="size-5 object-cover"
-                  height={20}
+                  className="size-8 object-cover"
+                  height={32}
                   src={data.url}
-                  width={20}
+                  width={32}
                 />
               ) : (
-                <div className="text-muted-foreground flex size-5 items-center justify-center">
-                  <PaperclipIcon className="size-3" />
+                <div className="text-muted-foreground flex size-8 items-center justify-center rounded-md border">
+                  <PaperclipIcon className="size-4" />
                 </div>
               )}
             </div>
+            {isUploading && (
+              <div className="bg-background/55 absolute inset-0 flex items-center justify-center rounded-md backdrop-blur-[1px]">
+                <AttachmentUploadRing progress={progress} />
+              </div>
+            )}
+            {isUploaded && (
+              <div className="bg-background absolute -right-1 -bottom-1 rounded-full p-0.5">
+                <CheckIcon className="size-3 text-emerald-500" />
+              </div>
+            )}
+            {isError && (
+              <div className="bg-background absolute -right-1 -bottom-1 rounded-full p-0.5">
+                <AlertCircleIcon className="size-3 text-red-500" />
+              </div>
+            )}
             <Button
               aria-label="Remove attachment"
-              className="absolute inset-0 size-5 cursor-pointer rounded p-0 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 [&>svg]:size-2.5"
+              className="absolute inset-0 size-8 cursor-pointer rounded-md p-0 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 [&>svg]:size-3"
               onClick={(e) => {
                 e.stopPropagation();
                 attachments.remove(data.id);
@@ -348,7 +423,34 @@ export function PromptInputAttachment({
             </Button>
           </div>
 
-          <span className="flex-1 truncate">{attachmentLabel}</span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate">{attachmentLabel}</div>
+            {uploadStatusLabel ? (
+              <div
+                className={cn(
+                  "truncate text-[10px] font-normal",
+                  isError ? "text-red-500" : "text-muted-foreground",
+                )}
+              >
+                {uploadStatusLabel}
+              </div>
+            ) : null}
+          </div>
+          {isError && (
+            <Button
+              className="h-7 shrink-0 rounded-full px-2 text-[10px]"
+              onClick={(e) => {
+                e.stopPropagation();
+                attachments.retry(data.id);
+              }}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <RotateCcwIcon className="size-3" />
+              {t.common.retry}
+            </Button>
+          )}
         </div>
       </HoverCardTrigger>
       <PromptInputHoverCardContent className="w-auto p-2">
@@ -386,7 +488,7 @@ export type PromptInputAttachmentsProps = Omit<
   HTMLAttributes<HTMLDivElement>,
   "children"
 > & {
-  children: (attachment: PromptInputFilePart & { id: string }) => ReactNode;
+  children: (attachment: PromptInputAttachmentItem) => ReactNode;
 };
 
 export function PromptInputAttachments({
@@ -491,9 +593,7 @@ export const PromptInput = ({
   const formRef = useRef<HTMLFormElement | null>(null);
 
   // ----- Local attachments (only used when no provider)
-  const [items, setItems] = useState<(PromptInputFilePart & { id: string })[]>(
-    [],
-  );
+  const [items, setItems] = useState<PromptInputAttachmentItem[]>([]);
   const files = usingProvider ? controller.attachments.files : items;
 
   // Keep a ref to files for cleanup on unmount (avoids stale closure)
@@ -561,7 +661,7 @@ export const PromptInput = ({
             message: "Too many files. Some were not added.",
           });
         }
-        const next: (PromptInputFilePart & { id: string })[] = [];
+        const next: PromptInputAttachmentItem[] = [];
         for (const file of capped) {
           next.push({
             id: nanoid(),
@@ -570,6 +670,10 @@ export const PromptInput = ({
             mediaType: file.type,
             filename: file.name,
             file,
+            upload: {
+              status: "pending",
+              progress: 0,
+            },
           });
         }
         return prev.concat(next);
@@ -603,9 +707,41 @@ export const PromptInput = ({
     [],
   );
 
+  const updateLocal = useCallback(
+    (
+      id: string,
+      updater: (file: PromptInputAttachmentItem) => PromptInputAttachmentItem,
+    ) =>
+      setItems((prev) =>
+        prev.map((file) => (file.id === id ? updater(file) : file)),
+      ),
+    [],
+  );
+
+  const retryLocal = useCallback(
+    (id: string) =>
+      setItems((prev) =>
+        prev.map((file) =>
+          file.id === id
+            ? {
+                ...file,
+                upload: {
+                  status: "pending",
+                  progress: 0,
+                  storedFilename: file.upload?.storedFilename,
+                },
+              }
+            : file,
+        ),
+      ),
+    [],
+  );
+
   const add = usingProvider ? controller.attachments.add : addLocal;
   const remove = usingProvider ? controller.attachments.remove : removeLocal;
   const clear = usingProvider ? controller.attachments.clear : clearLocal;
+  const update = usingProvider ? controller.attachments.update : updateLocal;
+  const retry = usingProvider ? controller.attachments.retry : retryLocal;
   const openFileDialog = usingProvider
     ? controller.attachments.openFileDialog
     : openFileDialogLocal;
@@ -744,10 +880,12 @@ export const PromptInput = ({
       add,
       remove,
       clear,
+      update,
+      retry,
       openFileDialog,
       fileInputRef: inputRef,
     }),
-    [files, add, remove, clear, openFileDialog],
+    [files, add, remove, clear, update, retry, openFileDialog],
   );
 
   const handleSubmit: FormEventHandler<HTMLFormElement> = (event) => {
@@ -1103,6 +1241,46 @@ export const PromptInputSubmit = ({
     </InputGroupButton>
   );
 };
+
+function AttachmentUploadRing({ progress }: { progress: number }) {
+  const size = 22;
+  const strokeWidth = 2.5;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference * (1 - progress / 100);
+
+  return (
+    <div className="relative flex size-6 items-center justify-center">
+      <svg
+        className="-rotate-90"
+        height={size}
+        width={size}
+        viewBox={`0 0 ${size} ${size}`}
+      >
+        <circle
+          className="stroke-black/10 dark:stroke-white/15"
+          cx={size / 2}
+          cy={size / 2}
+          fill="none"
+          r={radius}
+          strokeWidth={strokeWidth}
+        />
+        <circle
+          className="stroke-foreground"
+          cx={size / 2}
+          cy={size / 2}
+          fill="none"
+          r={radius}
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          strokeLinecap="round"
+          strokeWidth={strokeWidth}
+        />
+      </svg>
+      <span className="text-[7px] font-semibold tabular-nums">{progress}</span>
+    </div>
+  );
+}
 
 interface SpeechRecognition extends EventTarget {
   continuous: boolean;

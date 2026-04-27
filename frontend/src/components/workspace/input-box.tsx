@@ -21,6 +21,7 @@ import {
   useState,
   type ComponentProps,
 } from "react";
+import { toast } from "sonner";
 
 import {
   PromptInput,
@@ -60,6 +61,12 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import {
+  createDraftUploadFilename,
+  deleteUploadedFile,
+  UploadedFileNotFoundError,
+  uploadFiles,
+} from "@/core/uploads";
 import { cn } from "@/lib/utils";
 
 import {
@@ -106,6 +113,7 @@ export function InputBox({
   context,
   extraHeader,
   isNewThread,
+  isUploading = false,
   threadId,
   initialValue,
   onContextChange,
@@ -126,6 +134,7 @@ export function InputBox({
   };
   extraHeader?: React.ReactNode;
   isNewThread?: boolean;
+  isUploading?: boolean;
   threadId: string;
   initialValue?: string;
   onContextChange?: (
@@ -138,7 +147,7 @@ export function InputBox({
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
-  onSubmit?: (message: PromptInputMessage) => void;
+  onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
 }) {
   const { t } = useI18n();
@@ -146,8 +155,14 @@ export function InputBox({
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
   const { thread, isMock } = useThread();
+  const attachments = usePromptInputAttachments();
   const { textInput } = usePromptInputController();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
+  const activeUploadIdsRef = useRef(new Set<string>());
+  const uploadAbortControllersRef = useRef(new Map<string, AbortController>());
+  const discardedAttachmentIdsRef = useRef(new Set<string>());
+  const committedAttachmentIdsRef = useRef(new Set<string>());
+  const attachmentFilesRef = useRef(attachments.files);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const [followupsHidden, setFollowupsHidden] = useState(false);
@@ -245,10 +260,248 @@ export function InputBox({
     [onContextChange, context],
   );
 
+  const attachmentFiles = attachments.files;
+  attachmentFilesRef.current = attachmentFiles;
+  const hasPendingAttachmentUploads = attachmentFiles.some((file) => {
+    const uploadStatus = file.upload?.status;
+    return uploadStatus === "pending" || uploadStatus === "uploading";
+  });
+  const hasFailedAttachmentUploads = attachmentFiles.some(
+    (file) => file.upload?.status === "error",
+  );
+  const hasBlockingAttachmentUploads =
+    !isMock && (hasPendingAttachmentUploads || hasFailedAttachmentUploads);
+
+  useEffect(() => {
+    if (!isMock || attachmentFiles.length === 0) {
+      return;
+    }
+
+    attachments.clear();
+    toast.error(t.common.notAvailableInDemoMode);
+  }, [
+    attachmentFiles.length,
+    attachments,
+    isMock,
+    t.common.notAvailableInDemoMode,
+  ]);
+
+  const cleanupUploadedAttachment = useCallback(
+    async (filename: string) => {
+      let lastError: unknown = null;
+      const retryDelaysMs = [0, 100, 250, 500, 1000];
+
+      for (const delayMs of retryDelaysMs) {
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+
+        try {
+          await deleteUploadedFile(threadId, filename);
+          return;
+        } catch (error) {
+          if (error instanceof UploadedFileNotFoundError) {
+            return;
+          }
+          lastError = error;
+        }
+      }
+
+      console.warn("Failed to clean up preuploaded attachment", {
+        error: lastError,
+        filename,
+        threadId,
+      });
+    },
+    [threadId],
+  );
+
+  const getAttachmentStorageFilename = useCallback(
+    (attachment: (typeof attachmentFiles)[number]) => {
+      if (attachment.upload?.storedFilename) {
+        return attachment.upload.storedFilename;
+      }
+      if (attachment.upload?.info?.filename) {
+        return attachment.upload.info.filename;
+      }
+      const originalFilename =
+        (attachment.file instanceof File && attachment.file.name) ||
+        attachment.filename;
+      if (!originalFilename) {
+        return null;
+      }
+      return createDraftUploadFilename(attachment.id, originalFilename);
+    },
+    [],
+  );
+
+  const cleanupDraftAttachment = useCallback(
+    (attachment: (typeof attachmentFiles)[number]) => {
+      if (committedAttachmentIdsRef.current.delete(attachment.id)) {
+        return;
+      }
+
+      discardedAttachmentIdsRef.current.add(attachment.id);
+
+      const controller = uploadAbortControllersRef.current.get(attachment.id);
+      if (controller) {
+        controller.abort();
+        uploadAbortControllersRef.current.delete(attachment.id);
+      }
+
+      const uploadedFilename = getAttachmentStorageFilename(attachment);
+      if (uploadedFilename) {
+        void cleanupUploadedAttachment(uploadedFilename);
+      }
+    },
+    [cleanupUploadedAttachment, getAttachmentStorageFilename],
+  );
+
+  const uploadAttachment = useCallback(
+    async (attachmentId: string, file: File) => {
+      const abortController = new AbortController();
+      const storageFilename = createDraftUploadFilename(
+        attachmentId,
+        file.name,
+      );
+      const uploadFile =
+        file.name === storageFilename
+          ? file
+          : new File([file], storageFilename, {
+              type: file.type,
+              lastModified: file.lastModified,
+            });
+      uploadAbortControllersRef.current.set(attachmentId, abortController);
+      attachments.update(attachmentId, (current) => ({
+        ...current,
+        upload: {
+          status: "uploading",
+          progress: 0,
+          storedFilename: storageFilename,
+        },
+      }));
+
+      try {
+        const response = await uploadFiles(threadId, [uploadFile], {
+          signal: abortController.signal,
+          onProgress: (progress) => {
+            attachments.update(attachmentId, (current) => ({
+              ...current,
+              upload: {
+                status: "uploading",
+                progress,
+                storedFilename:
+                  current.upload?.storedFilename ?? storageFilename,
+              },
+            }));
+          },
+        });
+
+        const uploadedFile = response.files[0];
+        if (!uploadedFile) {
+          throw new Error("Upload failed");
+        }
+
+        if (discardedAttachmentIdsRef.current.has(attachmentId)) {
+          void cleanupUploadedAttachment(uploadedFile.filename);
+          return;
+        }
+
+        attachments.update(attachmentId, (current) => ({
+          ...current,
+          upload: {
+            status: "uploaded",
+            progress: 100,
+            info: uploadedFile,
+            storedFilename:
+              current.upload?.storedFilename ?? uploadedFile.filename,
+          },
+        }));
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+
+        attachments.update(attachmentId, (current) => ({
+          ...current,
+          upload: {
+            status: "error",
+            progress: 0,
+            error:
+              error instanceof Error ? error.message : t.uploads.uploadFailed,
+            storedFilename: current.upload?.storedFilename ?? storageFilename,
+          },
+        }));
+      } finally {
+        uploadAbortControllersRef.current.delete(attachmentId);
+        activeUploadIdsRef.current.delete(attachmentId);
+      }
+    },
+    [attachments, cleanupUploadedAttachment, t.uploads.uploadFailed, threadId],
+  );
+
+  const previousAttachmentFilesRef = useRef(attachmentFiles);
+
+  useEffect(() => {
+    const previousAttachmentFiles = previousAttachmentFilesRef.current;
+    previousAttachmentFilesRef.current = attachmentFiles;
+
+    const currentAttachmentIds = new Set(
+      attachmentFiles.map((file) => file.id),
+    );
+    for (const previousAttachment of previousAttachmentFiles) {
+      if (currentAttachmentIds.has(previousAttachment.id)) {
+        continue;
+      }
+      cleanupDraftAttachment(previousAttachment);
+    }
+  }, [attachmentFiles, cleanupDraftAttachment]);
+
+  useEffect(() => {
+    const uploadAbortControllers = uploadAbortControllersRef.current;
+    return () => {
+      for (const controller of uploadAbortControllers.values()) {
+        controller.abort();
+      }
+      uploadAbortControllers.clear();
+
+      for (const attachment of attachmentFilesRef.current) {
+        cleanupDraftAttachment(attachment);
+      }
+    };
+  }, [cleanupDraftAttachment]);
+
+  useEffect(() => {
+    if (!threadId || isMock) {
+      return;
+    }
+
+    for (const attachment of attachmentFiles) {
+      if (!(attachment.file instanceof File)) {
+        continue;
+      }
+
+      const uploadStatus = attachment.upload?.status ?? "pending";
+      if (uploadStatus !== "pending") {
+        continue;
+      }
+
+      if (activeUploadIdsRef.current.has(attachment.id)) {
+        continue;
+      }
+
+      activeUploadIdsRef.current.add(attachment.id);
+      void uploadAttachment(attachment.id, attachment.file);
+    }
+  }, [attachmentFiles, isMock, threadId, uploadAttachment]);
+
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
       if (status === "streaming") {
         onStop?.();
+        return;
+      }
+      if (hasBlockingAttachmentUploads) {
         return;
       }
       if (!message.text) {
@@ -257,6 +510,24 @@ export function InputBox({
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
+
+      const submitPreparedMessage = async (nextMessage: PromptInputMessage) => {
+        const messageForSubmit =
+          isMock && nextMessage.files.length > 0
+            ? { ...nextMessage, files: [] }
+            : nextMessage;
+        for (const attachment of attachmentFiles) {
+          committedAttachmentIdsRef.current.add(attachment.id);
+        }
+        try {
+          await onSubmit?.(messageForSubmit);
+        } catch (error) {
+          for (const attachment of attachmentFiles) {
+            committedAttachmentIdsRef.current.delete(attachment.id);
+          }
+          throw error;
+        }
+      };
 
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
@@ -269,14 +540,21 @@ export function InputBox({
             selectedModel?.supports_thinking ?? false,
           ),
         });
-        setTimeout(() => onSubmit?.(message), 0);
+        await new Promise<void>((resolve, reject) => {
+          setTimeout(() => {
+            void submitPreparedMessage(message).then(resolve, reject);
+          }, 0);
+        });
         return;
       }
 
-      onSubmit?.(message);
+      await submitPreparedMessage(message);
     },
     [
+      attachmentFiles,
       context,
+      hasBlockingAttachmentUploads,
+      isMock,
       onContextChange,
       onSubmit,
       onStop,
@@ -287,9 +565,12 @@ export function InputBox({
   );
 
   const requestFormSubmit = useCallback(() => {
+    if (hasBlockingAttachmentUploads) {
+      return;
+    }
     const form = promptRootRef.current?.querySelector("form");
     form?.requestSubmit();
-  }, []);
+  }, [hasBlockingAttachmentUploads]);
 
   const handleFollowupClick = useCallback(
     (suggestion: string) => {
@@ -427,6 +708,10 @@ export function InputBox({
 
     return () => controller.abort();
   }, [context.model_name, disabled, isMock, status, thread.messages, threadId]);
+
+  const showUploadingHint =
+    isUploading || (!isMock && hasPendingAttachmentUploads);
+  const submitDisabled = (disabled ?? false) || hasBlockingAttachmentUploads;
 
   return (
     <div ref={promptRootRef} className="relative flex flex-col gap-4">
@@ -830,11 +1115,16 @@ export function InputBox({
                 </ModelSelectorList>
               </ModelSelectorContent>
             </ModelSelector>
+            {showUploadingHint && (
+              <span className="text-muted-foreground px-1 text-[10px]">
+                {t.uploads.uploadingFiles}
+              </span>
+            )}
             <PromptInputSubmit
               className="rounded-full"
-              disabled={disabled}
+              disabled={submitDisabled}
               variant="outline"
-              status={status}
+              status={showUploadingHint ? "submitted" : status}
             />
           </PromptInputTools>
         </PromptInputFooter>
@@ -945,11 +1235,17 @@ function SuggestionList() {
 
 function AddAttachmentsButton({ className }: { className?: string }) {
   const { t } = useI18n();
+  const { isMock } = useThread();
   const attachments = usePromptInputAttachments();
   return (
-    <Tooltip content={t.inputBox.addAttachments}>
+    <Tooltip
+      content={
+        isMock ? t.common.notAvailableInDemoMode : t.inputBox.addAttachments
+      }
+    >
       <PromptInputButton
         className={cn("px-2!", className)}
+        disabled={isMock}
         onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />

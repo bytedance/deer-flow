@@ -76,7 +76,7 @@ export default function ChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      void sendMessage(threadId, message);
+      return sendMessage(threadId, message);
     },
     [sendMessage, threadId],
   );
@@ -161,6 +161,7 @@ export default function ChatPage() {
                     extraHeader={
                       isNewThread && <Welcome mode={settings.context.mode} />
                     }
+                    isUploading={isUploading}
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                       isUploading

@@ -1,9 +1,36 @@
 import type { FileUIPart } from "ai";
 
+import type { UploadedFileInfo } from "./api";
+
+export type PromptInputFileUploadStatus =
+  | "pending"
+  | "uploading"
+  | "uploaded"
+  | "error";
+
+export interface PromptInputFileUploadState {
+  status: PromptInputFileUploadStatus;
+  progress: number;
+  error?: string;
+  info?: UploadedFileInfo;
+  storedFilename?: string;
+}
+
 export type PromptInputFilePart = FileUIPart & {
   // Transient submit-time handle to the original browser File; not serializable.
   file?: File;
+  upload?: PromptInputFileUploadState;
 };
+
+export function createDraftUploadFilename(
+  attachmentId: string,
+  originalFilename: string,
+): string {
+  const dotIndex = originalFilename.lastIndexOf(".");
+  const extension =
+    dotIndex > 0 ? originalFilename.slice(dotIndex).toLowerCase() : "";
+  return `draft_${attachmentId}${extension}`;
+}
 
 export async function promptInputFilePartToFile(
   filePart: PromptInputFilePart,
