@@ -2,7 +2,7 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,7 @@ import {
   MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM,
 } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
+import { ThreadBranchActions } from "@/components/workspace/thread-branch-actions";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
@@ -32,17 +33,26 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export default function AgentChatPage() {
+  const { agent_name, thread_id } = useParams<{
+    agent_name: string;
+    thread_id: string;
+  }>();
+
+  if (agent_name === "default") {
+    return <DefaultAgentRouteRedirect threadId={thread_id} />;
+  }
+
+  return <AgentChatPageContent agentName={agent_name} />;
+}
+
+function AgentChatPageContent({ agentName }: { agentName: string }) {
   const { t } = useI18n();
   const [showFollowups, setShowFollowups] = useState(false);
   const router = useRouter();
 
-  const { agent_name } = useParams<{
-    agent_name: string;
-  }>();
+  const { agent } = useAgent(agentName);
 
-  const { agent } = useAgent(agent_name);
-
-  const { threadId, setThreadId, isNewThread, setIsNewThread } =
+  const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
   const { tokenUsageEnabled } = useModels();
@@ -50,7 +60,7 @@ export default function AgentChatPage() {
   const { showNotification } = useNotification();
   const [thread, sendMessage] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
-    context: { ...settings.context, agent_name: agent_name },
+    context: { ...settings.context, agent_name: agentName },
     onStart: (createdThreadId) => {
       setThreadId(createdThreadId);
       setIsNewThread(false);
@@ -58,7 +68,7 @@ export default function AgentChatPage() {
       history.replaceState(
         null,
         "",
-        `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
+        `/workspace/agents/${agentName}/chats/${createdThreadId}`,
       );
     },
     onFinish: (state) => {
@@ -81,9 +91,9 @@ export default function AgentChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      void sendMessage(threadId, message, { agent_name });
+      void sendMessage(threadId, message, { agent_name: agentName });
     },
-    [sendMessage, threadId, agent_name],
+    [sendMessage, threadId, agentName],
   );
 
   const handleStop = useCallback(async () => {
@@ -111,7 +121,7 @@ export default function AgentChatPage() {
             <div className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
               <BotIcon className="text-primary h-3.5 w-3.5" />
               <span className="text-xs font-medium">
-                {agent?.name ?? agent_name}
+                {agent?.name ?? agentName}
               </span>
             </div>
 
@@ -124,12 +134,20 @@ export default function AgentChatPage() {
                   size="sm"
                   variant="secondary"
                   onClick={() => {
-                    router.push(`/workspace/agents/${agent_name}/chats/new`);
+                    router.push(`/workspace/agents/${agentName}/chats/new`);
                   }}
                 >
                   <PlusSquare /> {t.agents.newChat}
                 </Button>
               </Tooltip>
+              <ThreadBranchActions
+                threadId={threadId}
+                isNewThread={isNewThread}
+                isStreaming={thread.isLoading}
+                isMock={isMock}
+                title={thread.values.title}
+                agentName={agentName}
+              />
               <TokenUsageIndicator
                 enabled={tokenUsageEnabled}
                 messages={thread.messages}
@@ -187,7 +205,7 @@ export default function AgentChatPage() {
                   context={settings.context}
                   extraHeader={
                     isNewThread && (
-                      <AgentWelcome agent={agent} agentName={agent_name} />
+                      <AgentWelcome agent={agent} agentName={agentName} />
                     )
                   }
                   disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
@@ -208,4 +226,14 @@ export default function AgentChatPage() {
       </ChatBox>
     </ThreadContext.Provider>
   );
+}
+
+function DefaultAgentRouteRedirect({ threadId }: { threadId: string }) {
+  const router = useRouter();
+
+  useEffect(() => {
+    router.replace(`/workspace/chats/${threadId}`);
+  }, [router, threadId]);
+
+  return null;
 }

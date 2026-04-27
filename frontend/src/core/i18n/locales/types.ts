@@ -181,6 +181,19 @@ export interface Translations {
     searchChats: string;
   };
 
+  // Context branching
+  branching: {
+    branch: string;
+    newBranch: string;
+    newBranchDescription: string;
+    backToParent: string;
+    backToParentDescription: string;
+    sideBranchDefaultName: string;
+    branchCreated: string;
+    branchCreateFailed: string;
+    branchDisabledWhileStreaming: string;
+  };
+
   // Page titles (document title)
   pages: {
     appName: string;

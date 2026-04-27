@@ -237,6 +237,18 @@ export const zhCN: Translations = {
     searchChats: "搜索对话",
   },
 
+  branching: {
+    branch: "分支",
+    newBranch: "新建分支",
+    newBranchDescription: "从当前对话状态 fork 一个隔离分支",
+    backToParent: "返回主线",
+    backToParentDescription: "回到父对话继续主流程",
+    sideBranchDefaultName: "侧边分支",
+    branchCreated: "分支已创建",
+    branchCreateFailed: "创建分支失败",
+    branchDisabledWhileStreaming: "请先停止当前运行，再创建分支",
+  },
+
   // Page titles (document title)
   pages: {
     appName: "DeerFlow",

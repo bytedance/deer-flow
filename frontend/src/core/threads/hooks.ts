@@ -16,7 +16,14 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
-import type { AgentThread, AgentThreadState } from "./types";
+import { createThreadBranch, fetchThreadRecord } from "./api";
+import type {
+  AgentThread,
+  AgentThreadState,
+  CreateThreadBranchRequest,
+  CreateThreadBranchResponse,
+  ThreadRecord,
+} from "./types";
 
 export type ToolEndEvent = {
   name: string;
@@ -674,6 +681,34 @@ export function useRenameThread() {
           });
         },
       );
+      void queryClient.invalidateQueries({
+        queryKey: ["threads", "detail", threadId],
+      });
+    },
+  });
+}
+
+export function useThreadRecord(threadId: string | null | undefined) {
+  return useQuery<ThreadRecord>({
+    queryKey: ["threads", "detail", threadId],
+    queryFn: async () => fetchThreadRecord(threadId!),
+    enabled: !!threadId,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useCreateThreadBranch() {
+  const queryClient = useQueryClient();
+
+  return useMutation<
+    CreateThreadBranchResponse,
+    Error,
+    { threadId: string; body: CreateThreadBranchRequest }
+  >({
+    mutationFn: async ({ threadId, body }) =>
+      createThreadBranch(threadId, body),
+    onSuccess() {
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });
 }

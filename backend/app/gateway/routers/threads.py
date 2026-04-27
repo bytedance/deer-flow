@@ -13,8 +13,12 @@ matching the LangGraph Platform wire format expected by the
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import time
 import uuid
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -33,6 +37,7 @@ THREADS_NS: tuple[str, ...] = ("threads",)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
+DEFAULT_LANGGRAPH_URL = "http://127.0.0.1:2024"
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +97,29 @@ class ThreadPatchRequest(BaseModel):
     """Request body for patching thread metadata."""
 
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata to merge")
+
+
+class ThreadBranchCreateRequest(BaseModel):
+    """Request body for forking a new branch thread from an existing thread."""
+
+    checkpoint_id: str | None = Field(default=None, description="Optional checkpoint to branch from")
+    branch_name: str | None = Field(default=None, description="Optional branch display name")
+    copy_uploads: bool = Field(default=True, description="Copy uploaded files into the branch")
+    copy_outputs: bool = Field(default=False, description="Copy generated outputs into the branch")
+    copy_workspace: bool = Field(default=False, description="Copy workspace files into the branch")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata to attach to the branch")
+
+
+class ThreadBranchResponse(BaseModel):
+    """Response model for a forked branch thread."""
+
+    thread_id: str = Field(description="Newly created branch thread identifier")
+    parent_thread_id: str = Field(description="Immediate parent thread identifier")
+    root_thread_id: str = Field(description="Root thread identifier for the branch tree")
+    fork_checkpoint_id: str | None = Field(default=None, description="Source checkpoint used for the fork")
+    created_at: str = Field(default="", description="Unix timestamp string")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Branch metadata")
+    values: dict[str, Any] = Field(default_factory=dict, description="Initial branch channel values")
 
 
 class ThreadStateUpdateRequest(BaseModel):
@@ -188,6 +216,173 @@ async def _store_upsert(store, thread_id: str, *, metadata: dict | None = None, 
         if values:
             val.setdefault("values", {}).update(values)
         await _store_put(store, val)
+
+
+def _strip_internal_checkpoint_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Strip internal LangGraph checkpoint keys from user-visible metadata."""
+    cleaned = dict(metadata or {})
+    for key in ("created_at", "updated_at", "step", "source", "writes", "parents"):
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def _copy_directory_contents(source: Path, destination: Path) -> None:
+    """Copy directory contents into an existing destination directory."""
+    if not source.exists():
+        return
+
+    def _copy_entry(entry: Path, target: Path) -> None:
+        if entry.is_symlink():
+            logger.warning("Skipping symlink while copying branch files: %s", entry)
+            return
+        if entry.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            for child in entry.iterdir():
+                _copy_entry(child, target / child.name)
+            return
+        shutil.copy2(entry, target, follow_symlinks=False)
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for entry in source.iterdir():
+        _copy_entry(entry, destination / entry.name)
+
+
+def _parse_branch_depth(value: Any) -> int:
+    """Parse branch depth metadata defensively."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            try:
+                return max(int(stripped), 0)
+            except ValueError:
+                return 0
+    return 0
+
+
+def _prepare_branch_channel_values(
+    channel_values: dict[str, Any],
+    *,
+    branch_name: str,
+    copy_outputs: bool,
+) -> dict[str, Any]:
+    """Normalize copied channel values for a new branch."""
+    prepared = deepcopy(channel_values)
+    prepared["title"] = branch_name
+    if not copy_outputs and "artifacts" in prepared:
+        prepared["artifacts"] = []
+    return prepared
+
+
+def _copy_thread_branch_files(
+    paths: Paths,
+    source_thread_id: str,
+    target_thread_id: str,
+    *,
+    copy_uploads: bool,
+    copy_outputs: bool,
+    copy_workspace: bool,
+) -> None:
+    """Copy selected thread-local directories into a branch thread."""
+    paths.ensure_thread_dirs(target_thread_id)
+
+    if copy_uploads:
+        _copy_directory_contents(
+            paths.sandbox_uploads_dir(source_thread_id),
+            paths.sandbox_uploads_dir(target_thread_id),
+        )
+
+    if copy_outputs:
+        _copy_directory_contents(
+            paths.sandbox_outputs_dir(source_thread_id),
+            paths.sandbox_outputs_dir(target_thread_id),
+        )
+
+    if copy_workspace:
+        _copy_directory_contents(
+            paths.sandbox_work_dir(source_thread_id),
+            paths.sandbox_work_dir(target_thread_id),
+        )
+
+
+def _get_langgraph_base_url() -> str:
+    """Resolve the internal LangGraph server base URL."""
+    configured = os.getenv("DEER_FLOW_INTERNAL_LANGGRAPH_BASE_URL") or os.getenv("LANGGRAPH_URL") or DEFAULT_LANGGRAPH_URL
+    return configured.rstrip("/")
+
+
+async def _ensure_langgraph_thread_exists(
+    thread_id: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Register a thread with the LangGraph server so SDK history/run APIs can use it."""
+    from langgraph_sdk import get_client
+
+    client = get_client(url=_get_langgraph_base_url())
+    await client.threads.create(
+        thread_id=thread_id,
+        metadata=metadata or {},
+        if_exists="do_nothing",
+    )
+
+
+async def _delete_langgraph_thread(thread_id: str) -> None:
+    """Remove a thread from the LangGraph server when branch creation rolls back."""
+    from langgraph_sdk import get_client
+
+    client = get_client(url=_get_langgraph_base_url())
+    await client.threads.delete(thread_id)
+
+
+async def _cleanup_failed_branch_creation(
+    thread_id: str,
+    *,
+    store,
+    checkpointer,
+    paths: Paths,
+) -> None:
+    """Best-effort cleanup for partially created branch resources."""
+    if store is not None:
+        try:
+            await store.adelete(THREADS_NS, thread_id)
+        except Exception:
+            logger.warning(
+                "Failed to remove partial branch store record for %s",
+                thread_id,
+                exc_info=True,
+            )
+
+    if checkpointer is not None and hasattr(checkpointer, "adelete_thread"):
+        try:
+            await checkpointer.adelete_thread(thread_id)
+        except Exception:
+            logger.warning(
+                "Failed to remove partial branch checkpoints for %s",
+                thread_id,
+                exc_info=True,
+            )
+
+    try:
+        paths.delete_thread_dir(thread_id)
+    except Exception:
+        logger.warning(
+            "Failed to remove partial branch files for %s",
+            thread_id,
+            exc_info=True,
+        )
+
+    try:
+        await _delete_langgraph_thread(thread_id)
+    except Exception:
+        logger.warning(
+            "Failed to remove partial LangGraph thread for %s",
+            thread_id,
+            exc_info=True,
+        )
 
 
 def _derive_thread_status(checkpoint_tuple) -> str:
@@ -375,7 +570,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
 
             ckpt_meta = getattr(checkpoint_tuple, "metadata", {}) or {}
             # Strip LangGraph internal keys from the user-visible metadata dict
-            user_meta = {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")}
+            user_meta = _strip_internal_checkpoint_metadata(ckpt_meta)
 
             # Extract state values (title) from the checkpoint's channel_values
             checkpoint_data = getattr(checkpoint_tuple, "checkpoint", {}) or {}
@@ -485,7 +680,7 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
             "status": "idle",
             "created_at": ckpt_meta.get("created_at", ""),
             "updated_at": ckpt_meta.get("updated_at", ckpt_meta.get("created_at", "")),
-            "metadata": {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")},
+            "metadata": _strip_internal_checkpoint_metadata(ckpt_meta),
         }
 
     if record is None:
@@ -634,6 +829,181 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         metadata=metadata,
         checkpoint_id=new_checkpoint_id,
         created_at=str(metadata.get("created_at", "")),
+    )
+
+
+@router.post("/{thread_id}/branches", response_model=ThreadBranchResponse)
+async def create_thread_branch(
+    thread_id: str,
+    body: ThreadBranchCreateRequest,
+    request: Request,
+) -> ThreadBranchResponse:
+    """Fork a new branch thread from the latest or specified checkpoint."""
+    checkpointer = get_checkpointer(request)
+    store = get_store(request)
+    paths = get_paths()
+
+    read_config: dict[str, Any] = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+        }
+    }
+    if body.checkpoint_id:
+        read_config["configurable"]["checkpoint_id"] = body.checkpoint_id
+
+    try:
+        checkpoint_tuple = await checkpointer.aget_tuple(read_config)
+    except Exception:
+        logger.exception("Failed to resolve branch source checkpoint for thread %s", thread_id)
+        raise HTTPException(status_code=500, detail="Failed to create thread branch")
+
+    if checkpoint_tuple is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    source_checkpoint = dict(getattr(checkpoint_tuple, "checkpoint", {}) or {})
+    source_metadata = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
+    source_channel_values = dict(source_checkpoint.get("channel_values", {}) or {})
+    source_title = source_channel_values.get("title")
+    if not isinstance(source_title, str):
+        source_title = None
+
+    source_checkpoint_id = (getattr(checkpoint_tuple, "config", {}) or {}).get("configurable", {}).get("checkpoint_id")
+
+    parent_record = await _store_get(store, thread_id) if store is not None else None
+    parent_metadata = dict(parent_record.get("metadata", {})) if parent_record is not None else _strip_internal_checkpoint_metadata(source_metadata)
+
+    now = time.time()
+    child_thread_id = str(uuid.uuid4())
+    root_thread_id = str(parent_metadata.get("root_thread_id") or thread_id)
+    branch_depth = _parse_branch_depth(parent_metadata.get("branch_depth")) + 1
+    branch_name = (body.branch_name or "").strip() or source_title or "Side branch"
+
+    branch_metadata = {
+        **parent_metadata,
+        **body.metadata,
+        "root_thread_id": root_thread_id,
+        "parent_thread_id": thread_id,
+        "return_thread_id": thread_id,
+        "fork_checkpoint_id": source_checkpoint_id,
+        "forked_from_title": source_title or "",
+        "branch_name": branch_name,
+        "branch_role": "branch",
+        "branch_depth": branch_depth,
+        "branch_status": "active",
+    }
+
+    source_channel_values = _prepare_branch_channel_values(
+        source_channel_values,
+        branch_name=branch_name,
+        copy_outputs=body.copy_outputs,
+    )
+
+    try:
+        await _ensure_langgraph_thread_exists(
+            child_thread_id,
+            metadata=branch_metadata,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to register branch thread %s with LangGraph server",
+            child_thread_id,
+        )
+        raise HTTPException(status_code=500, detail="Failed to create thread branch")
+
+    try:
+        _copy_thread_branch_files(
+            paths,
+            thread_id,
+            child_thread_id,
+            copy_uploads=body.copy_uploads,
+            copy_outputs=body.copy_outputs,
+            copy_workspace=body.copy_workspace,
+        )
+    except Exception:
+        logger.exception("Failed to copy thread files when branching from %s", thread_id)
+        await _cleanup_failed_branch_creation(
+            child_thread_id,
+            store=store,
+            checkpointer=checkpointer,
+            paths=paths,
+        )
+        raise HTTPException(status_code=500, detail="Failed to create thread branch")
+
+    branch_values = {"title": branch_name}
+    if store is not None:
+        try:
+            await _store_put(
+                store,
+                {
+                    "thread_id": child_thread_id,
+                    "status": "idle",
+                    "created_at": now,
+                    "updated_at": now,
+                    "metadata": branch_metadata,
+                    "values": branch_values,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to write branch thread %s to store", child_thread_id)
+            await _cleanup_failed_branch_creation(
+                child_thread_id,
+                store=store,
+                checkpointer=checkpointer,
+                paths=paths,
+            )
+            raise HTTPException(status_code=500, detail="Failed to create thread branch")
+
+    try:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        branch_checkpoint = empty_checkpoint()
+        branch_checkpoint["channel_values"] = source_channel_values
+        branch_checkpoint["updated_channels"] = list(source_channel_values.keys()) or None
+        branch_checkpoint["pending_sends"] = []
+
+        branch_checkpoint_metadata = {
+            "step": -1,
+            "source": "fork",
+            "writes": None,
+            "parents": {
+                "thread_id": thread_id,
+                "checkpoint_id": source_checkpoint_id,
+            },
+            **branch_metadata,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        await checkpointer.aput(
+            {
+                "configurable": {
+                    "thread_id": child_thread_id,
+                    "checkpoint_ns": "",
+                }
+            },
+            branch_checkpoint,
+            branch_checkpoint_metadata,
+            {},
+        )
+    except Exception:
+        logger.exception("Failed to create branch checkpoint for thread %s", child_thread_id)
+        await _cleanup_failed_branch_creation(
+            child_thread_id,
+            store=store,
+            checkpointer=checkpointer,
+            paths=paths,
+        )
+        raise HTTPException(status_code=500, detail="Failed to create thread branch")
+
+    return ThreadBranchResponse(
+        thread_id=child_thread_id,
+        parent_thread_id=thread_id,
+        root_thread_id=root_thread_id,
+        fork_checkpoint_id=source_checkpoint_id,
+        created_at=str(now),
+        metadata=branch_metadata,
+        values=serialize_channel_values(source_channel_values),
     )
 
 
