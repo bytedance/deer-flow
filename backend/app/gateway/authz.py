@@ -181,6 +181,9 @@ def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
         auth_context = await _authenticate(request)
         request.state.auth = auth_context
 
+        if not auth_context.is_authenticated:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
         return await func(*args, **kwargs)
 
     return wrapper

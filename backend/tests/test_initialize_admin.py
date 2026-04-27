@@ -22,6 +22,7 @@ _TEST_SECRET = "test-secret-key-initialize-admin-min-32"
 def _setup_auth(tmp_path):
     """Fresh SQLite engine + auth config per test."""
     from app.gateway import deps
+    from app.gateway.routers.auth import _SETUP_STATUS_COOLDOWN
     from deerflow.persistence.engine import close_engine, init_engine
 
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
@@ -29,11 +30,13 @@ def _setup_auth(tmp_path):
     asyncio.run(init_engine("sqlite", url=url, sqlite_dir=str(tmp_path)))
     deps._cached_local_provider = None
     deps._cached_repo = None
+    _SETUP_STATUS_COOLDOWN.clear()
     try:
         yield
     finally:
         deps._cached_local_provider = None
         deps._cached_repo = None
+        _SETUP_STATUS_COOLDOWN.clear()
         asyncio.run(close_engine())
 
 

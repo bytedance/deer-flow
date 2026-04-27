@@ -63,7 +63,7 @@ def test_invalid_jwt_raises_401():
     with pytest.raises(Auth.exceptions.HTTPException) as exc:
         asyncio.run(authenticate(_req({"access_token": "garbage"})))
     assert exc.value.status_code == 401
-    assert "Token error" in str(exc.value.detail)
+    assert "Invalid token" in str(exc.value.detail)
 
 
 def test_expired_jwt_raises_401():
@@ -295,7 +295,7 @@ def test_csrf_post_matching_token_proceeds_to_jwt():
         )
     # Past CSRF, rejected by JWT decode
     assert exc.value.status_code == 401
-    assert "Token error" in str(exc.value.detail)
+    assert "Invalid token" in str(exc.value.detail)
 
 
 def test_csrf_put_requires_token():

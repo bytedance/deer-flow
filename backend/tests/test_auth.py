@@ -166,7 +166,7 @@ def test_get_auth_context_set():
 
 
 def test_require_auth_sets_auth_context():
-    """require_auth sets auth context on request from cookie."""
+    """require_auth rejects unauthenticated requests with 401."""
     from fastapi import Request
 
     app = FastAPI()
@@ -178,10 +178,9 @@ def test_require_auth_sets_auth_context():
         return {"authenticated": ctx.is_authenticated}
 
     with TestClient(app) as client:
-        # No cookie → anonymous
+        # No cookie → 401 (require_auth independently enforces authentication)
         response = client.get("/test")
-        assert response.status_code == 200
-        assert response.json()["authenticated"] is False
+        assert response.status_code == 401
 
 
 def test_require_auth_requires_request_param():
