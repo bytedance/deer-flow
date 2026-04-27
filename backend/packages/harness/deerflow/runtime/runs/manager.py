@@ -6,15 +6,12 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+
+from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus
 
 logger = logging.getLogger(__name__)
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 @dataclass

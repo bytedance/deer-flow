@@ -13,7 +13,6 @@ matching the LangGraph Platform wire format expected by the
 from __future__ import annotations
 
 import logging
-import time
 import uuid
 from typing import Any
 
@@ -23,6 +22,7 @@ from pydantic import BaseModel, Field
 from app.gateway.deps import get_checkpointer, get_store
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
+from deerflow.utils.time import coerce_iso, now_iso
 
 # ---------------------------------------------------------------------------
 # Store namespace
@@ -166,7 +166,7 @@ async def _store_upsert(store, thread_id: str, *, metadata: dict | None = None, 
     ``values`` carries the agent-state snapshot exposed to the frontend
     (currently just ``{"title": "..."}``).
     """
-    now = time.time()
+    now = now_iso()
     existing = await _store_get(store, thread_id)
     if existing is None:
         await _store_put(
@@ -182,6 +182,9 @@ async def _store_upsert(store, thread_id: str, *, metadata: dict | None = None, 
         )
     else:
         val = dict(existing)
+        # Heal legacy unix-timestamp ``created_at`` opportunistically so
+        # the store converges to ISO without a one-shot migration.
+        val["created_at"] = coerce_iso(val.get("created_at", now))
         val["updated_at"] = now
         if metadata:
             val.setdefault("metadata", {}).update(metadata)
@@ -255,7 +258,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     store = get_store(request)
     checkpointer = get_checkpointer(request)
     thread_id = body.thread_id or str(uuid.uuid4())
-    now = time.time()
+    now = now_iso()
 
     # Idempotency: return existing record from Store when already present
     if store is not None:
@@ -264,8 +267,8 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             return ThreadResponse(
                 thread_id=thread_id,
                 status=existing_record.get("status", "idle"),
-                created_at=str(existing_record.get("created_at", "")),
-                updated_at=str(existing_record.get("updated_at", "")),
+                created_at=coerce_iso(existing_record.get("created_at", "")),
+                updated_at=coerce_iso(existing_record.get("updated_at", "")),
                 metadata=existing_record.get("metadata", {}),
             )
 
@@ -308,8 +311,8 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     return ThreadResponse(
         thread_id=thread_id,
         status="idle",
-        created_at=str(now),
-        updated_at=str(now),
+        created_at=now,
+        updated_at=now,
         metadata=body.metadata,
     )
 
@@ -351,8 +354,8 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             merged[val["thread_id"]] = ThreadResponse(
                 thread_id=val["thread_id"],
                 status=val.get("status", "idle"),
-                created_at=str(val.get("created_at", "")),
-                updated_at=str(val.get("updated_at", "")),
+                created_at=coerce_iso(val.get("created_at", "")),
+                updated_at=coerce_iso(val.get("updated_at", "")),
                 metadata=val.get("metadata", {}),
                 values=val.get("values", {}),
             )
@@ -387,8 +390,11 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             thread_resp = ThreadResponse(
                 thread_id=thread_id,
                 status=_derive_thread_status(checkpoint_tuple),
-                created_at=str(ckpt_meta.get("created_at", "")),
-                updated_at=str(ckpt_meta.get("updated_at", ckpt_meta.get("created_at", ""))),
+                # ``ckpt_meta`` is normally written by LangGraph Server as
+                # ISO already; ``coerce_iso`` heals legacy floats written by
+                # earlier Gateway versions in the same checkpoint metadata.
+                created_at=coerce_iso(ckpt_meta.get("created_at", "")),
+                updated_at=coerce_iso(ckpt_meta.get("updated_at", ckpt_meta.get("created_at", ""))),
                 metadata=user_meta,
                 values=ckpt_values,
             )
@@ -430,9 +436,11 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
     if record is None:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
-    now = time.time()
+    now = now_iso()
     updated = dict(record)
     updated.setdefault("metadata", {}).update(body.metadata)
+    # Heal legacy unix-timestamp ``created_at`` opportunistically.
+    updated["created_at"] = coerce_iso(updated.get("created_at", now))
     updated["updated_at"] = now
 
     try:
@@ -444,8 +452,8 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
     return ThreadResponse(
         thread_id=thread_id,
         status=updated.get("status", "idle"),
-        created_at=str(updated.get("created_at", "")),
-        updated_at=str(now),
+        created_at=coerce_iso(updated.get("created_at", "")),
+        updated_at=now,
         metadata=updated.get("metadata", {}),
     )
 
@@ -483,8 +491,8 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
         record = {
             "thread_id": thread_id,
             "status": "idle",
-            "created_at": ckpt_meta.get("created_at", ""),
-            "updated_at": ckpt_meta.get("updated_at", ckpt_meta.get("created_at", "")),
+            "created_at": coerce_iso(ckpt_meta.get("created_at", "")),
+            "updated_at": coerce_iso(ckpt_meta.get("updated_at", ckpt_meta.get("created_at", ""))),
             "metadata": {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")},
         }
 
@@ -498,8 +506,8 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     return ThreadResponse(
         thread_id=thread_id,
         status=status,
-        created_at=str(record.get("created_at", "")),
-        updated_at=str(record.get("updated_at", "")),
+        created_at=coerce_iso(record.get("created_at", "")),
+        updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
         values=serialize_channel_values(channel_values),
     )
@@ -595,7 +603,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         channel_values.update(body.values)
 
     checkpoint["channel_values"] = channel_values
-    metadata["updated_at"] = time.time()
+    metadata["updated_at"] = now_iso()
 
     if body.as_node:
         metadata["source"] = "update"
