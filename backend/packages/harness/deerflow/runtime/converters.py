@@ -1,6 +1,8 @@
 """Pure functions to convert LangChain message objects to OpenAI Chat Completions format.
 
-Used by RunJournal to build content dicts for event storage.
+Utility for translating LangChain message types to OpenAI-compatible dicts.
+Not currently wired into RunJournal (which uses message.model_dump() directly),
+but available for consumers that need the OpenAI wire format.
 """
 
 from __future__ import annotations

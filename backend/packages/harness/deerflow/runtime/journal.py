@@ -62,9 +62,6 @@ class RunJournal(BaseCallbackHandler):
         self._total_output_tokens = 0
         self._total_tokens = 0
         self._llm_call_count = 0
-        self._lead_agent_tokens = 0
-        self._subagent_tokens = 0
-        self._middleware_tokens = 0
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -76,7 +73,7 @@ class RunJournal(BaseCallbackHandler):
 
         # LLM request/response tracking
         self._llm_call_index = 0
-        self._cached_prompts: dict[str, list[dict]] = {}  # langchain run_id -> OpenAI messages
+        self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
 
     # -- Lifecycle callbacks --
 
@@ -135,15 +132,14 @@ class RunJournal(BaseCallbackHandler):
         rid = str(run_id)
         self._llm_start_times[rid] = time.monotonic()
         self._llm_call_index += 1
-        # Mark this run_id as seen so on_llm_end knows not to increment again.
-        self._cached_prompts[rid] = []
+        self._seen_llm_starts.add(rid)
 
-        logger.info(f"on_chat_model_start {run_id}: tags={tags} serialized={serialized} messages={messages}")
+        logger.debug(f"on_chat_model_start {run_id}: tags={tags} messages={len(messages)} batch(es)")
 
         # Capture the first human message sent to any LLM in this run.
-        if not self._first_human_msg and not messages:
-            for batch in messages.reversed():
-                for m in batch.reversed():
+        if not self._first_human_msg and messages:
+            for batch in reversed(messages):
+                for m in reversed(batch):
                     if isinstance(m, HumanMessage) and m.name != "summary":
                         caller = self._identify_caller(tags)
                         self.set_first_human_message(m.text)
@@ -163,7 +159,7 @@ class RunJournal(BaseCallbackHandler):
 
     def on_llm_end(self, response, *, run_id, parent_run_id, tags, **kwargs) -> None:
         messages: list[AnyMessage] = []
-        logger.info(f"on_llm_end {run_id}: response: {tags} {kwargs}")
+        logger.debug(f"on_llm_end {run_id}: tags={tags}")
         for generation in response.generations:
             for gen in generation:
                 if hasattr(gen, "message"):
@@ -185,7 +181,7 @@ class RunJournal(BaseCallbackHandler):
 
             # Resolve call index
             call_index = self._llm_call_index
-            if rid not in self._cached_prompts:
+            if rid not in self._seen_llm_starts:
                 # Fallback: on_chat_model_start was not called
                 self._llm_call_index += 1
                 call_index = self._llm_call_index
@@ -223,7 +219,7 @@ class RunJournal(BaseCallbackHandler):
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
         """Handle tool start event, cache tool call ID for later correlation"""
         tool_call_id = str(run_id)
-        logger.info(f"Tool start for node {run_id}, tool_call_id={tool_call_id}, tags={tags}, metadata={metadata}")
+        logger.debug(f"Tool start for node {run_id}, tool_call_id={tool_call_id}, tags={tags}")
 
     def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
         """Handle tool end event, append message and clear node data"""
@@ -242,7 +238,7 @@ class RunJournal(BaseCallbackHandler):
             else:
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
         finally:
-            logger.info(f"Tool end for node {run_id}")
+            logger.debug(f"Tool end for node {run_id}")
 
     # -- Internal methods --
 
@@ -365,9 +361,6 @@ class RunJournal(BaseCallbackHandler):
             "total_output_tokens": self._total_output_tokens,
             "total_tokens": self._total_tokens,
             "llm_call_count": self._llm_call_count,
-            "lead_agent_tokens": self._lead_agent_tokens,
-            "subagent_tokens": self._subagent_tokens,
-            "middleware_tokens": self._middleware_tokens,
             "message_count": self._msg_count,
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,
