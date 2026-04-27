@@ -28,7 +28,10 @@ from app.gateway.routers import (
     threads,
     uploads,
 )
-from deerflow.config.app_config import get_app_config
+from deerflow.config import app_config as deerflow_app_config
+
+AppConfig = deerflow_app_config.AppConfig
+get_app_config = deerflow_app_config.get_app_config
 
 # Configure logging
 logging.basicConfig(
@@ -160,7 +163,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Load config and check necessary environment variables at startup
     try:
-        get_app_config()
+        app.state.config = get_app_config()
         logger.info("Configuration loaded successfully")
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
@@ -181,7 +184,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.channels.service import start_channel_service
 
-            channel_service = await start_channel_service()
+            channel_service = await start_channel_service(app.state.config)
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
