@@ -166,3 +166,17 @@ def test_setup_status_false_when_only_regular_user_exists(client):
     resp = client.get("/api/v1/auth/setup-status")
     assert resp.status_code == 200
     assert resp.json()["needs_setup"] is True
+
+
+def test_setup_status_rate_limited_on_second_call(client):
+    """Second /setup-status call within the cooldown window returns 429 with Retry-After."""
+    # First call succeeds.
+    resp1 = client.get("/api/v1/auth/setup-status")
+    assert resp1.status_code == 200
+
+    # Immediate second call is rate-limited.
+    resp2 = client.get("/api/v1/auth/setup-status")
+    assert resp2.status_code == 429
+    assert "Retry-After" in resp2.headers
+    retry_after = int(resp2.headers["Retry-After"])
+    assert 1 <= retry_after <= 60
