@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from deerflow.sandbox.exceptions import SandboxPermissionError
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
@@ -101,16 +102,35 @@ class LocalSandbox(Sandbox):
         Returns:
             Resolved local path
         """
-        path_str = str(path)
+        # Normalize the path to use forward slashes consistently
+        path_str = str(path).replace("\\", "/")
+        if not path_str.startswith("/"):
+            path_str = "/" + path_str
 
         # Try each mapping (longest prefix first for more specific matches)
         for mapping in sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True):
-            container_path = mapping.container_path
-            local_path = mapping.local_path
+            container_path = mapping.container_path.rstrip("/")
+
             if path_str == container_path or path_str.startswith(container_path + "/"):
                 # Replace the container path prefix with local path
                 relative = path_str[len(container_path) :].lstrip("/")
-                resolved = str(Path(local_path) / relative) if relative else local_path
+
+                # Crucial: Use realpath to resolve all symlinks and relative path segments (..)
+                local_base = os.path.realpath(mapping.local_path).replace("\\", "/")
+                if relative:
+                    resolved = os.path.realpath(os.path.join(local_base, relative)).replace("\\", "/")
+                else:
+                    resolved = local_base
+
+                # Security Check: Ensure the resolved path does not escape the local_base directory
+                # We append "/" to both to prevent partial name matches (e.g. /workspace-hack bypassing /workspace)
+                if not (resolved + "/").startswith(local_base + "/"):
+                    raise SandboxPermissionError(
+                        f"Path '{path}' escapes sandbox boundary",
+                        path=path,
+                        operation="_resolve_path",
+                    )
+
                 return resolved
 
         # No mapping found, return original path

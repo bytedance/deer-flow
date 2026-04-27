@@ -1,9 +1,11 @@
 import errno
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from deerflow.sandbox.exceptions import SandboxPermissionError
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 
@@ -29,7 +31,7 @@ class TestLocalSandboxPathResolution:
             ],
         )
         resolved = sandbox._resolve_path("/mnt/skills")
-        assert resolved == "/home/user/skills"
+        assert resolved.replace("\\", "/") == os.path.realpath("/home/user/skills").replace("\\", "/")
 
     def test_resolve_path_nested_path(self):
         sandbox = LocalSandbox(
@@ -39,7 +41,7 @@ class TestLocalSandboxPathResolution:
             ],
         )
         resolved = sandbox._resolve_path("/mnt/skills/agent/prompt.py")
-        assert resolved == "/home/user/skills/agent/prompt.py"
+        assert resolved.replace("\\", "/") == os.path.realpath("/home/user/skills/agent/prompt.py").replace("\\", "/")
 
     def test_resolve_path_no_mapping(self):
         sandbox = LocalSandbox(
@@ -61,7 +63,91 @@ class TestLocalSandboxPathResolution:
         )
         resolved = sandbox._resolve_path("/mnt/skills/file.py")
         # Should match /mnt/skills first (longer prefix)
-        assert resolved == "/home/user/skills/file.py"
+        assert resolved.replace("\\", "/") == os.path.realpath("/home/user/skills/file.py").replace("\\", "/")
+
+    def test_resolve_path_traversal_dot_dot(self):
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/workspace", local_path="/tmp/sandbox/123"),
+            ],
+        )
+        # Attempt to escape via ../
+        with pytest.raises(SandboxPermissionError, match="escapes sandbox boundary"):
+            sandbox._resolve_path("/mnt/workspace/../../../etc/passwd")
+
+    def test_resolve_path_traversal_to_similar_name(self):
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/workspace", local_path="/tmp/sandbox/workspace"),
+            ],
+        )
+        # Attempting to escape the sandbox directory (/tmp/sandbox/workspace)
+        # to a directory with a similar prefix (/tmp/sandbox/workspace-hack)
+        # using a path traversal sequence.
+        with pytest.raises(SandboxPermissionError, match="escapes sandbox boundary"):
+            sandbox._resolve_path("/mnt/workspace/../workspace-hack/file")
+
+    def test_resolve_path_symlink_escape(self, tmp_path):
+        # Setup a mock environment with a symlink
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+
+        secret_dir = tmp_path / "secrets"
+        secret_dir.mkdir()
+        (secret_dir / "passwd").write_text("secret")
+
+        # Create a symlink inside the workspace pointing outside
+        symlink_path = workspace_dir / "mylink"
+        try:
+            os.symlink(str(secret_dir), str(symlink_path))
+        except OSError:
+            pytest.skip("Symlinks not supported on this OS/filesystem")
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/workspace", local_path=str(workspace_dir)),
+            ],
+        )
+
+        # Accessing the symlink should fail because its realpath escapes the workspace
+        with pytest.raises(SandboxPermissionError, match="escapes sandbox boundary"):
+            sandbox._resolve_path("/mnt/workspace/mylink/passwd")
+
+    def test_resolve_path_returns_realpath_result(self, tmp_path):
+        """Test that _resolve_path returns the same result as os.path.realpath."""
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/workspace", local_path=str(workspace_dir)),
+            ],
+        )
+
+        # Resolve a file inside the workspace
+        resolved = sandbox._resolve_path("/mnt/workspace/test.txt")
+
+        # The resolved path should match os.path.realpath behavior
+        expected_path = os.path.realpath(str(workspace_dir / "test.txt")).replace("\\", "/")
+        assert resolved == expected_path
+
+    def test_resolve_path_traversal_includes_context_in_exception(self):
+        """Test that SandboxPermissionError includes path and operation context."""
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/workspace", local_path="/tmp/workspace")],
+        )
+
+        with pytest.raises(SandboxPermissionError) as exc_info:
+            sandbox._resolve_path("/mnt/workspace/../etc/passwd")
+
+        assert exc_info.value.path == "/mnt/workspace/../etc/passwd"
+        assert exc_info.value.operation == "_resolve_path"
+        assert "escapes sandbox boundary" in str(exc_info.value)
 
     def test_reverse_resolve_path_exact_match(self, tmp_path):
         skills_dir = tmp_path / "skills"
