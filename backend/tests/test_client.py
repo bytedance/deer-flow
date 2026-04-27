@@ -939,7 +939,7 @@ class TestGetModel:
 
 
 # ---------------------------------------------------------------------------
-# Thread Queries (list_threads / get_thread)
+# Thread Queries (create_thread / list_threads / get_thread)
 # ---------------------------------------------------------------------------
 
 
@@ -982,6 +982,117 @@ class TestThreadQueries:
         result = client.list_threads()
         assert result == {"thread_list": []}
         mock_checkpointer.list.assert_called_once_with(config=None, limit=10)
+
+    def test_create_thread(self, client):
+        store = MagicMock()
+        store.get.return_value = None
+        checkpointer = MagicMock()
+
+        with (
+            patch("deerflow.client.get_store", return_value=store),
+            patch("deerflow.client.get_checkpointer", return_value=checkpointer),
+            patch("deerflow.client.time.time", return_value=1710001234.5),
+        ):
+            result = client.create_thread(thread_id="t1", metadata={"source": "seed"})
+
+        store.get.assert_called_once_with(("threads",), "t1")
+        store.put.assert_called_once_with(
+            ("threads",),
+            "t1",
+            {
+                "thread_id": "t1",
+                "status": "idle",
+                "created_at": 1710001234.5,
+                "updated_at": 1710001234.5,
+                "metadata": {"source": "seed"},
+            },
+        )
+        checkpointer.put.assert_called_once()
+        put_args = checkpointer.put.call_args.args
+        assert put_args[0] == {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+        assert put_args[2] == {
+            "step": -1,
+            "source": "seed",
+            "writes": None,
+            "parents": {},
+            "created_at": 1710001234.5,
+        }
+        assert result == {
+            "thread_id": "t1",
+            "status": "idle",
+            "created_at": "1710001234.5",
+            "updated_at": "1710001234.5",
+            "metadata": {"source": "seed"},
+            "values": {},
+            "interrupts": {},
+        }
+
+    def test_create_thread_returns_existing_record(self, client):
+        store = MagicMock()
+        existing = MagicMock()
+        existing.value = {
+            "thread_id": "t1",
+            "status": "idle",
+            "created_at": 1710001000.0,
+            "updated_at": 1710001001.0,
+            "metadata": {"source": "existing"},
+        }
+        store.get.return_value = existing
+        checkpointer = MagicMock()
+
+        with (
+            patch("deerflow.client.get_store", return_value=store),
+            patch("deerflow.client.get_checkpointer", return_value=checkpointer),
+        ):
+            result = client.create_thread(thread_id="t1", metadata={"source": "ignored"})
+
+        store.put.assert_not_called()
+        checkpointer.put.assert_not_called()
+        assert result == {
+            "thread_id": "t1",
+            "status": "idle",
+            "created_at": "1710001000.0",
+            "updated_at": "1710001001.0",
+            "metadata": {"source": "existing"},
+            "values": {},
+            "interrupts": {},
+        }
+
+    def test_create_thread_store_write_failure(self, client):
+        store = MagicMock()
+        store.get.return_value = None
+        store.put.side_effect = RuntimeError("boom")
+        checkpointer = MagicMock()
+
+        with (
+            patch("deerflow.client.get_store", return_value=store),
+            patch("deerflow.client.get_checkpointer", return_value=checkpointer),
+        ):
+            with pytest.raises(RuntimeError, match="Failed to create thread"):
+                client.create_thread(thread_id="t1", metadata={"source": "seed"})
+
+        checkpointer.put.assert_not_called()
+
+    def test_create_thread_without_store(self, client):
+        checkpointer = MagicMock()
+
+        with (
+            patch("deerflow.client.get_store", return_value=None),
+            patch("deerflow.client.get_checkpointer", return_value=checkpointer),
+            patch("deerflow.client.time.time", return_value=1710001234.5),
+        ):
+            result = client.create_thread(thread_id="t1")
+
+        checkpointer.put.assert_called_once()
+        assert result == {
+            "thread_id": "t1",
+            "status": "idle",
+            "created_at": "1710001234.5",
+            "updated_at": "1710001234.5",
+            "metadata": {},
+            "values": {},
+            "interrupts": {},
+        }
 
     def test_list_threads_basic(self, client):
         mock_checkpointer = MagicMock()

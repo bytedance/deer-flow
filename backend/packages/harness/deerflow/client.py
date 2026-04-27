@@ -21,6 +21,7 @@ import logging
 import mimetypes
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.checkpointer.provider import get_checkpointer
 from deerflow.agents.lead_agent.agent import _build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
@@ -40,6 +42,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime.store.provider import get_store
 from deerflow.skills.installer import install_skill_from_archive
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -53,6 +56,7 @@ from deerflow.uploads.manager import (
 )
 
 logger = logging.getLogger(__name__)
+THREADS_NS: tuple[str, ...] = ("threads",)
 
 
 StreamEventType = Literal["values", "messages-tuple", "custom", "end"]
@@ -417,6 +421,78 @@ class DeerFlowClient:
         threads.sort(key=lambda x: x.get("created_at") or "", reverse=True)
 
         return {"thread_list": threads[:limit]}
+
+    def create_thread(self, *, thread_id: str | None = None, metadata: dict[str, Any] | None = None) -> dict:
+        """Create a new thread with an empty checkpoint snapshot.
+
+        Args:
+            thread_id: Optional thread ID. Generated when omitted.
+            metadata: Optional metadata to persist on the thread record.
+
+        Returns:
+            Dict matching the Gateway ``ThreadResponse`` shape.
+        """
+        metadata = metadata or {}
+        thread_id = thread_id or str(uuid.uuid4())
+        now = time.time()
+
+        store = get_store()
+        checkpointer = get_checkpointer()
+
+        if store is not None:
+            existing_item = store.get(THREADS_NS, thread_id)
+            existing_record = existing_item.value if existing_item is not None else None
+            if existing_record is not None:
+                return {
+                    "thread_id": thread_id,
+                    "status": existing_record.get("status", "idle"),
+                    "created_at": str(existing_record.get("created_at", "")),
+                    "updated_at": str(existing_record.get("updated_at", "")),
+                    "metadata": existing_record.get("metadata", {}),
+                    "values": {},
+                    "interrupts": {},
+                }
+
+            try:
+                store.put(
+                    THREADS_NS,
+                    thread_id,
+                    {
+                        "thread_id": thread_id,
+                        "status": "idle",
+                        "created_at": now,
+                        "updated_at": now,
+                        "metadata": metadata,
+                    },
+                )
+            except Exception as exc:
+                raise RuntimeError("Failed to create thread") from exc
+
+        try:
+            from langgraph.checkpoint.base import empty_checkpoint
+
+            config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+            ckpt_metadata = {
+                "step": -1,
+                "source": "input",
+                "writes": None,
+                "parents": {},
+                **metadata,
+                "created_at": now,
+            }
+            checkpointer.put(config, empty_checkpoint(), ckpt_metadata, {})
+        except Exception as exc:
+            raise RuntimeError("Failed to create thread") from exc
+
+        return {
+            "thread_id": thread_id,
+            "status": "idle",
+            "created_at": str(now),
+            "updated_at": str(now),
+            "metadata": metadata,
+            "values": {},
+            "interrupts": {},
+        }
 
     def get_thread(self, thread_id: str) -> dict:
         """Get the complete thread record, including all node execution records.
