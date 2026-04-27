@@ -12,6 +12,16 @@ from .schemas import DisconnectMode, RunStatus
 
 logger = logging.getLogger(__name__)
 
+# Statuses that mean "a worker is still doing something for this run".
+# Used by has_inflight, create_or_reject, and any caller that needs to know
+# whether new mutable work for the same thread should wait for cleanup.
+_INFLIGHT_STATUSES = (
+    RunStatus.pending,
+    RunStatus.running,
+    RunStatus.cancelling,
+    RunStatus.rolling_back,
+)
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -106,7 +116,10 @@ class RunManager:
             action: "interrupt" keeps checkpoint, "rollback" reverts to pre-run state.
 
         Sets the abort event with the action reason and cancels the asyncio task.
-        Returns ``True`` if the run was in-flight and cancellation was initiated.
+        Transitions the run to ``cancelling`` immediately; the worker is
+        responsible for the subsequent ``cancelling -> rolling_back ->
+        interrupted`` (or ``-> error``) progression. Returns ``True`` if the
+        run was in-flight and cancellation was initiated.
         """
         async with self._lock:
             record = self._runs.get(run_id)
@@ -118,9 +131,9 @@ class RunManager:
             record.abort_event.set()
             if record.task is not None and not record.task.done():
                 record.task.cancel()
-            record.status = RunStatus.interrupted
+            record.status = RunStatus.cancelling
             record.updated_at = _now_iso()
-        logger.info("Run %s cancelled (action=%s)", run_id, action)
+        logger.info("Run %s cancelling (action=%s)", run_id, action)
         return True
 
     async def create_or_reject(
@@ -147,30 +160,50 @@ class RunManager:
 
         _supported_strategies = ("reject", "interrupt", "rollback")
 
+        # Hold the lock only for the inflight check + cancel-signal phase. We
+        # then release it to await the worker tasks (so other operations on
+        # other threads aren't blocked), and reacquire it to insert the new
+        # record. The new record is created with a fresh run_id and is keyed
+        # by run_id, so the brief unlocked window cannot collide.
+        tasks_to_await: list[asyncio.Task] = []
         async with self._lock:
             if multitask_strategy not in _supported_strategies:
                 raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-            inflight = [r for r in self._runs.values() if r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running)]
+            inflight = [r for r in self._runs.values() if r.thread_id == thread_id and r.status in _INFLIGHT_STATUSES]
 
             if multitask_strategy == "reject" and inflight:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
                 for r in inflight:
-                    r.abort_action = multitask_strategy
-                    r.abort_event.set()
+                    # Skip runs that are already cancelling/rolling_back -- the
+                    # earlier signaller already armed them. We still wait on
+                    # their tasks below so the new run is serialized after them.
+                    if r.status in (RunStatus.pending, RunStatus.running):
+                        r.abort_action = multitask_strategy
+                        r.abort_event.set()
+                        if r.task is not None and not r.task.done():
+                            r.task.cancel()
+                        r.status = RunStatus.cancelling
+                        r.updated_at = now
                     if r.task is not None and not r.task.done():
-                        r.task.cancel()
-                    r.status = RunStatus.interrupted
-                    r.updated_at = now
+                        tasks_to_await.append(r.task)
                 logger.info(
-                    "Cancelled %d inflight run(s) on thread %s (strategy=%s)",
+                    "Cancelling %d inflight run(s) on thread %s (strategy=%s)",
                     len(inflight),
                     thread_id,
                     multitask_strategy,
                 )
 
+        # Wait for cancelled workers to finish their cleanup (rollback or
+        # interrupt) BEFORE creating the new run. This is the serialization
+        # point that closes the race in #2505: an old worker can no longer
+        # restore an older snapshot over the new run's state.
+        if tasks_to_await:
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
+
+        async with self._lock:
             record = RunRecord(
                 run_id=run_id,
                 thread_id=thread_id,
@@ -189,9 +222,13 @@ class RunManager:
         return record
 
     async def has_inflight(self, thread_id: str) -> bool:
-        """Return ``True`` if *thread_id* has a pending or running run."""
+        """Return ``True`` if *thread_id* has a run that hasn't reached a terminal state.
+
+        ``cancelling`` and ``rolling_back`` count as inflight too -- a new
+        mutable run for the same thread must wait until cleanup completes.
+        """
         async with self._lock:
-            return any(r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running) for r in self._runs.values())
+            return any(r.thread_id == thread_id and r.status in _INFLIGHT_STATUSES for r in self._runs.values())
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay."""

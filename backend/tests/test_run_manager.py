@@ -1,5 +1,6 @@
 """Tests for RunManager."""
 
+import asyncio
 import re
 
 import pytest
@@ -53,14 +54,18 @@ async def test_status_transitions(manager: RunManager):
 
 @pytest.mark.anyio
 async def test_cancel(manager: RunManager):
-    """Cancel should set abort_event and transition to interrupted."""
+    """Cancel should set abort_event and transition to cancelling.
+
+    Final state (interrupted/error) is set by the worker after cleanup;
+    see #2505 for the rollback-serialization rationale.
+    """
     record = await manager.create("thread-1")
     await manager.set_status(record.run_id, RunStatus.running)
 
     cancelled = await manager.cancel(record.run_id)
     assert cancelled is True
     assert record.abort_event.is_set()
-    assert record.status == RunStatus.interrupted
+    assert record.status == RunStatus.cancelling
 
 
 @pytest.mark.anyio
@@ -141,3 +146,93 @@ async def test_create_defaults(manager: RunManager):
     assert record.kwargs == {}
     assert record.multitask_strategy == "reject"
     assert record.assistant_id is None
+
+
+# --- #2505: rollback-serialization regression tests ---
+
+
+@pytest.mark.anyio
+async def test_has_inflight_includes_cancelling_and_rolling_back(manager: RunManager):
+    """Cancelling/rolling_back must count as inflight so a new run waits."""
+    a = await manager.create("thread-1")
+    await manager.set_status(a.run_id, RunStatus.cancelling)
+    assert await manager.has_inflight("thread-1") is True
+
+    await manager.set_status(a.run_id, RunStatus.rolling_back)
+    assert await manager.has_inflight("thread-1") is True
+
+    await manager.set_status(a.run_id, RunStatus.interrupted)
+    assert await manager.has_inflight("thread-1") is False
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_awaits_cancelled_workers_before_creating(manager: RunManager):
+    """Interrupt/rollback strategies must wait for the old worker to finish.
+
+    Before #2505 was fixed, create_or_reject would mark the inflight run
+    as ``interrupted`` and immediately insert the new run, leaving the old
+    worker free to write rollback state on top of the new run. The fix
+    awaits the worker's task before insertion so the new run is serialized
+    after cleanup.
+    """
+    # Old run with a still-running worker task.
+    old = await manager.create("thread-1", multitask_strategy="rollback")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    finished_in_correct_order: list[str] = []
+
+    async def fake_worker() -> None:
+        try:
+            # The cancel signal hits before this completes naturally.
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            # Simulate rollback cleanup: takes time, sets status during.
+            await manager.set_status(old.run_id, RunStatus.rolling_back)
+            await asyncio.sleep(0.05)
+            await manager.set_status(old.run_id, RunStatus.interrupted)
+            finished_in_correct_order.append("worker_done")
+            raise
+
+    old.task = asyncio.create_task(fake_worker())
+    # Yield once so the task starts.
+    await asyncio.sleep(0)
+
+    # Kick off create_or_reject. It must wait for the worker.
+    new_run = await manager.create_or_reject(
+        "thread-1",
+        multitask_strategy="rollback",
+    )
+    finished_in_correct_order.append("new_created")
+
+    # Worker finished BEFORE the new run was created.
+    assert finished_in_correct_order == ["worker_done", "new_created"]
+    assert old.status == RunStatus.interrupted
+    assert new_run.status == RunStatus.pending
+    assert new_run.thread_id == "thread-1"
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_skips_already_cancelling_runs(manager: RunManager):
+    """Re-cancelling a cancelling run is a no-op for state, but still awaited.
+
+    If two cancellations race in for the same run, the second one must
+    not stomp on the first one's abort_action. We still wait on the task
+    so the new run is serialized after cleanup either way.
+    """
+    old = await manager.create("thread-1", multitask_strategy="rollback")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    # First signaller: rollback action.
+    cancelled = await manager.cancel(old.run_id, action="rollback")
+    assert cancelled is True
+    assert old.status == RunStatus.cancelling
+    assert old.abort_action == "rollback"
+
+    # Old has no real task; create_or_reject must still proceed and not
+    # overwrite abort_action.
+    new_run = await manager.create_or_reject(
+        "thread-1",
+        multitask_strategy="interrupt",
+    )
+    assert old.abort_action == "rollback"  # not stomped
+    assert new_run.status == RunStatus.pending

@@ -8,6 +8,8 @@ class RunStatus(StrEnum):
 
     pending = "pending"
     running = "running"
+    cancelling = "cancelling"
+    rolling_back = "rolling_back"
     success = "success"
     error = "error"
     timeout = "timeout"

@@ -184,7 +184,10 @@ async def run_agent(
         if record.abort_event.is_set():
             action = record.abort_action
             if action == "rollback":
-                await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+                # Mark rolling_back BEFORE the rollback work so create_or_reject
+                # for the same thread sees this run as still inflight and
+                # blocks until rollback completes (#2505).
+                await run_manager.set_status(run_id, RunStatus.rolling_back)
                 try:
                     await _rollback_to_pre_run_checkpoint(
                         checkpointer=checkpointer,
@@ -195,8 +198,10 @@ async def run_agent(
                         snapshot_capture_failed=snapshot_capture_failed,
                     )
                     logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
+                    await run_manager.set_status(run_id, RunStatus.interrupted, error="Rolled back by user")
                 except Exception:
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
+                    await run_manager.set_status(run_id, RunStatus.error, error="Rollback failed")
             else:
                 await run_manager.set_status(run_id, RunStatus.interrupted)
         else:
@@ -205,7 +210,7 @@ async def run_agent(
     except asyncio.CancelledError:
         action = record.abort_action
         if action == "rollback":
-            await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+            await run_manager.set_status(run_id, RunStatus.rolling_back)
             try:
                 await _rollback_to_pre_run_checkpoint(
                     checkpointer=checkpointer,
@@ -216,8 +221,10 @@ async def run_agent(
                     snapshot_capture_failed=snapshot_capture_failed,
                 )
                 logger.info("Run %s was cancelled and rolled back", run_id)
+                await run_manager.set_status(run_id, RunStatus.interrupted, error="Rolled back by user")
             except Exception:
                 logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
+                await run_manager.set_status(run_id, RunStatus.error, error="Rollback failed")
         else:
             await run_manager.set_status(run_id, RunStatus.interrupted)
             logger.info("Run %s was cancelled", run_id)
