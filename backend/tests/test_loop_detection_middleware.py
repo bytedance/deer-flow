@@ -303,6 +303,85 @@ class TestLoopDetection:
         assert "default" in mw._history
 
 
+class TestEscapeHatches:
+    def test_batch_friendly_tools_skip_hash_layer(self):
+        mw = LoopDetectionMiddleware(batch_friendly_tools={"bash"})
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(6):
+            result = mw._apply(_make_state(tool_calls=call), runtime)
+            assert result is None
+
+    def test_batch_friendly_tools_skip_frequency_layer(self):
+        mw = LoopDetectionMiddleware(batch_friendly_tools={"bash"})
+        runtime = _make_runtime()
+
+        for i in range(60):
+            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
+            assert result is None
+
+    def test_loop_detection_skip_marker_in_args(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        call = [
+            {
+                "name": "bash",
+                "id": "call_skip",
+                "args": {"command": "ls", "_loop_detection_skip": True},
+            }
+        ]
+
+        for _ in range(6):
+            result = mw._apply(_make_state(tool_calls=call), runtime)
+            assert result is None
+
+        assert call[0]["args"]["_loop_detection_skip"] is True
+
+    def test_runtime_loop_detection_disabled(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        runtime.context["loop_detection_disabled"] = True
+        call = [_bash_call("ls")]
+
+        for _ in range(6):
+            result = mw._apply(_make_state(tool_calls=call), runtime)
+            assert result is None
+
+        assert mw._history == {}
+        assert mw._tool_freq == {}
+
+    def test_hard_stop_message_includes_escape_hatch_hint(self):
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=3)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(2):
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is not None
+        content = result["messages"][0].content
+        assert "loop_detection_disabled" in content
+        assert "batch_friendly_tools" in content
+        assert "_loop_detection_skip" in content
+
+    def test_no_regression_when_no_escape_hatches_configured(self):
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls == []
+        assert _HARD_STOP_MSG in msg.content
+
+
 class TestAppendText:
     """Unit tests for LoopDetectionMiddleware._append_text."""
 
