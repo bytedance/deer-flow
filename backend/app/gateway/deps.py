@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
+from deerflow.config.app_config import AppConfig
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
@@ -29,6 +30,14 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+def get_config(request: Request) -> AppConfig:
+    """Return the app-scoped ``AppConfig`` stored on ``app.state``."""
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(status_code=503, detail="Configuration not available")
+    return config
+
+
 @asynccontextmanager
 async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
     """Bootstrap and tear down all LangGraph runtime singletons.
@@ -38,22 +47,24 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         async with langgraph_runtime(app):
             yield
     """
-    from deerflow.config import get_app_config
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.runtime import make_store, make_stream_bridge
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
 
     async with AsyncExitStack() as stack:
-        app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge())
+        config = getattr(app.state, "config", None)
+        if config is None:
+            raise RuntimeError("langgraph_runtime() requires app.state.config to be initialized")
+
+        app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
 
         # Initialize persistence engine BEFORE checkpointer so that
         # auto-create-database logic runs first (postgres backend).
-        config = get_app_config()
         await init_engine_from_config(config.database)
 
-        app.state.checkpointer = await stack.enter_async_context(make_checkpointer())
-        app.state.store = await stack.enter_async_context(make_store())
+        app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
+        app.state.store = await stack.enter_async_context(make_store(config))
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
@@ -130,13 +141,12 @@ def get_run_context(request: Request) -> RunContext:
 
     Returns a *base* context with infrastructure dependencies.
     """
-    from deerflow.config import get_app_config
-
+    config = get_config(request)
     return RunContext(
         checkpointer=get_checkpointer(request),
         store=get_store(request),
         event_store=get_run_event_store(request),
-        run_events_config=getattr(get_app_config(), "run_events", None),
+        run_events_config=getattr(config, "run_events", None),
         thread_store=get_thread_store(request),
     )
 

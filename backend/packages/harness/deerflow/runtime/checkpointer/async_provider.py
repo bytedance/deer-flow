@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator
 
 from langgraph.types import Checkpointer
 
-from deerflow.config.app_config import get_app_config
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpointer.provider import (
     POSTGRES_CONN_REQUIRED,
     POSTGRES_INSTALL,
@@ -123,11 +123,11 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
 
 
 @contextlib.asynccontextmanager
-async def make_checkpointer() -> AsyncIterator[Checkpointer]:
+async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterator[Checkpointer]:
     """Async context manager that yields a checkpointer for the caller's lifetime.
     Resources are opened on enter and closed on exit -- no global state::
 
-        async with make_checkpointer() as checkpointer:
+        async with make_checkpointer(app_config) as checkpointer:
             app.state.checkpointer = checkpointer
 
     Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
@@ -138,16 +138,17 @@ async def make_checkpointer() -> AsyncIterator[Checkpointer]:
     3. Default InMemorySaver
     """
 
-    config = get_app_config()
+    if app_config is None:
+        app_config = get_app_config()
 
     # Legacy: standalone checkpointer config takes precedence
-    if config.checkpointer is not None:
-        async with _async_checkpointer(config.checkpointer) as saver:
+    if app_config.checkpointer is not None:
+        async with _async_checkpointer(app_config.checkpointer) as saver:
             yield saver
             return
 
     # Unified database config
-    db_config = getattr(config, "database", None)
+    db_config = getattr(app_config, "database", None)
     if db_config is not None and db_config.backend != "memory":
         async with _async_checkpointer_from_database(db_config) as saver:
             yield saver
