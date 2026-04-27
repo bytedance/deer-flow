@@ -8,9 +8,11 @@ This test scans all Python files in the harness package and fails if any
 """
 
 import ast
+import json
 from pathlib import Path
 
 HARNESS_ROOT = Path(__file__).parent.parent / "packages" / "harness" / "deerflow"
+LANGGRAPH_CONFIG = Path(__file__).parent.parent / "langgraph.json"
 
 BANNED_PREFIXES = ("app.",)
 
@@ -44,3 +46,9 @@ def test_harness_does_not_import_app():
                 violations.append(f"  {rel}:{lineno}  imports {module}")
 
     assert not violations, "Harness layer must not import from app layer:\n" + "\n".join(violations)
+
+
+def test_langgraph_installs_harness_package_boundary():
+    config = json.loads(LANGGRAPH_CONFIG.read_text(encoding="utf-8"))
+
+    assert config["dependencies"] == ["./packages/harness"]

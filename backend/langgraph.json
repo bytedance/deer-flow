@@ -2,7 +2,7 @@
   "$schema": "https://langgra.ph/schema.json",
   "python_version": "3.12",
   "dependencies": [
-    "."
+    "./packages/harness"
   ],
   "env": ".env",
   "graphs": {
