@@ -1,8 +1,10 @@
+import uuid
 from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from langgraph.checkpoint.memory import MemorySaver
 
 from app.gateway.routers import threads
 from deerflow.config.paths import Paths
@@ -107,3 +109,74 @@ def test_delete_thread_data_returns_generic_500_error(tmp_path):
     assert exc_info.value.detail == "Failed to delete local thread data."
     assert "/secret/path" not in exc_info.value.detail
     log_exception.assert_called_once_with("Failed to delete thread data for %s", "thread-cleanup")
+
+
+# ---------------------------------------------------------------------------
+# update_thread_state — checkpoint history growth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_update_thread_state_creates_new_checkpoint_each_call():
+    """Each call to update_thread_state must INSERT a new checkpoint row.
+
+    Before the fix, checkpoint["id"] was copied verbatim from the previous
+    checkpoint, causing the SQL ``INSERT OR REPLACE`` to overwrite the
+    existing row in-place.  History therefore stayed at exactly 1 entry no
+    matter how many updates were applied.
+
+    After the fix a fresh UUID is assigned to checkpoint["id"] before aput,
+    so every call produces a distinct row and history grows correctly.
+    """
+    checkpointer = MemorySaver()
+    thread_id = str(uuid.uuid4())
+
+    # Write the initial (empty) checkpoint that create_thread would normally create.
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    init_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    await checkpointer.aput(init_config, empty_checkpoint(), {"step": -1, "source": "input", "writes": None, "parents": {}}, {})
+
+    # Build a minimal fake Request that returns our in-memory checkpointer.
+    class _FakeRequest:
+        class app:
+            class state:
+                pass
+
+        app.state.checkpointer = checkpointer
+        app.state.store = None
+
+    fake_request = _FakeRequest()
+
+    with (
+        patch("app.gateway.routers.threads.get_checkpointer", return_value=checkpointer),
+        patch("app.gateway.routers.threads.get_store", return_value=None),
+    ):
+        body1 = threads.ThreadStateUpdateRequest(values={"title": "First title"})
+        await threads.update_thread_state(thread_id, body1, fake_request)
+
+        body2 = threads.ThreadStateUpdateRequest(values={"title": "Second title"})
+        await threads.update_thread_state(thread_id, body2, fake_request)
+
+    # Collect all checkpoints for this thread.
+    history = [cp async for cp in checkpointer.alist({"configurable": {"thread_id": thread_id}})]
+
+    # There must be at least 3 entries: the initial one + one per update call.
+    # This is the key invariant: each update_thread_state call must INSERT a new
+    # checkpoint row instead of overwriting the existing one in-place.
+    #
+    # Note: MemorySaver stores channel_values as blobs keyed by new_versions entries.
+    # Since update_thread_state passes new_versions={}, MemorySaver does not persist
+    # channel_values in blobs — only the checkpoint count is meaningful here.
+    # In production (SQLite/Postgres) the full checkpoint dict is serialised as a
+    # single blob so channel_values are preserved correctly.
+    assert len(history) >= 3, f"Expected at least 3 checkpoint entries but got {len(history)}. update_thread_state may be overwriting the existing checkpoint instead of inserting a new one."
+
+    # Each checkpoint must have a distinct ID.
+    checkpoint_ids = [cp.config["configurable"]["checkpoint_id"] for cp in history]
+    assert len(checkpoint_ids) == len(set(checkpoint_ids)), f"Duplicate checkpoint IDs found: {checkpoint_ids}"
+
+    # Checkpoint IDs must be time-ordered (uuid6): later writes must sort after
+    # earlier writes.  alist() returns newest-first, so checkpoint_ids[0] must
+    # be lexicographically greater than checkpoint_ids[-1].
+    assert checkpoint_ids[0] > checkpoint_ids[-1], f"Expected newest checkpoint ID > oldest, but got {checkpoint_ids[0]} <= {checkpoint_ids[-1]}. update_thread_state may be using uuid4 (random) instead of uuid6 (time-ordered)."
