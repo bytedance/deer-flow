@@ -137,11 +137,13 @@ class SkillReviewMiddleware(AgentMiddleware[AgentState]):
         # Launch background review in a separate thread with its own event loop
         # to avoid RuntimeError when the main agent's event loop closes.
         messages = state.get("messages", [])
-        if messages:
+        reviewer = self._reviewer
+        messages_snapshot = tuple(messages)
+        if reviewer is not None and messages_snapshot:
             logger.info("Skill review triggered for thread %s (%d tool-call iterations)", thread_id, current)
             try:
                 thread = threading.Thread(
-                    target=lambda: asyncio.run(self._reviewer.review(thread_id, messages)),
+                    target=lambda: asyncio.run(reviewer.review(thread_id, messages_snapshot)),
                     daemon=True,
                     name=f"skill-review-{thread_id}",
                 )
