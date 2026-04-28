@@ -221,6 +221,18 @@ def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
     """Run an async memory update from sync code, including nested-loop contexts."""
     handed_off = False
 
+    def _run_coro() -> bool:
+        # Always create a fresh event loop to avoid reusing a closed loop.
+        # asyncio.run() is not safe to call multiple times from the same thread
+        # because it caches the loop internally; using new_event_loop() directly
+        # ensures each call gets a clean loop.
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
     try:
         try:
             loop = asyncio.get_running_loop()
@@ -228,12 +240,12 @@ def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
             loop = None
 
         if loop is not None and loop.is_running():
-            future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(asyncio.run, coro)
+            future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(_run_coro)
             handed_off = True
             return future.result()
 
         handed_off = True
-        return asyncio.run(coro)
+        return _run_coro()
     except Exception:
         if not handed_off:
             close = getattr(coro, "close", None)
