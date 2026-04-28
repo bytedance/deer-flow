@@ -1,12 +1,10 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
-  // Locale meta
   locale: {
     localName: string;
   };
 
-  // Common
   common: {
     home: string;
     settings: string;
@@ -45,7 +43,6 @@ export interface Translations {
     blog: string;
   };
 
-  // Welcome
   welcome: {
     greeting: string;
     description: string;
@@ -53,7 +50,6 @@ export interface Translations {
     createYourOwnSkillDescription: string;
   };
 
-  // Clipboard
   clipboard: {
     copyToClipboard: string;
     copiedToClipboard: string;
@@ -61,7 +57,6 @@ export interface Translations {
     linkCopied: string;
   };
 
-  // Input Box
   inputBox: {
     placeholder: string;
     createSkillPrompt: string;
@@ -109,7 +104,6 @@ export interface Translations {
     )[];
   };
 
-  // Sidebar
   sidebar: {
     recentChats: string;
     newChat: string;
@@ -118,7 +112,6 @@ export interface Translations {
     agents: string;
   };
 
-  // Agents
   agents: {
     title: string;
     description: string;
@@ -153,13 +146,11 @@ export interface Translations {
     backToGallery: string;
   };
 
-  // Breadcrumb
   breadcrumb: {
     workspace: string;
     chats: string;
   };
 
-  // Workspace
   workspace: {
     officialWebsite: string;
     githubTooltip: string;
@@ -170,18 +161,15 @@ export interface Translations {
     about: string;
   };
 
-  // Conversation
   conversation: {
     noMessages: string;
     startConversation: string;
   };
 
-  // Chats
   chats: {
     searchChats: string;
   };
 
-  // Page titles (document title)
   pages: {
     appName: string;
     chats: string;
@@ -189,7 +177,6 @@ export interface Translations {
     untitled: string;
   };
 
-  // Tool calls
   toolCalls: {
     moreSteps: (count: number) => string;
     lessSteps: string;
@@ -211,13 +198,11 @@ export interface Translations {
     skillInstallTooltip: string;
   };
 
-  // Uploads
   uploads: {
     uploading: string;
     uploadingFiles: string;
   };
 
-  // Subtasks
   subtasks: {
     subtask: string;
     executing: (count: number) => string;
@@ -226,7 +211,6 @@ export interface Translations {
     failed: string;
   };
 
-  // Token Usage
   tokenUsage: {
     title: string;
     label: string;
@@ -237,7 +221,6 @@ export interface Translations {
     unavailableShort: string;
   };
 
-  // Shortcuts
   shortcuts: {
     searchActions: string;
     noResults: string;
@@ -248,7 +231,48 @@ export interface Translations {
     toggleSidebar: string;
   };
 
-  // Settings
+  globalVariables: {
+    title: string;
+    description: string;
+    empty: string;
+    addVariable: string;
+    addVariableTitle: string;
+    editVariableTitle: string;
+    addSuccess: string;
+    updateSuccess: string;
+    deleteConfirmTitle: string;
+    deleteConfirmDescription: string;
+    deleteSuccess: string;
+    keyLabel: string;
+    valueLabel: string;
+    descriptionLabel: string;
+    llmEditableLabel: string;
+    llmEditableHint: string;
+    keyPlaceholder: string;
+    valuePlaceholder: string;
+    descriptionPlaceholder: string;
+    save: string;
+    validationKey: string;
+    validationValue: string;
+    noVariables: string;
+    scopeLabel: string;
+    scopeProject: string;
+    scopeThread: string;
+    selectThreadLabel: string;
+    searchThreadPlaceholder: string;
+    table: {
+      key: string;
+      value: string;
+      description: string;
+      llmEditable: string;
+      operations: string;
+    };
+    llmAllowed: string;
+    llmForbidden: string;
+    systemLabel: string;
+    systemHint: string;
+  };
+
   settings: {
     title: string;
     description: string;
@@ -259,6 +283,7 @@ export interface Translations {
       skills: string;
       notification: string;
       about: string;
+      globalVariables: string;
     };
     memory: {
       title: string;

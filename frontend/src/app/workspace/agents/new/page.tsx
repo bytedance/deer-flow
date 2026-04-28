@@ -350,7 +350,7 @@ export default function NewAgentPage() {
 
   return (
     <ThreadContext.Provider value={{ thread }}>
-      <ArtifactsProvider>
+      <ArtifactsProvider threadId={mockThreadId}>
         <div className="flex size-full flex-col">
           {header}
 

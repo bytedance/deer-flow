@@ -630,8 +630,11 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
 
 def get_agent_soul(agent_name: str | None) -> str:
     # Append SOUL.md (agent personality) if present
+    from deerflow.global_variables.prompt_injector import replace_template_variables
+
     soul = load_agent_soul(agent_name)
     if soul:
+        soul = replace_template_variables(soul)
         return f"<soul>\n{soul}\n</soul>\n" if soul else ""
     return ""
 

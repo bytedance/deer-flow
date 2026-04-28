@@ -12,9 +12,12 @@ from app.gateway.routers import (
     artifacts,
     assistants_compat,
     channels,
+    filesystem,
+    global_variables,
     mcp,
     memory,
     models,
+    novel_tags,
     runs,
     skills,
     suggestions,
@@ -171,6 +174,14 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
             },
             {
+                "name": "global-variables",
+                "description": "Manage global and thread-level variables for dynamic prompt injection",
+            },
+            {
+                "name": "novel-tags",
+                "description": "Query available novel tags from workspace/book directories",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -195,6 +206,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
 
+    # Filesystem API is mounted at /api/threads/{thread_id}/filesystem
+    app.include_router(filesystem.router)
+
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)
 
@@ -218,6 +232,12 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
+
+    # Global Variables API is mounted at /api/global-variables
+    app.include_router(global_variables.router)
+
+    # Novel Tags API is mounted at /api/novel-tags
+    app.include_router(novel_tags.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

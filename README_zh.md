@@ -48,6 +48,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
       - [MCP Server](#mcp-server)
       - [IM 渠道](#im-渠道)
       - [LangSmith 链路追踪](#langsmith-链路追踪)
+      - [小说写作系统](#小说写作系统二开功能)
   - [从 Deep Research 到 Super Agent Harness](#从-deep-research-到-super-agent-harness)
   - [核心特性](#核心特性)
     - [Skills 与 Tools](#skills-与-tools)
@@ -148,6 +149,31 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
      - name: gpt-4
        api_key: your-actual-api-key-here  # 替换为真实 key
    ```
+
+5. **（必须）配置共享数据文件夹**
+
+   DeerFlow 要求所有对话共享一个公共数据目录，用于跨对话资源共享（如项目模板、共享素材、全局配置等）。
+
+   打开 `config.yaml`，在 `sandbox` 配置段中确认 `mounts` 配置：
+
+   ```yaml
+   sandbox:
+     use: deerflow.sandbox.local:LocalSandboxProvider
+     allow_host_bash: false
+     mounts:
+       - host_path: backend/.deer-flow/shared-data    # 主机路径（相对于项目根目录）
+         container_path: /mnt/shared-data             # 沙箱内的虚拟路径
+         read_only: false                             # 允许所有对话读写
+   ```
+
+   首次使用前，需要手动创建该目录：
+
+   ```bash
+   mkdir -p backend/.deer-flow/shared-data
+   ```
+
+   > [!IMPORTANT]
+   > **必须配置共享文件夹**：这是 DeerFlow 项目的基础要求。所有对话都将通过 `/mnt/shared-data` 访问共享资源。未配置此挂载点将导致跨对话功能无法使用。
 
 ### 运行应用
 
@@ -385,6 +411,105 @@ LANGSMITH_PROJECT=xxx
 ```
 
 Docker 部署时，追踪默认关闭。在 `.env` 中设置 `LANGSMITH_TRACING=true` 和 `LANGSMITH_API_KEY` 即可启用。
+
+#### 小说写作系统（二开功能）
+
+本项目二开了一套完整的**小说写作系统**，包含 1 个主控 Agent（novel-master）和 14 个子 Agent，支持从新建小说、规划细纲/卷纲、写作章节、修改章节、审核连续性等全流程自动化。
+
+**Agent 架构**：
+
+| 类别 | Agent 名称 | 功能 |
+|------|-----------|------|
+| 主控 | novel-master | 协调所有子 Agent，接收用户指令 |
+| 规划类 | novel-architect | 新建小说时生成完整基础设定 |
+| | volume-planner | 编写/修改全书卷纲 |
+| | outline-planner | 编写/修改章节细纲（每5章一组） |
+| | book-rules-manager | 管理 book-rules.json 写作规则 |
+| 整理类 | novel-world-organizer | 整理当前章节需要的世界观设定 |
+| | novel-character-organizer | 整理当前章节出场的人物信息 |
+| | novel-item-organizer | 整理当前章节出场的道具和技能 |
+| 写作类 | novel-writer | 根据写作任务汇总撰写正文 |
+| | continuity-auditor | 多维度审核章节一致性 |
+| | novel-reviser | 根据审计报告修改正文 |
+| 状态管理类 | state-settler | 更新状态文件（位置、伏笔、摘要等） |
+| | chapter-summarizer | 生成章节摘要 |
+| | card-manager | 更新小说名片（card.json） |
+| | hook-manager | 管理伏笔池状态 |
+
+**配置步骤**：
+
+1. **启用 novel 工具组**：在 `config.yaml` 的 `tool_groups` 中添加：
+
+   ```yaml
+   tool_groups:
+     - name: novel    # 小说写作工具组
+   ```
+
+2. **注册自定义工具**：在 `config.yaml` 的 `tools` 段添加：
+
+   ```yaml
+   tools:
+     - name: context_assembler
+       group: novel
+       use: my_tools.context_assembler:context_assembler
+
+     - name: post_write_validator
+       group: novel
+       use: my_tools.post_write_validator:post_write_validator
+
+     - name: ai_trace_detector
+       group: novel
+       use: my_tools.ai_trace_detector:ai_trace_detector
+
+     - name: card_validator
+       group: novel
+       use: my_tools.card_validator:card_validator
+   ```
+
+3. **注册子 Agent**：在 `config.yaml` 的 `subagents.custom_agents` 中添加所有 14 个子 Agent 的定义（参考 `config.example.yaml` 中的完整示例）。
+
+4. **配置 novel-master**：`backend/.deer-flow/agents/novel-master/config.yaml` 已预配置好工具组和技能：
+
+   ```yaml
+   tool_groups:
+     - file:read
+     - file:write
+     - bash
+     - novel
+   skills:
+     - novel-post-write-validator
+     - novel-anti-ai-detector
+     - novel-plan-compliance
+   subagent_enabled: true
+   max_concurrent_subagents: 3
+   ```
+
+5. **启动服务**后即可使用。
+
+**使用示例**：
+
+- 新建小说：`我要写一部都市小说，书名《都市逍遥仙》，类型都市修仙`
+- 写作章节：`写第1章`
+- 修改章节：`修改第1章，加强主角和反派的冲突`
+- 查看状态：`现在写到哪了？`
+
+**目录结构**：
+
+```
+工作目录/book/[小说名称]/
+├── card.json                    # 小说名片（JSON 格式）
+├── 00-世界观/                   # 世界观、人物矩阵、支线板等
+├── 01-规划/                     # 卷纲、规则、细纲
+├── 02-正文/                     # 章节正文（按组组织）
+├── 03-状态/                     # 当前状态、伏笔池、摘要
+├── 04-审稿/                     # 审计报告、修改记录
+├── 05-参考/                     # 风格指纹、市场分析
+└── 06-归档/                     # 压缩摘要、历史版本
+```
+
+**文档**：
+- [Agent/Skill/Tool 配置指南](二开准备/二开经验/Agent-Skill-Tool配置指南.md)
+- [测试用例](二开准备/二开需求文档/agent配置/测试用例.md)
 
 ## 从 Deep Research 到 Super Agent Harness
 

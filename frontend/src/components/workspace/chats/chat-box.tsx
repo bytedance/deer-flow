@@ -1,4 +1,4 @@
-import { FilesIcon, XIcon } from "lucide-react";
+import { FileTextIcon, FilesIcon, XIcon } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { GroupImperativeHandle } from "react-resizable-panels";
@@ -109,6 +109,23 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     >
       <ResizablePanel className="relative" defaultSize={100} id="chat">
         {children}
+        <div className="absolute top-4 right-4 z-50">
+          <Button
+            size="icon-sm"
+            variant={artifactPanelOpen ? "secondary" : "outline"}
+            onClick={() => {
+              if (!artifactsOpen) {
+                deselect();
+                setArtifactsOpen(true);
+              } else {
+                setArtifactsOpen(false);
+              }
+            }}
+            className="shadow-sm"
+          >
+            <FileTextIcon className="h-4 w-4" />
+          </Button>
+        </div>
       </ResizablePanel>
       <ResizableHandle
         id={`${resizableIdBase}-separator`}
@@ -137,7 +154,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
               threadId={threadId}
             />
           ) : (
-            <div className="relative flex size-full justify-center">
+            <div className="relative flex size-full">
               <div className="absolute top-1 right-1 z-30">
                 <Button
                   size="icon-sm"
@@ -149,26 +166,11 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
                   <XIcon />
                 </Button>
               </div>
-              {thread.values.artifacts?.length === 0 ? (
-                <ConversationEmptyState
-                  icon={<FilesIcon />}
-                  title="No artifact selected"
-                  description="Select an artifact to view its details"
-                />
-              ) : (
-                <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
-                  <header className="shrink-0">
-                    <h2 className="text-lg font-medium">Artifacts</h2>
-                  </header>
-                  <main className="min-h-0 grow">
-                    <ArtifactFileList
-                      className="max-w-(--container-width-sm) p-4 pt-12"
-                      files={thread.values.artifacts ?? []}
-                      threadId={threadId}
-                    />
-                  </main>
-                </div>
-              )}
+              <ArtifactFileList
+                className="size-full max-w-(--container-width-sm)"
+                files={thread.values.artifacts ?? []}
+                threadId={threadId}
+              />
             </div>
           )}
         </div>

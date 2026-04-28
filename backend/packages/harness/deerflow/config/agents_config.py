@@ -38,6 +38,12 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # subagent_enabled controls whether the agent can use the "task" tool
+    # to delegate work to subagents. When True, the "task" tool is included
+    # in the agent's tool list regardless of the runtime mode.
+    subagent_enabled: bool = False
+    # max_concurrent_subagents controls how many subagent tasks can run in parallel
+    max_concurrent_subagents: int = 3
 
 
 def load_agent_config(name: str | None) -> AgentConfig | None:

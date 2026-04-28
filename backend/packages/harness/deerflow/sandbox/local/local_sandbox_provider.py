@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 
+from deerflow.config.paths import get_paths
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -55,13 +56,11 @@ class LocalSandboxProvider(SandboxProvider):
                     host_path = Path(mount.host_path)
                     container_path = mount.container_path.rstrip("/") or "/"
 
+                    # Resolve relative paths against project root
                     if not host_path.is_absolute():
-                        logger.warning(
-                            "Mount host_path must be absolute, skipping: %s -> %s",
-                            mount.host_path,
-                            mount.container_path,
-                        )
-                        continue
+                        # base_dir is backend/.deer-flow, so .parent.parent is project root (e.g., deer-flow/)
+                        project_root = get_paths().base_dir.parent.parent
+                        host_path = (project_root / host_path).resolve()
 
                     if not container_path.startswith("/"):
                         logger.warning(

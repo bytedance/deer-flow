@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
@@ -28,6 +28,7 @@ import { useThreadSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
+import { useAutoResumeMonitor } from "@/hooks/use-auto-resume-monitor";
 import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
@@ -88,6 +89,37 @@ export default function ChatPage() {
     ? MESSAGE_LIST_DEFAULT_PADDING_BOTTOM +
       MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM
     : undefined;
+
+  // -- Auto resume monitor --
+  const monitorLastActivityRef = useRef(Date.now());
+  const {
+    monitorState,
+    openDialog: openMonitorDialog,
+    closeDialog: closeMonitorDialog,
+    updateConfig: updateMonitorConfig,
+    startMonitor,
+    stopMonitor,
+  } = useAutoResumeMonitor(
+    isNewThread ? undefined : threadId,
+    () => thread.isLoading,
+    () => monitorLastActivityRef.current,
+    (ts: number) => {
+      monitorLastActivityRef.current = ts;
+    },
+    useCallback(
+      async (msg: string) => {
+        await sendMessage(threadId, { text: msg, files: [] });
+      },
+      [sendMessage, threadId],
+    ),
+  );
+
+  // Track activity when thread is loading
+  useEffect(() => {
+    if (thread.isLoading) {
+      monitorLastActivityRef.current = Date.now();
+    }
+  }, [thread.isLoading]);
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -171,6 +203,12 @@ export default function ChatPage() {
                     onFollowupsVisibilityChange={setShowFollowups}
                     onSubmit={handleSubmit}
                     onStop={handleStop}
+                    monitorState={monitorState}
+                    onMonitorOpen={openMonitorDialog}
+                    onMonitorClose={closeMonitorDialog}
+                    onMonitorConfigChange={updateMonitorConfig}
+                    onStartMonitor={startMonitor}
+                    onStopMonitor={stopMonitor}
                   />
                 ) : (
                   <div

@@ -39,6 +39,12 @@ is_port_listening() {
         fi
     fi
 
+    if command -v curl >/dev/null 2>&1; then
+        if curl -s -o /dev/null -w '' "http://127.0.0.1:$PORT/" --connect-timeout 2 >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
     return 1
 }
 

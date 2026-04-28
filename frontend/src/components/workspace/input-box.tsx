@@ -3,10 +3,12 @@
 import type { ChatStatus } from "ai";
 import {
   CheckIcon,
+  EyeIcon,
   GraduationCapIcon,
   LightbulbIcon,
   PaperclipIcon,
   PlusIcon,
+  SatelliteIcon,
   SparklesIcon,
   RocketIcon,
   XIcon,
@@ -58,8 +60,13 @@ import {
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
+import { useNovelTags } from "@/core/novel-tags/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import type {
+  MonitorConfig,
+  MonitorState,
+} from "@/hooks/use-auto-resume-monitor";
 import { cn } from "@/lib/utils";
 
 import {
@@ -81,6 +88,7 @@ import {
 
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
+import { NovelTagSelector } from "./novel-tag-selector";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
@@ -112,6 +120,12 @@ export function InputBox({
   onFollowupsVisibilityChange,
   onSubmit,
   onStop,
+  monitorState,
+  onMonitorOpen,
+  onMonitorClose,
+  onMonitorConfigChange,
+  onStartMonitor,
+  onStopMonitor,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -140,6 +154,13 @@ export function InputBox({
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onSubmit?: (message: PromptInputMessage) => void;
   onStop?: () => void;
+  // -- monitor props --
+  monitorState?: MonitorState;
+  onMonitorOpen?: () => void;
+  onMonitorClose?: () => void;
+  onMonitorConfigChange?: (config: Partial<MonitorConfig>) => void;
+  onStartMonitor?: () => void;
+  onStopMonitor?: () => void;
 }) {
   const { t } = useI18n();
   const searchParams = useSearchParams();
@@ -148,6 +169,7 @@ export function InputBox({
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
+  const { data: novelTagsData, isLoading: isLoadingTags } = useNovelTags();
 
   const [followups, setFollowups] = useState<string[]>([]);
   const [followupsHidden, setFollowupsHidden] = useState(false);
@@ -337,11 +359,7 @@ export function InputBox({
     setTimeout(() => requestFormSubmit(), 0);
   }, [pendingSuggestion, requestFormSubmit, textInput]);
 
-  const showFollowups =
-    !disabled &&
-    !isNewThread &&
-    !followupsHidden &&
-    (followupsLoading || followups.length > 0);
+  const showFollowups = false;
 
   const followupsVisibilityChangeRef = useRef(onFollowupsVisibilityChange);
 
@@ -477,6 +495,18 @@ export function InputBox({
             <div className="absolute right-0 bottom-0 left-0 flex items-center justify-center">
               {extraHeader}
             </div>
+          </div>
+        )}
+        {isNewThread && (
+          <div className="px-4 pt-3 pb-2">
+            <NovelTagSelector
+              value={context.novel_tag as string | undefined}
+              onChange={(tag) =>
+                onContextChange?.({ ...context, novel_tag: tag })
+              }
+              tags={novelTagsData?.tags ?? []}
+              disabled={isLoadingTags}
+            />
           </div>
         )}
         <PromptInputAttachments>
@@ -790,6 +820,37 @@ export function InputBox({
                 </PromptInputActionMenuContent>
               </PromptInputActionMenu>
             )}
+            {/* Monitor button */}
+            {monitorState && !isNewThread && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (monitorState.enabled) {
+                    onStopMonitor?.();
+                  } else if (monitorState.dialogOpen) {
+                    onMonitorClose?.();
+                  } else {
+                    onMonitorOpen?.();
+                  }
+                }}
+                className={cn(
+                  "flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-all",
+                  monitorState.enabled
+                    ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                    : "text-muted-foreground hover:bg-accent",
+                )}
+                title={monitorState.enabled ? "停止监控" : "开启监控"}
+              >
+                {monitorState.enabled ? (
+                  <SatelliteIcon className="size-3.5 animate-pulse" />
+                ) : (
+                  <EyeIcon className="size-3.5" />
+                )}
+                <span className="hidden sm:inline">
+                  {monitorState.enabled ? "监控中" : "监控"}
+                </span>
+              </button>
+            )}
           </PromptInputTools>
           <PromptInputTools>
             <ModelSelector
@@ -866,6 +927,72 @@ export function InputBox({
             </Button>
             <Button onClick={confirmReplaceAndSend}>
               {t.inputBox.followupConfirmReplace}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Monitor config dialog */}
+      <Dialog
+        open={monitorState?.dialogOpen ?? false}
+        onOpenChange={(open) => {
+          open ? onMonitorOpen?.() : onMonitorClose?.();
+        }}
+      >
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>监控配置</DialogTitle>
+            <DialogDescription>设置自动续传的空闲超时时间</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <label className="text-sm font-medium">
+                空闲超时时间（分钟）
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={60}
+                defaultValue={monitorState?.config.idleTimeoutMinutes ?? 10}
+                className="border-input focus-visible:ring-ring mt-1.5 flex h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:ring-1 focus-visible:outline-none"
+                onChange={(e) => {
+                  const value = parseInt(e.target.value, 10);
+                  if (value >= 1 && value <= 60) {
+                    onMonitorConfigChange?.({ idleTimeoutMinutes: value });
+                  }
+                }}
+              />
+              <p className="text-muted-foreground mt-1 text-xs">
+                建议 5-30 分钟，默认 10 分钟
+              </p>
+            </div>
+            <div>
+              <label className="text-sm font-medium">续传消息</label>
+              <div className="text-muted-foreground bg-muted mt-1 rounded-md px-3 py-2 text-xs">
+                &ldquo;请继续写第 N 章，一直写到第 M 章&rdquo;
+              </div>
+            </div>
+            <div>
+              <label className="text-sm font-medium">监控条件</label>
+              <div className="text-muted-foreground mt-1 text-xs">
+                target_chapters &gt; current_chapter
+                <br />
+                （当目标章节 &gt; 当前章节时生效）
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => onMonitorClose?.()}>
+              取消
+            </Button>
+            <Button
+              className="bg-emerald-600 text-white hover:bg-emerald-700"
+              onClick={() => {
+                onMonitorClose?.();
+                onStartMonitor?.();
+              }}
+            >
+              开始监控
             </Button>
           </DialogFooter>
         </DialogContent>

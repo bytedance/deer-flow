@@ -1,128 +1,165 @@
-import { DownloadIcon, LoaderIcon, PackageIcon } from "lucide-react";
-import { useCallback, useState } from "react";
-import { toast } from "sonner";
+import {
+  ChevronRightIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  Loader2Icon,
+} from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardAction,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { urlOfArtifact } from "@/core/artifacts/utils";
-import { useI18n } from "@/core/i18n/hooks";
-import { installSkill } from "@/core/skills/api";
-import {
-  getFileExtensionDisplayName,
-  getFileIcon,
-  getFileName,
-} from "@/core/utils/files";
+import { getFileIcon } from "@/core/utils/files";
 import { cn } from "@/lib/utils";
 
 import { useArtifacts } from "./context";
 
 export function ArtifactFileList({
   className,
-  files,
   threadId,
 }: {
   className?: string;
-  files: string[];
   threadId: string;
 }) {
-  const { t } = useI18n();
-  const { select: selectArtifact, setOpen } = useArtifacts();
-  const [installingFile, setInstallingFile] = useState<string | null>(null);
+  const {
+    directoryEntries,
+    expandedFolders,
+    currentPath,
+    isLoadingDirectory,
+    select,
+    toggleFolder,
+    loadDirectory,
+    navigateUp,
+  } = useArtifacts();
 
-  const handleClick = useCallback(
-    (filepath: string) => {
-      selectArtifact(filepath);
-      setOpen(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    console.log(
+      "📂 ArtifactFileList mounted, loading directory for thread:",
+      threadId,
+    );
+    setError(null);
+    void loadDirectory("/mnt/user-data/workspace").catch((err) => {
+      console.error("❌ Failed to load workspace directory:", err);
+      setError(
+        "Failed to connect to backend API. Make sure the backend server is running.",
+      );
+    });
+  }, [threadId, loadDirectory]);
+
+  const entries = directoryEntries[currentPath] ?? [];
+  const hasParent = currentPath !== "/mnt/user-data/workspace";
+
+  const handleSelect = useCallback(
+    (file: string) => {
+      select(`workspace:${file}`);
     },
-    [selectArtifact, setOpen],
+    [select],
   );
 
-  const handleInstallSkill = useCallback(
-    async (e: React.MouseEvent, filepath: string) => {
-      e.stopPropagation();
-      e.preventDefault();
-
-      if (installingFile) return;
-
-      setInstallingFile(filepath);
-      try {
-        const result = await installSkill({
-          thread_id: threadId,
-          path: filepath,
-        });
-        if (result.success) {
-          toast.success(result.message);
-        } else {
-          toast.error(result.message || "Failed to install skill");
-        }
-      } catch (error) {
-        console.error("Failed to install skill:", error);
-        toast.error("Failed to install skill");
-      } finally {
-        setInstallingFile(null);
+  const handleToggleFolder = useCallback(
+    (path: string) => {
+      toggleFolder(path);
+      if (!expandedFolders.has(path) && !directoryEntries[path]) {
+        void loadDirectory(path);
       }
     },
-    [threadId, installingFile],
+    [toggleFolder, expandedFolders, directoryEntries, loadDirectory],
   );
 
-  return (
-    <ul className={cn("flex w-full flex-col gap-4", className)}>
-      {files.map((file) => (
-        <Card
-          key={file}
-          className="relative cursor-pointer p-3"
-          onClick={() => handleClick(file)}
-        >
-          <CardHeader className="grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 pr-2 pl-1">
-            <CardTitle className="relative min-w-0 pl-8 leading-tight [overflow-wrap:anywhere] break-words">
-              <div className="min-w-0">{getFileName(file)}</div>
-              <div className="absolute top-2 -left-0.5">
-                {getFileIcon(file, "size-6")}
-              </div>
-            </CardTitle>
-            <CardDescription className="min-w-0 pl-8 text-xs">
-              {getFileExtensionDisplayName(file)} file
-            </CardDescription>
-            <CardAction className="row-span-1 self-center">
-              {file.endsWith(".skill") && (
-                <Button
-                  variant="ghost"
-                  disabled={installingFile === file}
-                  onClick={(e) => handleInstallSkill(e, file)}
-                >
-                  {installingFile === file ? (
-                    <LoaderIcon className="size-4 animate-spin" />
-                  ) : (
-                    <PackageIcon className="size-4" />
-                  )}
-                  {t.common.install}
-                </Button>
+  const renderEntry = (
+    entry: { name: string; path: string; isDirectory: boolean },
+    depth = 0,
+  ) => {
+    const isExpanded = expandedFolders.has(entry.path);
+    const paddingLeft = depth * 16 + 8;
+
+    if (entry.isDirectory) {
+      return (
+        <div key={entry.path}>
+          <div
+            className={cn(
+              "hover:bg-accent flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5",
+            )}
+            style={{ paddingLeft }}
+            onClick={() => handleToggleFolder(entry.path)}
+          >
+            {isExpanded ? (
+              <FolderOpenIcon className="text-muted-foreground h-4 w-4 shrink-0" />
+            ) : (
+              <FolderIcon className="text-muted-foreground h-4 w-4 shrink-0" />
+            )}
+            <span className="truncate text-sm font-medium">{entry.name}</span>
+            <ChevronRightIcon
+              className={cn(
+                "text-muted-foreground ml-auto h-4 w-4 shrink-0 transition-transform",
+                isExpanded && "rotate-90",
               )}
-              <Button variant="ghost" asChild>
-                <a
-                  href={urlOfArtifact({
-                    filepath: file,
-                    threadId: threadId,
-                    download: true,
-                  })}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <DownloadIcon className="size-4" />
-                  {t.common.download}
-                </a>
-              </Button>
-            </CardAction>
-          </CardHeader>
-        </Card>
-      ))}
-    </ul>
+            />
+          </div>
+          {isExpanded && directoryEntries[entry.path] && (
+            <div>
+              {directoryEntries[entry.path].map((child) =>
+                renderEntry(child, depth + 1),
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div
+        key={entry.path}
+        className={cn(
+          "hover:bg-accent flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5",
+        )}
+        style={{ paddingLeft }}
+        onClick={() => handleSelect(entry.path)}
+      >
+        {getFileIcon(entry.name, "h-4 w-4 shrink-0")}
+        <span className="truncate text-sm">{entry.name}</span>
+      </div>
+    );
+  };
+
+  return (
+    <div className={cn("size-full overflow-auto", className)}>
+      {/* Navigation bar */}
+      <div className="bg-background sticky top-0 z-10 flex items-center gap-2 border-b px-2 py-2">
+        {hasParent && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={navigateUp}
+            className="h-7 px-2 text-xs"
+          >
+            ↑ Up
+          </Button>
+        )}
+        <span className="text-muted-foreground truncate text-xs">
+          {currentPath}
+        </span>
+      </div>
+
+      {/* Content */}
+      <div className="p-2">
+        {isLoadingDirectory ? (
+          <div className="text-muted-foreground flex items-center justify-center gap-2 py-8 text-sm">
+            <Loader2Icon className="h-4 w-4 animate-spin" />
+            Loading...
+          </div>
+        ) : error ? (
+          <div className="text-destructive py-8 text-center text-sm">
+            {error}
+          </div>
+        ) : entries.length === 0 ? (
+          <div className="text-muted-foreground py-8 text-center text-sm">
+            No files found in this directory
+          </div>
+        ) : (
+          entries.map((entry) => renderEntry(entry))
+        )}
+      </div>
+    </div>
   );
 }

@@ -246,6 +246,11 @@ def _assemble_from_features(
 
             chain.append(MemoryMiddleware(agent_name=name))
 
+    # --- [9.5] Global Variables ---
+    from deerflow.agents.middlewares.global_variables_middleware import GlobalVariablesMiddleware
+
+    chain.append(GlobalVariablesMiddleware())
+
     # --- [10] Vision ---
     if feat.vision is not False:
         if isinstance(feat.vision, AgentMiddleware):

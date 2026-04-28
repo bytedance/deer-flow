@@ -84,6 +84,18 @@ def get_available_tools(
 
         builtin_tools.append(skill_manage_tool)
 
+    global_variables_config = getattr(config, "global_variables", None)
+    if getattr(global_variables_config, "enabled", False):
+        from deerflow.global_variables.tools import (
+            delete_variable_tool,
+            get_variable_tool,
+            list_variables_tool,
+            set_variable_tool,
+        )
+
+        builtin_tools.extend([get_variable_tool, set_variable_tool, delete_variable_tool, list_variables_tool])
+        logger.info("Global variable tools enabled")
+
     # Add subagent tools only if enabled via runtime parameter
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)

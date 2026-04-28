@@ -27,6 +27,8 @@ class AgentResponse(BaseModel):
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
     soul: str | None = Field(default=None, description="SOUL.md content")
+    subagent_enabled: bool = Field(default=False, description="Whether this agent can delegate to subagents via task tool")
+    max_concurrent_subagents: int = Field(default=3, description="Max concurrent subagent tasks")
 
 
 class AgentsListResponse(BaseModel):
@@ -99,6 +101,8 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
         soul=soul,
+        subagent_enabled=agent_cfg.subagent_enabled,
+        max_concurrent_subagents=agent_cfg.max_concurrent_subagents,
     )
 
 

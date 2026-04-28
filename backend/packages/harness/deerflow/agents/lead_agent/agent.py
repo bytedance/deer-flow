@@ -324,6 +324,13 @@ def make_lead_agent(config: RunnableConfig):
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
+    # Agent config can force subagent_enabled and max_concurrent_subagents
+    # This is useful for agents like novel-master that need task tool regardless of frontend mode
+    if agent_config:
+        if agent_config.subagent_enabled:
+            subagent_enabled = True
+            max_concurrent_subagents = agent_config.max_concurrent_subagents
+
     # Final model name resolution: request → agent config → global default, with fallback for unknown names
     model_name = _resolve_model_name(requested_model_name or agent_model_name)
 

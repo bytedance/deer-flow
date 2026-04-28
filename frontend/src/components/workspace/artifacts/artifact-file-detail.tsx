@@ -2,10 +2,13 @@ import {
   Code2Icon,
   CopyIcon,
   DownloadIcon,
+  EditIcon,
   EyeIcon,
   LoaderIcon,
   PackageIcon,
+  SaveIcon,
   SquareArrowOutUpRightIcon,
+  Trash2Icon,
   XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -20,6 +23,15 @@ import {
   ArtifactHeader,
   ArtifactTitle,
 } from "@/components/ai-elements/artifact";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Select, SelectItem } from "@/components/ui/select";
 import {
   SelectContent,
@@ -31,6 +43,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { CodeEditor } from "@/components/workspace/code-editor";
 import { useArtifactContent } from "@/core/artifacts/hooks";
 import { urlOfArtifact } from "@/core/artifacts/utils";
+import { deleteFile, readFile, writeFile } from "@/core/filesystem/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
@@ -54,46 +67,86 @@ export function ArtifactFileDetail({
   threadId: string;
 }) {
   const { t } = useI18n();
-  const { artifacts, setOpen, select } = useArtifacts();
+  const { artifacts, setOpen, select, directoryEntries, setDirectoryEntries } =
+    useArtifacts();
+
+  const isWorkspaceFile = useMemo(() => {
+    return filepathFromProps.startsWith("workspace:");
+  }, [filepathFromProps]);
+
   const isWriteFile = useMemo(() => {
     return filepathFromProps.startsWith("write-file:");
   }, [filepathFromProps]);
+
   const filepath = useMemo(() => {
     if (isWriteFile) {
       const url = new URL(filepathFromProps);
       return decodeURIComponent(url.pathname);
     }
+    if (isWorkspaceFile) {
+      return filepathFromProps.replace("workspace:", "");
+    }
     return filepathFromProps;
-  }, [filepathFromProps, isWriteFile]);
+  }, [filepathFromProps, isWriteFile, isWorkspaceFile]);
+
   const isSkillFile = useMemo(() => {
     return filepath.endsWith(".skill");
   }, [filepath]);
+
   const { isCodeFile, language } = useMemo(() => {
-    if (isWriteFile) {
+    if (isWriteFile || isWorkspaceFile) {
       let language = checkCodeFile(filepath).language;
       language ??= "text";
       return { isCodeFile: true, language };
     }
-    // Treat .skill files as markdown (they contain SKILL.md)
     if (isSkillFile) {
       return { isCodeFile: true, language: "markdown" };
     }
     return checkCodeFile(filepath);
-  }, [filepath, isWriteFile, isSkillFile]);
+  }, [filepath, isWriteFile, isSkillFile, isWorkspaceFile]);
+
   const isSupportPreview = useMemo(() => {
     return language === "html" || language === "markdown";
   }, [language]);
-  const { content } = useArtifactContent({
+
+  const { content: artifactContent } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
-    enabled: isCodeFile && !isWriteFile,
+    enabled: isCodeFile && !isWriteFile && !isWorkspaceFile,
   });
 
-  const displayContent = content ?? "";
+  const [workspaceContent, setWorkspaceContent] = useState<string | null>(null);
+  const [isLoadingWorkspaceContent, setIsLoadingWorkspaceContent] =
+    useState(false);
+
+  useEffect(() => {
+    if (isWorkspaceFile && !workspaceContent) {
+      setIsLoadingWorkspaceContent(true);
+      readFile(threadId, filepath)
+        .then((data) => {
+          setWorkspaceContent(data.content);
+        })
+        .catch((error) => {
+          console.error("Failed to read workspace file:", error);
+          toast.error("Failed to load file");
+        })
+        .finally(() => {
+          setIsLoadingWorkspaceContent(false);
+        });
+    }
+  }, [isWorkspaceFile, filepath, threadId, workspaceContent]);
+
+  const displayContent = workspaceContent ?? artifactContent ?? "";
 
   const [viewMode, setViewMode] = useState<"code" | "preview">("code");
+  const [isEditing, setIsEditing] = useState(false);
+  const [editContent, setEditContent] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
   const [isInstalling, setIsInstalling] = useState(false);
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const { isMock } = useThread();
+
   useEffect(() => {
     if (isSupportPreview) {
       setViewMode("preview");
@@ -101,6 +154,69 @@ export function ArtifactFileDetail({
       setViewMode("code");
     }
   }, [isSupportPreview]);
+
+  useEffect(() => {
+    if (isEditing) {
+      setEditContent(displayContent);
+    }
+  }, [isEditing, displayContent]);
+
+  const handleStartEdit = useCallback(() => {
+    setIsEditing(true);
+    setEditContent(displayContent);
+  }, [displayContent]);
+
+  const handleCancelEdit = useCallback(() => {
+    setIsEditing(false);
+    setEditContent("");
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      await writeFile(threadId, filepath, editContent);
+      setWorkspaceContent(editContent);
+      setIsEditing(false);
+      toast.success("File saved successfully");
+    } catch (error) {
+      console.error("Failed to save file:", error);
+      toast.error("Failed to save file");
+    } finally {
+      setIsSaving(false);
+    }
+  }, [threadId, filepath, editContent, isSaving]);
+
+  const handleDelete = useCallback(async () => {
+    if (isDeleting) return;
+    setIsDeleting(true);
+    try {
+      await deleteFile(threadId, filepath);
+      toast.success("File deleted successfully");
+      setOpen(false);
+
+      const parentPath = filepath.substring(0, filepath.lastIndexOf("/"));
+      if (directoryEntries[parentPath]) {
+        const updatedEntries = directoryEntries[parentPath].filter(
+          (e) => e.path !== filepath,
+        );
+        setDirectoryEntries(parentPath, updatedEntries);
+      }
+    } catch (error) {
+      console.error("Failed to delete file:", error);
+      toast.error("Failed to delete file");
+    } finally {
+      setIsDeleting(false);
+      setIsDeleteDialogOpen(false);
+    }
+  }, [
+    threadId,
+    filepath,
+    isDeleting,
+    setOpen,
+    directoryEntries,
+    setDirectoryEntries,
+  ]);
 
   const handleInstallSkill = useCallback(async () => {
     if (isInstalling) return;
@@ -123,12 +239,23 @@ export function ArtifactFileDetail({
       setIsInstalling(false);
     }
   }, [threadId, filepath, isInstalling]);
+
+  if (isLoadingWorkspaceContent && isWorkspaceFile) {
+    return (
+      <Artifact className={cn(className)}>
+        <ArtifactContent className="flex items-center justify-center p-4">
+          <LoaderIcon className="text-muted-foreground h-6 w-6 animate-spin" />
+        </ArtifactContent>
+      </Artifact>
+    );
+  }
+
   return (
     <Artifact className={cn(className)}>
       <ArtifactHeader className="px-2">
         <div className="flex items-center gap-2">
           <ArtifactTitle>
-            {isWriteFile ? (
+            {isWriteFile || isWorkspaceFile ? (
               <div className="px-2">{getFileName(filepath)}</div>
             ) : (
               <Select value={filepath} onValueChange={select}>
@@ -149,7 +276,7 @@ export function ArtifactFileDetail({
           </ArtifactTitle>
         </div>
         <div className="flex min-w-0 grow items-center justify-center">
-          {isSupportPreview && (
+          {isSupportPreview && !isEditing && (
             <ToggleGroup
               className="mx-auto"
               type="single"
@@ -170,24 +297,70 @@ export function ArtifactFileDetail({
               </ToggleGroupItem>
             </ToggleGroup>
           )}
+          {isEditing && (
+            <span className="text-muted-foreground text-xs">Editing mode</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <ArtifactActions>
-            {!isWriteFile && filepath.endsWith(".skill") && (
-              <Tooltip content={t.toolCalls.skillInstallTooltip}>
+            {isWorkspaceFile && !isEditing && (
+              <Tooltip content="Edit file">
                 <ArtifactAction
-                  icon={isInstalling ? LoaderIcon : PackageIcon}
-                  label={t.common.install}
-                  tooltip={t.common.install}
-                  disabled={
-                    isInstalling ||
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
-                  }
-                  onClick={handleInstallSkill}
+                  icon={EditIcon}
+                  label="Edit"
+                  tooltip="Edit file"
+                  onClick={handleStartEdit}
                 />
               </Tooltip>
             )}
-            {!isWriteFile && (
+            {isEditing && (
+              <>
+                <Tooltip content="Cancel">
+                  <ArtifactAction
+                    icon={XIcon}
+                    label="Cancel"
+                    tooltip="Cancel editing"
+                    onClick={handleCancelEdit}
+                  />
+                </Tooltip>
+                <Tooltip content="Save">
+                  <ArtifactAction
+                    icon={SaveIcon}
+                    label="Save"
+                    tooltip="Save file"
+                    disabled={isSaving}
+                    onClick={handleSave}
+                  />
+                </Tooltip>
+              </>
+            )}
+            {isWorkspaceFile && !isEditing && (
+              <Tooltip content="Delete file">
+                <ArtifactAction
+                  icon={Trash2Icon}
+                  label="Delete"
+                  tooltip="Delete file"
+                  onClick={() => setIsDeleteDialogOpen(true)}
+                />
+              </Tooltip>
+            )}
+            {!isWriteFile &&
+              !isWorkspaceFile &&
+              filepath.endsWith(".skill") && (
+                <Tooltip content={t.toolCalls.skillInstallTooltip}>
+                  <ArtifactAction
+                    icon={isInstalling ? LoaderIcon : PackageIcon}
+                    label={t.common.install}
+                    tooltip={t.common.install}
+                    disabled={
+                      isInstalling ||
+                      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+                    }
+                    onClick={handleInstallSkill}
+                  />
+                </Tooltip>
+              )}
+            {!isWriteFile && !isWorkspaceFile && (
               <ArtifactAction
                 icon={SquareArrowOutUpRightIcon}
                 label={t.common.openInNewWindow}
@@ -202,11 +375,11 @@ export function ArtifactFileDetail({
                 }}
               />
             )}
-            {isCodeFile && (
+            {isCodeFile && !isEditing && (
               <ArtifactAction
                 icon={CopyIcon}
                 label={t.clipboard.copyToClipboard}
-                disabled={!content}
+                disabled={!displayContent}
                 onClick={async () => {
                   try {
                     await navigator.clipboard.writeText(displayContent ?? "");
@@ -219,7 +392,7 @@ export function ArtifactFileDetail({
                 tooltip={t.clipboard.copyToClipboard}
               />
             )}
-            {!isWriteFile && (
+            {!isWriteFile && !isWorkspaceFile && (
               <ArtifactAction
                 icon={DownloadIcon}
                 label={t.common.download}
@@ -251,7 +424,8 @@ export function ArtifactFileDetail({
       <ArtifactContent className="p-0">
         {isSupportPreview &&
           viewMode === "preview" &&
-          (language === "markdown" || language === "html") && (
+          (language === "markdown" || language === "html") &&
+          !isEditing && (
             <ArtifactFilePreview
               content={displayContent}
               language={language ?? "text"}
@@ -260,17 +434,45 @@ export function ArtifactFileDetail({
         {isCodeFile && viewMode === "code" && (
           <CodeEditor
             className="size-full resize-none rounded-none border-none"
-            value={displayContent ?? ""}
-            readonly
+            value={isEditing ? editContent : displayContent}
+            readonly={!isEditing}
+            onChange={isEditing ? setEditContent : undefined}
           />
         )}
-        {!isCodeFile && (
+        {!isCodeFile && !isEditing && (
           <iframe
             className="size-full"
             src={urlOfArtifact({ filepath, threadId, isMock })}
           />
         )}
       </ArtifactContent>
+
+      <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete File</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete &quot;{getFileName(filepath)}
+              &quot;? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setIsDeleteDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={isDeleting}
+            >
+              {isDeleting ? "Deleting..." : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Artifact>
   );
 }

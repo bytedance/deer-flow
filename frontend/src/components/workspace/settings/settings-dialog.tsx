@@ -7,6 +7,7 @@ import {
   PaletteIcon,
   SparklesIcon,
   WrenchIcon,
+  HashIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -19,6 +20,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { AboutSettingsPage } from "@/components/workspace/settings/about-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
+import { GlobalVariablesSettingsPage } from "@/components/workspace/settings/global-variables-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
@@ -32,7 +34,8 @@ type SettingsSection =
   | "tools"
   | "skills"
   | "notification"
-  | "about";
+  | "about"
+  | "globalVariables";
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
   defaultSection?: SettingsSection;
@@ -71,6 +74,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
       },
       { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
       { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
+      {
+        id: "globalVariables",
+        label: t.settings.sections.globalVariables,
+        icon: HashIcon,
+      },
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
@@ -80,6 +88,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.skills,
       t.settings.sections.notification,
       t.settings.sections.about,
+      t.settings.sections.globalVariables,
     ],
   );
   return (
@@ -133,6 +142,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 />
               )}
               {activeSection === "notification" && <NotificationSettingsPage />}
+              {activeSection === "globalVariables" && (
+                <GlobalVariablesSettingsPage />
+              )}
               {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>

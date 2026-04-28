@@ -744,6 +744,7 @@ def test_full_chain_order(mock_create_agent):
         "TodoMiddleware",
         "TitleMiddleware",
         "MemoryMiddleware",
+        "GlobalVariablesMiddleware",
         "ViewImageMiddleware",
         "SubagentLimitMiddleware",
         "LoopDetectionMiddleware",

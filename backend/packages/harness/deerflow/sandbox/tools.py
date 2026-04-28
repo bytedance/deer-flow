@@ -133,14 +133,23 @@ def _get_custom_mounts():
         from pathlib import Path
 
         from deerflow.config import get_app_config
+        from deerflow.config.paths import get_paths
 
         config = get_app_config()
         mounts = []
         if config.sandbox and config.sandbox.mounts:
+            # Get project root for resolving relative paths
+            project_root = get_paths().base_dir.parent.parent
+
             # Only include mounts whose host_path exists, consistent with
             # LocalSandboxProvider._setup_path_mappings() which also filters
             # by host_path.exists().
-            mounts = [m for m in config.sandbox.mounts if Path(m.host_path).exists()]
+            for m in config.sandbox.mounts:
+                host_path = Path(m.host_path)
+                if not host_path.is_absolute():
+                    host_path = (project_root / host_path).resolve()
+                if host_path.exists():
+                    mounts.append(m)
         _get_custom_mounts._cached = mounts  # type: ignore[attr-defined]
         return mounts
     except Exception:

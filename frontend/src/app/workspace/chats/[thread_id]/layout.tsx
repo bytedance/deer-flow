@@ -6,12 +6,14 @@ import { SubtasksProvider } from "@/core/tasks/context";
 
 export default function ChatLayout({
   children,
+  params,
 }: {
   children: React.ReactNode;
+  params: Promise<{ thread_id: string }>;
 }) {
   return (
     <SubtasksProvider>
-      <ArtifactsProvider>
+      <ArtifactsProvider threadId={params.thread_id}>
         <PromptInputProvider>{children}</PromptInputProvider>
       </ArtifactsProvider>
     </SubtasksProvider>

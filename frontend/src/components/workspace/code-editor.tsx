@@ -42,6 +42,7 @@ export function CodeEditor({
   disabled,
   autoFocus,
   settings,
+  onChange,
 }: {
   className?: string;
   placeholder?: string;
@@ -50,6 +51,7 @@ export function CodeEditor({
   disabled?: boolean;
   autoFocus?: boolean;
   settings?: unknown;
+  onChange?: (value: string) => void;
 }) {
   const {
     thread: { isLoading },
@@ -107,6 +109,7 @@ export function CodeEditor({
           }}
           autoFocus={autoFocus}
           value={value}
+          onChange={onChange}
         />
       )}
     </div>

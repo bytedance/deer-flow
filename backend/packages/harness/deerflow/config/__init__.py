@@ -1,5 +1,6 @@
 from .app_config import get_app_config
 from .extensions_config import ExtensionsConfig, get_extensions_config
+from .global_variables_config import GlobalVariablesConfig, get_global_variables_config
 from .memory_config import MemoryConfig, get_memory_config
 from .paths import Paths, get_paths
 from .skill_evolution_config import SkillEvolutionConfig
@@ -22,6 +23,8 @@ __all__ = [
     "get_extensions_config",
     "MemoryConfig",
     "get_memory_config",
+    "GlobalVariablesConfig",
+    "get_global_variables_config",
     "get_tracing_config",
     "get_explicitly_enabled_tracing_providers",
     "get_enabled_tracing_providers",

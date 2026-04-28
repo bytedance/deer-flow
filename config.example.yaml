@@ -357,6 +357,7 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  # - name: novel             # 小说写作工具组（二开新增）
 
 # ============================================================================
 # Tools Configuration
@@ -481,6 +482,28 @@ tools:
     group: bash
     use: deerflow.sandbox.tools:bash_tool
 
+  # ============================================================================
+  # Novel Writing System Tools（二开新增）
+  # ============================================================================
+  # 小说写作系统自定义工具，需配合 novel-master Agent 使用
+  # 工具代码放在 my_tools/ 目录下
+  #
+  # - name: context_assembler      # 写作上下文汇总工具
+  #   group: novel
+  #   use: my_tools.context_assembler:context_assembler
+  #
+  # - name: post_write_validator   # 写作后格式验证工具
+  #   group: novel
+  #   use: my_tools.post_write_validator:post_write_validator
+  #
+  # - name: ai_trace_detector      # AI 痕迹检测工具
+  #   group: novel
+  #   use: my_tools.ai_trace_detector:ai_trace_detector
+  #
+  # - name: card_validator          # card.json 格式验证工具
+  #   group: novel
+  #   use: my_tools.card_validator:card_validator
+
 # ============================================================================
 # Tool Search Configuration (Deferred Tool Loading)
 # ============================================================================
@@ -521,6 +544,16 @@ sandbox:
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+
+  # Required: Shared data directory accessible by all threads.
+  # This mount enables cross-thread data sharing, allowing agents to read/write
+  # common resources like project templates, shared assets, and global configs.
+  # You MUST configure this mount before using DeerFlow.
+  mounts:
+    - host_path: backend/.deer-flow/shared-data    # Host path (relative to project root)
+      container_path: /mnt/shared-data             # Virtual path inside the sandbox
+      read_only: false                             # Read-write access for all threads
+
   # Optional: Mount additional host directories into the sandbox.
   # Each mount maps a host path to a virtual container path accessible by the agent.
   # mounts:
@@ -592,51 +625,207 @@ sandbox:
 # Configure timeouts for subagent execution
 # Subagents are background workers delegated tasks by the lead agent
 
-# subagents:
-#   # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
-#   timeout_seconds: 900
-#   # Optional global max-turn override for all subagents
-#   # max_turns: 120
-#
-#   # Optional per-agent overrides (applies to both built-in and custom agents)
-#   agents:
-#     general-purpose:
-#       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
-#       max_turns: 160
-#       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
-#       # skills:               # Skill whitelist (default: inherit all enabled skills)
-#       #   - web-search
-#       #   - data-analysis
-#     bash:
-#       timeout_seconds: 300   # 5 minutes for quick command execution
-#       max_turns: 80
-#       # skills: []            # No skills for bash agent
-#
-#   # Custom subagent types: define specialized agents with their own prompts,
-#   # tools, skills, and model configuration. Custom agents are available via
-#   # the `task` tool alongside built-in types (general-purpose, bash).
-#   # custom_agents:
-#   #   analysis:
-#   #     description: "Data analysis specialist for processing datasets and generating insights"
-#   #     system_prompt: |
-#   #       You are a data analysis subagent. Focus on:
-#   #       - Processing and analyzing datasets
-#   #       - Generating visualizations
-#   #       - Providing statistical insights
-#   #     tools:                  # Tool whitelist (null = inherit all)
-#   #       - bash
-#   #       - read_file
-#   #       - write_file
-#   #     skills:                 # Skill whitelist (null = inherit all, [] = none)
-#   #       - data-analysis
-#   #       - visualization
-#   #     model: inherit          # 'inherit' uses parent's model
-#   #     max_turns: 80
-#   #     timeout_seconds: 600
-#
-#   # Model override: by default, subagents inherit the lead agent's model.
-#   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
-#   # The model name must match a name defined in the `models:` section above.
+subagents:
+  # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
+  timeout_seconds: 900
+  # Optional global max-turn override for all subagents
+  # max_turns: 50
+
+  # Optional per-agent overrides (applies to both built-in and custom agents)
+  agents:
+    general-purpose:
+      timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
+      max_turns: 160
+    bash:
+      timeout_seconds: 300   # 5 minutes for quick command execution
+      max_turns: 80
+
+  # ============================================================================
+  # Novel Writing System Custom Subagents（二开新增）
+  # ============================================================================
+  # 小说写作系统子Agent，包含1个主控Agent + 14个子Agent
+  # 在 backend/.deer-flow/agents/ 目录下有对应的 SOUL.md 和 config.yaml
+  #
+  # custom_agents:
+  #   # ===== 规划类子Agent =====
+  #   novel-architect:
+  #     description: |
+  #       小说架构师，负责新建小说时生成完整基础设定。
+  #       包括世界观、卷纲、规则、计划、初始状态、伏笔池。
+  #     system_prompt: |
+  #       你是小说创作系统的架构师，专门负责新建小说时生成完整的基础架构设定。
+  #       ## 职责
+  #       1. 世界观构建  2. 卷纲规划  3. 规则制定  4. 创作计划  5. 初始状态
+  #       ## 输出文件
+  #       - story-bible.md、volume-outline.md、book-rules.json
+  #       - book-plan.md、current-state.md、pending-hooks.md
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #       - glob
+  #     model: inherit
+  #     max_turns: 80
+  #     timeout_seconds: 1800
+  #
+  #   volume-planner:
+  #     description: 卷纲规划师，负责编写或修改全书卷纲
+  #     system_prompt: |
+  #       你是小说创作系统的卷纲规划师，专门负责编写或修改全书的分卷大纲。
+  #       ## 职责：新建卷纲、修改卷纲、一致性维护、章节分组
+  #       ## 设计原则：起承转合、层层递进、节奏变化、悬念设置
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #       - str_replace
+  #     model: inherit
+  #     max_turns: 60
+  #     timeout_seconds: 1200
+  #
+  #   outline-planner:
+  #     description: 细纲规划师，负责编写或修改章节细纲（每5章一组）
+  #     system_prompt: |
+  #       你是小说创作系统的细纲规划师，专门负责编写或修改章节细纲。
+  #       ## 工作模式：new（新建）、revise（修改）、sync（同步）
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #       - str_replace
+  #     model: inherit
+  #     max_turns: 60
+  #     timeout_seconds: 1200
+  #
+  #   book-rules-manager:
+  #     description: 本书规则管理器，负责管理 book-rules.json
+  #     system_prompt: |
+  #       你是小说创作系统的规则管理器，负责管理 book-rules.json 文件。
+  #       ## 规则类别：hard_rules、style_guidelines、constraints、banned_words
+  #     tools:
+  #       - read_file
+  #       - str_replace
+  #     model: inherit
+  #     max_turns: 40
+  #     timeout_seconds: 600
+  #
+  #   # ===== 整理类子Agent =====
+  #   novel-world-organizer:
+  #     description: 世界观整理员，负责整理当前章节需要的世界观设定
+  #     system_prompt: |
+  #       你是小说创作系统的世界观整理员，负责在写作前整理当前章节需要的世界观设定。
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #     model: inherit
+  #     max_turns: 40
+  #     timeout_seconds: 600
+  #
+  #   novel-character-organizer:
+  #     description: 人物整理员，负责整理当前章节出场的人物信息
+  #     system_prompt: |
+  #       你是小说创作系统的人物整理员，负责在写作前整理当前章节出场的人物信息。
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #     model: inherit
+  #     max_turns: 40
+  #     timeout_seconds: 600
+  #
+  #   novel-item-organizer:
+  #     description: 道具整理员，负责整理当前章节出场的道具和技能
+  #     system_prompt: |
+  #       你是小说创作系统的道具整理员，负责在写作前整理当前章节出场的道具和技能信息。
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #     model: inherit
+  #     max_turns: 40
+  #     timeout_seconds: 600
+  #
+  #   # ===== 写作类子Agent =====
+  #   novel-writer:
+  #     description: 长篇网文写手，负责根据写作任务汇总撰写小说正文
+  #     system_prompt: |
+  #       你是一个专业的长篇网文写手。
+  #       ## 写作风格：口语化对白、强情绪强冲突、长短句结合
+  #       ## 写作要求：冲突升级、对话占比30%、1600字以上
+  #       ## 输出规则：纯正文、无Markdown格式、无章节标题
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #     model: inherit
+  #     max_turns: 80
+  #     timeout_seconds: 1800
+  #
+  #   continuity-auditor:
+  #     description: 连续性审计师，负责多维度审核小说章节一致性
+  #     system_prompt: |
+  #       你是小说创作系统的连续性审计师，负责对新写的小说章节进行多维度审核。
+  #       ## 审计维度：角色一致性、世界观一致性、叙事连贯性、伏笔管理、写作质量、AI痕迹检测
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #     model: inherit
+  #     max_turns: 60
+  #     timeout_seconds: 1200
+  #
+  #   novel-reviser:
+  #     description: 修稿编辑，负责根据审计报告修改小说正文
+  #     system_prompt: |
+  #       你是小说创作系统的修稿编辑，负责根据审计报告中的问题对小说正文进行修改。
+  #       ## 修稿模式：polish、rewrite、rework、anti-detect、spot-fix
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #       - str_replace
+  #     model: inherit
+  #     max_turns: 80
+  #     timeout_seconds: 1800
+  #
+  #   # ===== 状态管理类子Agent =====
+  #   state-settler:
+  #     description: 结算器，负责将写作输出的事实变更合并到状态文件
+  #     system_prompt: |
+  #       你是小说创作系统的结算器，负责将小说正文中发生的事实变更合并到系统的状态文件中。
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #       - str_replace
+  #     model: inherit
+  #     max_turns: 60
+  #     timeout_seconds: 1200
+  #
+  #   chapter-summarizer:
+  #     description: 章节总结员，负责从小说正文生成章节摘要
+  #     system_prompt: |
+  #       你是小说创作系统的章节总结助理，负责将小说正文浓缩为简洁的章节摘要。
+  #     tools:
+  #       - read_file
+  #       - write_file
+  #     model: inherit
+  #     max_turns: 40
+  #     timeout_seconds: 600
+  #
+  #   card-manager:
+  #     description: 名片管理器，负责更新小说名片（card.json）
+  #     system_prompt: |
+  #       你是小说创作系统的名片管理助理，负责维护 card.json 文件的准确性和时效性。
+  #     tools:
+  #       - read_file
+  #       - str_replace
+  #     model: inherit
+  #     max_turns: 40
+  #     timeout_seconds: 600
+  #
+  #   hook-manager:
+  #     description: 伏笔管理器，负责管理伏笔池状态
+  #     system_prompt: |
+  #       你是小说创作系统的伏笔管理助理，负责跟踪小说中所有未解决的伏笔。
+  #       ## 伏笔状态：open、progressing、resolved
+  #     tools:
+  #       - read_file
+  #       - str_replace
+  #     model: inherit
+  #     max_turns: 40
+  #     timeout_seconds: 600
 
 # ============================================================================
 # ACP Agents Configuration
