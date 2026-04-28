@@ -170,6 +170,10 @@ class ChannelService:
             channel = channel_cls(bus=self.bus, config=config)
             self._channels[name] = channel
             await channel.start()
+            if not channel.is_running:
+                self._channels.pop(name, None)
+                logger.error("Channel %s did not enter a running state after start()", name)
+                return False
             logger.info("Channel %s started", name)
             return True
         except Exception:
