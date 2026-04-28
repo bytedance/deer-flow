@@ -138,7 +138,13 @@ class RunJournal(BaseCallbackHandler):
         # Mark this run_id as seen so on_llm_end knows not to increment again.
         self._cached_prompts[rid] = []
 
-        logger.info(f"on_chat_model_start {run_id}: tags={tags} serialized={serialized} messages={messages}")
+        logger.debug(
+            "on_chat_model_start %s: tags=%s batch_count=%d message_counts=%s",
+            run_id,
+            tags,
+            len(messages),
+            [len(batch) for batch in messages],
+        )
 
         # Capture the first human message sent to any LLM in this run.
         if not self._first_human_msg and messages:

@@ -44,8 +44,13 @@ class LocalAuthProvider(AuthProvider):
             return None
 
         if needs_rehash(user.password_hash):
-            user.password_hash = await hash_password_async(password)
-            await self._repo.update_user(user)
+            try:
+                user.password_hash = await hash_password_async(password)
+                await self._repo.update_user(user)
+            except Exception:
+                # Rehash is an opportunistic upgrade; a transient DB error must not
+                # prevent an otherwise-valid login from succeeding.
+                pass
 
         return user
 

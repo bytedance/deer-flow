@@ -41,16 +41,21 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Accepts v2 (``$dfv2$…``), v1 (``$dfv1$…``), and bare bcrypt hashes
     (treated as v1 for backward compatibility with pre-versioning data).
     """
-    if hashed_password.startswith(_PREFIX_V2):
-        bcrypt_hash = hashed_password[len(_PREFIX_V2) :]
-        return bcrypt.checkpw(_pre_hash_v2(plain_password), bcrypt_hash.encode("utf-8"))
+    try:
+        if hashed_password.startswith(_PREFIX_V2):
+            bcrypt_hash = hashed_password[len(_PREFIX_V2) :]
+            return bcrypt.checkpw(_pre_hash_v2(plain_password), bcrypt_hash.encode("utf-8"))
 
-    if hashed_password.startswith(_PREFIX_V1):
-        bcrypt_hash = hashed_password[len(_PREFIX_V1) :]
-    else:
-        bcrypt_hash = hashed_password
+        if hashed_password.startswith(_PREFIX_V1):
+            bcrypt_hash = hashed_password[len(_PREFIX_V1) :]
+        else:
+            bcrypt_hash = hashed_password
 
-    return bcrypt.checkpw(plain_password.encode("utf-8"), bcrypt_hash.encode("utf-8"))
+        return bcrypt.checkpw(plain_password.encode("utf-8"), bcrypt_hash.encode("utf-8"))
+    except Exception:
+        # Malformed or corrupt hash (e.g. ValueError from bcrypt for invalid salt)
+        # — fail closed rather than crashing the request.
+        return False
 
 
 def needs_rehash(hashed_password: str) -> bool:
