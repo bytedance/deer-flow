@@ -1183,10 +1183,11 @@ class DeerFlowClient:
             FileNotFoundError: If the artifact does not exist.
             ValueError: If the path is invalid.
         """
+        normalized = path if path.startswith("/") else f"/{path}"
         try:
-            actual = get_paths().resolve_virtual_path(thread_id, path)
+            actual = get_paths().resolve_output_virtual_path(thread_id, normalized)
         except ValueError as exc:
-            if "traversal" in str(exc):
+            if "traversal" in str(exc) or "outside outputs" in str(exc):
                 from deerflow.uploads.manager import PathTraversalError
 
                 raise PathTraversalError("Path traversal detected") from exc

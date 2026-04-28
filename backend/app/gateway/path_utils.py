@@ -26,3 +26,11 @@ def resolve_thread_virtual_path(thread_id: str, virtual_path: str) -> Path:
     except ValueError as e:
         status = 403 if "traversal" in str(e) else 400
         raise HTTPException(status_code=status, detail=str(e))
+
+
+def resolve_thread_artifact_path(thread_id: str, virtual_path: str) -> Path:
+    normalized = virtual_path if virtual_path.startswith("/") else f"/{virtual_path}"
+    try:
+        return get_paths().resolve_output_virtual_path(thread_id, normalized)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))

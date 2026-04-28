@@ -3005,16 +3005,27 @@ class TestBugArtifactPrefixMatchTooLoose:
         with pytest.raises(ValueError, match="must start with"):
             client.get_artifact("t1", "mnt/user-data-evil/secret.txt")
 
-    def test_exact_prefix_without_subpath_accepted(self, client):
-        """Bare 'mnt/user-data' is accepted (will later fail as directory, not at prefix)."""
+    def test_exact_prefix_without_subpath_rejected_for_artifacts(self, client):
+        """Bare 'mnt/user-data' is outside the artifact output boundary."""
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
             paths.sandbox_user_data_dir("t1").mkdir(parents=True)
 
             with patch("deerflow.client.get_paths", return_value=paths):
-                # Accepted at prefix check, but fails because it's a directory.
-                with pytest.raises(ValueError, match="not a file"):
+                with pytest.raises(PathTraversalError):
                     client.get_artifact("t1", "mnt/user-data")
+
+    def test_artifact_upload_path_rejected(self, client):
+        """get_artifact must not read uploaded files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = Paths(base_dir=tmp)
+            upload = paths.sandbox_uploads_dir("t1") / "secret.txt"
+            upload.parent.mkdir(parents=True)
+            upload.write_text("secret")
+
+            with patch("deerflow.client.get_paths", return_value=paths):
+                with pytest.raises(PathTraversalError):
+                    client.get_artifact("t1", "mnt/user-data/uploads/secret.txt")
 
 
 class TestBugListUploadsDeadCode:

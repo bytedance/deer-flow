@@ -280,6 +280,24 @@ class Paths:
 
         return actual
 
+    def resolve_output_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
+        stripped = virtual_path.lstrip("/")
+        prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
+
+        if stripped != prefix and not stripped.startswith(prefix + "/"):
+            raise ValueError(f"Path must start with /{prefix}")
+
+        relative = stripped[len(prefix) :].lstrip("/")
+        outputs_base = self.sandbox_outputs_dir(thread_id).resolve()
+        actual = (self.sandbox_user_data_dir(thread_id) / relative).resolve()
+
+        try:
+            actual.relative_to(outputs_base)
+        except ValueError:
+            raise ValueError("Access denied: artifact path outside outputs")
+
+        return actual
+
 
 # ── Singleton ────────────────────────────────────────────────────────────
 
