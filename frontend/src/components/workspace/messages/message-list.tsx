@@ -1,4 +1,5 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
+import { InfoIcon } from "lucide-react";
 
 import {
   Conversation,
@@ -51,6 +52,7 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
+  const hasSummary = messages.length > 0 && isSummaryMessage(messages[0]!);
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
@@ -59,6 +61,14 @@ export function MessageList({
       className={cn("flex size-full flex-col justify-center", className)}
     >
       <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-12">
+        {hasSummary && (
+          <div className="border-border/50 bg-muted/30 mx-auto flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm">
+            <InfoIcon className="text-muted-foreground size-4 shrink-0" />
+            <span className="text-muted-foreground">
+              {t.conversation.summarized}
+            </span>
+          </div>
+        )}
         {groupMessages(messages, (group) => {
           if (group.type === "human" || group.type === "assistant") {
             return group.messages.map((msg) => {

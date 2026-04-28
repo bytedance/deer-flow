@@ -306,6 +306,27 @@ export function extractPresentFilesFromMessage(message: Message) {
   return files;
 }
 
+/**
+ * Detect whether a message is a conversation summary injected by
+ * the backend SummarizationMiddleware. When the conversation exceeds
+ * the configured token threshold, older messages are replaced with a
+ * single HumanMessage whose content starts with a well-known prefix.
+ */
+const SUMMARY_PREFIX = "Here is a summary of the conversation to date:";
+
+export function isSummaryMessage(message: Message): boolean {
+  if (message.type !== "human") {
+    return false;
+  }
+  const text =
+    typeof message.content === "string"
+      ? message.content
+      : Array.isArray(message.content)
+        ? message.content.map((c) => (c.type === "text" ? c.text : "")).join("")
+        : "";
+  return text.trimStart().startsWith(SUMMARY_PREFIX);
+}
+
 export function hasSubagent(message: AIMessage) {
   for (const toolCall of message.tool_calls ?? []) {
     if (toolCall.name === "task") {

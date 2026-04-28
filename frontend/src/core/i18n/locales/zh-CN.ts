@@ -230,6 +230,7 @@ export const zhCN: Translations = {
   conversation: {
     noMessages: "还没有消息",
     startConversation: "开始新的对话以查看消息",
+    summarized: "更早的消息已被自动摘要以节省上下文空间。",
   },
 
   // Chats

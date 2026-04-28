@@ -242,6 +242,7 @@ export const enUS: Translations = {
   conversation: {
     noMessages: "No messages yet",
     startConversation: "Start a conversation to see messages here",
+    summarized: "Earlier messages have been summarized to save context space.",
   },
 
   // Chats
