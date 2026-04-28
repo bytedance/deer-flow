@@ -138,19 +138,29 @@ def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> 
 
     validate_path_traversal(dest, base_dir)
 
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise UnsafeUploadPathError("Upload writes require O_NOFOLLOW support")
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
 
     try:
-        fd = os.open(dest, flags, 0o666)
+        fd = os.open(dest, flags, 0o600)
     except OSError as exc:
         if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR}:
             raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
         raise
 
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(data)
+    try:
+        opened_stat = os.fstat(fd)
+        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
+            raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
+        os.ftruncate(fd, 0)
+        with os.fdopen(fd, "wb") as fh:
+            fd = -1
+            fh.write(data)
+    finally:
+        if fd >= 0:
+            os.close(fd)
     return dest
 
 

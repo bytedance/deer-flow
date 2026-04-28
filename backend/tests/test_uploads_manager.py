@@ -1,14 +1,18 @@
 """Tests for deerflow.uploads.manager — shared upload management logic."""
 
+import os
+
 import pytest
 
 from deerflow.uploads.manager import (
     PathTraversalError,
+    UnsafeUploadPathError,
     claim_unique_filename,
     delete_file_safe,
     list_files_in_dir,
     normalize_filename,
     validate_path_traversal,
+    write_upload_file_no_symlink,
 )
 
 # ---------------------------------------------------------------------------
@@ -95,6 +99,27 @@ class TestValidatePathTraversal:
             raise
         with pytest.raises(PathTraversalError, match="traversal"):
             validate_path_traversal(link, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# write_upload_file_no_symlink
+# ---------------------------------------------------------------------------
+
+
+class TestWriteUploadFileNoSymlink:
+    def test_writes_new_file(self, tmp_path):
+        dest = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
+
+        assert dest == tmp_path / "notes.txt"
+        assert dest.read_bytes() == b"hello"
+
+    def test_fails_closed_without_no_follow_support(self, tmp_path, monkeypatch):
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+        with pytest.raises(UnsafeUploadPathError, match="O_NOFOLLOW"):
+            write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
+
+        assert not (tmp_path / "notes.txt").exists()
 
 
 # ---------------------------------------------------------------------------

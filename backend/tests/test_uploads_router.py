@@ -1,4 +1,5 @@
 import asyncio
+import os
 import stat
 from io import BytesIO
 from pathlib import Path
@@ -450,6 +451,53 @@ def test_upload_files_rejects_preexisting_symlink_destination(tmp_path):
     assert result.files == []
     assert outside_file.read_text(encoding="utf-8") == "protected"
     assert (thread_uploads_dir / "victim.txt").is_symlink()
+
+
+def test_upload_files_rejects_dangling_symlink_destination(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    missing_target = tmp_path / "missing-target.txt"
+    (thread_uploads_dir / "victim.txt").symlink_to(missing_target)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        file = UploadFile(filename="victim.txt", file=BytesIO(b"attacker upload"))
+        result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+
+    assert result.success is True
+    assert result.files == []
+    assert not missing_target.exists()
+    assert (thread_uploads_dir / "victim.txt").is_symlink()
+
+
+def test_upload_files_rejects_hardlinked_destination_without_truncating(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("protected", encoding="utf-8")
+    os.link(outside_file, thread_uploads_dir / "victim.txt")
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        file = UploadFile(filename="victim.txt", file=BytesIO(b"attacker upload"))
+        result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+
+    assert result.success is True
+    assert result.files == []
+    assert outside_file.read_text(encoding="utf-8") == "protected"
+    assert (thread_uploads_dir / "victim.txt").read_text(encoding="utf-8") == "protected"
 
 
 def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
