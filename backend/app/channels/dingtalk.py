@@ -289,6 +289,7 @@ class DingTalkChannel(Channel):
                 await self._send_p2p_message(robot_code, sender_staff_id, text)
         except Exception:
             logger.exception("[DingTalk] markdown fallback also failed")
+            raise
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if attachment.size > _MAX_UPLOAD_SIZE_BYTES:
@@ -500,8 +501,22 @@ class DingTalkChannel(Channel):
                 )
                 response.raise_for_status()
                 data = response.json()
-                self._cached_token = data.get("accessToken", "")
-                expires_in = data.get("expireIn", 7200)
+
+                if not isinstance(data, dict):
+                    raise ValueError(f"DingTalk access token response must be a JSON object, got {type(data).__name__}")
+
+                access_token = data.get("accessToken")
+                if not isinstance(access_token, str) or not access_token.strip():
+                    raise ValueError("DingTalk access token response did not contain a usable accessToken")
+
+                raw_expires_in = data.get("expireIn", 7200)
+                try:
+                    expires_in = int(raw_expires_in)
+                except (TypeError, ValueError):
+                    logger.warning("[DingTalk] invalid expireIn value %r, using default 7200s", raw_expires_in)
+                    expires_in = 7200
+
+                self._cached_token = access_token.strip()
                 self._token_expires_at = time.monotonic() + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
                 return self._cached_token
 

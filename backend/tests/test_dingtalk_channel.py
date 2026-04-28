@@ -459,6 +459,23 @@ class TestAllowedUsersFiltering:
 # ---------------------------------------------------------------------------
 
 
+class TestMarkdownFallbackPropagation:
+    def test_fallback_raises_on_failure(self):
+        async def go():
+            bus = MessageBus()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "test_key"
+            channel._cached_token = "tok"
+            channel._token_expires_at = float("inf")
+
+            channel._send_p2p_message = AsyncMock(side_effect=ConnectionError("send failed"))
+
+            with pytest.raises(ConnectionError, match="send failed"):
+                await channel._send_markdown_fallback("test_key", _CONVERSATION_TYPE_P2P, "user_001", "", "hello")
+
+        _run(go())
+
+
 class TestSendRouting:
     def test_p2p_send_uses_oto_endpoint(self):
         async def go():
@@ -680,6 +697,108 @@ class TestTopicIdMapping:
 # ---------------------------------------------------------------------------
 # Token caching tests
 # ---------------------------------------------------------------------------
+
+
+class TestAccessTokenValidation:
+    def test_rejects_non_dict_response(self):
+        async def go():
+            from unittest.mock import patch
+
+            bus = MessageBus()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "k"
+            channel._client_secret = "s"
+
+            class FakeResponse:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return "not a dict"
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                async def post(self, url, **kwargs):
+                    return FakeResponse()
+
+            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+                with pytest.raises(ValueError, match="JSON object"):
+                    await channel._get_access_token()
+
+        _run(go())
+
+    def test_rejects_empty_access_token(self):
+        async def go():
+            from unittest.mock import patch
+
+            bus = MessageBus()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "k"
+            channel._client_secret = "s"
+
+            class FakeResponse:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"accessToken": "", "expireIn": 7200}
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                async def post(self, url, **kwargs):
+                    return FakeResponse()
+
+            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+                with pytest.raises(ValueError, match="usable accessToken"):
+                    await channel._get_access_token()
+
+        _run(go())
+
+    def test_invalid_expire_in_uses_default(self):
+        async def go():
+            import time
+            from unittest.mock import patch
+
+            bus = MessageBus()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "k"
+            channel._client_secret = "s"
+
+            class FakeResponse:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"accessToken": "tok_ok", "expireIn": "invalid"}
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                async def post(self, url, **kwargs):
+                    return FakeResponse()
+
+            before = time.monotonic()
+            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+                token = await channel._get_access_token()
+
+            assert token == "tok_ok"
+            assert channel._token_expires_at > before
+
+        _run(go())
 
 
 class TestTokenCaching:
