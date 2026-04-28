@@ -36,7 +36,7 @@ class SkillReviewMiddleware(AgentMiddleware[AgentState]):
         self._iters: OrderedDict[str, int] = OrderedDict()
         # Per-thread last-seen total tool-call rounds (to compute per-turn deltas)
         self._last_seen: dict[str, int] = {}
-        logger.info("SkillReviewMiddleware.__init__ called, config=%s, skill_evolution=%s", type(config).__name__, getattr(config, "skill_evolution", None))
+        logger.info("SkillReviewMiddleware initialized")
 
     def _ensure_config(self):
         """Lazily resolve config and reviewer (avoids import-time disk reads)."""
@@ -90,21 +90,20 @@ class SkillReviewMiddleware(AgentMiddleware[AgentState]):
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         """Check iteration count and trigger background skill review if threshold reached."""
-        logger.info("SkillReviewMiddleware.aafter_agent CALLED — entry point reached")
+        logger.debug("SkillReviewMiddleware.aafter_agent called")
         self._ensure_config()
 
         if not getattr(self._config, "skill_evolution", None) or not self._config.skill_evolution.enabled:
-            logger.info("SkillReviewMiddleware: skill_evolution not enabled, skipping")
+            logger.debug("SkillReviewMiddleware: skill_evolution not enabled, skipping")
             return None
 
         thread_id = self._get_thread_id(runtime)
-        logger.info("SkillReviewMiddleware: thread_id=%s", thread_id)
         if not thread_id:
-            logger.info("No thread_id in context, skipping skill review check")
+            logger.debug("No thread_id in context, skipping skill review check")
             return None
 
         total_rounds = self._count_tool_call_rounds(state)
-        logger.info("SkillReviewMiddleware: total_rounds=%d", total_rounds)
+        logger.debug("SkillReviewMiddleware: thread=%s, total_rounds=%d", thread_id, total_rounds)
         if total_rounds == 0:
             return None
 
@@ -126,7 +125,7 @@ class SkillReviewMiddleware(AgentMiddleware[AgentState]):
 
             self._iters[thread_id] += new_rounds
             current = self._iters[thread_id]
-            logger.info("SkillReviewMiddleware: thread=%s, new_rounds=%d, current=%d, threshold=%d", thread_id, new_rounds, current, threshold)
+            logger.debug("SkillReviewMiddleware: thread=%s, new_rounds=%d, current=%d, threshold=%d", thread_id, new_rounds, current, threshold)
 
             if current < threshold:
                 return None

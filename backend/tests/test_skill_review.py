@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 
+import threading
+
 from deerflow.agents.middlewares.skill_review_middleware import SkillReviewMiddleware
 from deerflow.agents.skill_review.reviewer import SkillReviewer
 
@@ -56,6 +58,26 @@ def _make_config(enabled=True, interval=10):
 async def _run_middleware(mw, state, runtime):
     """Helper to run aafter_agent in an async context."""
     return await mw.aafter_agent(state, runtime)
+
+
+class _SyncThread:
+    """Patches threading.Thread to run the target synchronously in the calling thread.
+
+    This avoids race conditions in tests where assertions run before the daemon
+    thread has executed. Replace ``threading.Thread`` with this class via patch.
+    """
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=False, name=None, **_):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        if self._target:
+            self._target(*self._args, **self._kwargs)
+
+    def join(self, timeout=None):
+        pass  # Already completed in start()
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +241,11 @@ class TestSkillReviewMiddleware:
 
         msgs = state1["messages"] + [AIMessage(content="", tool_calls=[{"name": "bash", "id": "call_new", "args": {"command": "ls"}}])]
         state2 = {"messages": msgs}
-        anyio.run(_run_middleware, mw, state2, runtime)
+
+        # Patch threading.Thread to execute synchronously so the assertion is deterministic
+        with patch.object(threading, "Thread", _SyncThread):
+            anyio.run(_run_middleware, mw, state2, runtime)
+
         assert mw._iters["thread-B"] == 0  # Reset after trigger
         mock_reviewer.review.assert_called_once()
 
@@ -233,7 +259,10 @@ class TestSkillReviewMiddleware:
         mw._reviewer = mock_reviewer
 
         state = _make_state(tool_call_rounds=2)
-        anyio.run(_run_middleware, mw, state, runtime)
+
+        with patch.object(threading, "Thread", _SyncThread):
+            anyio.run(_run_middleware, mw, state, runtime)
+
         assert mw._iters["thread-C"] == 0
 
     def test_per_thread_isolation(self):
