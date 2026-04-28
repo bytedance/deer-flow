@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from langchain_core.tools import StructuredTool
@@ -26,15 +26,14 @@ def test_mcp_tool_sync_wrapper_generation():
         coroutine=mock_coro,
     )
 
-    mock_client_instance = MagicMock()
-    # Use AsyncMock for get_tools as it's awaited (Fix for Comment 5)
-    mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool])
+    mock_load_tools = AsyncMock(return_value=[mock_tool])
 
     with (
-        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
         patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
-        patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {}}),
+        patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {"transport": "sse", "url": "http://localhost:8000/sse"}}),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.tools.load_mcp_tools", mock_load_tools),
     ):
         # Run the async function manually with asyncio.run
         tools = asyncio.run(get_mcp_tools())

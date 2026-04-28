@@ -59,9 +59,10 @@ async def get_mcp_tools() -> list[BaseTool]:
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
+        If some servers are unavailable, tools from available servers are still returned.
     """
     try:
-        from langchain_mcp_adapters.client import MultiServerMCPClient
+        from langchain_mcp_adapters.tools import load_mcp_tools as load_mcp_tools_from_connection
     except ImportError:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
@@ -117,18 +118,48 @@ async def get_mcp_tools() -> list[BaseTool]:
             except Exception as e:
                 logger.warning(f"Failed to load MCP interceptor {interceptor_path}: {e}", exc_info=True)
 
-        client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors, tool_name_prefix=True)
+        # FIX: Load tools from each server individually with graceful error handling.
+        # The default MultiServerMCPClient.get_tools() uses asyncio.gather() without
+        # return_exceptions=True, which means if ANY server fails, ALL tools are lost.
+        # This implementation loads tools per-server and tolerates individual failures.
+        all_tools: list[BaseTool] = []
+        load_tasks = []
+        server_names = list(servers_config.keys())
 
-        # Get all tools from all servers
-        tools = await client.get_tools()
-        logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
+        for server_name in server_names:
+            connection = servers_config[server_name]
+            task = asyncio.create_task(
+                load_mcp_tools_from_connection(
+                    None,
+                    connection=connection,
+                    server_name=server_name,
+                    tool_interceptors=tool_interceptors,
+                    tool_name_prefix=True,
+                )
+            )
+            load_tasks.append((server_name, task))
+
+        # Use return_exceptions=True to handle individual server failures gracefully
+        results = await asyncio.gather(
+            *[task for _, task in load_tasks],
+            return_exceptions=True,
+        )
+
+        for (server_name, _), result in zip(load_tasks, results):
+            if isinstance(result, BaseException):
+                logger.warning(f"Failed to load tools from MCP server '{server_name}': {type(result).__name__}: {result}")
+            else:
+                all_tools.extend(result)
+                logger.info(f"Loaded {len(result)} tool(s) from MCP server '{server_name}'")
+
+        logger.info(f"Successfully loaded {len(all_tools)} tool(s) from {len(server_names)} MCP server(s)")
 
         # Patch tools to support sync invocation, as deerflow client streams synchronously
-        for tool in tools:
+        for tool in all_tools:
             if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
                 tool.func = _make_sync_tool_wrapper(tool.coroutine, tool.name)
 
-        return tools
+        return all_tools
 
     except Exception as e:
         logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
