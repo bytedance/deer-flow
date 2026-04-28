@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 from collections.abc import Iterator
 
 from langgraph.store.base import BaseStore
@@ -98,6 +99,7 @@ def _sync_store_cm(config) -> Iterator[BaseStore]:
 
 _store: BaseStore | None = None
 _store_ctx = None  # open context manager keeping the connection alive
+_store_lock = threading.Lock()
 
 
 def get_store() -> BaseStore:
@@ -115,30 +117,32 @@ def get_store() -> BaseStore:
     if _store is not None:
         return _store
 
-    # Lazily load app config, mirroring the checkpointer singleton pattern so
-    # that tests that set the global checkpointer config explicitly remain isolated.
-    from deerflow.config.app_config import _app_config
-    from deerflow.config.checkpointer_config import get_checkpointer_config
+    with _store_lock:
+        if _store is not None:
+            return _store
 
-    config = get_checkpointer_config()
+        from deerflow.config.app_config import _app_config
+        from deerflow.config.checkpointer_config import get_checkpointer_config
 
-    if config is None and _app_config is None:
-        try:
-            get_app_config()
-        except FileNotFoundError:
-            pass
         config = get_checkpointer_config()
 
-    if config is None:
-        from langgraph.store.memory import InMemoryStore
+        if config is None and _app_config is None:
+            try:
+                get_app_config()
+            except FileNotFoundError:
+                pass
+            config = get_checkpointer_config()
 
-        logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
-        _store = InMemoryStore()
+        if config is None:
+            from langgraph.store.memory import InMemoryStore
+
+            logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
+            _store = InMemoryStore()
+            return _store
+
+        _store_ctx = _sync_store_cm(config)
+        _store = _store_ctx.__enter__()
         return _store
-
-    _store_ctx = _sync_store_cm(config)
-    _store = _store_ctx.__enter__()
-    return _store
 
 
 def reset_store() -> None:
@@ -148,13 +152,14 @@ def reset_store() -> None:
     Useful in tests or after a configuration change.
     """
     global _store, _store_ctx
-    if _store_ctx is not None:
-        try:
-            _store_ctx.__exit__(None, None, None)
-        except Exception:
-            logger.warning("Error during store cleanup", exc_info=True)
-        _store_ctx = None
-    _store = None
+    with _store_lock:
+        if _store_ctx is not None:
+            try:
+                _store_ctx.__exit__(None, None, None)
+            except Exception:
+                logger.warning("Error during store cleanup", exc_info=True)
+            _store_ctx = None
+        _store = None
 
 
 # ---------------------------------------------------------------------------
