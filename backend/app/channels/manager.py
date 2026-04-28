@@ -35,6 +35,7 @@ STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
+    "dingtalk": {"supports_streaming": False},
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
@@ -760,6 +761,7 @@ class ChannelManager:
             artifacts=artifacts,
             attachments=attachments,
             thread_ts=msg.thread_ts,
+            metadata=dict(msg.metadata),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
@@ -821,6 +823,7 @@ class ChannelManager:
                         text=latest_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
+                        metadata=dict(msg.metadata),
                     )
                 )
                 last_published_text = latest_text
@@ -865,6 +868,7 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
+                    metadata=dict(msg.metadata),
                 )
             )
 
@@ -923,6 +927,7 @@ class ChannelManager:
             thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=reply,
             thread_ts=msg.thread_ts,
+            metadata=dict(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
 
@@ -956,5 +961,6 @@ class ChannelManager:
             thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
+            metadata=dict(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)

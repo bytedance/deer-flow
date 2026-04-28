@@ -514,6 +514,45 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_chat_outbound_preserves_inbound_metadata(self):
+        """DingTalk (and similar) need inbound metadata on outbound sends (e.g. sender_staff_id)."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            await manager.start()
+
+            meta = {
+                "sender_staff_id": "staff_001",
+                "conversation_type": "1",
+                "conversation_id": "conv_001",
+            }
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                metadata=meta,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].metadata == meta
+
+        _run(go())
+
     def test_handle_chat_uses_channel_session_overrides(self):
         from app.channels.manager import ChannelManager
 
