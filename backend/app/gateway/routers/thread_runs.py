@@ -17,10 +17,10 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.deps import get_checkpointer, get_run_manager, get_stream_bridge
-from app.gateway.services import sse_consumer, start_run
+from app.gateway.services import sse_consumer, start_run, validate_custom_fields
 from deerflow.runtime import RunRecord, serialize_channel_values
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,15 @@ class RunCreateRequest(BaseModel):
     after_seconds: float | None = Field(default=None, description="Delayed execution")
     if_not_exists: Literal["reject", "create"] = Field(default="create", description="Thread creation policy")
     feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
+    custom_fields: dict[str, Any] | None = Field(
+        default=None,
+        description="Business-defined custom attributes, accessible by tools and MCP during agent execution.",
+    )
+
+    @field_validator("custom_fields")
+    @classmethod
+    def _validate_custom_fields(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        return validate_custom_fields(v)
 
 
 class RunResponse(BaseModel):

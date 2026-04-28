@@ -17,6 +17,7 @@ from langgraph_sdk.errors import ConflictError
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
+from app.gateway.services import validate_custom_fields
 
 logger = logging.getLogger(__name__)
 
@@ -574,6 +575,20 @@ class ChannelManager:
         if assistant_id != DEFAULT_ASSISTANT_ID:
             run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id))
             assistant_id = DEFAULT_ASSISTANT_ID
+
+        # Merge custom_fields from session layers into run_context and run_config.
+        custom_fields = _merge_dicts(
+            self._default_session.get("custom_fields"),
+            channel_layer.get("custom_fields"),
+            user_layer.get("custom_fields"),
+        )
+        if custom_fields:
+            try:
+                validate_custom_fields(custom_fields)
+            except ValueError as exc:
+                raise InvalidChannelSessionConfigError(f"Invalid custom_fields: {exc}") from exc
+            run_context["custom_fields"] = custom_fields
+            run_config.setdefault("configurable", {})["custom_fields"] = custom_fields
 
         return assistant_id, run_config, run_context
 

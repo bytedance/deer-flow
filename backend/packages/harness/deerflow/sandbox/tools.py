@@ -2,6 +2,7 @@ import posixpath
 import re
 import shlex
 from pathlib import Path
+from typing import Any
 
 from langchain.tools import ToolRuntime, tool
 from langgraph.typing import ContextT
@@ -788,6 +789,30 @@ def is_local_sandbox(runtime: ToolRuntime[ContextT, ThreadState] | None) -> bool
     if sandbox_state is None:
         return False
     return sandbox_state.get("sandbox_id") == "local"
+
+
+def get_custom_fields(runtime: ToolRuntime[ContextT, ThreadState] | None) -> dict[str, Any]:
+    """Extract custom_fields from runtime state or config.
+
+    Checks state first (set by CustomFieldsMiddleware), then context
+    (for channel-provided fields), then config.configurable (for direct
+    access without middleware).
+    """
+    if runtime is None:
+        return {}
+    if runtime.state is not None:
+        fields = runtime.state.get("custom_fields")
+        if fields is not None:
+            return fields
+    # Check context for channel-provided custom fields
+    context = getattr(runtime, "context", None)
+    if context and isinstance(context, dict):
+        fields = context.get("custom_fields")
+        if fields is not None:
+            return fields
+    configurable = runtime.config.get("configurable", {})
+    fields = configurable.get("custom_fields")
+    return fields if fields is not None else {}
 
 
 def sandbox_from_runtime(runtime: ToolRuntime[ContextT, ThreadState] | None = None) -> Sandbox:

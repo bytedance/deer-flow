@@ -7,6 +7,7 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.custom_fields_middleware import CustomFieldsMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
@@ -251,6 +252,9 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     """
     middlewares = build_lead_runtime_middlewares(lazy_init=True)
 
+    # Inject custom_fields from config.configurable into state for tool access
+    middlewares.append(CustomFieldsMiddleware())
+
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
@@ -319,7 +323,7 @@ def make_lead_agent(config: RunnableConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
-
+    custom_fields = cfg.get("custom_fields")
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
@@ -370,7 +374,7 @@ def make_lead_agent(config: RunnableConfig):
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
             middleware=_build_middlewares(config, model_name=model_name),
-            system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
+            system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"]), custom_fields=custom_fields),
             state_schema=ThreadState,
         )
 
@@ -380,7 +384,11 @@ def make_lead_agent(config: RunnableConfig):
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
         system_prompt=apply_prompt_template(
-            subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
+            subagent_enabled=subagent_enabled,
+            max_concurrent_subagents=max_concurrent_subagents,
+            agent_name=agent_name,
+            available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
+            custom_fields=custom_fields,
         ),
         state_schema=ThreadState,
     )

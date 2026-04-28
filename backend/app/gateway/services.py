@@ -34,6 +34,34 @@ from deerflow.runtime import (
 
 logger = logging.getLogger(__name__)
 
+_CUSTOM_FIELDS_KEY_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def validate_custom_fields(fields: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Validate custom_fields dict. Shared by HTTP API and channel paths.
+
+    Warning: custom_fields values are visible to the agent via the system prompt.
+    Callers should not include instructions or directive content in field values
+    to avoid indirect prompt injection.
+    """
+    if fields is None:
+        return fields
+    if len(fields) > 50:
+        raise ValueError("custom_fields can contain at most 50 keys")
+    try:
+        serialized = json.dumps(fields)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"custom_fields must be JSON-serializable: {e}") from e
+    byte_size = len(serialized.encode("utf-8"))
+    if byte_size > 4096:
+        raise ValueError(f"custom_fields serialized size ({byte_size} bytes) exceeds 4KB limit")
+    for key in fields:
+        if not isinstance(key, str):
+            raise ValueError(f"custom_fields key must be a string, got {type(key).__name__}")
+        if not _CUSTOM_FIELDS_KEY_PATTERN.match(key):
+            raise ValueError(f"custom_fields key '{key}' must match ^[a-zA-Z_][a-zA-Z0-9_]*$")
+    return fields
+
 
 # ---------------------------------------------------------------------------
 # SSE formatting
@@ -322,6 +350,11 @@ async def start_run(
         for key in _CONTEXT_CONFIGURABLE_KEYS:
             if key in context:
                 configurable.setdefault(key, context[key])
+
+    # Inject custom_fields (per-run business attributes) into configurable.
+    custom_fields = getattr(body, "custom_fields", None)
+    if custom_fields:
+        config.setdefault("configurable", {})["custom_fields"] = custom_fields
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
