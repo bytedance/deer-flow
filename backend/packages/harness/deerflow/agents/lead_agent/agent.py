@@ -253,11 +253,14 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Add SkillReviewMiddleware if skill_evolution is enabled (after MemoryMiddleware)
     skill_evolution_config = getattr(app_config, "skill_evolution", None)
     skill_evolution_enabled = getattr(skill_evolution_config, "enabled", False)
-    logger.info("SkillReviewMiddleware check: skill_evolution_config=%s, enabled=%s", skill_evolution_config, skill_evolution_enabled)
+    logger.debug(
+        "SkillReviewMiddleware check: enabled=%s",
+        skill_evolution_enabled,
+    )
     if skill_evolution_enabled:
         mw = SkillReviewMiddleware(config=app_config)
         middlewares.append(mw)
-        logger.info("SkillReviewMiddleware appended to middleware chain (total: %d)", len(middlewares))
+        logger.debug("SkillReviewMiddleware appended to middleware chain (total: %d)", len(middlewares))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
