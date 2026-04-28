@@ -523,6 +523,15 @@ class TestSkillInstallation:
     """install_skill() with real ZIP handling and filesystem."""
 
     @pytest.fixture(autouse=True)
+    def _allow_skill_security_scan(self, monkeypatch):
+        async def _scan(*args, **kwargs):
+            from deerflow.skills.security_scanner import ScanResult
+
+            return ScanResult(decision="allow", reason="ok")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+
+    @pytest.fixture(autouse=True)
     def _isolate_skills_dir(self, tmp_path, monkeypatch):
         """Redirect skill installation to a temp directory."""
         skills_root = tmp_path / "skills"
