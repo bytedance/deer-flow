@@ -1,6 +1,8 @@
 # DeerFlow 配置系统设计
 
 > 对应实现：[PR #2271](https://github.com/bytedance/deer-flow/pull/2271) · RFC [#1811](https://github.com/bytedance/deer-flow/issues/1811) · 归档 spec：[config-refactor-design](./plans/2026-04-12-config-refactor-design.md)
+>
+> 文档版本：**Phase 2 终态**。早期 Phase 1 设计（`AppConfig.current()` 三层 fallback）已被推翻，详见 §6。
 
 ## 1. 为什么要重构
 
@@ -16,61 +18,50 @@
 
 ## 2. 核心设计原则
 
-> **Config is a value object, not live shared state.**
-> 构造一次，不可变，没有 reload。新 config = 新对象 + 重建 agent。
+> **Config is a value object, passed explicitly. No ambient lookup.**
+> 在三个明确的进程边界点加载，之后沿调用链作为参数显式流动。新 config = 重新加载 + 重新构造依赖它的对象。
 
 这一条原则推导出后面所有决策：
 
 - 全部 config model `frozen=True` → 非法状态不可表示
-- `from_file()` 是纯函数 → 无副作用
-- 没有 "热加载"语义 → 改变配置等于"拿到新对象"，由调用方决定要不要换进程全局
+- `AppConfig.from_file()` 是纯函数 → 无副作用
+- **没有任何 ambient 查找**——既没有 `get_app_config()` 单例，也没有 `AppConfig.current()` ContextVar fallback，更没有 mtime 自动 reload
+- 改变配置等于"在边界点重新加载 + 重新装配 agent"，由调用方决定语义
 
-## 3. 四层分层
+## 3. 三层架构
 
 ```mermaid
 graph TB
     subgraph L1 ["第 1 层 数据模型 — 冻结的 ADT"]
         direction LR
         AppConfig["AppConfig frozen=True"]
-        Sub["MemoryConfig TitleConfig SummarizationConfig ... 全部 frozen"]
+        Sub["MemoryConfig TitleConfig SummarizationConfig DatabaseConfig CircuitBreakerConfig ... 全部 frozen"]
         AppConfig --> Sub
     end
 
-    subgraph L2 ["第 2 层 Lifecycle — AppConfig.current"]
+    subgraph L2 ["第 2 层 边界加载 — 三个唯一入口"]
         direction LR
-        Override["_override ContextVar per-context"]
-        Global["_global ClassVar process-singleton"]
-        Auto["auto-load from file with warning"]
-        Override --> Global
-        Global --> Auto
+        Gw["Gateway lifespan app.state.config = AppConfig.from_file"]
+        Cli["DeerFlowClient init self._app_config = AppConfig.from_file"]
+        Lg["make_lead_agent registration AppConfig.from_file at LangGraph boundary"]
     end
 
-    subgraph L3 ["第 3 层 Per-invocation context — DeerFlowContext"]
+    subgraph L3 ["第 3 层 显式参数 + 类型化注入"]
         direction LR
-        Ctx["frozen dataclass app_config thread_id agent_name"]
-        Resolve["resolve_context legacy bridge"]
-        Ctx --> Resolve
-    end
-
-    subgraph L4 ["第 4 层 访问模式 — 按 caller 类型分流"]
-        direction LR
-        Typed["typed middleware runtime.context.app_config.xxx"]
-        Legacy["dict-legacy resolve_context runtime"]
-        NonAgent["非 agent 路径 AppConfig.current"]
+        Dep["Gateway routers Depends get_config"]
+        Ctx["Agent runs DeerFlowContext via runtime.context"]
+        Field["Provider/Factory __init__ explicit app_config parameter"]
     end
 
     L1 --> L2
     L2 --> L3
-    L3 --> L4
 
     classDef morandiBlue fill:#B5C4D1,stroke:#6A7A8C,color:#2E3A47
     classDef morandiGreen fill:#C4D1B5,stroke:#7A8C6A,color:#2E3A47
     classDef morandiPurple fill:#C9BED1,stroke:#7E6A8C,color:#2E3A47
-    classDef morandiGrey fill:#CFCFCF,stroke:#7A7A7A,color:#2E3A47
     class L1 morandiBlue
     class L2 morandiGreen
     class L3 morandiPurple
-    class L4 morandiGrey
 ```
 
 ### 3.1 第 1 层：冻结的 ADT
@@ -88,6 +79,8 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=True)
     memory: MemoryConfig
     title: TitleConfig
+    database: DatabaseConfig
+    circuit_breaker: CircuitBreakerConfig
     ...
 ```
 
@@ -97,76 +90,111 @@ class AppConfig(BaseModel):
 new_config = config.model_copy(update={"memory": new_memory_config})
 ```
 
-**从类型论视角**：这就是个 product type（record），所有字段组合起来才是一个完整的 `AppConfig`。冻结意味着 `AppConfig` 是**指称透明**的——同样的输入永远拿到同样的对象。
+**从类型论视角**：这就是个 product type（record），所有字段组合起来才是一个完整的 `AppConfig`。冻结意味着 `AppConfig` 是**指称透明**的——同样的输入永远拿到同样的对象，没有"今天看到的 config 和明天看到的 config 不一样"这种现象。
 
-### 3.2 第 2 层：Lifecycle — `AppConfig.current()`
+### 3.2 第 2 层：边界加载 — 三个唯一入口
 
-这层是整个设计最值得讲的一块。它不是一个简单的单 `ContextVar`，而是**三层 fallback**：
+整个进程里**只有三个地方**调 `AppConfig.from_file()`，对应三种部署形态：
+
+| # | 调用点 | 何时执行 | 存到哪 |
+|---|--------|---------|-------|
+| ① | `app/gateway/app.py` 的 lifespan | Gateway 进程启动 | `app.state.config` |
+| ② | `DeerFlowClient.__init__` | 嵌入式客户端构造 | `self._app_config` |
+| ③ | `deerflow/agents/lead_agent/agent.py` 里的 `make_lead_agent` | LangGraph Server 注册 graph 时 | 闭包到 agent 内部 |
 
 ```python
-class AppConfig(BaseModel):
-    ...
+# ① Gateway lifespan
+async def lifespan(app: FastAPI):
+    app.state.config = AppConfig.from_file()
+    async with langgraph_runtime(app):  # config 通过 app.state 显式向下传
+        yield
 
-    # 进程级单例。GIL 下原子指针交换，无需锁
-    _global: ClassVar[AppConfig | None] = None
+# ② DeerFlowClient 构造
+class DeerFlowClient:
+    def __init__(self, config: AppConfig | None = None, config_path: Path | None = None):
+        if config is not None:
+            self._app_config = config
+        elif config_path is not None:
+            self._app_config = AppConfig.from_file(config_path)
+        else:
+            self._app_config = AppConfig.from_file()
 
-    # Per-context override，用于测试隔离和多 client
-    _override: ClassVar[ContextVar[AppConfig]] = ContextVar("deerflow_app_config_override")
-
-    @classmethod
-    def init(cls, config: AppConfig) -> None:
-        """设置进程全局。对所有后续 async task 可见"""
-        cls._global = config
-
-    @classmethod
-    def set_override(cls, config: AppConfig) -> Token[AppConfig]:
-        """Per-context 覆盖。返回 Token 给 reset_override()"""
-        return cls._override.set(config)
-
-    @classmethod
-    def reset_override(cls, token: Token[AppConfig]) -> None:
-        cls._override.reset(token)
-
-    @classmethod
-    def current(cls) -> AppConfig:
-        """优先级：per-context override > 进程全局 > 自动从文件加载（warning）"""
-        try:
-            return cls._override.get()
-        except LookupError:
-            pass
-        if cls._global is not None:
-            return cls._global
-        logger.warning("AppConfig.current() called before init(); auto-loading from file. ...")
-        config = cls.from_file()
-        cls._global = config
-        return config
+# ③ LangGraph Server 注册边界
+def make_lead_agent(config: RunnableConfig) -> CompiledStateGraph:
+    app_config = _resolve_app_config(config)  # 内部调 AppConfig.from_file()
+    return _build_agent(app_config, ...)
 ```
 
-**为什么是三层，不是一层？**
+**为什么是这三个，不能再多？**
 
-| 原因 | 解释 |
-|------|------|
-| 单 ContextVar 行不通 | Gateway 收到 `PUT /mcp/config` reload config，下一个请求在**全新的 async context** 里跑——ContextVar 的值传不过去。只能用进程级变量 |
-| 保留 ContextVar override | 测试需要 per-test scope config，`Token`-based reset 保证干净恢复。多 client 场景如果真出现也能靠它 |
-| Auto-load fallback | 有些 call site 历史上没调 `init()`（内部脚本、import-time 触发的测试）。加 warning 保证信号不丢，但不硬崩 |
+- 这三处都是**进程/会话边界**——之外的代码全是 inner loop，应该接收已经加载好的 config 而不是自己再去 I/O
+- 每多一处 `from_file()`，就多一次"配置漂移"的可能：A 路径加载到的 config 和 B 路径加载到的 config 不是同一个对象
+- 边界点之外如果还想读 config，必须沿调用链显式传过去——没有 ambient lookup 这条捷径
 
-**Scala 视角的映射**：
+> **历史包袱**：当前还存在两处 in-middleware 的 `AppConfig.from_file()` band-aid（见 §6），是因为合并 main 时这两个 hot path 暂时找不到优雅的传递路径，标记为 follow-up。
 
-- `_global` = 进程级 `var`，脏，但别无选择
-- `_override` = `Option[ContextVar]` 形式的 reader monad 层
-- `current()` = fallback chain `override.orElse(global).orElse(autoLoad)`，和 `Option.orElse` 思路一致
+### 3.3 第 3 层：显式参数 + 类型化注入
 
-**为什么 `_global` 没加锁？**
+边界加载完之后，config 怎么流到内部？三种 caller、三种模式：
 
-因为读和写都是单个指针赋值（assignment of class attribute），在 CPython 的 GIL 下是原子的。如果将来改成 read-modify-write（比如 "如果没 init 就 init 成 X"），再加 `threading.Lock`。现在不加是因为——不需要。
+| Caller 类型 | 注入方式 | 例子 |
+|------------|---------|------|
+| Gateway router | FastAPI `Depends(get_config)` 读 `request.app.state.config` | `app/gateway/routers/*.py` |
+| Agent middleware / tool | LangGraph `Runtime[DeerFlowContext]` 注入，`runtime.context.app_config.xxx` 直读 | `memory_middleware`、`title_middleware`、`thread_data_middleware` 等 |
+| Provider / Factory / 普通函数 | `__init__` 或函数签名上的 `app_config: AppConfig` 必传参数 | `make_checkpointer(config)`、`get_sandbox_provider(config)`、`load_skills(config, ...)` |
 
-### 3.3 第 3 层：`DeerFlowContext` — per-invocation typed context
+#### Gateway 侧
+
+```python
+# app/gateway/deps.py
+def get_config(request: Request) -> AppConfig:
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is None:
+        raise HTTPException(status_code=503, detail="Configuration not available")
+    return cfg
+
+# app/gateway/routers/models.py
+@router.get("/")
+async def list_models(config: AppConfig = Depends(get_config)):
+    return ModelsListResponse(models=[ModelResponse(**m.model_dump()) for m in config.models])
+```
+
+#### Agent 侧
+
+```python
+# Gateway 侧（主路径）
+deer_flow_context = DeerFlowContext(
+    app_config=app.state.config,   # 来自 lifespan 加载
+    thread_id=thread_id,
+)
+agent.astream(input, config=runnable_config, context=deer_flow_context)
+
+# DeerFlowClient 侧
+context = DeerFlowContext(
+    app_config=self._app_config,   # 来自 client 构造
+    thread_id=thread_id,
+)
+agent.stream(input, config=runnable_config, context=context)
+```
+
+LangGraph 把 `context=...` 注入到 `Runtime[DeerFlowContext].context`。Middleware 拿到的就是 typed 的 `DeerFlowContext`：
+
+```python
+class TitleMiddleware:
+    async def after_model(self, state: ThreadState, runtime: Runtime[DeerFlowContext]) -> dict:
+        title_cfg = runtime.context.app_config.title  # 直读，零包装
+        if not title_cfg.enabled:
+            return {}
+        ...
+```
+
+#### `DeerFlowContext` 是什么
 
 ```python
 # deerflow/config/deer_flow_context.py
 @dataclass(frozen=True)
 class DeerFlowContext:
-    """Typed, immutable, per-invocation context injected via LangGraph Runtime"""
+    """Typed, immutable, per-invocation context injected via LangGraph Runtime."""
     app_config: AppConfig
     thread_id: str
     agent_name: str | None = None
@@ -179,105 +207,108 @@ class DeerFlowContext:
 
 两者是不同的 category，混在一起就是把静态配置和动态 identity 耦合。
 
-**注入路径**：
+**不进 context 的东西**：`sandbox_id`——它是 mid-execution 才 acquire 的**可变运行时状态**，正确的归宿是 `ThreadState.sandbox`（state channel，有 reducer），不是 context。
+
+## 4. `resolve_context()` 的契约
 
 ```python
-# Gateway worker（主路径）
-deer_flow_context = DeerFlowContext(
-    app_config=AppConfig.current(),
-    thread_id=thread_id,
-)
-agent.astream(input, config=config, context=deer_flow_context)
-
-# DeerFlowClient
-AppConfig.init(AppConfig.from_file(config_path))
-context = DeerFlowContext(app_config=AppConfig.current(), thread_id=thread_id)
-agent.stream(input, config=config, context=context)
-```
-
-LangGraph 的 `Runtime` 会把 `context=...` 的值注入到 `Runtime[DeerFlowContext].context` 里。Middleware 拿到的就是 typed 的 `DeerFlowContext`。
-
-**不进 context 的东西**：`sandbox_id`——它是 mid-execution 才 acquire 的**可变运行时状态**，正确的归宿是 `ThreadState.sandbox`（state channel，有 reducer），不是 context。原先 `sandbox/tools.py` 里 3 处 `runtime.context["sandbox_id"] = ...` 的写法全部删除。
-
-### 3.4 第 4 层：访问模式按 caller 类型分流
-
-三种 caller，三种模式：
-
-| Caller 类型 | 访问模式 | 例子 |
-|-------------|----------|------|
-| Typed middleware（签名写 `Runtime[DeerFlowContext]`） | `runtime.context.app_config.xxx` 直读，无包装 | `memory_middleware` / `title_middleware` / `thread_data_middleware` 等 |
-| 可能遇到 dict context 的 tool | `resolve_context(runtime).xxx` | `sandbox/tools.py`（dict-legacy 路径）/ `task_tool.py`（bash subagent gate） |
-| 非 agent 路径（Gateway router、CLI、factory） | `AppConfig.current().xxx` | `app/gateway/routers/*` / `reset_admin.py` / `models/factory.py` |
-
-**关键简化**（commit `a934a822`）：原本所有 middleware 都走 `resolve_context()`，后来发现既然签名已经是 `Runtime[DeerFlowContext]`，包装就是冗余防御，直接 `runtime.context.app_config.xxx` 就行。同时也把 `title_middleware` 里每个 helper 的 `title_config=None` fallback 都删掉了——**required parameter 不给 default**，让类型系统强制 caller 传对。
-
-这对应 Scala / FP 的两个信条：
-- **让非法状态不可表示**（`Option[TitleConfig]` 改成 `TitleConfig` required）
-- **Let-it-crash**（config 解析失败是真 bug，surface 出来比吞掉退化更好）
-
-## 4. `resolve_context()` 的三种分支
-
-`resolve_context()` 自己还在，处理三种 runtime.context 形状：
-
-```python
+# deerflow/config/deer_flow_context.py
 def resolve_context(runtime: Any) -> DeerFlowContext:
+    """Return the typed DeerFlowContext that the runtime carries."""
     ctx = getattr(runtime, "context", None)
-
-    # 1. typed 路径（Gateway、Client）— 直接返回
     if isinstance(ctx, DeerFlowContext):
         return ctx
 
-    # 2. dict-legacy 路径（老测试、第三方 invoke）— 桥接
-    if isinstance(ctx, dict):
-        thread_id = ctx.get("thread_id", "")
-        if not thread_id:
-            logger.warning("...empty thread_id...")
-        return DeerFlowContext(
-            app_config=AppConfig.current(),
-            thread_id=thread_id,
-            agent_name=ctx.get("agent_name"),
-        )
-
-    # 3. 完全没 context — fall back 到 LangGraph configurable
-    cfg = get_config().get("configurable", {})
-    return DeerFlowContext(
-        app_config=AppConfig.current(),
-        thread_id=cfg.get("thread_id", ""),
-        agent_name=cfg.get("agent_name"),
+    raise RuntimeError(
+        "resolve_context: runtime.context is not a DeerFlowContext "
+        "(got type %s). Every entry point must attach one at invoke time — "
+        "Gateway/Client via agent.astream(context=DeerFlowContext(...)), "
+        "LangGraph Server via the make_lead_agent boundary that loads "
+        "AppConfig.from_file()." % type(ctx).__name__
     )
 ```
 
-空 thread_id 会 warn，不会硬崩——在这里 warn 比 crash 合理，因为 `thread_id` 缺失只影响文件路径（落到空字符串目录），不会让整个 agent 跑崩。
+**单分支 + 异常**——拿不到 typed context 直接 `RuntimeError`，**没有 fallback**。
 
-## 5. Gateway config 热更新流程
+为什么不像 Phase 1 那样 fall back 到 `AppConfig.current()`？
 
-历史上 Gateway 用 `reload_*_config()` 带 mtime 检测。现在改成：
+- 让非法状态不可表示：runtime.context 必须是 typed DeerFlowContext，不是就是 caller bug
+- Let-it-crash：错误立刻浮出来，能看到 stack trace、能看到调用链上是谁忘了挂 context；退化到 ambient lookup 的代价是这个 bug 永远被吞掉
+- 入口点已经穷举：Gateway / DeerFlowClient / LangGraph Server registration——三个都会显式 attach context，剩下任何"漏挂"都是真错误
 
+旧的 dict-legacy 兼容分支已经删掉。所有测试要么走 typed context，要么不进 `resolve_context()`。
+
+## 5. 配置热更新
+
+历史上 Gateway 用 `reload_*_config()` + mtime 检测做"自动热加载"。现在改成**显式重新加载 + 显式 swap**：
+
+```python
+# app/gateway/routers/mcp.py
+@router.put("/config")
+async def update_mcp_config(req: McpConfigUpdateRequest, http_request: Request, ...):
+    # 1. 写盘
+    save_extensions_config(...)
+
+    # 2. 重新加载 AppConfig（纯函数）
+    reloaded = AppConfig.from_file()
+
+    # 3. 原子 swap app.state.config（CPython 赋值在 GIL 下原子）
+    http_request.app.state.config = reloaded
+
+    return McpConfigResponse(...)
 ```
-写 extensions_config.json → AppConfig.init(AppConfig.from_file()) → 下一个请求看到新值
+
+**没有**：mtime 检测、自动刷新、`reload_*()` 函数、ambient ContextVar 查找。
+
+**Skills router 同理**：
+
+```python
+# app/gateway/routers/skills.py
+reloaded = AppConfig.from_file()
+http_request.app.state.config = reloaded
+await refresh_skills_system_prompt_cache_async(reloaded)
+skills = load_skills(reloaded, enabled_only=False)
 ```
 
-**没有**：mtime 检测、自动刷新、`reload_*()` 函数。
+哲学：**结构性变化（模型、tools、middleware 链）需要重建 agent；运行时变化（`memory.enabled` 这种 flag）下一次 invocation 通过 `Depends(get_config)` 拿到新值就自动生效**。不需要给 config 做"活对象"语义，更不需要让代码处处感知"现在是不是应该 reload"。
 
-哲学很简单：**结构性变化（模型、tools、middleware 链）需要重建 agent；运行时变化（`memory.enabled` 这种 flag）下一次 invocation 从 `AppConfig.current()` 取值就自动生效**。不需要给 config 做"活对象"语义。
+## 6. 从原计划的演化（Phase 0 → Phase 1 → Phase 2）
 
-## 6. 从原计划的分歧
+设计经过两次推翻：
 
-三处关键分歧（详情见 [归档 spec §7](./plans/2026-04-12-config-refactor-design.md#7-divergence-from-original-plan)）：
+| 维度 | Phase 0（重构前） | Phase 1（过渡） | Phase 2（终态，已 ship） |
+|------|------------------|---------------|------------------------|
+| Config lifecycle | 模块级 globals + mtime 自动 reload + 8 个 sub-config singleton | `AppConfig.current()` 三层 fallback（override > global > auto-load） | 三个边界加载点 + 显式参数传递，**`AppConfig.current()` 已删** |
+| ContextVar | 不完整（只罩 AppConfig 本体） | 用作 per-test override，配 `Token` reset | **删除**——测试 fixture 直接传 config 进 `app.state` 或对象构造器 |
+| `_global: ClassVar` | 无（用模块级 `_app_config`） | `AppConfig._global` ClassVar 作为进程全局 | **删除** |
+| Gateway 路由读 config | `get_app_config()` 全局函数 | `AppConfig.current()` | `Depends(get_config)` 从 `app.state.config` 读 |
+| `resolve_context()` | 不存在 | 三分支 fallback：typed / dict-legacy / 完全空 | **单分支 + RuntimeError**，非 typed 一律拒绝 |
+| 热更新 | mtime 自动检测 | `AppConfig.init(AppConfig.from_file())` | `app.state.config = AppConfig.from_file()` 显式赋值 |
+| 测试隔离 | 模块级 globals 互相污染 | `set_override()` / `reset_override()` Token API | fixture 直接构造 `AppConfig` 传给 `app.state.config` 或 client |
 
-| 分歧 | 原计划 | Shipped | 原因 |
-|------|--------|---------|------|
-| Lifecycle 存储 | 单 ContextVar，`ConfigNotInitializedError` 硬崩 | 3 层 fallback，auto-load + warning | ContextVar 跨 async 边界传不过去 |
-| 模块位置 | 新建 `context.py` | Lifecycle 放在 `AppConfig` 自身 classmethod | 减一层模块耦合 |
-| Middleware 访问 | 处处 `resolve_context()` | typed middleware 直读 `runtime.context.xxx` | 类型收紧后防御性包装是 noise |
+**为什么 Phase 1 没坚持？**
+
+Phase 1 的核心妥协是 `_global: ClassVar`——一个进程级单例，"GIL 原子赋值，无需锁"。但这个妥协带来两个连锁副作用：
+
+1. **Async edge 仍然有歧义**：Gateway 处理一个请求时改了全局 config，正在 async-running 的 background task 是看到老 config 还是新 config？答案不一致——读到老的看到的是 `_override.get()`（如果该 task 之前 set 过），读到新的看到的是 `_global`，但这两条路径在不同 task 里的覆盖关系很难推理
+2. **测试隔离假象**：`_override` 看似干净，但 `_global` 一污染就整个进程持续生效；测试套件按文件并行就崩
+3. **理论上的妥协沦为实际上的拐杖**：因为 `current()` 永远能拿到 config（auto-load fallback），上层代码完全有借口在任意位置随手 `AppConfig.current().xxx`——本来想当 fallback 用，结果变成了主路径
+
+Phase 2 的核心判断：**与其精心设计一个"勉强够用的全局"，不如把 config 流动彻底显式化**。代价是每个调用链都要把 `app_config` 传下去，但这个代价换来的是：
+
+- 类型系统检查所有路径是否都拿到 config
+- 测试 fixture 一次性塞进对象构造器，永不污染其他测试
+- 配置漂移（"两个地方读到的不是同一份")彻底不存在
+
+从 Scala/FP 视角：Phase 1 是 `Reader[AppConfig, A]` 配 `Option[ContextVar]` 的混合模型，Phase 2 干脆把 `Reader` 物化成构造器参数（partial application），更朴素也更稳。
 
 ## 7. 从 Scala / Actor 视角的几点观察
 
-- **`AppConfig` 就是个 case class / ADT**。`frozen=True` 相当于 Scala 的 final case class：构造完就不动。改动靠 `model_copy(update=…)`，对应 Scala 的 `copy(…)`。
+- **`AppConfig` 是 case class / ADT**。`frozen=True` 相当于 Scala 的 `final case class`：构造完就不动。改动靠 `model_copy(update=…)`，对应 Scala 的 `copy(…)`。
 - **`DeerFlowContext` 是 typed reader**。Middleware 接收 `Runtime[DeerFlowContext]`，本质是 `Kleisli[DeerFlowContext, State, Result]`——依赖注入，类型化。比 `RunnableConfig.configurable: dict[str, Any]` 强太多。
-- **`resolve_context()` 是适配层**。存在是因为有三种不同形状的上游输入；在纯 FP 眼里这是个 `X => DeerFlowContext` 的 total function，通过 pattern match 三种 case 把世界收敛回 typed 的那条路径。
-- **Let-it-crash 的体现**：commit `a934a822` 干掉 middleware 里 `try/except resolve_context(...)`，干掉 `TitleConfig | None` 的 defensive fallback。Config 解析失败就让它抛出去，别吞成"degraded mode"——actor supervision 会处理，吞错反而藏 bug。
-- **进程 global 的妥协**：`_global: ClassVar` 是这套设计里唯一违背纯值的地方。但在 Python async + HTTP server 的语境里，你没别的办法跨 request 把"新 config"传给所有 task。承认妥协、限制范围（只在 lifecycle 层一个变量）、周边全部 immutable——这就是工程意义上的"合理妥协"。
+- **`resolve_context()` 不再是适配层，是断言点**。它现在只回答一个问题："runtime 里挂的 context 是合法的 typed context 吗？"——是就过，不是就崩。这种"边界处的硬断言"本质上和 actor 系统启动时验证 message protocol 是一回事。
+- **Let-it-crash 的体现**：commit `a934a822` 干掉 middleware 里 `try/except resolve_context(...)`、干掉 `TitleConfig | None` 的 defensive fallback；Phase 2 进一步干掉 `AppConfig.current()` 的 auto-load fallback。每去掉一层 fallback，错误浮出来的速度就快一层。
+- **没有妥协的全局了**。Phase 1 还有 `_global: ClassVar` 这一个进程单例作为"妥协的容器"，Phase 2 把它也拆了——边界加载完直接落到 `app.state.config` 这种**作用域明确的容器**里，没有"进程级全局"这个概念。Python 没有 actor system，但这套结构等价于把"配置广播"的职责从隐式（class attribute）变成了显式（生命周期容器）。
 
 ## 8. Cheat sheet
 
@@ -285,17 +316,25 @@ def resolve_context(runtime: Any) -> DeerFlowContext:
 
 | 我在写什么 | 用什么 |
 |------------|--------|
-| Typed middleware（签名 `Runtime[DeerFlowContext]`） | `runtime.context.app_config.xxx` |
-| Typed tool（`ToolRuntime[DeerFlowContext]`） | `runtime.context.xxx` |
-| 可能被老调用方以 dict context 调到的 tool | `resolve_context(runtime).xxx` |
-| Gateway router、CLI、factory、测试 helper | `AppConfig.current().xxx` |
-| 启动时初始化 | `AppConfig.init(AppConfig.from_file(path))` |
-| 测试里想临时改 config | `token = AppConfig.set_override(cfg)` / `AppConfig.reset_override(token)` |
-| Gateway 写完新 `extensions_config.json` 之后 | `AppConfig.init(AppConfig.from_file())`，然后让 agent 重建（如果结构变了） |
+| Gateway router | 函数签名加 `config: AppConfig = Depends(get_config)` |
+| Gateway 内部 helper（拿不到 Request） | 调用方传 `app_config: AppConfig` 必传参数 |
+| Typed agent middleware（签名 `Runtime[DeerFlowContext]`） | `runtime.context.app_config.xxx` |
+| Typed agent tool（`ToolRuntime[DeerFlowContext]`） | `runtime.context.app_config.xxx` |
+| Provider / Factory / 库函数 | 构造器或函数签名上 `app_config: AppConfig` 必传 |
+| Gateway 启动时初始化 | `app.state.config = AppConfig.from_file()`（在 lifespan 里） |
+| DeerFlowClient 启动 | `DeerFlowClient(config=...)` 或 `DeerFlowClient(config_path=...)` |
+| LangGraph Server 边界 | `make_lead_agent` 内部已经 `AppConfig.from_file()`，调用方什么都不用做 |
+| Gateway 写完新 `extensions_config.json` 之后 | `request.app.state.config = AppConfig.from_file()`（一行赋值） |
+| 测试里想换 config | fixture 里直接 `app.state.config = AppConfig(...)` 或 `DeerFlowClient(config=...)` |
 
 不要：
+- ~~`get_app_config()`~~（已删）
+- ~~`AppConfig.current()` / `AppConfig.init()` / `AppConfig.set_override()`~~（已删）
 - ~~`get_memory_config()` / `get_title_config()` 等旧 getter~~（已删）
 - ~~`reload_app_config()` / `reset_app_config()`~~（已删）
 - ~~`_memory_config` 等模块级 global~~（已删）
+- ~~mtime 自动检测、文件 watcher~~（已删）
 - ~~`runtime.context["sandbox_id"] = ...`~~（走 `runtime.state["sandbox"]`）
+- ~~`resolve_context()` fall back 到 `AppConfig.current()`~~（已改成 RuntimeError）
 - ~~防御性 `try/except resolve_context(...)`~~（让它崩）
+- 在边界点之外的任何代码里调 `AppConfig.from_file()`——除非你在改 `app/gateway/app.py`、`DeerFlowClient.__init__` 或 `make_lead_agent` 这三个文件
