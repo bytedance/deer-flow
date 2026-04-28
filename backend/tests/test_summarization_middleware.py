@@ -34,6 +34,7 @@ def _middleware(
     before_summarization=None,
     trigger=("messages", 4),
     keep=("messages", 2),
+    token_counter=len,
     skill_file_read_tool_names=None,
     preserve_recent_skill_count: int = 0,
     preserve_recent_skill_tokens: int = 0,
@@ -45,7 +46,7 @@ def _middleware(
         model=model,
         trigger=trigger,
         keep=keep,
-        token_counter=len,
+        token_counter=token_counter,
         before_summarization=before_summarization,
         skill_file_read_tool_names=skill_file_read_tool_names,
         preserve_recent_skill_count=preserve_recent_skill_count,
@@ -75,6 +76,10 @@ def _skill_conversation() -> list:
     ]
 
 
+def _content_length_token_counter(messages) -> int:
+    return sum(len(str(message.content)) for message in messages)
+
+
 def test_before_summarization_hook_receives_messages_before_compression() -> None:
     captured: list[SummarizationEvent] = []
     middleware = _middleware(before_summarization=[captured.append])
@@ -98,6 +103,50 @@ def test_before_summarization_hook_not_called_when_threshold_not_met() -> None:
 
     assert captured == []
     assert result is None
+
+
+def test_summarization_still_compresses_old_history_when_preserved_messages_exceed_trigger() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(
+        before_summarization=[captured.append],
+        trigger=("tokens", 100),
+        keep=("messages", 2),
+        token_counter=_content_length_token_counter,
+    )
+    messages = [
+        HumanMessage(content="old question"),
+        AIMessage(content="old answer"),
+        HumanMessage(content="x" * 80),
+        AIMessage(content="y" * 80),
+    ]
+
+    result = middleware.before_model({"messages": messages}, _runtime())
+
+    assert result is not None
+    assert len(captured) == 1
+    assert [message.content for message in captured[0].messages_to_summarize] == ["old question", "old answer"]
+    assert isinstance(result["messages"][0], RemoveMessage)
+    assert result["messages"][1].name == "summary"
+
+
+def test_summarization_skips_when_only_existing_summary_would_be_recompressed() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(
+        before_summarization=[captured.append],
+        trigger=("tokens", 100),
+        keep=("messages", 2),
+        token_counter=_content_length_token_counter,
+    )
+    messages = [
+        HumanMessage(content="Here is a summary of the conversation to date:\n\nold summary", name="summary"),
+        HumanMessage(content="x" * 80),
+        AIMessage(content="y" * 80),
+    ]
+
+    result = middleware.before_model({"messages": messages}, _runtime())
+
+    assert result is None
+    assert captured == []
 
 
 def test_before_summarization_hook_exception_does_not_block_compression(caplog: pytest.LogCaptureFixture) -> None:

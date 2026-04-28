@@ -136,6 +136,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         messages_to_summarize, preserved_messages = self._partition_with_skill_rescue(messages, cutoff_index)
+        if self._would_only_recompress_existing_summary(messages_to_summarize, preserved_messages):
+            logger.debug("Skipping summarization because it would only recompress an existing summary")
+            return None
+
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = self._create_summary(messages_to_summarize)
         new_messages = self._build_new_messages(summary)
@@ -161,6 +165,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         messages_to_summarize, preserved_messages = self._partition_with_skill_rescue(messages, cutoff_index)
+        if self._would_only_recompress_existing_summary(messages_to_summarize, preserved_messages):
+            logger.debug("Skipping summarization because it would only recompress an existing summary")
+            return None
+
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = await self._acreate_summary(messages_to_summarize)
         new_messages = self._build_new_messages(summary)
@@ -227,6 +235,44 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             remaining.append(msg)
 
         return remaining, rescued + preserved
+
+    def _would_only_recompress_existing_summary(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        preserved_messages: list[AnyMessage],
+    ) -> bool:
+        """Return True when summarization would only rewrite the prior summary."""
+        if not messages_to_summarize:
+            return False
+
+        for message in messages_to_summarize:
+            if not (isinstance(message, HumanMessage) and message.name == "summary"):
+                return False
+
+        return self._preserved_messages_would_retrigger(preserved_messages)
+
+    def _preserved_messages_would_retrigger(self, preserved_messages: list[AnyMessage]) -> bool:
+        """Return True when token-based summarization cannot reduce state below its trigger."""
+        if not preserved_messages:
+            return False
+        total_tokens = self.token_counter(preserved_messages)
+        for kind, value in self._trigger_conditions:
+            if kind == "tokens" and total_tokens >= value:
+                return True
+            if kind == "tokens" and self._should_summarize_based_on_reported_tokens(preserved_messages, value):
+                return True
+            if kind == "fraction":
+                max_input_tokens = self._get_profile_limits()
+                if max_input_tokens is None:
+                    continue
+                threshold = int(max_input_tokens * value)
+                if threshold <= 0:
+                    threshold = 1
+                if total_tokens >= threshold:
+                    return True
+                if self._should_summarize_based_on_reported_tokens(preserved_messages, threshold):
+                    return True
+        return False
 
     def _find_skill_bundles(
         self,
