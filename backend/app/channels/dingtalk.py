@@ -345,7 +345,7 @@ class DingTalkChannel(Channel):
 
             logger.info("[DingTalk] file sent: %s", attachment.filename)
             return True
-        except (httpx.HTTPError, OSError, ValueError):
+        except (httpx.HTTPError, OSError, ValueError, TypeError, AttributeError):
             logger.exception("[DingTalk] failed to send file: %s", attachment.filename)
             return False
 
@@ -687,7 +687,15 @@ class DingTalkChannel(Channel):
                     data={"type": media_type},
                 )
                 response.raise_for_status()
-                return response.json().get("mediaId")
+                try:
+                    payload = response.json()
+                except json.JSONDecodeError:
+                    logger.exception("[DingTalk] failed to decode upload response JSON: %s", file_path)
+                    return None
+                if not isinstance(payload, dict):
+                    logger.warning("[DingTalk] unexpected upload response type %s for %s", type(payload).__name__, file_path)
+                    return None
+                return payload.get("mediaId")
         except (httpx.HTTPError, OSError):
             logger.exception("[DingTalk] failed to upload media: %s", file_path)
             return None

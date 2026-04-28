@@ -1013,6 +1013,79 @@ class TestConvertMarkdownTable:
         assert "> **Right**: c" in result
 
 
+class TestUploadMediaValidation:
+    def test_non_dict_response_returns_none(self):
+        async def go():
+            from unittest.mock import patch
+
+            bus = MessageBus()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "k"
+            channel._client_secret = "s"
+            channel._cached_token = "tok"
+            channel._token_expires_at = float("inf")
+
+            class FakeResponse:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return ["not", "a", "dict"]
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                async def post(self, url, **kwargs):
+                    return FakeResponse()
+
+            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+                result = await channel._upload_media("/tmp/test.png", "image")
+
+            assert result is None
+
+        _run(go())
+
+    def test_json_decode_error_returns_none(self):
+        async def go():
+            import json as json_mod
+            from unittest.mock import patch
+
+            bus = MessageBus()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "k"
+            channel._client_secret = "s"
+            channel._cached_token = "tok"
+            channel._token_expires_at = float("inf")
+
+            class FakeResponse:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    raise json_mod.JSONDecodeError("err", "", 0)
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                async def post(self, url, **kwargs):
+                    return FakeResponse()
+
+            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+                result = await channel._upload_media("/tmp/test.png", "image")
+
+            assert result is None
+
+        _run(go())
+
+
 class TestChannelRegistration:
     def test_dingtalk_in_channel_registry(self):
         from app.channels.service import _CHANNEL_REGISTRY
