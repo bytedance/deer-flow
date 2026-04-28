@@ -400,6 +400,15 @@ tools:
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
 
+  # Web search tool (uses Apify Google Search Scraper, requires APIFY_API_TOKEN)
+  # NOTE: Only one web_search provider can be active at a time.
+  # Comment out the Tavily/Jina/other web_search entry above before enabling this one.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.apify.tools:web_search_tool
+  #   max_results: 5
+  #   api_key: $APIFY_API_TOKEN
+
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.
@@ -430,6 +439,36 @@ tools:
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
+
+  # Web fetch tool (uses Apify Website Content Crawler, requires APIFY_API_TOKEN)
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI/other web_fetch entry above before enabling this one.
+  # crawler_type options: "cheerio" (fast, no JS), "playwright:firefox" (JS-heavy pages)
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.apify.tools:web_fetch_tool
+  #   crawler_type: cheerio
+  #   api_key: $APIFY_API_TOKEN
+
+  # Apify async actor tools — discover/start/await pattern for parallel actor runs
+  # - name: apify_actor_discover
+  #   group: web
+  #   use: deerflow.community.apify.tools:apify_actor_discover_tool
+  #   max_results: 10
+  #   api_key: $APIFY_API_TOKEN
+  # - name: apify_actor_start
+  #   group: web
+  #   use: deerflow.community.apify.tools:apify_actor_start_tool
+  #   # timeout_secs: 3600   # optional: override Apify platform default
+  #   # memory_mbytes: 1024  # optional: override Apify platform default
+  #   api_key: $APIFY_API_TOKEN
+  # - name: apify_actor_await
+  #   group: web
+  #   use: deerflow.community.apify.tools:apify_actor_await_tool
+  #   poll_interval_secs: 5   # seconds between Apify API status checks
+  #   timeout_secs: 300       # give up after this many seconds (default 5 min)
+  #   max_items: 50
+  #   api_key: $APIFY_API_TOKEN
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
