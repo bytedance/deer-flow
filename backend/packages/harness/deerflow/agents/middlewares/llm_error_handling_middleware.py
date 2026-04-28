@@ -70,20 +70,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     retry_base_delay_ms: int = 1000
     retry_cap_delay_ms: int = 8000
 
-    circuit_failure_threshold: int = 5
-    circuit_recovery_timeout_sec: int = 60
-
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *, app_config: AppConfig, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
-        # Load Circuit Breaker configs from app config if available, fall back to defaults
-        try:
-            app_config = AppConfig.from_file()
-            self.circuit_failure_threshold = app_config.circuit_breaker.failure_threshold
-            self.circuit_recovery_timeout_sec = app_config.circuit_breaker.recovery_timeout_sec
-        except (FileNotFoundError, RuntimeError):
-            # Gracefully fall back to class defaults in test environments
-            pass
+        self.circuit_failure_threshold = app_config.circuit_breaker.failure_threshold
+        self.circuit_recovery_timeout_sec = app_config.circuit_breaker.recovery_timeout_sec
 
         # Circuit Breaker state
         self._circuit_lock = threading.Lock()

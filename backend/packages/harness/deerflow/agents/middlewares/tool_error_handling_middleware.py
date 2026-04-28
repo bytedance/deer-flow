@@ -97,7 +97,7 @@ def _build_runtime_middlewares(
 
         middlewares.append(DanglingToolCallMiddleware())
 
-    middlewares.append(LLMErrorHandlingMiddleware())
+    middlewares.append(LLMErrorHandlingMiddleware(app_config=app_config))
 
     # Guardrail middleware (if configured)
     guardrails_config = app_config.guardrails
@@ -139,9 +139,10 @@ def build_lead_runtime_middlewares(*, app_config: "AppConfig", lazy_init: bool =
     )
 
 
-def build_subagent_runtime_middlewares(*, lazy_init: bool = True) -> list[AgentMiddleware]:
+def build_subagent_runtime_middlewares(*, app_config: "AppConfig", lazy_init: bool = True) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     return _build_runtime_middlewares(
+        app_config=app_config,
         include_uploads=False,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
