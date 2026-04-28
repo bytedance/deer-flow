@@ -20,11 +20,13 @@ import copy
 import inspect
 import logging
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from langchain_core.messages import HumanMessage
 
+from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 
@@ -51,6 +53,27 @@ class RunContext:
     event_store: Any | None = field(default=None)
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
+    app_config: AppConfig | None = field(default=None)
+
+
+def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:
+    try:
+        return "app_config" in inspect.signature(agent_factory).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+@lru_cache(maxsize=128)
+def _cached_agent_factory_supports_app_config(agent_factory: Any) -> bool:
+    return _compute_agent_factory_supports_app_config(agent_factory)
+
+
+def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
+    try:
+        return _cached_agent_factory_supports_app_config(agent_factory)
+    except TypeError:
+        # Some callable instances are unhashable; fall back to a direct check.
+        return _compute_agent_factory_supports_app_config(agent_factory)
 
 
 async def run_agent(
@@ -163,7 +186,10 @@ async def run_agent(
             config.setdefault("callbacks", []).append(journal)
 
         runnable_config = RunnableConfig(**config)
-        agent = agent_factory(config=runnable_config)
+        if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
+            agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
+        else:
+            agent = agent_factory(config=runnable_config)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:

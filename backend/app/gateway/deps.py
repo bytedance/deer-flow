@@ -148,6 +148,7 @@ def get_run_context(request: Request) -> RunContext:
         event_store=get_run_event_store(request),
         run_events_config=getattr(config, "run_events", None),
         thread_store=get_thread_store(request),
+        app_config=config,
     )
 
 

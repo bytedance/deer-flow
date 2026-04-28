@@ -2,6 +2,8 @@ import logging
 import os
 from pathlib import Path
 
+from deerflow.config.app_config import AppConfig
+
 from .parser import parse_skill_file
 from .types import Skill
 
@@ -22,7 +24,7 @@ def get_skills_root_path() -> Path:
     return skills_dir
 
 
-def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False) -> list[Skill]:
+def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False, *, app_config: AppConfig | None = None) -> list[Skill]:
     """
     Load all skills from the skills directory.
 
@@ -44,7 +46,7 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
             try:
                 from deerflow.config import get_app_config
 
-                config = get_app_config()
+                config = app_config or get_app_config()
                 skills_path = config.skills.get_skills_path()
             except Exception:
                 # Fallback to default if config fails
