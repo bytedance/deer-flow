@@ -36,6 +36,13 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
     )
 
 
+def _make_test_app(config) -> FastAPI:
+    app = FastAPI()
+    app.state.config = config
+    app.include_router(skills_router.router)
+    return app
+
+
 def _make_skill_archive(tmp_path: Path, name: str, content: str | None = None) -> Path:
     archive = tmp_path / f"{name}.skill"
     skill_content = content or _skill_content(name)
@@ -134,8 +141,7 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         response = client.get("/api/skills/custom")
@@ -176,7 +182,7 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
-    get_skill_history_file("demo-skill").write_text(
+    get_skill_history_file("demo-skill", app_config=config).write_text(
         '{"action":"human_edit","prev_content":' + json.dumps(original_content) + ',"new_content":' + json.dumps(edited_content) + "}\n",
         encoding="utf-8",
     )
@@ -193,8 +199,7 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _scan)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
@@ -226,8 +231,7 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
 
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         delete_response = client.delete("/api/skills/custom/demo-skill")
@@ -267,8 +271,7 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
     monkeypatch.setattr("app.gateway.routers.skills.append_history", _readonly_history)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         delete_response = client.delete("/api/skills/custom/demo-skill")
@@ -301,8 +304,7 @@ def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp
     monkeypatch.setattr("app.gateway.routers.skills.shutil.rmtree", _fail_rmtree)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         delete_response = client.delete("/api/skills/custom/demo-skill")
@@ -318,7 +320,7 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     enabled_state = {"value": True}
     refresh_calls = []
 
-    def _load_skills(*, enabled_only: bool):
+    def _load_skills(*, enabled_only: bool, app_config=None):
         skill = _make_skill("demo-skill", enabled=enabled_state["value"])
         if enabled_only and not skill.enabled:
             return []
@@ -334,8 +336,7 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(SimpleNamespace())
 
     with TestClient(app) as client:
         response = client.put("/api/skills/demo-skill", json={"enabled": False})
