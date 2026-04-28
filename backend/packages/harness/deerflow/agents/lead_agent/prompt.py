@@ -107,6 +107,15 @@ def warm_enabled_skills_cache(timeout_seconds: float = _ENABLED_SKILLS_REFRESH_W
 
 
 def _get_enabled_skills():
+    return get_cached_enabled_skills()
+
+
+def get_cached_enabled_skills() -> list[Skill]:
+    """Return the cached enabled-skills list, kicking off a background refresh on miss.
+
+    Safe to call from request paths: never blocks on disk I/O. Returns an empty
+    list on cache miss; the next call will see the warmed result.
+    """
     with _enabled_skills_lock:
         cached = _enabled_skills_cache
 

@@ -1,5 +1,5 @@
 import logging
-from typing import Protocol, TypeVar
+from typing import Protocol
 
 from deerflow.skills.types import Skill
 
@@ -8,9 +8,6 @@ logger = logging.getLogger(__name__)
 
 class NamedTool(Protocol):
     name: str
-
-
-ToolT = TypeVar("ToolT", bound=NamedTool)
 
 
 def allowed_tool_names_for_skills(skills: list[Skill]) -> list[str] | None:
