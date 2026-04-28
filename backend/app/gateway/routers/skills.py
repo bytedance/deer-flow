@@ -244,7 +244,8 @@ async def get_custom_skill_history(skill_name: str, config: AppConfig = Depends(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to read history for %s: %s", skill_name, e, exc_info=True)
+        name = skill_name.replace("\r\n", "").replace("\n", "")
+        logger.error("Failed to read history for %s: %s", name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to read history: {str(e)}")
 
 

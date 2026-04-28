@@ -41,8 +41,8 @@ def _make_test_app(config) -> FastAPI:
     app.state.config = config
     app.include_router(skills_router.router)
     return app
-  
-  
+
+
 def _make_skill_archive(tmp_path: Path, name: str, content: str | None = None) -> Path:
     archive = tmp_path / f"{name}.skill"
     skill_content = content or _skill_content(name)
