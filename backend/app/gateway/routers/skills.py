@@ -13,7 +13,7 @@ from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.skills import Skill, load_skills
-from deerflow.skills.installer import SkillAlreadyExistsError, install_skill_from_archive
+from deerflow.skills.installer import SkillAlreadyExistsError, ainstall_skill_from_archive
 from deerflow.skills.manager import (
     append_history,
     atomic_write,
@@ -121,7 +121,7 @@ async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResp
 async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
     try:
         skill_file_path = resolve_thread_virtual_path(request.thread_id, request.path)
-        result = install_skill_from_archive(skill_file_path)
+        result = await ainstall_skill_from_archive(skill_file_path)
         await refresh_skills_system_prompt_cache_async()
         return SkillInstallResponse(**result)
     except FileNotFoundError as e:

@@ -116,10 +116,22 @@ def test_middleware_and_features_conflict():
 
 
 # ---------------------------------------------------------------------------
-# 7. Vision feature auto-injects view_image_tool
+# 7. Vision feature auto-injects view_image_tool when thread data is available
 # ---------------------------------------------------------------------------
 @patch("deerflow.agents.factory.create_agent")
 def test_vision_injects_view_image_tool(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    feat = RuntimeFeatures(vision=True, sandbox=True)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    tool_names = [t.name for t in call_kwargs["tools"]]
+    assert "view_image" in tool_names
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_vision_without_sandbox_does_not_inject_view_image_tool(mock_create_agent):
     mock_create_agent.return_value = MagicMock()
     feat = RuntimeFeatures(vision=True, sandbox=False)
 
@@ -127,7 +139,7 @@ def test_vision_injects_view_image_tool(mock_create_agent):
 
     call_kwargs = mock_create_agent.call_args[1]
     tool_names = [t.name for t in call_kwargs["tools"]]
-    assert "view_image" in tool_names
+    assert "view_image" not in tool_names
 
 
 def test_view_image_middleware_preserves_viewed_images_reducer():
@@ -301,11 +313,11 @@ def test_always_on_error_handling(mock_create_agent):
 
 
 # ---------------------------------------------------------------------------
-# 17. Vision with custom middleware still injects tool
+# 17. Vision with custom middleware follows thread-data availability
 # ---------------------------------------------------------------------------
 @patch("deerflow.agents.factory.create_agent")
-def test_vision_custom_middleware_still_injects_tool(mock_create_agent):
-    """Custom vision middleware still gets the view_image_tool auto-injected."""
+def test_vision_custom_middleware_without_sandbox_does_not_inject_tool(mock_create_agent):
+    """Custom vision middleware without thread data does not get view_image_tool auto-injected."""
     from langchain.agents.middleware import AgentMiddleware
 
     mock_create_agent.return_value = MagicMock()
@@ -319,7 +331,7 @@ def test_vision_custom_middleware_still_injects_tool(mock_create_agent):
 
     call_kwargs = mock_create_agent.call_args[1]
     tool_names = [t.name for t in call_kwargs["tools"]]
-    assert "view_image" in tool_names
+    assert "view_image" not in tool_names
 
 
 # ===========================================================================

@@ -254,9 +254,11 @@ def _assemble_from_features(
             from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
             chain.append(ViewImageMiddleware())
-        from deerflow.tools.builtins import view_image_tool
 
-        extra_tools.append(view_image_tool)
+        if feat.sandbox is not False:
+            from deerflow.tools.builtins import view_image_tool
+
+            extra_tools.append(view_image_tool)
 
     # --- [11] Subagent ---
     if feat.subagent is not False:
