@@ -135,10 +135,11 @@ class RunJournal(BaseCallbackHandler):
         self._seen_llm_starts.add(rid)
 
         logger.debug(
-            "on_chat_model_start %s: tags=%s messages=%d batch(es)",
+            "on_chat_model_start %s: tags=%s num_batches=%d message_counts=%s",
             run_id,
             tags,
             len(messages),
+            [len(batch) for batch in messages],
         )
 
         # Capture the first human message sent to any LLM in this run.

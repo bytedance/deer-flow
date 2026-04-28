@@ -2032,6 +2032,22 @@ class TestChannelService:
         assert service.manager._langgraph_url == "http://custom-gateway:8001/api"
         assert service.manager._gateway_url == "http://custom-gateway:8001"
 
+    def test_from_app_config_uses_explicit_config(self):
+        from app.channels.service import ChannelService
+
+        app_config = SimpleNamespace(
+            model_extra={
+                "channels": {
+                    "telegram": {"enabled": False},
+                }
+            }
+        )
+
+        with patch("deerflow.config.app_config.get_app_config", side_effect=AssertionError("should not read global config")):
+            service = ChannelService.from_app_config(app_config)
+
+        assert service._config == {"telegram": {"enabled": False}}
+
     def test_disabled_channel_with_string_creds_emits_warning(self, caplog):
         """Warning is emitted when a channel has string credentials but enabled=false."""
         import logging
