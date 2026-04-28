@@ -139,7 +139,7 @@ class RunJournal(BaseCallbackHandler):
         self._cached_prompts[rid] = []
 
         logger.debug(
-            "on_chat_model_start %s: tags=%s batch_count=%d message_counts=%s",
+            "on_chat_model_start %s: tags=%s num_batches=%d message_counts=%s",
             run_id,
             tags,
             len(messages),

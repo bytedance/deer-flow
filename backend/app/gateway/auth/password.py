@@ -52,9 +52,9 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
             bcrypt_hash = hashed_password
 
         return bcrypt.checkpw(plain_password.encode("utf-8"), bcrypt_hash.encode("utf-8"))
-    except Exception:
-        # Malformed or corrupt hash (e.g. ValueError from bcrypt for invalid salt)
-        # — fail closed rather than crashing the request.
+    except ValueError:
+        # bcrypt raises ValueError for malformed or corrupt hashes (e.g., invalid salt).
+        # Fail closed rather than crashing the request.
         return False
 
 
