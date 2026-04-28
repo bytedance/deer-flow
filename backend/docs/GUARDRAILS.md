@@ -296,7 +296,7 @@ These are the tool names your provider will see in `request.tool_name`:
 | `web_search` | Web search query |
 | `web_fetch` | Fetch URL content |
 | `image_search` | Image search |
-| `present_file` | Present file to user |
+| `present_files` | Present file to user |
 | `view_image` | Display image |
 | `ask_clarification` | Ask user a question |
 | `task` | Delegate to subagent |

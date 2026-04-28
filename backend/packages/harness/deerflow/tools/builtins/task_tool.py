@@ -4,18 +4,29 @@ import asyncio
 import logging
 import uuid
 from dataclasses import replace
-from typing import Annotated, Literal
+from typing import Annotated
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langgraph.config import get_stream_writer
 from langgraph.typing import ContextT
 
-from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 from deerflow.agents.thread_state import ThreadState
-from deerflow.subagents import SubagentExecutor, get_subagent_config
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
+from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
+from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result, request_cancel_background_task
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
+    """Return the effective subagent skill allowlist under the parent policy."""
+    if parent is None:
+        return child
+    if child is None:
+        return list(parent)
+
+    parent_set = set(parent)
+    return [skill for skill in child if skill in parent_set]
 
 
 @tool("task", parse_docstring=True)
@@ -23,7 +34,7 @@ async def task_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
     description: str,
     prompt: str,
-    subagent_type: Literal["general-purpose", "bash"],
+    subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
     max_turns: int | None = None,
 ) -> str:
@@ -34,12 +45,18 @@ async def task_tool(
     - Handle complex multi-step tasks autonomously
     - Execute commands or operations in isolated contexts
 
-    Available subagent types:
+    Built-in subagent types:
     - **general-purpose**: A capable agent for complex, multi-step tasks that require
       both exploration and action. Use when the task requires complex reasoning,
       multiple dependent steps, or would benefit from isolated context.
-    - **bash**: Command execution specialist for running bash commands. Use for
-      git operations, build processes, or when command output would be verbose.
+    - **bash**: Command execution specialist for running bash commands. This is only
+      available when host bash is explicitly allowed or when using an isolated shell
+      sandbox such as `AioSandboxProvider`.
+
+    Additional custom subagent types may be defined in config.yaml under
+    `subagents.custom_agents`. Each custom type can have its own system prompt,
+    tools, skills, model, and timeout configuration. If an unknown subagent_type
+    is provided, the error message will list all available types.
 
     When to use this tool:
     - Complex tasks requiring multiple steps or tools
@@ -57,23 +74,25 @@ async def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
         max_turns: Optional maximum number of agent turns. Defaults to subagent's configured max.
     """
+    available_subagent_names = get_available_subagent_names()
+
     # Get subagent configuration
     config = get_subagent_config(subagent_type)
     if config is None:
-        return f"Error: Unknown subagent type '{subagent_type}'. Available: general-purpose, bash"
+        available = ", ".join(available_subagent_names)
+        return f"Error: Unknown subagent type '{subagent_type}'. Available: {available}"
+    if subagent_type == "bash" and not is_host_bash_allowed():
+        return f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}"
 
     # Build config overrides
     overrides: dict = {}
 
-    skills_section = get_skills_prompt_section()
-    if skills_section:
-        overrides["system_prompt"] = config.system_prompt + "\n\n" + skills_section
+    # Skills are loaded by SubagentExecutor per-session (aligned with Codex's pattern:
+    # each subagent loads its own skills based on config, injected as conversation items).
+    # No longer appended to system_prompt here.
 
     if max_turns is not None:
         overrides["max_turns"] = max_turns
-
-    if overrides:
-        config = replace(config, **overrides)
 
     # Extract parent context from runtime
     sandbox_state = None
@@ -81,11 +100,14 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
+    metadata: dict = {}
 
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
         thread_id = runtime.context.get("thread_id") if runtime.context else None
+        if thread_id is None:
+            thread_id = runtime.config.get("configurable", {}).get("thread_id")
 
         # Try to get parent model from configurable
         metadata = runtime.config.get("metadata", {})
@@ -94,12 +116,22 @@ async def task_tool(
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
 
+    parent_available_skills = metadata.get("available_skills")
+    if parent_available_skills is not None:
+        overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
+
+    if overrides:
+        config = replace(config, **overrides)
+
     # Get available tools (excluding task tool to prevent nesting)
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
 
+    # Inherit parent agent's tool_groups so subagents respect the same restrictions
+    parent_tool_groups = metadata.get("tool_groups")
+
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    tools = get_available_tools(model_name=parent_model, subagent_enabled=False)
+    tools = get_available_tools(model_name=parent_model, groups=parent_tool_groups, subagent_enabled=False)
 
     # Create executor
     executor = SubagentExecutor(
@@ -173,6 +205,11 @@ async def task_tool(
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task failed. Error: {result.error}"
+            elif result.status == SubagentStatus.CANCELLED:
+                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error})
+                logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
+                cleanup_background_task(task_id)
+                return "Task cancelled by user."
             elif result.status == SubagentStatus.TIMED_OUT:
                 writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
@@ -195,6 +232,12 @@ async def task_tool(
                 writer({"type": "task_timed_out", "task_id": task_id})
                 return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
     except asyncio.CancelledError:
+        # Signal the background subagent thread to stop cooperatively.
+        # Without this, the thread (running in ThreadPoolExecutor with its
+        # own event loop via asyncio.run) would continue executing even
+        # after the parent task is cancelled.
+        request_cancel_background_task(task_id)
+
         async def cleanup_when_done() -> None:
             max_cleanup_polls = max_poll_count
             cleanup_poll_count = 0
@@ -204,14 +247,12 @@ async def task_tool(
                 if result is None:
                     return
 
-                if result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None:
+                if result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None:
                     cleanup_background_task(task_id)
                     return
 
                 if cleanup_poll_count > max_cleanup_polls:
-                    logger.warning(
-                        f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls"
-                    )
+                    logger.warning(f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls")
                     return
 
                 await asyncio.sleep(5)

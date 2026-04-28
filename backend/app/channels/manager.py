@@ -5,10 +5,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
+import httpx
+from langgraph_sdk.errors import ConflictError
+
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
 
@@ -17,6 +23,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
+CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
@@ -25,12 +32,85 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "subagent_enabled": False,
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
+THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
+    "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
     "telegram": {"supports_streaming": False},
+    "wechat": {"supports_streaming": False},
+    "wecom": {"supports_streaming": True},
 }
+
+InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
+
+
+INBOUND_FILE_READERS: dict[str, InboundFileReader] = {}
+
+
+def register_inbound_file_reader(channel_name: str, reader: InboundFileReader) -> None:
+    INBOUND_FILE_READERS[channel_name] = reader
+
+
+async def _read_http_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
+    url = file_info.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+
+    resp = await client.get(url)
+    resp.raise_for_status()
+    return resp.content
+
+
+async def _read_wecom_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
+    data = await _read_http_inbound_file(file_info, client)
+    if data is None:
+        return None
+
+    aeskey = file_info.get("aeskey") if isinstance(file_info.get("aeskey"), str) else None
+    if not aeskey:
+        return data
+
+    try:
+        from aibot.crypto_utils import decrypt_file
+    except Exception:
+        logger.exception("[Manager] failed to import WeCom decrypt_file")
+        return None
+
+    return decrypt_file(data, aeskey)
+
+
+async def _read_wechat_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
+    raw_path = file_info.get("path")
+    if isinstance(raw_path, str) and raw_path.strip():
+        try:
+            return await asyncio.to_thread(Path(raw_path).read_bytes)
+        except OSError:
+            logger.exception("[Manager] failed to read WeChat inbound file from local path: %s", raw_path)
+            return None
+
+    full_url = file_info.get("full_url")
+    if isinstance(full_url, str) and full_url.strip():
+        return await _read_http_inbound_file({"url": full_url}, client)
+
+    return None
+
+
+register_inbound_file_reader("wecom", _read_wecom_inbound_file)
+register_inbound_file_reader("wechat", _read_wechat_inbound_file)
+
+
+class InvalidChannelSessionConfigError(ValueError):
+    """Raised when IM channel session overrides contain invalid agent config."""
+
+
+def _is_thread_busy_error(exc: BaseException | None) -> bool:
+    if exc is None:
+        return False
+    if isinstance(exc, ConflictError):
+        return True
+    return "already running a task" in str(exc)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -43,6 +123,16 @@ def _merge_dicts(*layers: Any) -> dict[str, Any]:
         if isinstance(layer, Mapping):
             merged.update(layer)
     return merged
+
+
+def _normalize_custom_agent_name(raw_value: str) -> str:
+    """Normalize legacy channel assistant IDs into valid custom agent names."""
+    normalized = raw_value.strip().lower().replace("_", "-")
+    if not normalized:
+        raise InvalidChannelSessionConfigError("Channel session assistant_id is empty. Use 'lead_agent' or a valid custom agent name.")
+    if not CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
+        raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
+    return normalized
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -314,6 +404,105 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
+async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dict[str, Any]]:
+    if not msg.files:
+        return []
+
+    from deerflow.uploads.manager import claim_unique_filename, ensure_uploads_dir, normalize_filename
+
+    uploads_dir = ensure_uploads_dir(thread_id)
+    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+
+    created: list[dict[str, Any]] = []
+    file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        for idx, f in enumerate(msg.files):
+            if not isinstance(f, dict):
+                continue
+
+            ftype = f.get("type") if isinstance(f.get("type"), str) else "file"
+            filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
+
+            try:
+                data = await file_reader(f, client)
+            except Exception:
+                logger.exception(
+                    "[Manager] failed to read inbound file: channel=%s, file=%s",
+                    msg.channel_name,
+                    f.get("url") or filename or idx,
+                )
+                continue
+
+            if data is None:
+                logger.warning(
+                    "[Manager] inbound file reader returned no data: channel=%s, file=%s",
+                    msg.channel_name,
+                    f.get("url") or filename or idx,
+                )
+                continue
+
+            if not filename:
+                ext = ".bin"
+                if ftype == "image":
+                    ext = ".png"
+                filename = f"{msg.thread_ts or 'msg'}_{idx}{ext}"
+
+            try:
+                safe_name = claim_unique_filename(normalize_filename(filename), seen_names)
+            except ValueError:
+                logger.warning(
+                    "[Manager] skipping inbound file with unsafe filename: channel=%s, file=%r",
+                    msg.channel_name,
+                    filename,
+                )
+                continue
+
+            dest = uploads_dir / safe_name
+            try:
+                dest.write_bytes(data)
+            except Exception:
+                logger.exception("[Manager] failed to write inbound file: %s", dest)
+                continue
+
+            created.append(
+                {
+                    "filename": safe_name,
+                    "size": len(data),
+                    "path": f"/mnt/user-data/uploads/{safe_name}",
+                    "is_image": ftype == "image",
+                }
+            )
+
+    return created
+
+
+def _format_uploaded_files_block(files: list[dict[str, Any]]) -> str:
+    lines = [
+        "<uploaded_files>",
+        "The following files were uploaded in this message:",
+        "",
+    ]
+    if not files:
+        lines.append("(empty)")
+    else:
+        for f in files:
+            filename = f.get("filename", "")
+            size = int(f.get("size") or 0)
+            size_kb = size / 1024 if size else 0
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+            path = f.get("path", "")
+            is_image = bool(f.get("is_image"))
+            file_kind = "image" if is_image else "file"
+            lines.append(f"- {filename} ({size_str})")
+            lines.append(f"  Type: {file_kind}")
+            lines.append(f"  Path: {path}")
+            lines.append("")
+    lines.append("Use `read_file` for text-based files and documents.")
+    lines.append("Use `view_image` for image files (jpg, jpeg, png, webp) so the model can inspect the image content.")
+    lines.append("</uploaded_files>")
+    return "\n".join(lines)
+
+
 class ChannelManager:
     """Core dispatcher that bridges IM channels to the DeerFlow agent.
 
@@ -378,6 +567,13 @@ class ChannelManager:
             user_layer.get("context"),
             {"thread_id": thread_id},
         )
+
+        # Custom agents are implemented as lead_agent + agent_name context.
+        # Keep backward compatibility for channel configs that set
+        # assistant_id: <custom-agent-name> by routing through lead_agent.
+        if assistant_id != DEFAULT_ASSISTANT_ID:
+            run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id))
+            assistant_id = DEFAULT_ASSISTANT_ID
 
         return assistant_id, run_config, run_context
 
@@ -452,6 +648,14 @@ class ChannelManager:
                     await self._handle_command(msg)
                 else:
                     await self._handle_chat(msg)
+            except InvalidChannelSessionConfigError as exc:
+                logger.warning(
+                    "Invalid channel session config for %s (chat=%s): %s",
+                    msg.channel_name,
+                    msg.chat_id,
+                    exc,
+                )
+                await self._send_error(msg, str(exc))
             except Exception:
                 logger.exception(
                     "Error handling message from %s (chat=%s)",
@@ -491,8 +695,25 @@ class ChannelManager:
             thread_id = await self._create_thread(client, msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+
+        # If the inbound message contains file attachments, let the channel
+        # materialize (download) them and update msg.text to include sandbox file paths.
+        # This enables downstream models to access user-uploaded files by path.
+        # Channels that do not support file download will simply return the original message.
+        if msg.files:
+            from .service import get_channel_service
+
+            service = get_channel_service()
+            channel = service.get_channel(msg.channel_name) if service else None
+            logger.info("[Manager] preparing receive file context for %d attachments", len(msg.files))
+            msg = await channel.receive_file(msg, thread_id) if channel else msg
         if extra_context:
             run_context.update(extra_context)
+
+        uploaded = await _ingest_inbound_files(thread_id, msg)
+        if uploaded:
+            msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
+
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
                 client,
@@ -570,6 +791,7 @@ class ChannelManager:
                 config=run_config,
                 context=run_context,
                 stream_mode=["messages-tuple", "values"],
+                multitask_strategy="reject",
             ):
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
@@ -605,7 +827,10 @@ class ChannelManager:
                 last_publish_at = now
         except Exception as exc:
             stream_error = exc
-            logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
+            if _is_thread_busy_error(exc):
+                logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+            else:
+                logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
         finally:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
@@ -616,7 +841,10 @@ class ChannelManager:
                 if attachments:
                     response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
                 elif stream_error:
-                    response_text = "An error occurred while processing your request. Please try again."
+                    if _is_thread_busy_error(stream_error):
+                        response_text = THREAD_BUSY_MESSAGE
+                    else:
+                        response_text = "An error occurred while processing your request. Please try again."
                 else:
                     response_text = latest_text or "(No response from agent)"
 
@@ -686,7 +914,8 @@ class ChannelManager:
                 "/help — Show this help"
             )
         else:
-            reply = f"Unknown command: /{command}. Type /help for available commands."
+            available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
+            reply = f"Unknown command: /{command}. Available commands: {available}"
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,

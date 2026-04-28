@@ -1,6 +1,9 @@
 """Middleware for intercepting clarification requests and presenting them to the user."""
 
+import json
+import logging
 from collections.abc import Callable
+from hashlib import sha256
 from typing import override
 
 from langchain.agents import AgentState
@@ -9,6 +12,8 @@ from langchain_core.messages import ToolMessage
 from langgraph.graph import END
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
+
+logger = logging.getLogger(__name__)
 
 
 class ClarificationMiddlewareState(AgentState):
@@ -31,6 +36,13 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
     """
 
     state_schema = ClarificationMiddlewareState
+
+    def _stable_message_id(self, tool_call_id: str, formatted_message: str) -> str:
+        """Build a deterministic message ID so retried clarification calls replace, not append."""
+        if tool_call_id:
+            return f"clarification:{tool_call_id}"
+        digest = sha256(formatted_message.encode("utf-8")).hexdigest()[:16]
+        return f"clarification:{digest}"
 
     def _is_chinese(self, text: str) -> bool:
         """Check if text contains Chinese characters.
@@ -56,6 +68,20 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         clarification_type = args.get("clarification_type", "missing_info")
         context = args.get("context")
         options = args.get("options", [])
+
+        # Some models (e.g. Qwen3-Max) serialize array parameters as JSON strings
+        # instead of native arrays. Deserialize and normalize so `options`
+        # is always a list for the rendering logic below.
+        if isinstance(options, str):
+            try:
+                options = json.loads(options)
+            except (json.JSONDecodeError, TypeError):
+                options = [options]
+
+        if options is None:
+            options = []
+        elif not isinstance(options, list):
+            options = [options]
 
         # Type-specific icons
         type_icons = {
@@ -101,8 +127,8 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         args = request.tool_call.get("args", {})
         question = args.get("question", "")
 
-        print("[ClarificationMiddleware] Intercepted clarification request")
-        print(f"[ClarificationMiddleware] Question: {question}")
+        logger.info("Intercepted clarification request")
+        logger.debug("Clarification question: %s", question)
 
         # Format the clarification message
         formatted_message = self._format_clarification_message(args)
@@ -113,6 +139,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         # Create a ToolMessage with the formatted question
         # This will be added to the message history
         tool_message = ToolMessage(
+            id=self._stable_message_id(tool_call_id, formatted_message),
             content=formatted_message,
             tool_call_id=tool_call_id,
             name="ask_clarification",

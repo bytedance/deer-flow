@@ -5,6 +5,7 @@ Supports two authentication modes:
   2. Claude Code OAuth token (Authorization: Bearer header)
      - Detected by sk-ant-oat prefix
      - Requires anthropic-beta: oauth-2025-04-20,claude-code-20250219
+     - Requires billing header in system prompt for all OAuth requests
 
 Auto-loads credentials from explicit runtime handoff:
   - $ANTHROPIC_API_KEY environment variable
@@ -14,18 +15,30 @@ Auto-loads credentials from explicit runtime handoff:
   - ~/.claude/.credentials.json
 """
 
+import hashlib
+import json
 import logging
+import os
+import socket
 import time
+import uuid
 from typing import Any
 
 import anthropic
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
+from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 THINKING_BUDGET_RATIO = 0.8
+
+# Billing header required by Anthropic API for OAuth token access.
+# Must be the first system prompt block. Format mirrors Claude Code CLI.
+# Override with ANTHROPIC_BILLING_HEADER env var if the hardcoded version drifts.
+_DEFAULT_BILLING_HEADER = "x-anthropic-billing-header: cc_version=2.1.85.351; cc_entrypoint=cli; cch=6c6d5;"
+OAUTH_BILLING_HEADER = os.environ.get("ANTHROPIC_BILLING_HEADER", _DEFAULT_BILLING_HEADER)
 
 
 class ClaudeChatModel(ChatAnthropic):
@@ -44,8 +57,8 @@ class ClaudeChatModel(ChatAnthropic):
     prompt_cache_size: int = 3
     auto_thinking_budget: bool = True
     retry_max_attempts: int = MAX_RETRIES
-    _is_oauth: bool = False
-    _oauth_access_token: str = ""
+    _is_oauth: bool = PrivateAttr(default=False)
+    _oauth_access_token: str = PrivateAttr(default="")
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -125,8 +138,11 @@ class ClaudeChatModel(ChatAnthropic):
         stop: list[str] | None = None,
         **kwargs: Any,
     ) -> dict:
-        """Override to inject prompt caching and thinking budget."""
+        """Override to inject prompt caching, thinking budget, and OAuth billing."""
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+
+        if self._is_oauth:
+            self._apply_oauth_billing(payload)
 
         if self.enable_prompt_caching:
             self._apply_prompt_caching(payload)
@@ -136,24 +152,71 @@ class ClaudeChatModel(ChatAnthropic):
 
         return payload
 
+    def _apply_oauth_billing(self, payload: dict) -> None:
+        """Inject the billing header block required for all OAuth requests.
+
+        The billing block is always placed first in the system list, removing any
+        existing occurrence to avoid duplication or out-of-order positioning.
+        """
+        billing_block = {"type": "text", "text": OAUTH_BILLING_HEADER}
+
+        system = payload.get("system")
+        if isinstance(system, list):
+            # Remove any existing billing blocks, then insert a single one at index 0.
+            filtered = [b for b in system if not (isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", ""))]
+            payload["system"] = [billing_block] + filtered
+        elif isinstance(system, str):
+            if OAUTH_BILLING_HEADER in system:
+                payload["system"] = [billing_block]
+            else:
+                payload["system"] = [billing_block, {"type": "text", "text": system}]
+        else:
+            payload["system"] = [billing_block]
+
+        # Add metadata.user_id required by the API for OAuth billing validation
+        if not isinstance(payload.get("metadata"), dict):
+            payload["metadata"] = {}
+        if "user_id" not in payload["metadata"]:
+            # Generate a stable device_id from the machine's hostname
+            hostname = socket.gethostname()
+            device_id = hashlib.sha256(f"deerflow-{hostname}".encode()).hexdigest()
+            session_id = str(uuid.uuid4())
+            payload["metadata"]["user_id"] = json.dumps(
+                {
+                    "device_id": device_id,
+                    "account_uuid": "deerflow",
+                    "session_id": session_id,
+                }
+            )
+
     def _apply_prompt_caching(self, payload: dict) -> None:
-        """Apply ephemeral cache_control to system and recent messages."""
-        # Cache system messages
+        """Apply ephemeral cache_control to system, recent messages, and last tool definition.
+
+        Uses a budget of MAX_CACHE_BREAKPOINTS (4) breakpoints — the hard limit
+        enforced by both the Anthropic API and AWS Bedrock.  Breakpoints are
+        placed on the *last* eligible blocks because later breakpoints cover a
+        larger prefix and yield better cache hit rates.
+        """
+        MAX_CACHE_BREAKPOINTS = 4
+
+        # Collect candidate blocks in document order:
+        #   1. system text blocks
+        #   2. content blocks of the last prompt_cache_size messages
+        #   3. the last tool definition
+        candidates: list[dict] = []
+
+        # 1. System blocks
         system = payload.get("system")
         if system and isinstance(system, list):
             for block in system:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    block["cache_control"] = {"type": "ephemeral"}
+                    candidates.append(block)
         elif system and isinstance(system, str):
-            payload["system"] = [
-                {
-                    "type": "text",
-                    "text": system,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
+            new_block: dict = {"type": "text", "text": system}
+            payload["system"] = [new_block]
+            candidates.append(new_block)
 
-        # Cache recent messages
+        # 2. Recent message blocks
         messages = payload.get("messages", [])
         cache_start = max(0, len(messages) - self.prompt_cache_size)
         for i in range(cache_start, len(messages)):
@@ -164,20 +227,21 @@ class ClaudeChatModel(ChatAnthropic):
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict):
-                        block["cache_control"] = {"type": "ephemeral"}
+                        candidates.append(block)
             elif isinstance(content, str) and content:
-                msg["content"] = [
-                    {
-                        "type": "text",
-                        "text": content,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
+                new_block = {"type": "text", "text": content}
+                msg["content"] = [new_block]
+                candidates.append(new_block)
 
-        # Cache the last tool definition
+        # 3. Last tool definition
         tools = payload.get("tools", [])
         if tools and isinstance(tools[-1], dict):
-            tools[-1]["cache_control"] = {"type": "ephemeral"}
+            candidates.append(tools[-1])
+
+        # Apply cache_control only to the last MAX_CACHE_BREAKPOINTS candidates
+        # to stay within the API limit.
+        for block in candidates[-MAX_CACHE_BREAKPOINTS:]:
+            block["cache_control"] = {"type": "ephemeral"}
 
     def _apply_thinking_budget(self, payload: dict) -> None:
         """Auto-allocate thinking budget (80% of max_tokens)."""
@@ -191,6 +255,39 @@ class ClaudeChatModel(ChatAnthropic):
 
         max_tokens = payload.get("max_tokens", 8192)
         thinking["budget_tokens"] = int(max_tokens * THINKING_BUDGET_RATIO)
+
+    @staticmethod
+    def _strip_cache_control(payload: dict) -> None:
+        """Remove cache_control markers before OAuth requests reach Anthropic."""
+        for section in ("system", "messages"):
+            items = payload.get(section)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item.pop("cache_control", None)
+                content = item.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            block.pop("cache_control", None)
+
+        tools = payload.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                if isinstance(tool, dict):
+                    tool.pop("cache_control", None)
+
+    def _create(self, payload: dict) -> Any:
+        if self._is_oauth:
+            self._strip_cache_control(payload)
+        return super()._create(payload)
+
+    async def _acreate(self, payload: dict) -> Any:
+        if self._is_oauth:
+            self._strip_cache_control(payload)
+        return await super()._acreate(payload)
 
     def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None, **kwargs: Any) -> Any:
         """Override with OAuth patching and retry logic."""

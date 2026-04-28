@@ -1,19 +1,19 @@
 """Middleware for injecting image details into conversation before LLM call."""
 
-from typing import NotRequired, override
+import logging
+from typing import override
 
-from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
-from deerflow.agents.thread_state import ViewedImageData
+from deerflow.agents.thread_state import ThreadState
+
+logger = logging.getLogger(__name__)
 
 
-class ViewImageMiddlewareState(AgentState):
-    """Compatible with the `ThreadState` schema."""
-
-    viewed_images: NotRequired[dict[str, ViewedImageData] | None]
+class ViewImageMiddlewareState(ThreadState):
+    """Reuse the thread state so reducer-backed keys keep their annotations."""
 
 
 class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
@@ -182,7 +182,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # Create a new human message with mixed content (text + images)
         human_msg = HumanMessage(content=image_content)
 
-        print("[ViewImageMiddleware] Injecting image details message with images before LLM call")
+        logger.debug("Injecting image details message with images before LLM call")
 
         # Return state update with the new message
         return {"messages": [human_msg]}

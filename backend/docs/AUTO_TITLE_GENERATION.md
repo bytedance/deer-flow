@@ -246,9 +246,9 @@ def after_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | N
 ## 相关文件
 
 - [`packages/harness/deerflow/agents/thread_state.py`](../packages/harness/deerflow/agents/thread_state.py) - ThreadState 定义
-- [`packages/harness/deerflow/agents/title_middleware.py`](../packages/harness/deerflow/agents/title_middleware.py) - TitleMiddleware 实现
+- [`packages/harness/deerflow/agents/middlewares/title_middleware.py`](../packages/harness/deerflow/agents/middlewares/title_middleware.py) - TitleMiddleware 实现
 - [`packages/harness/deerflow/config/title_config.py`](../packages/harness/deerflow/config/title_config.py) - 配置管理
-- [`config.yaml`](../config.yaml) - 配置文件
+- [`config.yaml`](../../config.example.yaml) - 配置文件
 - [`packages/harness/deerflow/agents/lead_agent/agent.py`](../packages/harness/deerflow/agents/lead_agent/agent.py) - Middleware 注册
 
 ## 参考资料

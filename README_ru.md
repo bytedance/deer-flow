@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Русский
+[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | Русский
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -265,6 +265,8 @@ channels:
     enabled: true
     app_id: $FEISHU_APP_ID
     app_secret: $FEISHU_APP_SECRET
+    # domain: https://open.feishu.cn       # China (default)
+    # domain: https://open.larksuite.com   # International
 
   slack:
     enabled: true

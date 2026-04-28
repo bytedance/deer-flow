@@ -1,8 +1,11 @@
+import logging
 import os
 from pathlib import Path
 
 from .parser import parse_skill_file
 from .types import Skill
+
+logger = logging.getLogger(__name__)
 
 
 def get_skills_root_path() -> Path:
@@ -52,7 +55,7 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
     if not skills_path.exists():
         return []
 
-    skills = []
+    skills_by_name: dict[str, Skill] = {}
 
     # Scan public and custom directories
     for category in ["public", "custom"]:
@@ -71,7 +74,9 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
 
             skill = parse_skill_file(skill_file, category=category, relative_path=relative_path)
             if skill:
-                skills.append(skill)
+                skills_by_name[skill.name] = skill
+
+    skills = list(skills_by_name.values())
 
     # Load skills state configuration and update enabled status
     # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
@@ -86,7 +91,7 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
             skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
     except Exception as e:
         # If config loading fails, default to all enabled
-        print(f"Warning: Failed to load extensions config: {e}")
+        logger.warning("Failed to load extensions config: %s", e)
 
     # Filter by enabled status if requested
     if enabled_only:
