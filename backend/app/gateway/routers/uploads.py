@@ -4,11 +4,14 @@ import logging
 import os
 import stat
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from deerflow.config.app_config import get_app_config
+from app.gateway.authz import require_permission
+from app.gateway.deps import get_config
+from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
     PathTraversalError,
@@ -58,23 +61,22 @@ def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
     return bool(getattr(sandbox_provider, "uses_thread_data_mounts", False))
 
 
-def _get_uploads_config_value(key: str, default: object) -> object:
+def _get_uploads_config_value(app_config: AppConfig, key: str, default: object) -> object:
     """Read a value from the uploads config, supporting dict and attribute access."""
-    cfg = get_app_config()
-    uploads_cfg = getattr(cfg, "uploads", None)
+    uploads_cfg = getattr(app_config, "uploads", None)
     if isinstance(uploads_cfg, dict):
         return uploads_cfg.get(key, default)
     return getattr(uploads_cfg, key, default)
 
 
-def _auto_convert_documents_enabled() -> bool:
+def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
     """Return whether automatic host-side document conversion is enabled.
 
     The secure default is disabled unless an operator explicitly opts in via
     uploads.auto_convert_documents in config.yaml.
     """
     try:
-        raw = _get_uploads_config_value("auto_convert_documents", False)
+        raw = _get_uploads_config_value(app_config, "auto_convert_documents", False)
         if isinstance(raw, str):
             return raw.strip().lower() in {"1", "true", "yes", "on"}
         return bool(raw)
@@ -83,9 +85,12 @@ def _auto_convert_documents_enabled() -> bool:
 
 
 @router.post("", response_model=UploadResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=False)
 async def upload_files(
     thread_id: str,
+    request: Request,
     files: list[UploadFile] = File(...),
+    config: AppConfig = Depends(get_config),
 ) -> UploadResponse:
     """Upload multiple files to a thread's uploads directory."""
     if not files:
@@ -95,7 +100,7 @@ async def upload_files(
         uploads_dir = ensure_uploads_dir(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
     uploaded_files = []
 
     sandbox_provider = get_sandbox_provider()
@@ -104,7 +109,7 @@ async def upload_files(
     if sync_to_sandbox:
         sandbox_id = sandbox_provider.acquire(thread_id)
         sandbox = sandbox_provider.get(sandbox_id)
-    auto_convert_documents = _auto_convert_documents_enabled()
+    auto_convert_documents = _auto_convert_documents_enabled(config)
 
     for file in files:
         if not file.filename:
@@ -166,7 +171,8 @@ async def upload_files(
 
 
 @router.get("/list", response_model=dict)
-async def list_uploaded_files(thread_id: str) -> dict:
+@require_permission("threads", "read", owner_check=True)
+async def list_uploaded_files(thread_id: str, request: Request) -> dict:
     """List all files in a thread's uploads directory."""
     try:
         uploads_dir = get_uploads_dir(thread_id)
@@ -176,7 +182,7 @@ async def list_uploaded_files(thread_id: str) -> dict:
     enrich_file_listing(result, thread_id)
 
     # Gateway additionally includes the sandbox-relative path.
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
     for f in result["files"]:
         f["path"] = str(sandbox_uploads / f["filename"])
 
@@ -184,7 +190,8 @@ async def list_uploaded_files(thread_id: str) -> dict:
 
 
 @router.delete("/{filename}")
-async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
+@require_permission("threads", "delete", owner_check=True, require_existing=True)
+async def delete_uploaded_file(thread_id: str, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
         uploads_dir = get_uploads_dir(thread_id)

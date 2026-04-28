@@ -1,3 +1,4 @@
+import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import type { Skill } from "./type";

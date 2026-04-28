@@ -17,7 +17,13 @@ dependencies = [
     "langgraph-sdk>=0.1.51",
     "markdown-to-mrkdwn>=0.3.1",
     "wecom-aibot-python-sdk>=0.1.6",
+    "bcrypt>=4.0.0",
+    "pyjwt>=2.9.0",
+    "email-validator>=2.0.0",
 ]
+
+[project.optional-dependencies]
+postgres = ["deerflow-harness[postgres]"]
 
 [dependency-groups]
 dev = [
@@ -27,8 +33,17 @@ dev = [
     "ruff>=0.14.11",
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "no_auto_user: disable the conftest autouse contextvar fixture for this test",
+]
+
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
 [tool.uv.workspace]
 members = ["packages/harness"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
+

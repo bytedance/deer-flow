@@ -1,0 +1,130 @@
+---
+title: 快速上手
+description: 本指南引导你使用 `make dev` 工作流在本地机器上启动 DeerFlow 应用。所有四个服务（LangGraph、Gateway、前端、nginx）一起启动，通过单个 URL 访问。
+---
+
+import { Callout, Cards, Steps } from "nextra/components";
+
+# 快速上手
+
+<Callout type="info" emoji="⚡">
+  大约 10 分钟即可在本地运行 DeerFlow 应用。你需要一台安装了 Python
+  3.12+、Node.js 22+ 的机器，以及至少一个 LLM API Key。
+</Callout>
+
+本指南引导你使用 `make dev` 工作流在本地机器上启动 DeerFlow 应用。所有四个服务（LangGraph、Gateway、前端、nginx）一起启动，通过单个 URL 访问。
+
+## 前置条件
+
+检查所有必需工具是否已安装：
+
+```bash
+make check
+```
+
+必需工具：
+
+| 工具    | 最低版本     |
+| ------- | ------------ |
+| Python  | 3.12         |
+| uv      | 最新版       |
+| Node.js | 22           |
+| pnpm    | 10           |
+| nginx   | 任何近期版本 |
+
+在 macOS 上，使用 `brew install python uv node pnpm nginx` 安装。在 Linux 上，使用你的发行版包管理器。
+
+## 步骤
+
+<Steps>
+
+### 克隆仓库
+
+```bash
+git clone https://github.com/bytedance/deer-flow.git
+cd deer-flow
+```
+
+### 安装依赖
+
+```bash
+make install
+```
+
+这会安装后端 Python 依赖（通过 `uv`）和前端 Node.js 依赖（通过 `pnpm`）。
+
+### 创建配置文件
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+然后编辑 `config.yaml` 至少添加一个模型：
+
+```yaml
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+```
+
+启动前设置对应的环境变量：
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+查看[配置](/docs/application/configuration)页面了解其他模型提供商的示例。
+
+### 启动所有服务
+
+```bash
+make dev
+```
+
+这会启动：
+
+- LangGraph 服务，端口 `2024`
+- Gateway API，端口 `8001`
+- 前端，端口 `3000`
+- nginx 反向代理，端口 `2026`
+
+在浏览器中打开 [http://localhost:2026](http://localhost:2026)。
+
+### 停止所有服务
+
+```bash
+make stop
+```
+
+</Steps>
+
+## `make dev` 做了什么
+
+- 首先停止已有的服务进程（在启动被中断后安全运行）。
+- 每个服务在后台启动，日志写入 `logs/` 目录。
+- nginx 通过端口 `2026` 代理所有流量，所以你只需要一个 URL。
+
+日志文件：
+
+| 服务      | 日志文件             |
+| --------- | -------------------- |
+| LangGraph | `logs/langgraph.log` |
+| Gateway   | `logs/gateway.log`   |
+| 前端      | `logs/frontend.log`  |
+| nginx     | `logs/nginx.log`     |
+
+<Callout type="tip">
+  如果有问题，先检查日志文件。大多数启动错误（缺失 API
+  Key、配置解析失败）会出现在 <code>logs/langgraph.log</code> 或{" "}
+  <code>logs/gateway.log</code> 中。
+</Callout>
+
+<Cards num={2}>
+  <Cards.Card title="部署指南" href="/docs/application/deployment-guide" />
+  <Cards.Card title="配置" href="/docs/application/configuration" />
+</Cards>

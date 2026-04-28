@@ -54,7 +54,6 @@
     "@xyflow/react": "^12.10.0",
     "ai": "^6.0.33",
     "best-effort-json-parser": "^1.2.1",
-    "better-auth": "^1.3",
     "canvas-confetti": "^1.9.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

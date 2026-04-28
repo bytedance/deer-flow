@@ -1,0 +1,163 @@
+---
+title: 集成指南
+description: DeerFlow Harness 不仅仅是一个独立应用程序——它是一个可以导入并在你自己的后端、API 服务器、自动化系统或多 Agent 协调器中使用的 Python 库。
+---
+
+import { Callout, Cards } from "nextra/components";
+
+# 集成指南
+
+<Callout type="info" emoji="🔌">
+  DeerFlow Harness 可以嵌入任何 Python 应用程序。本指南涵盖在你自己的系统中将
+  DeerFlow 作为库使用的集成模式。
+</Callout>
+
+DeerFlow Harness 不仅仅是一个独立应用程序——它是一个可以导入并在你自己的后端、API 服务器、自动化系统或多 Agent 协调器中使用的 Python 库。
+
+## 嵌入 DeerFlowClient
+
+主要集成点是 `DeerFlowClient`。它封装了 LangGraph 运行时，并提供一个简洁的 API，用于在任何 Python 应用中发送消息和流式传输响应。
+
+```python
+from deerflow.client import DeerFlowClient
+from deerflow.config import load_config
+
+# 加载配置（读取 config.yaml 或 DEER_FLOW_CONFIG_PATH）
+load_config()
+
+client = DeerFlowClient()
+```
+
+客户端是线程安全的，设计为实例化一次并在请求之间复用。
+
+## 异步流式传输
+
+推荐的集成模式是异步流式传输。这让你可以在 Agent 生成响应时实时访问每个 token 和事件：
+
+```python
+import asyncio
+
+async def run_agent(thread_id: str, user_message: str):
+    async for event in client.astream(
+        thread_id=thread_id,
+        message=user_message,
+        config={
+            "configurable": {
+                "model_name": "gpt-4o",
+                "subagent_enabled": True,
+            }
+        },
+    ):
+        # 处理每个流式事件
+        yield event
+
+# 在 FastAPI 处理器中：
+# from fastapi.responses import StreamingResponse
+# return StreamingResponse(run_agent(thread_id, message), media_type="text/event-stream")
+```
+
+## 非流式调用
+
+对于批处理或只需要最终结果的场景：
+
+```python
+async def run_agent_sync(thread_id: str, user_message: str) -> dict:
+    result = await client.ainvoke(
+        thread_id=thread_id,
+        message=user_message,
+    )
+    return result
+```
+
+## 线程管理
+
+线程表示持久化对话。使用唯一线程 ID 隔离不同用户会话：
+
+```python
+import uuid
+
+# 新对话
+thread_id = str(uuid.uuid4())
+
+# 继续已有对话（相同 thread_id）
+# 如果配置了检查点，Agent 将看到完整历史
+await client.ainvoke(thread_id=existing_thread_id, message="后续问题")
+```
+
+## 自定义 Agent 配置
+
+通过创建命名 Agent 配置并在运行时传入 `agent_name` 来构建领域特定 Agent：
+
+```python
+# agents/research-assistant/config.yaml 必须存在并包含技能和工具配置
+
+result = await client.ainvoke(
+    thread_id=thread_id,
+    message=user_message,
+    config={
+        "configurable": {
+            "agent_name": "research-assistant",
+            "model_name": "gpt-4o",
+        }
+    },
+)
+```
+
+## 与 FastAPI 集成
+
+DeerFlow Gateway 本身是一个 FastAPI 应用程序。你可以将其作为子应用程序挂载：
+
+```python
+from fastapi import FastAPI
+from deerflow.config import load_config
+
+load_config()
+
+app = FastAPI()
+
+# 挂载 DeerFlow Gateway
+from deerflow.app.gateway.main import app as gateway_app
+app.mount("/deerflow", gateway_app)
+```
+
+或者在你自己的 FastAPI 路由中直接使用 `DeerFlowClient` 进行流式传输：
+
+```python
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from deerflow.client import DeerFlowClient
+
+app = FastAPI()
+client = DeerFlowClient()
+
+@app.post("/chat/{thread_id}")
+async def chat(thread_id: str, body: dict):
+    async def generate():
+        async for event in client.astream(thread_id=thread_id, message=body["message"]):
+            yield f"data: {event}\n\n"
+    return StreamingResponse(generate(), media_type="text/event-stream")
+```
+
+## 嵌入模式下的配置
+
+当嵌入到另一个应用程序时，显式设置配置路径以避免歧义：
+
+```python
+import os
+os.environ["DEER_FLOW_CONFIG_PATH"] = "/path/to/my-deerflow-config.yaml"
+
+from deerflow.config import load_config
+load_config()
+```
+
+或直接传递路径：
+
+```python
+from deerflow.config import load_config
+load_config(config_path="/path/to/my-deerflow-config.yaml")
+```
+
+<Cards num={2}>
+  <Cards.Card title="自定义与扩展" href="/docs/harness/customization" />
+  <Cards.Card title="配置" href="/docs/harness/configuration" />
+</Cards>

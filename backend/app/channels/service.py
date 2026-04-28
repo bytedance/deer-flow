@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.channels.base import Channel
 from app.channels.manager import DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
@@ -12,6 +12,9 @@ from app.channels.message_bus import MessageBus
 from app.channels.store import ChannelStore
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from deerflow.config.app_config import AppConfig
 
 # Channel name → import path for lazy loading
 _CHANNEL_REGISTRY: dict[str, str] = {
@@ -75,14 +78,15 @@ class ChannelService:
         self._running = False
 
     @classmethod
-    def from_app_config(cls) -> ChannelService:
+    def from_app_config(cls, app_config: AppConfig | None = None) -> ChannelService:
         """Create a ChannelService from the application config."""
-        from deerflow.config.app_config import get_app_config
+        if app_config is None:
+            from deerflow.config.app_config import get_app_config
 
-        config = get_app_config()
+            app_config = get_app_config()
         channels_config = {}
         # extra fields are allowed by AppConfig (extra="allow")
-        extra = config.model_extra or {}
+        extra = app_config.model_extra or {}
         if "channels" in extra:
             channels_config = extra["channels"]
         return cls(channels_config=channels_config)
@@ -201,12 +205,12 @@ def get_channel_service() -> ChannelService | None:
     return _channel_service
 
 
-async def start_channel_service() -> ChannelService:
+async def start_channel_service(app_config: AppConfig | None = None) -> ChannelService:
     """Create and start the global ChannelService from app config."""
     global _channel_service
     if _channel_service is not None:
         return _channel_service
-    _channel_service = ChannelService.from_app_config()
+    _channel_service = ChannelService.from_app_config(app_config)
     await _channel_service.start()
     return _channel_service
 

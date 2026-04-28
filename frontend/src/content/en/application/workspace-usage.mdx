@@ -1,3 +1,82 @@
+---
+title: Workspace Usage
+description: The DeerFlow App workspace is a browser-based interface for having multi-turn conversations with the agent, tracking task progress, viewing artifacts, and managing files.
+---
+
+import { Callout, Cards } from "nextra/components";
+
 # Workspace Usage
 
-TBD
+The DeerFlow App workspace is a browser-based interface for having multi-turn conversations with the agent, tracking task progress, viewing artifacts, and managing files.
+
+## Starting a conversation
+
+Open the app at `http://localhost:2026` (or your deployment URL). The workspace is split into:
+
+- **Sidebar** (left): thread list, new thread button, and navigation to agents and settings.
+- **Conversation area** (center): the active thread's message history.
+- **Input bar** (bottom): text input, skill selector, model selector, and attachment controls.
+
+To start a new thread, click **New Thread** in the sidebar or use the keyboard shortcut. Each thread is independent — it has its own conversation history, artifacts, and state.
+
+## Selecting a model
+
+Use the model picker in the input bar to choose which configured model to use for the current request. Models listed here correspond to the `models:` entries in your `config.yaml`.
+
+The selected model applies to the next message only. You can switch models between messages in the same thread.
+
+If a model supports **thinking mode**, a toggle appears next to the model selector. When thinking is enabled, the agent's internal reasoning steps are shown inline in the response.
+
+## Selecting a skill
+
+Click the **Skills** button in the input bar to open the skill selector. Enabled skills are listed here. Selecting a skill tells the agent to apply that skill's workflow and instructions for the current message.
+
+<Callout type="tip">
+  Skills are most useful when you want the agent to follow a specific approach,
+  such as deep research methodology or structured data analysis. For general
+  questions, you typically do not need to select a skill.
+</Callout>
+
+## Plan mode
+
+Toggle **Plan Mode** in the input bar to enable the todo list middleware. In plan mode, the agent creates and maintains a visible task list as it works through a complex multi-step objective. Each task shows its status (`pending`, `in_progress`, `completed`) in real time.
+
+Plan mode is most useful for complex tasks with 3 or more distinct steps.
+
+## Uploading files
+
+Click the attachment icon in the input bar to upload files. Supported file types include PDFs, text files, spreadsheets, and images.
+
+Uploaded files are stored under the thread's working directory (`/mnt/user-data/uploads/`) and are accessible to the agent during the conversation. PDFs are automatically converted to Markdown for better model comprehension (the converter can be configured via `uploads.pdf_converter` in `config.yaml`).
+
+## Viewing artifacts
+
+When the agent produces output files (reports, charts, code, etc.), they appear in the **Artifacts** panel. Each artifact shows a preview (for supported types) and a download link.
+
+Artifacts are tracked in the thread state and persist across page reloads.
+
+## Understanding the message stream
+
+Each agent response in the conversation may contain:
+
+- **Text**: the agent's direct reply.
+- **Thinking** (if thinking mode is enabled): the model's internal reasoning, shown in a collapsible block.
+- **Tool calls**: a record of which tools were called and with what arguments.
+- **Tool results**: the output returned by each tool.
+- **Subagent output**: if the agent delegated a task, the subagent's progress appears inline.
+
+Tool calls and thinking steps are collapsed by default. Click to expand them.
+
+## Switching agents
+
+If you have created custom agents, use the **Agent** selector in the input bar to switch to a different agent. The selected agent persists for the duration of the thread.
+
+Custom agents may have different models, skills, tool sets, and system prompts. See [Agents and Threads](/docs/application/agents-and-threads) for how to create and manage custom agents.
+
+<Cards num={2}>
+  <Cards.Card
+    title="Agents and Threads"
+    href="/docs/application/agents-and-threads"
+  />
+  <Cards.Card title="Configuration" href="/docs/application/configuration" />
+</Cards>

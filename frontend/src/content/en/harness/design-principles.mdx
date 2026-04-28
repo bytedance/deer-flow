@@ -1,3 +1,126 @@
+---
+title: Design Principles
+description: Understanding the design principles behind DeerFlow Harness helps you use it effectively, extend it confidently, and reason about how your agents will behave in production.
+---
+
+import { Callout, Cards } from "nextra/components";
+
 # Design Principles
 
-TBD
+<Callout type="info" emoji="🏗️">
+  DeerFlow is built around one central idea: agent behavior should be composed
+  from small, observable, replaceable pieces — not hardcoded into a fixed
+  workflow graph.
+</Callout>
+
+Understanding the design principles behind DeerFlow Harness helps you use it effectively, extend it confidently, and reason about how your agents will behave in production.
+
+## Why a harness, not a framework
+
+A framework gives you abstractions and building blocks. You assemble the parts and write the glue code that connects them.
+
+A **harness** goes further. It packages an opinionated, ready-to-run runtime so that agents can do real work without you rebuilding the same infrastructure every time.
+
+DeerFlow is a harness because it bundles:
+
+- a lead agent with tool routing,
+- a middleware chain that wraps every LLM turn,
+- sandboxed execution for files and commands,
+- skills that load specialized capabilities on demand,
+- subagents for delegated parallel work,
+- memory for cross-session continuity, and
+- a configuration system that controls all of it.
+
+You do not need to design the orchestration layer from scratch. The harness is the orchestration layer.
+
+## Long-horizon tasks are the primary case
+
+DeerFlow is designed for tasks that require more than a single prompt-response exchange. A useful long-horizon agent must:
+
+1. make a plan,
+2. call tools in sequence,
+3. inspect and modify files,
+4. recover when something fails,
+5. delegate work to subagents when the task is too broad, and
+6. return a concrete artifact at the end.
+
+Every architectural decision in DeerFlow is evaluated against this use case. Short, stateless exchanges are easy. Long, multi-step workflows under real-world pressure are the target.
+
+## Middleware chain over inheritance
+
+DeerFlow does not ask you to subclass an agent or override methods to change its behavior. Instead, it uses a **middleware chain** that wraps every LLM turn.
+
+Each middleware is a small, focused plugin that can inspect or modify the agent's state before and after the model call. The lead agent's behavior is entirely determined by which middlewares are active.
+
+This design has several benefits:
+
+- Individual behaviors (memory, summarization, clarification, loop detection) are isolated and testable independently.
+- The chain can be extended without touching the agent's core logic.
+- Each middleware's effect is visible and auditable because it only touches the state it declares.
+
+See the [Middlewares](/docs/harness/middlewares) page for the full list and configuration.
+
+## Skills provide specialization without contamination
+
+A **skill** is a task-oriented capability package. It contains instructions, workflows, best practices, and any tools or resources that make the agent effective at a specific class of work.
+
+The key design decision is that skills are loaded **on demand**. The base agent stays general. When a task requires deep research, the research skill is loaded. When a task requires data analysis, the analysis skill is loaded.
+
+This matters because it keeps the base agent's context clean. A specialized prompt for writing academic papers does not pollute a session focused on coding. Skills inject their content exactly when relevant and no further.
+
+Skills also make the system extensible. Adding a new capability to DeerFlow means writing a new skill pack, not modifying the agent core.
+
+## Sandbox is the execution environment
+
+DeerFlow gives agents a **sandbox**: an isolated workspace where they can read files, write outputs, run commands, and produce artifacts.
+
+This turns the agent from a text generator into a system that can do work. Instead of only describing what code to write, the agent can write it, run it, and verify the result.
+
+Isolation is important because execution should be reproducible and controllable. The sandbox is the reason DeerFlow can support genuine action rather than only conversation.
+
+Two modes are available:
+
+- **LocalSandbox**: commands run directly on the host. Suitable for trusted, single-user local workflows.
+- **Container-based sandbox**: commands run in an isolated container (Docker or Apple Container). Suitable for multi-user environments and production deployments.
+
+## Context engineering keeps long tasks tractable
+
+Context pressure is the primary challenge for long-horizon agents. If everything accumulates in the context window indefinitely, the agent becomes slower, noisier, and less reliable.
+
+DeerFlow addresses this through **context engineering** — deliberate control of what the agent sees, remembers, and ignores at each step:
+
+- **Summarization**: when the conversation grows too long, older turns are summarized and replaced. The agent retains the meaning without the bulk.
+- **Scoped subagent context**: when work is delegated to a subagent, that subagent receives only the information it needs for its piece of the task, not the full parent history.
+- **External working memory**: files and artifacts produced during a task live on disk, not in the context window. The agent references them when needed.
+- **Memory injection**: cross-session facts are injected into the system prompt at a controlled token budget.
+
+This is one of the most important ideas in DeerFlow. Good agent behavior is not only about a stronger model. It is also about giving the model the right working set at the right time.
+
+## Configuration drives behavior
+
+All meaningful behaviors in DeerFlow are controlled through `config.yaml`. The system is designed so that operators can change how the agent behaves — which models to use, whether summarization is active, how subagents are limited, what tools are available — without touching code.
+
+This design principle has three implications:
+
+1. **Reproducibility**: a config file is a complete description of the agent's behavior at a point in time.
+2. **Deployability**: the same code runs differently in different environments because the config is different.
+3. **Auditability**: what the agent can and cannot do is visible in one place.
+
+Environment variable interpolation (`api_key: $OPENAI_API_KEY`) keeps secrets out of committed config files while preserving the same structure.
+
+## Summary
+
+| Principle                   | What it means in practice                                      |
+| --------------------------- | -------------------------------------------------------------- |
+| Harness, not framework      | Ready-to-run runtime with all the infrastructure already wired |
+| Long-horizon first          | Architecture assumes multi-step, multi-tool, multi-turn tasks  |
+| Middleware over inheritance | Behavior is composed from small, isolated plugins              |
+| Skills for specialization   | Domain capability injected on demand, keeping the base clean   |
+| Sandbox for execution       | Isolated workspace for real file and command work              |
+| Context engineering         | Active management of what the agent sees to stay effective     |
+| Config-driven               | All key behaviors are controlled through `config.yaml`         |
+
+<Cards num={2}>
+  <Cards.Card title="Lead Agent" href="/docs/harness/lead-agent" />
+  <Cards.Card title="Middlewares" href="/docs/harness/middlewares" />
+</Cards>

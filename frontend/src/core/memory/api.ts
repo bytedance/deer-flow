@@ -1,3 +1,4 @@
+import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 
 import type {

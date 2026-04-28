@@ -328,7 +328,11 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 export function isHiddenFromUIMessage(message: Message) {
-  return message.additional_kwargs?.hide_from_ui === true;
+  return (
+    message.additional_kwargs?.hide_from_ui === true ||
+    message.name === "summary" ||
+    message.name === "loop_warning"
+  );
 }
 
 /**

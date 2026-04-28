@@ -414,6 +414,27 @@ def _make_async_iterator(items):
 
 
 class TestChannelManager:
+    def test_get_client_includes_csrf_header_and_cookie(self):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store, langgraph_url="http://localhost:8001")
+
+        with patch("langgraph_sdk.get_client") as get_client:
+            get_client.return_value = object()
+
+            manager._get_client()
+
+        get_client.assert_called_once()
+        kwargs = get_client.call_args.kwargs
+        assert kwargs["url"] == "http://localhost:8001"
+        headers = kwargs["headers"]
+        csrf_token = headers["X-CSRF-Token"]
+        assert csrf_token
+        assert headers["Cookie"] == f"csrf_token={csrf_token}"
+        assert headers["X-DeerFlow-Internal-Token"]
+
     def test_handle_chat_calls_channel_receive_file_for_inbound_files(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
@@ -495,7 +516,7 @@ class TestChannelManager:
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
-            # Thread should be created on the LangGraph Server
+            # Thread should be created through Gateway
             mock_client.threads.create.assert_called_once()
 
             # Thread ID should be stored
@@ -1987,29 +2008,45 @@ class TestChannelService:
     def test_service_urls_fall_back_to_env(self, monkeypatch):
         from app.channels.service import ChannelService
 
-        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://langgraph:2024")
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://gateway:8001/api")
         monkeypatch.setenv("DEER_FLOW_CHANNELS_GATEWAY_URL", "http://gateway:8001")
 
         service = ChannelService(channels_config={})
 
-        assert service.manager._langgraph_url == "http://langgraph:2024"
+        assert service.manager._langgraph_url == "http://gateway:8001/api"
         assert service.manager._gateway_url == "http://gateway:8001"
 
     def test_config_service_urls_override_env(self, monkeypatch):
         from app.channels.service import ChannelService
 
-        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://langgraph:2024")
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://gateway:8001/api")
         monkeypatch.setenv("DEER_FLOW_CHANNELS_GATEWAY_URL", "http://gateway:8001")
 
         service = ChannelService(
             channels_config={
-                "langgraph_url": "http://custom-langgraph:2024",
+                "langgraph_url": "http://custom-gateway:8001/api",
                 "gateway_url": "http://custom-gateway:8001",
             }
         )
 
-        assert service.manager._langgraph_url == "http://custom-langgraph:2024"
+        assert service.manager._langgraph_url == "http://custom-gateway:8001/api"
         assert service.manager._gateway_url == "http://custom-gateway:8001"
+
+    def test_from_app_config_uses_explicit_config(self):
+        from app.channels.service import ChannelService
+
+        app_config = SimpleNamespace(
+            model_extra={
+                "channels": {
+                    "telegram": {"enabled": False},
+                }
+            }
+        )
+
+        with patch("deerflow.config.app_config.get_app_config", side_effect=AssertionError("should not read global config")):
+            service = ChannelService.from_app_config(app_config)
+
+        assert service._config == {"telegram": {"enabled": False}}
 
     def test_disabled_channel_with_string_creds_emits_warning(self, caplog):
         """Warning is emitted when a channel has string credentials but enabled=false."""

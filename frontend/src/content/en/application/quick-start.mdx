@@ -1,3 +1,133 @@
+---
+title: Quick Start
+description: This guide walks you through starting DeerFlow App on your local machine using the `make dev` workflow. All four services (LangGraph, Gateway, Frontend, nginx) start together and are accessible through a single URL.
+---
+
+import { Callout, Cards, Steps } from "nextra/components";
+
 # Quick Start
 
-TBD
+<Callout type="info" emoji="⚡">
+  Get DeerFlow App running locally in about 10 minutes. You need a machine with
+  Python 3.12+, Node.js 22+, and at least one LLM API key.
+</Callout>
+
+This guide walks you through starting DeerFlow App on your local machine using the `make dev` workflow. All four services (LangGraph, Gateway, Frontend, nginx) start together and are accessible through a single URL.
+
+## Prerequisites
+
+Check that all required tools are installed:
+
+```bash
+make check
+```
+
+Required:
+
+| Tool    | Minimum version    |
+| ------- | ------------------ |
+| Python  | 3.12               |
+| uv      | latest             |
+| Node.js | 22                 |
+| pnpm    | 10                 |
+| nginx   | any recent version |
+
+On macOS, install with `brew install python uv node pnpm nginx`. On Linux, use your distribution's package manager.
+
+## Steps
+
+<Steps>
+
+### Clone the repository
+
+```bash
+git clone https://github.com/bytedance/deer-flow.git
+cd deer-flow
+```
+
+### Install dependencies
+
+```bash
+make install
+```
+
+This installs both backend Python dependencies (via `uv`) and frontend Node.js dependencies (via `pnpm`).
+
+### Create your config file
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Then edit `config.yaml` to add at least one model. The minimum change is adding a model under the `models:` section:
+
+```yaml
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+```
+
+Set the corresponding environment variable before starting:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+See the [Application Configuration](/docs/application/configuration) page for examples with other model providers.
+
+### Start all services
+
+```bash
+make dev
+```
+
+This starts:
+
+- LangGraph server on port `2024`
+- Gateway API on port `8001`
+- Frontend on port `3000`
+- nginx reverse proxy on port `2026`
+
+Open [http://localhost:2026](http://localhost:2026) in your browser.
+
+### Stop all services
+
+```bash
+make stop
+```
+
+</Steps>
+
+## What happens when you run `make dev`
+
+- Existing service processes are stopped first (safe to run after an interrupted start).
+- Each service is started in the background and writes logs to the `logs/` directory.
+- nginx proxies all traffic through port `2026`, so you only need one URL.
+
+Log files:
+
+| Service   | Log file             |
+| --------- | -------------------- |
+| LangGraph | `logs/langgraph.log` |
+| Gateway   | `logs/gateway.log`   |
+| Frontend  | `logs/frontend.log`  |
+| nginx     | `logs/nginx.log`     |
+
+<Callout type="tip">
+  If something is not working, check the log files first. Most startup errors
+  (missing API keys, config parsing failures) appear in `logs/langgraph.log` or
+  `logs/gateway.log`.
+</Callout>
+
+<Cards num={2}>
+  <Cards.Card
+    title="Deployment Guide"
+    href="/docs/application/deployment-guide"
+  />
+  <Cards.Card title="Configuration" href="/docs/application/configuration" />
+</Cards>

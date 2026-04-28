@@ -1,0 +1,219 @@
+---
+title: Middlewares
+description: Every time the Lead Agent calls the LLM, it runs through a **middleware chain** before and after the model call. Middlewares can read and modify the agent's state, inject content into the system prompt, intercept tool calls, and react to model outputs.
+---
+
+import { Callout } from "nextra/components";
+
+# Middlewares
+
+<Callout type="info" emoji="🔌">
+  Middlewares wrap every LLM turn in the Lead Agent. They are the primary
+  extension point for adding cross-cutting behaviors like memory, summarization,
+  clarification, and token tracking.
+</Callout>
+
+Every time the Lead Agent calls the LLM, it runs through a **middleware chain** before and after the model call. Middlewares can read and modify the agent's state, inject content into the system prompt, intercept tool calls, and react to model outputs.
+
+This design keeps the agent core simple and stable while allowing rich, composable behaviors to be layered in.
+
+## How the chain works
+
+The middleware chain is built once per agent invocation, based on the current configuration and request parameters. The middlewares run in a defined order:
+
+1. Runtime middlewares (error handling, thread data, uploads, dangling tool call patching)
+2. `SummarizationMiddleware` — context compression (if enabled)
+3. `TodoMiddleware` — task list management (plan mode only)
+4. `TokenUsageMiddleware` — token tracking (if enabled)
+5. `TitleMiddleware` — automatic thread title generation
+6. `MemoryMiddleware` — cross-session memory injection and queuing
+7. `ViewImageMiddleware` — image details injection (if model supports vision)
+8. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
+9. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
+10. `LoopDetectionMiddleware` — breaks repetitive tool call loops
+11. Custom middlewares (if any)
+12. `ClarificationMiddleware` — intercepts clarification requests (always last)
+
+The ordering is significant. Summarization runs early to reduce context before other processing. Clarification always runs last so it can intercept after all other middlewares have had their turn.
+
+## Middleware reference
+
+### ClarificationMiddleware
+
+Intercepts clarification tool calls and converts them into proper user-facing requests for additional information. When the model decides it needs to ask the user something before proceeding, this middleware surfaces that request.
+
+**Configuration**: controlled by `guardrails.clarification` settings.
+
+---
+
+### LoopDetectionMiddleware
+
+Detects when the agent is making the same tool call repeatedly without making progress. When a loop is detected, the middleware intervenes to break the cycle and prevents the agent from burning turns indefinitely.
+
+**Configuration**: built-in, no user configuration.
+
+---
+
+### MemoryMiddleware
+
+Reads persisted memory facts at the start of each conversation and injects them into the system prompt. After a conversation ends, queues a background update to incorporate any new information into the memory store.
+
+**Configuration**: see the [Memory](/docs/harness/memory) page and the `memory:` section in `config.yaml`.
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  max_injection_tokens: 2000
+  debounce_seconds: 30
+```
+
+---
+
+### SubagentLimitMiddleware
+
+Limits the number of parallel subagent task calls the agent can make in a single turn. This prevents the agent from spawning an unbounded number of concurrent subagents.
+
+**Configuration**: `subagent_enabled` and `max_concurrent_subagents` in the per-request config.
+
+---
+
+### TitleMiddleware
+
+Automatically generates a title for the thread after the first exchange. The title is derived from the user's first message and the agent's response.
+
+**Configuration**: `title:` section in `config.yaml`.
+
+```yaml
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null # use default model
+```
+
+---
+
+### TodoMiddleware
+
+When plan mode is active, maintains a structured task list visible to the user. The agent uses the `write_todos` tool to mark tasks as `pending`, `in_progress`, or `completed` as it works through a complex objective.
+
+**Activation**: enabled automatically when `is_plan_mode: true` is set in the request configuration. No `config.yaml` entry required.
+
+---
+
+### TokenUsageMiddleware
+
+Tracks LLM token consumption per model call and logs it at the `info` level. Useful for monitoring costs and understanding where tokens are going in long tasks.
+
+**Configuration**: `token_usage:` section in `config.yaml`.
+
+```yaml
+token_usage:
+  enabled: false
+```
+
+---
+
+### SandboxAuditMiddleware
+
+Audits sandbox operations performed during the agent's execution. Provides a record of what files were read, written, and what commands were run.
+
+**Configuration**: built-in runtime middleware, always active when a sandbox is available.
+
+---
+
+### SummarizationMiddleware
+
+When the conversation grows long, summarizes older messages to reduce context size. The summary is injected back into the conversation in place of the original messages, preserving meaning without the full token cost.
+
+**Configuration**: `summarization:` section in `config.yaml`. See detailed configuration below.
+
+---
+
+### ViewImageMiddleware
+
+When the current model supports vision (`supports_vision: true`), this middleware intercepts `view_image` tool calls and injects the image content directly into the model's context so it can be analyzed.
+
+**Activation**: automatically enabled when the resolved model has `supports_vision: true`.
+
+---
+
+### DeferredToolFilterMiddleware
+
+When tool search is enabled, this middleware hides deferred tool schemas from the model's context. Tools are discovered lazily via the `tool_search` tool instead of being listed upfront, reducing context usage.
+
+**Configuration**: `tool_search.enabled: true` in `config.yaml`.
+
+## Summarization configuration
+
+The `SummarizationMiddleware` is one of the most impactful middlewares for long-horizon tasks. Here is the full configuration reference:
+
+```yaml
+summarization:
+  enabled: true
+
+  # Model to use for summarization (null = use default model)
+  # A lightweight model like gpt-4o-mini is recommended to reduce cost.
+  model_name: null
+
+  # Trigger conditions — summarization runs when ANY threshold is met
+  trigger:
+    - type: tokens # trigger when context exceeds N tokens
+      value: 15564
+    # - type: messages  # trigger when there are more than N messages
+    #   value: 50
+    # - type: fraction  # trigger when context exceeds X% of model max
+    #   value: 0.8
+
+  # How much recent history to keep after summarization
+  keep:
+    type: messages
+    value: 10 # keep the 10 most recent messages
+    # Alternative: keep by tokens
+    # type: tokens
+    # value: 3000
+
+  # Maximum tokens to trim when preparing messages for the summarizer
+  trim_tokens_to_summarize: 15564
+
+  # Custom summary prompt (null = use default LangChain prompt)
+  summary_prompt: null
+```
+
+**Trigger types**:
+
+- `tokens`: triggers when the total token count in the conversation exceeds `value`.
+- `messages`: triggers when the number of messages exceeds `value`.
+- `fraction`: triggers when the context reaches `value` fraction of the model's maximum input token limit.
+
+Multiple triggers can be listed; summarization runs when **any** of them fires.
+
+**Keep types**:
+
+- `messages`: keep the last `value` messages after summarization.
+- `tokens`: keep up to `value` tokens of recent history.
+- `fraction`: keep up to `value` fraction of the model's max input token limit.
+
+## Writing a custom middleware
+
+Custom middlewares can be injected into the chain for specialized use cases. A middleware must implement the `AgentMiddleware` interface from `langchain.agents.middleware`.
+
+The basic structure is:
+
+```python
+from langchain.agents.middleware import AgentMiddleware
+
+class MyMiddleware(AgentMiddleware):
+    async def on_start(self, state, config):
+        # Runs before the model call
+        # Modify state or config here
+        return state, config
+
+    async def on_end(self, state, config):
+        # Runs after the model call
+        # Inspect or modify the result
+        return state, config
+```
+
+Custom middlewares are passed to `make_lead_agent` via the `custom_middlewares` parameter in `_build_middlewares`. They are injected immediately before `ClarificationMiddleware` at the end of the chain.

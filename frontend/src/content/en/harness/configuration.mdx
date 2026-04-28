@@ -1,3 +1,168 @@
+---
+title: Configuration
+description: "DeerFlow's configuration system is designed around one goal: every meaningful behavior should be expressible in a config file, not hardcoded in the application. This makes deployments reproducible, auditable, and easy to customize per environment."
+---
+
+import { Callout, Cards } from "nextra/components";
+
 # Configuration
 
-TBD
+<Callout type="info" emoji="⚙️">
+  All DeerFlow Harness behaviors are driven by <code>config.yaml</code>. One
+  file controls which models are available, how the sandbox runs, what tools are
+  loaded, and how each subsystem behaves.
+</Callout>
+
+DeerFlow's configuration system is designed around one goal: every meaningful behavior should be expressible in a config file, not hardcoded in the application. This makes deployments reproducible, auditable, and easy to customize per environment.
+
+## Config file location
+
+DeerFlow resolves `config.yaml` using the following priority order:
+
+1. The path passed to `AppConfig.from_file(config_path)` explicitly.
+2. The `DEER_FLOW_CONFIG_PATH` environment variable.
+3. `backend/config.yaml` (relative to the backend directory).
+4. `config.yaml` in the repository root.
+
+If none of these paths exist, the application raises an error at startup.
+
+To use a custom location:
+
+```bash
+export DEER_FLOW_CONFIG_PATH=/path/to/my-config.yaml
+```
+
+## Environment variable interpolation
+
+Any field value can reference an environment variable using `$VAR_NAME` syntax:
+
+```yaml
+models:
+  - name: gpt-4o
+    api_key: $OPENAI_API_KEY
+```
+
+This keeps secrets out of the config file itself. The variable is resolved at runtime from the process environment.
+
+## The `use` field
+
+Many configuration entries use a `use:` field to specify the Python class or object to instantiate. The format is:
+
+```
+package.subpackage.module:ClassName
+```
+
+or for module-level objects:
+
+```
+package.subpackage.module:variable_name
+```
+
+Examples:
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.tavily.tools:web_search_tool
+    api_key: $TAVILY_API_KEY
+```
+
+This pattern is how DeerFlow achieves pluggability without hardcoding class references.
+
+## Extra fields are passed through
+
+For model configuration, `ModelConfig` uses `pydantic ConfigDict(extra="allow")`. This means any extra fields you add under a model entry are passed directly to the model constructor. This allows provider-specific options (like `extra_body`, `reasoning`, or custom timeout keys) to work without modifying the harness:
+
+```yaml
+models:
+  - name: my-model
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    some_provider_specific_option: value # passed through to ChatOpenAI constructor
+```
+
+## Configuration version
+
+`config.yaml` includes a `config_version` field that tracks the schema version:
+
+```yaml
+config_version: 6
+```
+
+When the schema changes (new fields, renamed sections), this number is bumped. If your local `config.yaml` is behind the current version, run:
+
+```bash
+make config-upgrade
+```
+
+This merges new fields from `config.example.yaml` into your existing `config.yaml` without overwriting your customizations.
+
+## Module configuration reference
+
+The following table maps each top-level `config.yaml` section to its documentation page:
+
+| Section           | Description                                      | Documentation                                            |
+| ----------------- | ------------------------------------------------ | -------------------------------------------------------- |
+| `log_level`       | Logging level (`debug`/`info`/`warning`/`error`) | —                                                        |
+| `models`          | Available LLM models                             | [Lead Agent](/docs/harness/lead-agent)                   |
+| `token_usage`     | Token tracking per model call                    | [Middlewares](/docs/harness/middlewares)                 |
+| `tools`           | Available agent tools                            | [Tools](/docs/harness/tools)                             |
+| `tool_groups`     | Named groups of tools                            | [Tools](/docs/harness/tools)                             |
+| `tool_search`     | Deferred/on-demand tool loading                  | [Tools](/docs/harness/tools)                             |
+| `sandbox`         | Sandbox provider and options                     | [Sandbox](/docs/harness/sandbox)                         |
+| `skills`          | Skills directory and container path              | [Skills](/docs/harness/skills)                           |
+| `skill_evolution` | Agent-managed skill creation                     | [Skills](/docs/harness/skills)                           |
+| `subagents`       | Subagent timeouts and max turns                  | [Subagents](/docs/harness/subagents)                     |
+| `acp_agents`      | External ACP agent integrations                  | [Subagents](/docs/harness/subagents)                     |
+| `memory`          | Cross-session memory storage                     | [Memory](/docs/harness/memory)                           |
+| `summarization`   | Conversation summarization                       | [Middlewares](/docs/harness/middlewares)                 |
+| `title`           | Automatic thread title generation                | [Middlewares](/docs/harness/middlewares)                 |
+| `checkpointer`    | Thread state persistence                         | [Agents & Threads](/docs/application/agents-and-threads) |
+| `guardrails`      | Tool call authorization                          | —                                                        |
+| `stream_bridge`   | Streaming configuration                          | —                                                        |
+| `uploads`         | File upload settings (PDF converter)             | —                                                        |
+| `channels`        | IM channel integrations (Feishu, Slack, etc.)    | —                                                        |
+
+## Minimal config to get started
+
+The minimum valid `config.yaml` requires at least one model and a sandbox:
+
+```yaml
+config_version: 6
+
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+Start from `config.example.yaml` in the repository root and uncomment the sections you need.
+
+<Cards num={2}>
+  <Cards.Card
+    title="Deployment Guide"
+    href="/docs/application/deployment-guide"
+  />
+  <Cards.Card
+    title="Application Configuration"
+    href="/docs/application/configuration"
+  />
+</Cards>

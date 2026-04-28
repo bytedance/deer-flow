@@ -239,8 +239,9 @@ def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
     if thread_id is not None:
         try:
             from deerflow.config.paths import get_paths
+            from deerflow.runtime.user_context import get_effective_user_id
 
-            host_path = get_paths().acp_workspace_dir(thread_id)
+            host_path = get_paths().acp_workspace_dir(thread_id, user_id=get_effective_user_id())
             if host_path.exists():
                 return str(host_path)
         except Exception:

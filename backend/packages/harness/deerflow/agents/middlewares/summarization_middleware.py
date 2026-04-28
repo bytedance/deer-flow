@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, override, runtime_checkable
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AIMessage, AnyMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.config import get_config
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
@@ -172,6 +172,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *preserved_messages,
             ]
         }
+
+    @override
+    def _build_new_messages(self, summary: str) -> list[HumanMessage]:
+        """Override the base implementation to let the human message with the special name 'summary'.
+        And this message will be ignored to display in the frontend, but still can be used as context for the model.
+        """
+        return [HumanMessage(content=f"Here is a summary of the conversation to date:\n\n{summary}", name="summary")]
 
     def _partition_with_skill_rescue(
         self,

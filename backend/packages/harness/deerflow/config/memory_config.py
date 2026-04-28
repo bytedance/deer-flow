@@ -14,8 +14,9 @@ class MemoryConfig(BaseModel):
         default="",
         description=(
             "Path to store memory data. "
-            "If empty, defaults to `{base_dir}/memory.json` (see Paths.memory_file). "
-            "Absolute paths are used as-is. "
+            "If empty, defaults to per-user memory at `{base_dir}/users/{user_id}/memory.json`. "
+            "Absolute paths are used as-is and opt out of per-user isolation "
+            "(all users share the same file). "
             "Relative paths are resolved against `Paths.base_dir` "
             "(not the backend working directory). "
             "Note: if you previously set this to `.deer-flow/memory.json`, "

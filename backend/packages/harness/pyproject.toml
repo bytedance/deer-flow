@@ -10,16 +10,16 @@ dependencies = [
     "exa-py>=1.0.0",
     "httpx>=0.28.0",
     "kubernetes>=30.0.0",
-    "langchain>=1.2.3",
-    "langchain-anthropic>=1.3.4",
+    "langchain>=1.2.15",
+    "langchain-anthropic>=1.4.1",
     "langchain-deepseek>=1.0.1",
-    "langchain-mcp-adapters>=0.1.0",
-    "langchain-openai>=1.1.7",
+    "langchain-mcp-adapters>=0.2.2",
+    "langchain-openai>=1.2.1",
     "langfuse>=3.4.1",
-    "langgraph>=1.0.6,<1.0.10",
-    "langgraph-api>=0.7.0,<0.8.0",
-    "langgraph-cli>=0.4.14",
-    "langgraph-runtime-inmem>=0.22.1",
+    "langgraph>=1.1.9",
+    "langgraph-api>=0.8.1",
+    "langgraph-cli>=0.4.24",
+    "langgraph-runtime-inmem>=0.28.0",
     "markdownify>=1.2.2",
     "markitdown[all,xlsx]>=0.0.1a2",
     "pydantic>=2.12.5",
@@ -33,10 +33,19 @@ dependencies = [
     "langchain-google-genai>=4.2.1",
     "langgraph-checkpoint-sqlite>=3.0.3",
     "langgraph-sdk>=0.1.51",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
+    "aiosqlite>=0.19",
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
 ollama = ["langchain-ollama>=0.3.0"]
+postgres = [
+    "asyncpg>=0.29",
+    "langgraph-checkpoint-postgres>=3.0.5",
+    "psycopg[binary]>=3.3.3",
+    "psycopg-pool>=3.3.0",
+]
 pymupdf = ["pymupdf4llm>=0.0.17"]
 
 [build-system]

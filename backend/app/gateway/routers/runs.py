@@ -11,10 +11,11 @@ import asyncio
 import logging
 import uuid
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.gateway.deps import get_checkpointer, get_run_manager, get_stream_bridge
+from app.gateway.authz import require_permission
+from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.routers.thread_runs import RunCreateRequest
 from app.gateway.services import sse_consumer, start_run
 from deerflow.runtime import serialize_channel_values
@@ -85,3 +86,58 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
         logger.exception("Failed to fetch final state for run %s", record.run_id)
 
     return {"status": record.status.value, "error": record.error}
+
+
+# ---------------------------------------------------------------------------
+# Run-scoped read endpoints
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_run(run_id: str, request: Request) -> dict:
+    """Fetch run by run_id with user ownership check. Raises 404 if not found."""
+    run_store = get_run_store(request)
+    record = await run_store.get(run_id)  # user_id=AUTO filters by contextvar
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return record
+
+
+@router.get("/{run_id}/messages")
+@require_permission("runs", "read")
+async def run_messages(
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=50, le=200, ge=1),
+    before_seq: int | None = Query(default=None),
+    after_seq: int | None = Query(default=None),
+) -> dict:
+    """Return paginated messages for a run (cursor-based).
+
+    Pagination:
+    - after_seq: messages with seq > after_seq (forward)
+    - before_seq: messages with seq < before_seq (backward)
+    - neither: latest messages
+
+    Response: { data: [...], has_more: bool }
+    """
+    run = await _resolve_run(run_id, request)
+    event_store = get_run_event_store(request)
+    rows = await event_store.list_messages_by_run(
+        run["thread_id"],
+        run_id,
+        limit=limit + 1,
+        before_seq=before_seq,
+        after_seq=after_seq,
+    )
+    has_more = len(rows) > limit
+    data = rows[:limit] if has_more else rows
+    return {"data": data, "has_more": has_more}
+
+
+@router.get("/{run_id}/feedback")
+@require_permission("runs", "read")
+async def run_feedback(run_id: str, request: Request) -> list[dict]:
+    """Return all feedback for a run."""
+    run = await _resolve_run(run_id, request)
+    feedback_repo = get_feedback_repo(request)
+    return await feedback_repo.list_by_run(run["thread_id"], run_id)
