@@ -158,12 +158,7 @@ class RemoteSandboxBackend(SandboxBackend):
     @staticmethod
     def _is_provisioner_builtin_mount(container_path: str) -> bool:
         """Return true for mount paths the provisioner already creates itself."""
-        return (
-            container_path == "/mnt/skills"
-            or container_path.startswith("/mnt/skills/")
-            or container_path == "/mnt/user-data"
-            or container_path.startswith("/mnt/user-data/")
-        )
+        return container_path == "/mnt/skills" or container_path.startswith("/mnt/skills/") or container_path == "/mnt/user-data" or container_path.startswith("/mnt/user-data/")
 
     def _provisioner_destroy(self, sandbox_id: str) -> None:
         """DELETE /api/sandboxes/{sandbox_id} → destroy Pod + Service."""
