@@ -29,3 +29,10 @@ class SubagentConfig:
     model: str = "inherit"
     max_turns: int = 50
     timeout_seconds: int = 900
+
+
+def resolve_subagent_model_name(config: SubagentConfig, parent_model: str | None) -> str | None:
+    """Resolve the model name a subagent should use."""
+    if config.model == "inherit":
+        return parent_model
+    return config.model

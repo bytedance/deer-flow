@@ -20,7 +20,7 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
-from deerflow.subagents.config import SubagentConfig
+from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -198,21 +198,6 @@ def _filter_tools(
     return filtered
 
 
-def _get_model_name(config: SubagentConfig, parent_model: str | None) -> str | None:
-    """Resolve the model name for a subagent.
-
-    Args:
-        config: Subagent configuration.
-        parent_model: The parent agent's model name.
-
-    Returns:
-        Model name to use, or None to use default.
-    """
-    if config.model == "inherit":
-        return parent_model
-    return config.model
-
-
 class SubagentExecutor:
     """Executor for running subagents."""
 
@@ -244,6 +229,7 @@ class SubagentExecutor:
         self.config = config
         self.app_config = app_config
         self.parent_model = parent_model
+        self.model_name = resolve_subagent_model_name(config, parent_model)
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.thread_id = thread_id
@@ -266,12 +252,12 @@ class SubagentExecutor:
         from deerflow.config import get_app_config
 
         resolved_app_config = self.app_config or get_app_config()
-        model_name = _get_model_name(self.config, self.parent_model)
-        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=resolved_app_config)
+        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=resolved_app_config)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
-        middlewares = build_subagent_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
+        # Reuse shared middleware composition with lead agent.
+        middlewares = build_subagent_runtime_middlewares(app_config=resolved_app_config, model_name=self.model_name, lazy_init=True)
 
         return create_agent(
             model=model,

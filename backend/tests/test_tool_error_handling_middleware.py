@@ -9,9 +9,18 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
     build_subagent_runtime_middlewares,
 )
+from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
+from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+
+
+def _request(name: str = "web_search", tool_call_id: str | None = "tc-1"):
+    tool_call = {"name": name}
+    if tool_call_id is not None:
+        tool_call["id"] = tool_call_id
+    return SimpleNamespace(tool_call=tool_call)
 
 
 def _module(name: str, **attrs):
@@ -21,19 +30,22 @@ def _module(name: str, **attrs):
     return module
 
 
-def _make_app_config() -> AppConfig:
+def _make_app_config(*, supports_vision: bool = False) -> AppConfig:
     return AppConfig(
+        models=[
+            ModelConfig(
+                name="test-model",
+                display_name="test-model",
+                description=None,
+                use="langchain_openai:ChatOpenAI",
+                model="test-model",
+                supports_vision=supports_vision,
+            )
+        ],
         sandbox=SandboxConfig(use="test"),
         guardrails=GuardrailsConfig(enabled=False),
         circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
     )
-
-
-def _request(name: str = "web_search", tool_call_id: str | None = "tc-1"):
-    tool_call = {"name": name}
-    if tool_call_id is not None:
-        tool_call["id"] = tool_call_id
-    return SimpleNamespace(tool_call=tool_call)
 
 
 def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware(monkeypatch: pytest.MonkeyPatch):
@@ -166,3 +178,25 @@ async def test_awrap_tool_call_reraises_graph_interrupt():
 
     with pytest.raises(GraphInterrupt):
         await middleware.awrap_tool_call(req, _interrupt)
+
+
+def test_subagent_runtime_middlewares_include_view_image_for_vision_model(monkeypatch):
+    app_config = _make_app_config(supports_vision=True)
+
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.get_app_config", lambda: app_config)
+
+    middlewares = build_subagent_runtime_middlewares(model_name="test-model")
+
+    assert any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
+
+
+def test_subagent_runtime_middlewares_skip_view_image_for_text_model(monkeypatch):
+    app_config = _make_app_config(supports_vision=False)
+
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.get_app_config", lambda: app_config)
+
+    middlewares = build_subagent_runtime_middlewares(model_name="test-model")
+
+    assert not any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
