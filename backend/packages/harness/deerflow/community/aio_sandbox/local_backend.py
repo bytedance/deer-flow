@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import subprocess
 from datetime import datetime
 
@@ -84,6 +85,46 @@ def _format_container_mount(runtime: str, host_path: str, container_path: str, r
     if read_only:
         mount_spec += ":ro"
     return ["-v", mount_spec]
+
+
+def _redact_container_command_for_log(cmd: list[str]) -> list[str]:
+    """Return a Docker/Container command with environment values redacted."""
+    redacted: list[str] = []
+    redact_next_env = False
+
+    for arg in cmd:
+        if redact_next_env:
+            if "=" in arg:
+                key = arg.split("=", 1)[0]
+                redacted.append(f"{key}=<redacted>" if key else "<redacted>")
+            else:
+                redacted.append(arg)
+            redact_next_env = False
+            continue
+
+        if arg in {"-e", "--env"}:
+            redacted.append(arg)
+            redact_next_env = True
+            continue
+
+        if arg.startswith("--env="):
+            value = arg.removeprefix("--env=")
+            if "=" in value:
+                key = value.split("=", 1)[0]
+                redacted.append(f"--env={key}=<redacted>" if key else "--env=<redacted>")
+            else:
+                redacted.append(arg)
+            continue
+
+        redacted.append(arg)
+
+    return redacted
+
+
+def _format_container_command_for_log(cmd: list[str]) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline(cmd)
+    return shlex.join(cmd)
 
 
 class LocalContainerBackend(SandboxBackend):
@@ -464,7 +505,8 @@ class LocalContainerBackend(SandboxBackend):
 
         cmd.append(self._image)
 
-        logger.info(f"Starting container using {self._runtime}: {' '.join(cmd)}")
+        log_cmd = _format_container_command_for_log(_redact_container_command_for_log(cmd))
+        logger.info(f"Starting container using {self._runtime}: {log_cmd}")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
