@@ -1,13 +1,10 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from deerflow.agents.memory.prompt import format_conversation_for_update
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
     _extract_text,
-    _run_async_update_sync,
     clear_memory_data,
     create_memory_fact,
     delete_memory_fact,
@@ -528,6 +525,7 @@ class TestUpdateMemoryStructuredResponse:
         response = MagicMock()
         response.content = content
         model.ainvoke = AsyncMock(return_value=response)
+        model.invoke = MagicMock(return_value=response)
         return model
 
     def test_string_response_parses(self):
@@ -551,7 +549,7 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg])
 
         assert result is True
-        model.ainvoke.assert_awaited_once()
+        model.invoke.assert_called_once()
 
     def test_list_content_response_parses(self):
         """LLM response as list-of-blocks should be extracted, not repr'd."""
@@ -622,7 +620,7 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg], correction_detected=True)
 
         assert result is True
-        prompt = model.ainvoke.await_args.args[0]
+        prompt = model.invoke.call_args.args[0]
         assert "Explicit correction signals were detected" in prompt
 
     def test_correction_hint_empty_when_not_detected(self):
@@ -647,7 +645,7 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg], correction_detected=False)
 
         assert result is True
-        prompt = model.ainvoke.await_args.args[0]
+        prompt = model.invoke.call_args.args[0]
         assert "Explicit correction signals were detected" not in prompt
 
     def test_sync_update_memory_wrapper_works_in_running_loop(self):
@@ -675,15 +673,15 @@ class TestUpdateMemoryStructuredResponse:
             result = asyncio.run(run_in_loop())
 
         assert result is True
-        model.ainvoke.assert_awaited_once()
+        model.invoke.assert_called_once()
 
-    def test_sync_update_memory_returns_false_when_loop_unavailable(self):
+    def test_sync_update_memory_returns_false_when_executor_down(self):
         updater = MemoryUpdater()
 
         with (
             patch(
-                "deerflow.agents.memory.updater._memory_loop_runner._ensure_loop",
-                return_value=None,
+                "deerflow.agents.memory.updater._SYNC_MEMORY_UPDATER_EXECUTOR.submit",
+                side_effect=RuntimeError("executor down"),
             ),
         ):
             msg = MagicMock()
@@ -702,29 +700,67 @@ class TestUpdateMemoryStructuredResponse:
         assert result is False
 
 
-class TestRunAsyncUpdateSync:
-    def test_closes_unawaited_awaitable_when_loop_unavailable(self):
-        class CloseableAwaitable:
-            def __init__(self):
-                self.closed = False
+class TestSyncUpdateIsolatesProviderClientPool:
+    """Regression tests for issue #2615.
 
-            def __await__(self):
-                pytest.fail("awaitable should not have been awaited")
-                yield
+    The sync ``update_memory`` path must use ``model.invoke()`` (sync HTTP)
+    and never touch the async provider client pool shared with the lead agent.
+    """
 
-            def close(self):
-                self.closed = True
+    def test_sync_update_uses_invoke_not_ainvoke(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = MagicMock()
+        response = MagicMock()
+        response.content = valid_json
+        model.invoke = MagicMock(return_value=response)
+        model.ainvoke = AsyncMock(return_value=response)
 
-        awaitable = CloseableAwaitable()
-
-        with patch(
-            "deerflow.agents.memory.updater._memory_loop_runner._ensure_loop",
-            return_value=None,
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
         ):
-            result = _run_async_update_sync(awaitable)
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Hello"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Hi"
+            ai_msg.tool_calls = []
+            result = updater.update_memory([msg, ai_msg])
 
-        assert result is False
-        assert awaitable.closed is True
+        assert result is True
+        model.invoke.assert_called_once()
+        model.ainvoke.assert_not_called()
+
+    def test_no_event_loop_created_during_sync_update(self):
+        """Sync update must not create or destroy any event loop."""
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = MagicMock()
+        response = MagicMock()
+        response.content = valid_json
+        model.invoke = MagicMock(return_value=response)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+            patch("asyncio.run", side_effect=AssertionError("asyncio.run must not be called from sync update path")),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Hello"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Hi"
+            ai_msg.tool_calls = []
+            result = updater.update_memory([msg, ai_msg])
+
+        assert result is True
 
 
 class TestFactDeduplicationCaseInsensitive:
@@ -801,6 +837,7 @@ class TestReinforcementHint:
         response = MagicMock()
         response.content = f"```json\n{json_response}\n```"
         model.ainvoke = AsyncMock(return_value=response)
+        model.invoke = MagicMock(return_value=response)
         return model
 
     def test_reinforcement_hint_injected_when_detected(self):
@@ -825,7 +862,7 @@ class TestReinforcementHint:
             result = updater.update_memory([msg, ai_msg], reinforcement_detected=True)
 
         assert result is True
-        prompt = model.ainvoke.await_args.args[0]
+        prompt = model.invoke.call_args.args[0]
         assert "Positive reinforcement signals were detected" in prompt
 
     def test_reinforcement_hint_absent_when_not_detected(self):
@@ -850,7 +887,7 @@ class TestReinforcementHint:
             result = updater.update_memory([msg, ai_msg], reinforcement_detected=False)
 
         assert result is True
-        prompt = model.ainvoke.await_args.args[0]
+        prompt = model.invoke.call_args.args[0]
         assert "Positive reinforcement signals were detected" not in prompt
 
     def test_both_hints_present_when_both_detected(self):
@@ -875,7 +912,7 @@ class TestReinforcementHint:
             result = updater.update_memory([msg, ai_msg], correction_detected=True, reinforcement_detected=True)
 
         assert result is True
-        prompt = model.ainvoke.await_args.args[0]
+        prompt = model.invoke.call_args.args[0]
         assert "Explicit correction signals were detected" in prompt
         assert "Positive reinforcement signals were detected" in prompt
 
