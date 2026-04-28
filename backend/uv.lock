@@ -779,8 +779,8 @@ dev = [
 requires-dist = [
     { name = "bcrypt", specifier = ">=4.0.0" },
     { name = "deerflow-harness", editable = "packages/harness" },
-    { name = "dingtalk-stream", specifier = ">=0.24.3" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
+    { name = "dingtalk-stream", specifier = ">=0.24.3" },
     { name = "email-validator", specifier = ">=2.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },

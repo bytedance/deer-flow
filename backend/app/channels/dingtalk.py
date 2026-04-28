@@ -26,6 +26,8 @@ _TOKEN_REFRESH_MARGIN_SECONDS = 300
 _CONVERSATION_TYPE_P2P = "1"
 _CONVERSATION_TYPE_GROUP = "2"
 
+_MAX_UPLOAD_SIZE_BYTES = 20 * 1024 * 1024
+
 
 def _normalize_conversation_type(raw: Any) -> str:
     """Normalize ``conversationType`` to ``"1"`` (P2P) or ``"2"`` (group).
@@ -35,7 +37,7 @@ def _normalize_conversation_type(raw: Any) -> str:
     if raw is None:
         return _CONVERSATION_TYPE_P2P
     s = str(raw).strip()
-    if s in (_CONVERSATION_TYPE_GROUP, "2"):
+    if s == _CONVERSATION_TYPE_GROUP:
         return _CONVERSATION_TYPE_GROUP
     return _CONVERSATION_TYPE_P2P
 
@@ -45,7 +47,7 @@ def _normalize_allowed_users(allowed_users: Any) -> set[str]:
         return set()
     if isinstance(allowed_users, str):
         values = [allowed_users]
-    elif isinstance(allowed_users, list | tuple | set):
+    elif isinstance(allowed_users, (list, tuple, set)):
         values = allowed_users
     else:
         logger.warning(
@@ -289,6 +291,10 @@ class DingTalkChannel(Channel):
             logger.exception("[DingTalk] markdown fallback also failed")
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if attachment.size > _MAX_UPLOAD_SIZE_BYTES:
+            logger.warning("[DingTalk] file too large (%d bytes), skipping: %s", attachment.size, attachment.filename)
+            return False
+
         conversation_type, sender_staff_id, conversation_id = self._resolve_routing(msg)
         robot_code = self._client_id
 
@@ -338,7 +344,7 @@ class DingTalkChannel(Channel):
 
             logger.info("[DingTalk] file sent: %s", attachment.filename)
             return True
-        except Exception:
+        except (httpx.HTTPError, OSError, ValueError):
             logger.exception("[DingTalk] failed to send file: %s", attachment.filename)
             return False
 
@@ -677,7 +683,7 @@ class DingTalkChannel(Channel):
             exc = fut.exception()
             if exc:
                 logger.error("[DingTalk] %s failed for msg_id=%s: %s", name, msg_id, exc)
-        except Exception:
+        except (asyncio.CancelledError, asyncio.InvalidStateError):
             pass
 
 
