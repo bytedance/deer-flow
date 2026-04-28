@@ -83,6 +83,7 @@ class SkillReviewMiddleware(AgentMiddleware[AgentState]):
             if thread_id:
                 with self._lock:
                     self._iters.pop(thread_id, None)
+                    self._last_seen.pop(thread_id, None)
                     logger.info("SkillReviewMiddleware: counter reset for thread %s (skill_manage called)", thread_id)
         return await handler(request)
 
