@@ -49,6 +49,13 @@ CHANNEL_CAPABILITIES = {
 
 InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
 
+_METADATA_DROP_KEYS = frozenset({"raw_message", "ref_msg"})
+
+
+def _slim_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of *meta* with known-large keys removed."""
+    return {k: v for k, v in meta.items() if k not in _METADATA_DROP_KEYS}
+
 
 INBOUND_FILE_READERS: dict[str, InboundFileReader] = {}
 
@@ -780,7 +787,7 @@ class ChannelManager:
             artifacts=artifacts,
             attachments=attachments,
             thread_ts=msg.thread_ts,
-            metadata=dict(msg.metadata),
+            metadata=_slim_metadata(msg.metadata),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
@@ -842,7 +849,7 @@ class ChannelManager:
                         text=latest_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
-                        metadata=dict(msg.metadata),
+                        metadata=_slim_metadata(msg.metadata),
                     )
                 )
                 last_published_text = latest_text
@@ -887,7 +894,7 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
-                    metadata=dict(msg.metadata),
+                    metadata=_slim_metadata(msg.metadata),
                 )
             )
 
@@ -946,7 +953,7 @@ class ChannelManager:
             thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=reply,
             thread_ts=msg.thread_ts,
-            metadata=dict(msg.metadata),
+            metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
 
@@ -980,6 +987,6 @@ class ChannelManager:
             thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
-            metadata=dict(msg.metadata),
+            metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)

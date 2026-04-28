@@ -168,11 +168,12 @@ class ChannelService:
 
         try:
             channel = channel_cls(bus=self.bus, config=config)
-            await channel.start()
             self._channels[name] = channel
+            await channel.start()
             logger.info("Channel %s started", name)
             return True
         except Exception:
+            self._channels.pop(name, None)
             logger.exception("Failed to start channel %s", name)
             return False
 
