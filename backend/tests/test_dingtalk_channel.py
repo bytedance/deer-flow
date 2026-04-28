@@ -242,6 +242,7 @@ class TestOnChatbotMessage:
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(
                 text="hello from dingtalk",
@@ -274,6 +275,7 @@ class TestOnChatbotMessage:
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(
                 text="hello group",
@@ -309,6 +311,7 @@ class TestOnChatbotMessage:
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(
                 text="hello group",
@@ -338,6 +341,7 @@ class TestOnChatbotMessage:
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(text="/help")
             channel._send_running_reply = AsyncMock()
@@ -358,6 +362,7 @@ class TestOnChatbotMessage:
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(text="just chatting")
             channel._send_running_reply = AsyncMock()
@@ -378,6 +383,7 @@ class TestOnChatbotMessage:
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(text="   ")
             channel._on_chatbot_message(msg)
@@ -401,6 +407,7 @@ class TestAllowedUsersFiltering:
             channel = DingTalkChannel(bus, config={"allowed_users": ["user_001"]})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(sender_staff_id="user_001")
             channel._send_running_reply = AsyncMock()
@@ -418,6 +425,7 @@ class TestAllowedUsersFiltering:
             channel = DingTalkChannel(bus, config={"allowed_users": ["user_001"]})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(sender_staff_id="user_blocked")
             channel._on_chatbot_message(msg)
@@ -434,6 +442,7 @@ class TestAllowedUsersFiltering:
             channel = DingTalkChannel(bus, config={"allowed_users": []})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(sender_staff_id="anyone")
             channel._send_running_reply = AsyncMock()
@@ -629,6 +638,7 @@ class TestTopicIdMapping:
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(
                 conversation_type=_CONVERSATION_TYPE_P2P,
@@ -650,6 +660,7 @@ class TestTopicIdMapping:
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "test_key"
             channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
 
             msg = _make_chatbot_message(
                 conversation_type=_CONVERSATION_TYPE_GROUP,
@@ -910,29 +921,15 @@ class TestChannelRegistration:
 
 
 class TestCardMode:
-    def test_card_mode_enabled_updates_capabilities(self):
-        from unittest.mock import patch
+    def test_card_mode_enabled_supports_streaming(self):
+        bus = MessageBus()
+        channel = DingTalkChannel(bus, config={"card_template_id": "tpl_123"})
+        assert channel.supports_streaming is True
 
-        from app.channels.manager import CHANNEL_CAPABILITIES
-
-        original_value = CHANNEL_CAPABILITIES["dingtalk"]["supports_streaming"]
-        try:
-            bus = MessageBus()
-            channel = DingTalkChannel(bus, config={"card_template_id": "tpl_123"})
-
-            async def go():
-                with patch("app.channels.dingtalk.dingtalk_stream", create=True):
-                    channel._client_id = "test_key"
-                    channel._client_secret = "test_secret"
-                    channel._running = False
-                    # Manually trigger the capability update logic (same as start())
-                    if channel._card_template_id:
-                        CHANNEL_CAPABILITIES["dingtalk"]["supports_streaming"] = True
-
-            _run(go())
-            assert CHANNEL_CAPABILITIES["dingtalk"]["supports_streaming"] is True
-        finally:
-            CHANNEL_CAPABILITIES["dingtalk"]["supports_streaming"] = original_value
+    def test_non_card_mode_no_streaming(self):
+        bus = MessageBus()
+        channel = DingTalkChannel(bus, config={})
+        assert channel.supports_streaming is False
 
     def test_non_card_mode_unchanged(self):
         bus = MessageBus()
@@ -1266,6 +1263,7 @@ class TestCardMode:
         channel._main_loop = MagicMock()
         channel._main_loop.is_running.return_value = False
         channel._allowed_users = set()
+        channel._running = True
 
         channel._on_chatbot_message(mock_message)
 

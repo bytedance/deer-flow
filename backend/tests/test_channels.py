@@ -462,6 +462,7 @@ class TestChannelManager:
             )
             mock_channel = MagicMock()
             mock_channel.receive_file = AsyncMock(return_value=modified_msg)
+            mock_channel.supports_streaming = False
             mock_service = MagicMock()
             mock_service.get_channel.return_value = mock_channel
             monkeypatch.setattr("app.channels.service.get_channel_service", lambda: mock_service)

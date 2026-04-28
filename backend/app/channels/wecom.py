@@ -29,6 +29,10 @@ class WeComChannel(Channel):
         self._ws_stream_ids: dict[str, str] = {}
         self._working_message = "Working on it..."
 
+    @property
+    def supports_streaming(self) -> bool:
+        return True
+
     def _clear_ws_context(self, thread_ts: str | None) -> None:
         if not thread_ts:
             return

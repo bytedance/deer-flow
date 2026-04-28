@@ -544,6 +544,13 @@ class ChannelManager:
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
+        from .service import get_channel_service
+
+        service = get_channel_service()
+        if service:
+            channel = service.get_channel(channel_name)
+            if channel is not None:
+                return channel.supports_streaming
         return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
 
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:

@@ -132,8 +132,14 @@ class DingTalkChannel(Channel):
         self._card_template_id: str = config.get("card_template_id", "")
         self._card_track_ids: dict[str, str] = {}
         self._dingtalk_client: Any = None
+        self._stream_client: Any = None
         self._incoming_messages: dict[str, Any] = {}
+        self._incoming_messages_lock = threading.Lock()
         self._card_repliers: dict[str, Any] = {}
+
+    @property
+    def supports_streaming(self) -> bool:
+        return bool(self._card_template_id)
 
     async def start(self) -> None:
         if self._running:
@@ -157,9 +163,6 @@ class DingTalkChannel(Channel):
         self._main_loop = asyncio.get_running_loop()
 
         if self._card_template_id:
-            from app.channels.manager import CHANNEL_CAPABILITIES
-
-            CHANNEL_CAPABILITIES["dingtalk"]["supports_streaming"] = True
             logger.info("[DingTalk] AI Card mode enabled (template=%s)", self._card_template_id)
 
         self._running = True
@@ -176,8 +179,19 @@ class DingTalkChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+
+        stream_client = self._stream_client
+        if stream_client is not None:
+            try:
+                if hasattr(stream_client, "disconnect"):
+                    stream_client.disconnect()
+            except Exception:
+                logger.debug("[DingTalk] error disconnecting stream client", exc_info=True)
+
         self._dingtalk_client = None
-        self._incoming_messages.clear()
+        self._stream_client = None
+        with self._incoming_messages_lock:
+            self._incoming_messages.clear()
         self._card_repliers.clear()
         self._card_track_ids.clear()
         if self._thread:
@@ -185,10 +199,22 @@ class DingTalkChannel(Channel):
             self._thread = None
         logger.info("DingTalk channel stopped")
 
-    async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
+    def _resolve_routing(self, msg: OutboundMessage) -> tuple[str, str, str]:
+        """Return (conversation_type, sender_staff_id, conversation_id).
+
+        Uses msg.chat_id as the primary routing key; metadata as fallback.
+        """
         conversation_type = _normalize_conversation_type(msg.metadata.get("conversation_type"))
         sender_staff_id = msg.metadata.get("sender_staff_id", "")
         conversation_id = msg.metadata.get("conversation_id", "")
+        if conversation_type == _CONVERSATION_TYPE_GROUP:
+            conversation_id = msg.chat_id or conversation_id
+        else:
+            sender_staff_id = msg.chat_id or sender_staff_id
+        return conversation_type, sender_staff_id, conversation_id
+
+    async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
+        conversation_type, sender_staff_id, conversation_id = self._resolve_routing(msg)
         robot_code = self._client_id
 
         # Card mode: stream update to existing AI card
@@ -263,9 +289,7 @@ class DingTalkChannel(Channel):
             logger.exception("[DingTalk] markdown fallback also failed")
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
-        conversation_type = _normalize_conversation_type(msg.metadata.get("conversation_type"))
-        conversation_id = msg.metadata.get("conversation_id", "")
-        sender_staff_id = msg.metadata.get("sender_staff_id", "")
+        conversation_type, sender_staff_id, conversation_id = self._resolve_routing(msg)
         robot_code = self._client_id
 
         try:
@@ -326,6 +350,7 @@ class DingTalkChannel(Channel):
 
             credential = dingtalk_stream.Credential(client_id, client_secret)
             client = dingtalk_stream.DingTalkStreamClient(credential)
+            self._stream_client = client
             client.register_callback_handler(
                 dingtalk_stream.chatbot.ChatbotMessage.TOPIC,
                 _DingTalkMessageHandler(self),
@@ -334,8 +359,12 @@ class DingTalkChannel(Channel):
         except Exception:
             if self._running:
                 logger.exception("DingTalk Stream Push error")
+        finally:
+            self._stream_client = None
 
     def _on_chatbot_message(self, message: Any) -> None:
+        if not self._running:
+            return
         try:
             sender_staff_id = message.sender_staff_id or ""
             conversation_type = _normalize_conversation_type(message.conversation_type)
@@ -391,7 +420,8 @@ class DingTalkChannel(Channel):
 
             if self._card_template_id:
                 source_key = self._make_card_source_key(inbound)
-                self._incoming_messages[source_key] = message
+                with self._incoming_messages_lock:
+                    self._incoming_messages[source_key] = message
 
             if self._main_loop and self._main_loop.is_running():
                 logger.info("[DingTalk] publishing inbound message to bus (type=%s, msg_id=%s)", msg_type.value, msg_id)
@@ -429,7 +459,8 @@ class DingTalkChannel(Channel):
         try:
             if self._card_template_id:
                 source_key = self._make_card_source_key(inbound)
-                chatbot_message = self._incoming_messages.pop(source_key, None)
+                with self._incoming_messages_lock:
+                    chatbot_message = self._incoming_messages.pop(source_key, None)
                 out_track_id = await self._create_and_deliver_card(
                     text,
                     chatbot_message=chatbot_message,
@@ -672,7 +703,7 @@ class _DingTalkMessageHandler:
         ack_message.data = {"response": message}
         return ack_message
 
-    async def process(self, callback: Any) -> tuple[str, str]:
+    async def process(self, callback: Any) -> tuple[int, str]:
         import dingtalk_stream
 
         incoming_message = dingtalk_stream.ChatbotMessage.from_dict(callback.data)

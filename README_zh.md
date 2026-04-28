@@ -371,7 +371,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 
 **钉钉配置**
 
-1. 在 [钉钉开放平台](https://open.dingtalk.com/) 创建应用，并 **机器人** 能力。
+1. 在 [钉钉开放平台](https://open.dingtalk.com/) 创建应用，并启用 **机器人** 能力。
 2. 在机器人配置页面设置消息接收模式为 **Stream模式**。
 3. 复制 `Client ID` 和 `Client Secret`，在 `.env` 中设置 `DINGTALK_CLIENT_ID` 和 `DINGTALK_CLIENT_SECRET`，并在 `config.yaml` 中启用该渠道。
 4. *（可选）* 如需开启流式 AI 卡片回复（打字机效果），请在[钉钉卡片平台](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card)创建 **AI 卡片**模板，然后在 `config.yaml` 中将 `card_template_id` 设为该模板 ID。同时需要申请 `Card.Streaming.Write` 和 `Card.Instance.Write` 权限。
