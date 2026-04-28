@@ -23,6 +23,8 @@ from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadSt
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 
 logger = logging.getLogger(__name__)
@@ -260,12 +262,12 @@ class SubagentExecutor:
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
 
-        # Filter tools based on config
-        self.tools = _filter_tools(
+        self._base_tools = _filter_tools(
             tools,
             config.tools,
             config.disallowed_tools,
         )
+        self.tools = self._base_tools
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
@@ -289,20 +291,8 @@ class SubagentExecutor:
             state_schema=ThreadState,
         )
 
-    async def _load_skill_messages(self) -> list[SystemMessage]:
-        """Load skill content as conversation items based on config.skills.
-
-        Aligned with Codex's pattern: each subagent loads its own skills
-        per-session and injects them as conversation items (developer messages),
-        not as system prompt text. The config.skills whitelist controls which
-        skills are loaded:
-        - None: load all enabled skills
-        - []: no skills
-        - ["skill-a", "skill-b"]: only these skills
-
-        Returns:
-            List of SystemMessages containing skill content.
-        """
+    async def _load_skills(self) -> list[Skill]:
+        """Load enabled skill metadata based on config.skills."""
         if self.config.skills is not None and len(self.config.skills) == 0:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading")
             return []
@@ -316,8 +306,8 @@ class SubagentExecutor:
             all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
         except Exception:
-            logger.warning(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}", exc_info=True)
-            return []
+            logger.exception(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}")
+            raise
 
         if not all_skills:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found")
@@ -326,10 +316,26 @@ class SubagentExecutor:
         # Filter by config.skills whitelist
         if self.config.skills is not None:
             allowed = set(self.config.skills)
-            skills = [s for s in all_skills if s.name in allowed]
-        else:
-            skills = all_skills
+            return [s for s in all_skills if s.name in allowed]
+        return all_skills
 
+    def _apply_skill_allowed_tools(self, skills: list[Skill]) -> None:
+        self.tools = filter_tools_by_skill_allowed_tools(self._base_tools, skills)
+
+    async def _load_skill_messages(self, skills: list[Skill]) -> list[SystemMessage]:
+        """Load skill content as conversation items based on config.skills.
+
+        Aligned with Codex's pattern: each subagent loads its own skills
+        per-session and injects them as conversation items (developer messages),
+        not as system prompt text. The config.skills whitelist controls which
+        skills are loaded:
+        - None: load all enabled skills
+        - []: no skills
+        - ["skill-a", "skill-b"]: only these skills
+
+        Returns:
+            List of SystemMessages containing skill content.
+        """
         if not skills:
             return []
 
@@ -357,7 +363,9 @@ class SubagentExecutor:
             Initial state dictionary.
         """
         # Load skills as conversation items (Codex pattern)
-        skill_messages = await self._load_skill_messages()
+        skills = await self._load_skills()
+        self._apply_skill_allowed_tools(skills)
+        skill_messages = await self._load_skill_messages(skills)
 
         messages: list = []
         # Skill content injected as developer/system messages before the task
@@ -405,8 +413,8 @@ class SubagentExecutor:
             result.ai_messages = ai_messages
 
         try:
-            agent = self._create_agent()
             state = await self._build_initial_state(task)
+            agent = self._create_agent()
 
             # Build config with thread_id for sandbox access and recursion limit
             run_config: RunnableConfig = {
