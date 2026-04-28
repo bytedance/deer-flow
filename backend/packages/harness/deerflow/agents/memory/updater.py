@@ -2,12 +2,12 @@
 
 import asyncio
 import atexit
-import concurrent.futures
 import copy
 import json
 import logging
 import math
 import re
+import threading
 import uuid
 from collections.abc import Awaitable
 from typing import Any
@@ -26,11 +26,94 @@ from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
 
-_SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=4,
-    thread_name_prefix="memory-updater-sync",
-)
-atexit.register(lambda: _SYNC_MEMORY_UPDATER_EXECUTOR.shutdown(wait=False))
+
+class _MemoryLoopRunner:
+    """Persistent event loop for memory updates.
+
+    Runs a single event loop in a daemon thread for the process lifetime,
+    avoiding short-lived ``asyncio.run()`` loops that leave zombie httpx
+    connections in langchain providers' globally cached AsyncClient pools.
+
+    Without this, the sequence is:
+      1. asyncio.run() creates loop_mem → LLM call creates SSL conn on loop_mem
+      2. asyncio.run() destroys loop_mem → conn becomes zombie in shared pool
+      3. Main agent reuses conn → ``RuntimeError: Event loop is closed``
+
+    With a persistent loop the connections always reference a live loop.
+    """
+
+    def __init__(self):
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
+
+    def _run(self):
+        """Thread target: create and run a persistent event loop."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        try:
+            self._loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            self._loop.run_until_complete(self._loop.shutdown_default_executor())
+            self._loop.close()
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop | None:
+        """Return the persistent loop, starting it if needed."""
+        if self._loop is not None and self._thread is not None and self._thread.is_alive():
+            return self._loop
+
+        with self._lock:
+            if self._loop is not None and self._thread is not None and self._thread.is_alive():
+                return self._loop
+
+            self._ready.clear()
+            self._thread = threading.Thread(
+                target=self._run,
+                name="memory-updater-loop",
+                daemon=True,
+            )
+            self._thread.start()
+            if not self._ready.wait(timeout=10):
+                logger.error("Persistent memory loop failed to start within 10s")
+                return None
+            return self._loop
+
+    def run(self, coro: Awaitable[bool]) -> bool:
+        """Submit *coro* to the persistent loop and block until it completes."""
+        loop = self._ensure_loop()
+        if loop is None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            return False
+
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return future.result(timeout=300)
+        except Exception:
+            logger.exception("Memory update coroutine failed in persistent loop")
+            return False
+
+    def shutdown(self):
+        """Stop the persistent loop thread (called at process exit)."""
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(loop.stop)
+
+
+_memory_loop_runner = _MemoryLoopRunner()
+atexit.register(_memory_loop_runner.shutdown)
 
 
 def _create_empty_memory() -> dict[str, Any]:
@@ -223,36 +306,13 @@ def _extract_text(content: Any) -> str:
 
 
 def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
-    """Run an async memory update from sync code, including nested-loop contexts."""
-    handed_off = False
+    """Run an async memory update on the persistent event loop.
 
-    try:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is not None and loop.is_running():
-            future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(asyncio.run, coro)
-            handed_off = True
-            return future.result()
-
-        handed_off = True
-        return asyncio.run(coro)
-    except Exception:
-        if not handed_off:
-            close = getattr(coro, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    logger.debug(
-                        "Failed to close un-awaited memory update coroutine",
-                        exc_info=True,
-                    )
-
-        logger.exception("Failed to run async memory update from sync context")
-        return False
+    Uses a persistent daemon thread instead of ``asyncio.run()`` to avoid
+    creating short-lived event loops that leave zombie connections in
+    langchain providers' globally cached httpx AsyncClient pools.
+    """
+    return _memory_loop_runner.run(coro)
 
 
 # Matches sentences that describe a file-upload *event* rather than general

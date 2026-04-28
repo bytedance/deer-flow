@@ -677,13 +677,13 @@ class TestUpdateMemoryStructuredResponse:
         assert result is True
         model.ainvoke.assert_awaited_once()
 
-    def test_sync_update_memory_returns_false_when_bridge_submit_fails(self):
+    def test_sync_update_memory_returns_false_when_loop_unavailable(self):
         updater = MemoryUpdater()
 
         with (
             patch(
-                "deerflow.agents.memory.updater._SYNC_MEMORY_UPDATER_EXECUTOR.submit",
-                side_effect=RuntimeError("executor down"),
+                "deerflow.agents.memory.updater._memory_loop_runner._ensure_loop",
+                return_value=None,
             ),
         ):
             msg = MagicMock()
@@ -703,7 +703,7 @@ class TestUpdateMemoryStructuredResponse:
 
 
 class TestRunAsyncUpdateSync:
-    def test_closes_unawaited_awaitable_when_bridge_fails_before_handoff(self):
+    def test_closes_unawaited_awaitable_when_loop_unavailable(self):
         class CloseableAwaitable:
             def __init__(self):
                 self.closed = False
@@ -718,14 +718,10 @@ class TestRunAsyncUpdateSync:
         awaitable = CloseableAwaitable()
 
         with patch(
-            "deerflow.agents.memory.updater._SYNC_MEMORY_UPDATER_EXECUTOR.submit",
-            side_effect=RuntimeError("executor down"),
+            "deerflow.agents.memory.updater._memory_loop_runner._ensure_loop",
+            return_value=None,
         ):
-
-            async def run_in_loop():
-                return _run_async_update_sync(awaitable)
-
-            result = asyncio.run(run_in_loop())
+            result = _run_async_update_sync(awaitable)
 
         assert result is False
         assert awaitable.closed is True
