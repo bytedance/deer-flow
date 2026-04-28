@@ -150,6 +150,7 @@ async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsL
 @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
 async def get_custom_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         skills = load_skills(enabled_only=False, app_config=config)
         skill = next((s for s in skills if s.name == skill_name and s.category == "custom"), None)
         if skill is None:
@@ -165,6 +166,7 @@ async def get_custom_skill(skill_name: str, config: AppConfig = Depends(get_conf
 @router.put("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Edit Custom Skill")
 async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         ensure_custom_skill_is_editable(skill_name, app_config=config)
         validate_skill_markdown_content(skill_name, request.content)
         scan = await scan_skill_content(request.content, executable=False, location=f"{skill_name}/SKILL.md", app_config=config)
@@ -202,6 +204,7 @@ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest
 @router.delete("/skills/custom/{skill_name}", summary="Delete Custom Skill")
 async def delete_custom_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> dict[str, bool]:
     try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         ensure_custom_skill_is_editable(skill_name, app_config=config)
         skill_dir = get_custom_skill_dir(skill_name, app_config=config)
         prev_content = read_custom_skill_content(skill_name, app_config=config)
@@ -238,14 +241,14 @@ async def delete_custom_skill(skill_name: str, config: AppConfig = Depends(get_c
 @router.get("/skills/custom/{skill_name}/history", response_model=CustomSkillHistoryResponse, summary="Get Custom Skill History")
 async def get_custom_skill_history(skill_name: str, config: AppConfig = Depends(get_config)) -> CustomSkillHistoryResponse:
     try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         if not custom_skill_exists(skill_name, app_config=config) and not get_skill_history_file(skill_name, app_config=config).exists():
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
         return CustomSkillHistoryResponse(history=read_history(skill_name, app_config=config))
     except HTTPException:
         raise
     except Exception as e:
-        name = skill_name.replace("\r\n", "").replace("\n", "")
-        logger.error("Failed to read history for %s: %s", name, e, exc_info=True)
+        logger.error("Failed to read history for %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to read history: {str(e)}")
 
 
@@ -303,6 +306,7 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest, 
 )
 async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         skills = load_skills(enabled_only=False, app_config=config)
         skill = next((s for s in skills if s.name == skill_name), None)
 
@@ -325,6 +329,7 @@ async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) ->
 )
 async def update_skill(skill_name: str, request: SkillUpdateRequest, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         skills = load_skills(enabled_only=False, app_config=config)
         skill = next((s for s in skills if s.name == skill_name), None)
 
