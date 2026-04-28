@@ -49,6 +49,17 @@ def client(mock_app_config):
         return DeerFlowClient()
 
 
+@pytest.fixture
+def allow_skill_security_scan():
+    async def _scan(*args, **kwargs):
+        from deerflow.skills.security_scanner import ScanResult
+
+        return ScanResult(decision="allow", reason="ok")
+
+    with patch("deerflow.skills.installer.scan_skill_content", _scan):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # __init__
 # ---------------------------------------------------------------------------
@@ -1195,7 +1206,7 @@ class TestSkillsManagement:
             with pytest.raises(ValueError, match="not found"):
                 client.update_skill("nonexistent", enabled=True)
 
-    def test_install_skill(self, client):
+    def test_install_skill(self, client, allow_skill_security_scan):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
@@ -2015,7 +2026,7 @@ class TestScenarioMemoryWorkflow:
 class TestScenarioSkillInstallAndUse:
     """Scenario: Install a skill → verify it appears → toggle it."""
 
-    def test_install_then_toggle(self, client):
+    def test_install_then_toggle(self, client, allow_skill_security_scan):
         """Install .skill archive → list to verify → disable → verify disabled."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2261,7 +2272,7 @@ class TestGatewayConformance:
         parsed = SkillResponse(**result)
         assert parsed.name == "web-search"
 
-    def test_install_skill(self, client, tmp_path):
+    def test_install_skill(self, client, tmp_path, allow_skill_security_scan):
         skill_dir = tmp_path / "my-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("---\nname: my-skill\ndescription: A test skill\n---\nBody\n")
@@ -2459,7 +2470,7 @@ class TestInstallSkillSecurity:
                 with pytest.raises(ValueError, match="unsafe"):
                     client.install_skill(archive)
 
-    def test_symlinks_skipped_during_extraction(self, client):
+    def test_symlinks_skipped_during_extraction(self, client, allow_skill_security_scan):
         """Symlink entries in the archive are skipped (never written to disk)."""
         import stat as stat_mod
 
