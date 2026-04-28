@@ -145,7 +145,11 @@ async def _authenticate(request: Request) -> AuthContext:
 
 
 def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
-    """Decorator that authenticates the request and sets AuthContext.
+    """Decorator that authenticates the request and enforces authentication.
+
+    Independently raises HTTP 401 for unauthenticated requests, regardless of
+    whether ``AuthMiddleware`` is present in the ASGI stack. Sets the resolved
+    ``AuthContext`` on ``request.state.auth`` for downstream handlers.
 
     Must be placed ABOVE other decorators (executes after them).
 
@@ -158,7 +162,8 @@ def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
             ...
 
     Raises:
-        ValueError: If 'request' parameter is missing
+        HTTPException: 401 if the request is unauthenticated.
+        ValueError: If 'request' parameter is missing.
     """
 
     @functools.wraps(func)
@@ -180,6 +185,9 @@ def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
         # Authenticate and set context
         auth_context = await _authenticate(request)
         request.state.auth = auth_context
+
+        if not auth_context.is_authenticated:
+            raise HTTPException(status_code=401, detail="Authentication required")
 
         return await func(*args, **kwargs)
 

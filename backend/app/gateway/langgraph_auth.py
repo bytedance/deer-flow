@@ -73,7 +73,7 @@ async def authenticate(request):
     if isinstance(payload, TokenError):
         raise Auth.exceptions.HTTPException(
             status_code=401,
-            detail=f"Token error: {payload.value}",
+            detail="Invalid token",
         )
 
     user = await get_local_provider().get_user(payload.sub)

@@ -4,12 +4,14 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import bcrypt
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.gateway.auth import create_access_token, decode_token, hash_password, verify_password
 from app.gateway.auth.models import User
+from app.gateway.auth.password import needs_rehash
 from app.gateway.authz import (
     AuthContext,
     Permissions,
@@ -26,6 +28,7 @@ def test_hash_password_and_verify():
     password = "s3cr3tP@ssw0rd!"
     hashed = hash_password(password)
     assert hashed != password
+    assert hashed.startswith("$dfv2$")
     assert verify_password(password, hashed) is True
     assert verify_password("wrongpassword", hashed) is False
 
@@ -45,6 +48,47 @@ def test_verify_password_rejects_empty():
     """Empty password should not verify."""
     hashed = hash_password("nonempty")
     assert verify_password("", hashed) is False
+
+
+def test_hash_produces_v2_prefix():
+    """hash_password output starts with $dfv2$."""
+    hashed = hash_password("anypassword123")
+    assert hashed.startswith("$dfv2$")
+
+
+def test_verify_v1_prefixed_hash():
+    """verify_password handles $dfv1$ prefixed hashes (plain bcrypt)."""
+    password = "legacyP@ssw0rd"
+    raw_bcrypt = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    v1_hash = f"$dfv1${raw_bcrypt}"
+    assert verify_password(password, v1_hash) is True
+    assert verify_password("wrong", v1_hash) is False
+
+
+def test_verify_bare_bcrypt_hash():
+    """verify_password handles bare bcrypt hashes (no prefix) as v1."""
+    password = "oldstyleP@ss"
+    raw_bcrypt = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    assert verify_password(password, raw_bcrypt) is True
+    assert verify_password("wrong", raw_bcrypt) is False
+
+
+def test_needs_rehash_returns_false_for_v2():
+    """v2 hashes do not need rehashing."""
+    hashed = hash_password("something")
+    assert needs_rehash(hashed) is False
+
+
+def test_needs_rehash_returns_true_for_v1():
+    """v1-prefixed hashes need rehashing."""
+    raw = bcrypt.hashpw(b"pw", bcrypt.gensalt()).decode("utf-8")
+    assert needs_rehash(f"$dfv1${raw}") is True
+
+
+def test_needs_rehash_returns_true_for_bare_bcrypt():
+    """Bare bcrypt hashes (no prefix) need rehashing."""
+    raw = bcrypt.hashpw(b"pw", bcrypt.gensalt()).decode("utf-8")
+    assert needs_rehash(raw) is True
 
 
 # ── JWT ─────────────────────────────────────────────────────────────────────
@@ -166,7 +210,7 @@ def test_get_auth_context_set():
 
 
 def test_require_auth_sets_auth_context():
-    """require_auth sets auth context on request from cookie."""
+    """require_auth rejects unauthenticated requests with 401."""
     from fastapi import Request
 
     app = FastAPI()
@@ -178,10 +222,9 @@ def test_require_auth_sets_auth_context():
         return {"authenticated": ctx.is_authenticated}
 
     with TestClient(app) as client:
-        # No cookie → anonymous
+        # No cookie → 401 (require_auth independently enforces authentication)
         response = client.get("/test")
-        assert response.status_code == 200
-        assert response.json()["authenticated"] is False
+        assert response.status_code == 401
 
 
 def test_require_auth_requires_request_param():
@@ -652,3 +695,57 @@ def test_missing_jwt_secret_generates_ephemeral(monkeypatch, caplog):
 
     # Cleanup
     config_module._auth_config = None
+
+
+# ── Auto-rehash on login ──────────────────────────────────────────────────
+
+
+def test_authenticate_auto_rehashes_legacy_hash():
+    """authenticate() upgrades a bare bcrypt hash to v2 on successful login."""
+    import asyncio
+
+    from app.gateway.auth.local_provider import LocalAuthProvider
+
+    password = "rehashTest123"
+
+    user = User(
+        id=uuid4(),
+        email="rehash@test.com",
+        password_hash=bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
+    )
+
+    mock_repo = MagicMock()
+    mock_repo.get_user_by_email = AsyncMock(return_value=user)
+    mock_repo.update_user = AsyncMock(return_value=user)
+
+    provider = LocalAuthProvider(mock_repo)
+
+    result = asyncio.run(provider.authenticate({"email": "rehash@test.com", "password": password}))
+    assert result is not None
+    assert result.password_hash.startswith("$dfv2$")
+    mock_repo.update_user.assert_called_once()
+
+
+def test_authenticate_skips_rehash_for_v2_hash():
+    """authenticate() does NOT rehash when the stored hash is already v2."""
+    import asyncio
+
+    from app.gateway.auth.local_provider import LocalAuthProvider
+
+    password = "alreadyv2Pass!"
+
+    user = User(
+        id=uuid4(),
+        email="v2@test.com",
+        password_hash=hash_password(password),
+    )
+
+    mock_repo = MagicMock()
+    mock_repo.get_user_by_email = AsyncMock(return_value=user)
+    mock_repo.update_user = AsyncMock(return_value=user)
+
+    provider = LocalAuthProvider(mock_repo)
+
+    result = asyncio.run(provider.authenticate({"email": "v2@test.com", "password": password}))
+    assert result is not None
+    mock_repo.update_user.assert_not_called()
