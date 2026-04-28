@@ -1,0 +1,255 @@
+"""Tests for deerflow.runtime.scheduler.service."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import pytest
+from langgraph.store.memory import InMemoryStore
+
+
+def _ts(year: int, month: int, day: int, hour: int, minute: int) -> float:
+    return datetime(year, month, day, hour, minute, tzinfo=UTC).timestamp()
+
+
+@pytest.mark.anyio
+async def test_manual_trigger_creates_run():
+    from deerflow.runtime.scheduler import CronJobCreate, CronSchedulerService, create_cron_job
+
+    store = InMemoryStore()
+    launched: list[tuple[str, object]] = []
+
+    async def fake_run_launcher(thread_id, payload):
+        launched.append((thread_id, payload))
+        return SimpleNamespace(run_id="run-manual")
+
+    await create_cron_job(
+        store,
+        CronJobCreate(
+            thread_id="thread-1",
+            cron="*/30 * * * *",
+            timezone="UTC",
+            input={"messages": [{"role": "user", "content": "manual"}]},
+        ),
+        job_id="job-1",
+        now=_ts(2026, 4, 8, 10, 0),
+    )
+    service = CronSchedulerService(store, fake_run_launcher)
+
+    record = await service.trigger_job("job-1")
+
+    assert record.run_id == "run-manual"
+    assert len(launched) == 1
+    assert launched[0][0] == "thread-1"
+    assert launched[0][1].input["messages"][0]["content"] == "manual"
+
+
+@pytest.mark.anyio
+async def test_disabled_job_is_not_dispatched():
+    from deerflow.runtime.scheduler import CronJobCreate, CronSchedulerService, create_cron_job
+
+    store = InMemoryStore()
+    launched: list[tuple[str, object]] = []
+
+    async def fake_run_launcher(thread_id, payload):
+        launched.append((thread_id, payload))
+        return SimpleNamespace(run_id="run-disabled")
+
+    await create_cron_job(
+        store,
+        CronJobCreate(
+            thread_id="thread-1",
+            cron="*/30 * * * *",
+            timezone="UTC",
+            enabled=False,
+        ),
+        job_id="job-1",
+        now=_ts(2026, 4, 8, 10, 0),
+    )
+    service = CronSchedulerService(store, fake_run_launcher)
+
+    records = await service.dispatch_due_jobs(now=_ts(2026, 4, 8, 11, 0))
+
+    assert records == []
+    assert launched == []
+
+
+@pytest.mark.anyio
+async def test_scheduler_dispatch_respects_enqueue_strategy():
+    from deerflow.runtime.scheduler import CronJobCreate, CronSchedulerService, create_cron_job, get_cron_job
+
+    store = InMemoryStore()
+    launched: list[tuple[str, object]] = []
+
+    async def fake_run_launcher(thread_id, payload):
+        launched.append((thread_id, payload))
+        return SimpleNamespace(run_id="run-enqueue")
+
+    await create_cron_job(
+        store,
+        CronJobCreate(
+            thread_id="thread-1",
+            cron="*/30 * * * *",
+            timezone="UTC",
+            multitask_strategy="enqueue",
+        ),
+        job_id="job-1",
+        now=_ts(2026, 4, 8, 10, 0),
+    )
+    service = CronSchedulerService(store, fake_run_launcher)
+
+    records = await service.dispatch_due_jobs(now=_ts(2026, 4, 8, 10, 30))
+    stored = await get_cron_job(store, "job-1")
+
+    assert len(records) == 1
+    assert len(launched) == 1
+    assert launched[0][1].multitask_strategy == "enqueue"
+    assert stored is not None
+    assert stored.last_run_id == "run-enqueue"
+    assert stored.next_fire_at == _ts(2026, 4, 8, 11, 0)
+
+
+@pytest.mark.anyio
+async def test_scheduler_dispatch_continues_after_job_failure(caplog: pytest.LogCaptureFixture):
+    from deerflow.runtime.scheduler import CronJobCreate, CronSchedulerService, create_cron_job, get_cron_job
+
+    store = InMemoryStore()
+    launched: list[str] = []
+
+    async def fake_run_launcher(thread_id, payload):
+        launched.append(thread_id)
+        if thread_id == "thread-fail":
+            raise RuntimeError("boom")
+        return SimpleNamespace(run_id=f"run-{thread_id}")
+
+    await create_cron_job(
+        store,
+        CronJobCreate(
+            thread_id="thread-fail",
+            cron="*/30 * * * *",
+            timezone="UTC",
+        ),
+        job_id="job-fail",
+        now=_ts(2026, 4, 8, 10, 0),
+    )
+    await create_cron_job(
+        store,
+        CronJobCreate(
+            thread_id="thread-ok",
+            cron="*/30 * * * *",
+            timezone="UTC",
+        ),
+        job_id="job-ok",
+        now=_ts(2026, 4, 8, 10, 0),
+    )
+
+    service = CronSchedulerService(store, fake_run_launcher)
+
+    with caplog.at_level("ERROR"):
+        records = await service.dispatch_due_jobs(now=_ts(2026, 4, 8, 10, 30))
+
+    failed = await get_cron_job(store, "job-fail")
+    succeeded = await get_cron_job(store, "job-ok")
+
+    assert launched == ["thread-fail", "thread-ok"]
+    assert [record.run_id for record in records] == ["run-thread-ok"]
+    assert failed is not None
+    assert failed.last_run_id is None
+    assert failed.last_fire_at == _ts(2026, 4, 8, 10, 30)
+    assert failed.next_fire_at == _ts(2026, 4, 8, 11, 0)
+    assert succeeded is not None
+    assert succeeded.last_run_id == "run-thread-ok"
+    assert succeeded.next_fire_at == _ts(2026, 4, 8, 11, 0)
+    assert any("failed to dispatch job job-fail" in record.message for record in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_compute_sleep_seconds_avoids_zero_spin_for_overdue_jobs():
+    from deerflow.runtime.scheduler import CronJobCreate, CronSchedulerService, create_cron_job
+
+    store = InMemoryStore()
+
+    async def fake_run_launcher(thread_id, payload):
+        return SimpleNamespace(run_id="run-sleep")
+
+    await create_cron_job(
+        store,
+        CronJobCreate(
+            thread_id="thread-1",
+            cron="*/30 * * * *",
+            timezone="UTC",
+        ),
+        job_id="job-1",
+        now=_ts(2026, 4, 8, 10, 0),
+    )
+
+    service = CronSchedulerService(store, fake_run_launcher, poll_interval=30.0)
+
+    sleep_seconds = await service.compute_sleep_seconds(now=_ts(2026, 4, 8, 10, 45))
+
+    assert sleep_seconds == 1.0
+
+
+@pytest.mark.anyio
+async def test_scheduler_run_loop_can_start_and_stop():
+    from deerflow.runtime.scheduler import CronSchedulerService
+
+    store = InMemoryStore()
+    wake_count = 0
+
+    async def fake_run_launcher(thread_id, payload):
+        return SimpleNamespace(run_id="run-loop")
+
+    service = CronSchedulerService(store, fake_run_launcher, poll_interval=0.01)
+    original_dispatch = service.dispatch_due_jobs
+
+    async def counted_dispatch(*, now=None, limit=100):
+        nonlocal wake_count
+        wake_count += 1
+        return await original_dispatch(now=now, limit=limit)
+
+    service.dispatch_due_jobs = counted_dispatch  # type: ignore[method-assign]
+
+    service.start()
+    await pytest.importorskip("asyncio").sleep(0.03)
+    await service.stop()
+
+    assert wake_count >= 1
+    assert service.task is None
+
+
+@pytest.mark.anyio
+async def test_scheduler_preserves_wake_signal_during_dispatch():
+    from deerflow.runtime.scheduler import CronSchedulerService
+
+    store = InMemoryStore()
+    dispatch_count = 0
+
+    async def fake_run_launcher(thread_id, payload):
+        return SimpleNamespace(run_id="run-loop")
+
+    service = CronSchedulerService(store, fake_run_launcher, poll_interval=10.0)
+
+    async def fake_dispatch(*, now=None, limit=100):
+        nonlocal dispatch_count
+        dispatch_count += 1
+        if dispatch_count == 1:
+            service.wake()
+        else:
+            service._stop_event.set()
+            service.wake()
+        return []
+
+    async def fake_compute_sleep_seconds(*, now=None, scan_limit=1000):
+        return 10.0
+
+    service.dispatch_due_jobs = fake_dispatch  # type: ignore[method-assign]
+    service.compute_sleep_seconds = fake_compute_sleep_seconds  # type: ignore[method-assign]
+
+    service.start()
+    await asyncio.sleep(0.05)
+    await service.stop()
+
+    assert dispatch_count >= 2

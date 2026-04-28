@@ -308,6 +308,72 @@ DeerFlow supports multiple startup modes across two dimensions:
 
 > **Gateway mode** eliminates the LangGraph server process — the Gateway API handles agent execution directly via async tasks, managing its own concurrency.
 
+#### Built-in Cron Scheduler (Gateway Mode)
+
+Gateway mode also includes a built-in cron scheduler for recurring runs. The scheduler is intentionally thin:
+
+- it stores cron job definitions in the existing DeerFlow Store,
+- it only decides when to create a run,
+- real execution still goes through the normal Gateway run lifecycle.
+
+Enable the background loop on exactly one Gateway worker:
+
+```bash
+export DEERFLOW_CRON_SCHEDULER_ENABLED=1
+export DEERFLOW_CRON_SCHEDULER_LEADER=1
+# Optional: shorten polling for local testing
+export DEERFLOW_CRON_SCHEDULER_POLL_INTERVAL=10
+```
+
+If `DEERFLOW_CRON_SCHEDULER_ENABLED=1` but leader mode is left off, the Gateway still exposes the cron job APIs and manual trigger endpoint, but it does not run the background dispatch loop.
+
+Available Gateway endpoints:
+
+- `POST /api/cron/jobs` — create a persisted cron job
+- `GET /api/cron/jobs` — list cron jobs
+- `GET /api/cron/jobs/{job_id}` — fetch one job
+- `PATCH /api/cron/jobs/{job_id}` — update cron, timezone, enablement, payload, or multitask strategy
+- `DELETE /api/cron/jobs/{job_id}` — delete a job
+- `POST /api/cron/jobs/{job_id}/trigger` — manually create a run immediately without advancing wall-clock schedule
+
+Example payload:
+
+```json
+{
+  "thread_id": "thread-123",
+  "assistant_id": "lead_agent",
+  "cron": "0 9 * * 1",
+  "timezone": "Asia/Shanghai",
+  "enabled": true,
+  "multitask_strategy": "enqueue",
+  "input": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Generate the weekly project summary."
+      }
+    ]
+  },
+  "metadata": {
+    "source": "cron"
+  }
+}
+```
+
+Current MVP scope is backend-only:
+
+- cron expressions only
+- persistent job definitions
+- enable / disable / delete / manual trigger
+- scheduled dispatch into real runs
+
+Out of scope for the first version:
+
+- frontend scheduler UI
+- natural-language schedule creation
+- distributed leader election across replicas
+- retry policies and job history dashboards
+
 #### Why Gateway Mode?
 
 In standard mode, DeerFlow runs a dedicated [LangGraph Platform](https://langchain-ai.github.io/langgraph/) server alongside the Gateway API. This architecture works well but has trade-offs:

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
+
+import pytest
+from fastapi import FastAPI, HTTPException
 
 
 def test_format_sse_basic():
@@ -213,7 +218,7 @@ def test_context_merges_into_configurable():
     Since start_run is async and requires many dependencies, we test the
     merging logic directly by simulating what start_run does.
     """
-    from app.gateway.services import build_run_config
+    from app.gateway.services import apply_context_overrides, build_run_config
 
     # Simulate the context merging logic from start_run
     config = build_run_config("thread-1", None, None)
@@ -229,19 +234,7 @@ def test_context_merges_into_configurable():
         "thread_id": "should-be-ignored",
     }
 
-    _CONTEXT_CONFIGURABLE_KEYS = {
-        "model_name",
-        "mode",
-        "thinking_enabled",
-        "reasoning_effort",
-        "is_plan_mode",
-        "subagent_enabled",
-        "max_concurrent_subagents",
-    }
-    configurable = config.setdefault("configurable", {})
-    for key in _CONTEXT_CONFIGURABLE_KEYS:
-        if key in context:
-            configurable.setdefault(key, context[key])
+    apply_context_overrides(config, context)
 
     assert config["configurable"]["model_name"] == "deepseek-v3"
     assert config["configurable"]["thinking_enabled"] is True
@@ -252,13 +245,11 @@ def test_context_merges_into_configurable():
     assert config["configurable"]["mode"] == "ultra"
     # thread_id from context should NOT override the one from build_run_config
     assert config["configurable"]["thread_id"] == "thread-1"
-    # Non-allowlisted keys should not appear
-    assert "thread_id" not in {k for k in context if k in _CONTEXT_CONFIGURABLE_KEYS}
 
 
 def test_context_does_not_override_existing_configurable():
     """Values already in config.configurable must NOT be overridden by context."""
-    from app.gateway.services import build_run_config
+    from app.gateway.services import apply_context_overrides, build_run_config
 
     config = build_run_config(
         "thread-1",
@@ -272,19 +263,7 @@ def test_context_does_not_override_existing_configurable():
         "subagent_enabled": True,
     }
 
-    _CONTEXT_CONFIGURABLE_KEYS = {
-        "model_name",
-        "mode",
-        "thinking_enabled",
-        "reasoning_effort",
-        "is_plan_mode",
-        "subagent_enabled",
-        "max_concurrent_subagents",
-    }
-    configurable = config.setdefault("configurable", {})
-    for key in _CONTEXT_CONFIGURABLE_KEYS:
-        if key in context:
-            configurable.setdefault(key, context[key])
+    apply_context_overrides(config, context)
 
     # Existing values must NOT be overridden
     assert config["configurable"]["model_name"] == "gpt-4"
@@ -385,3 +364,113 @@ def test_build_run_config_no_request_config():
     config = build_run_config("thread-abc", None, None)
     assert config["configurable"] == {"thread_id": "thread-abc"}
     assert "context" not in config
+
+
+class CountingBridge:
+    """Small wrapper around MemoryStreamBridge that counts publish_end calls."""
+
+    def __init__(self):
+        from deerflow.runtime import MemoryStreamBridge
+
+        self._bridge = MemoryStreamBridge(queue_maxsize=32)
+        self.end_calls: list[str] = []
+
+    async def publish(self, run_id: str, event: str, data):
+        await self._bridge.publish(run_id, event, data)
+
+    async def publish_end(self, run_id: str):
+        self.end_calls.append(run_id)
+        await self._bridge.publish_end(run_id)
+
+    def subscribe(
+        self,
+        run_id: str,
+        *,
+        last_event_id: str | None = None,
+        heartbeat_interval: float = 15.0,
+    ):
+        return self._bridge.subscribe(
+            run_id,
+            last_event_id=last_event_id,
+            heartbeat_interval=heartbeat_interval,
+        )
+
+    async def cleanup(self, run_id: str, *, delay: float = 0):
+        await self._bridge.cleanup(run_id, delay=delay)
+
+
+def _make_gateway_request():
+    from deerflow.runtime import RunManager
+
+    app = FastAPI()
+    app.state.stream_bridge = CountingBridge()
+    app.state.run_manager = RunManager()
+    app.state.checkpointer = SimpleNamespace()
+    app.state.store = None
+    return SimpleNamespace(app=app)
+
+
+@pytest.mark.anyio
+async def test_start_run_with_deps_launches_without_request(monkeypatch: pytest.MonkeyPatch):
+    """Non-HTTP callers should be able to launch runs with explicit dependencies only."""
+    from app.gateway.services import RunLaunchRequest, start_run_with_deps
+    from deerflow.runtime import RunStatus
+
+    request = _make_gateway_request()
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(bridge, run_manager, record, **kwargs):
+        captured["graph_input"] = kwargs["graph_input"]
+        captured["config"] = kwargs["config"]
+        await run_manager.set_status(record.run_id, RunStatus.running)
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        await bridge.publish_end(record.run_id)
+
+    monkeypatch.setattr("app.gateway.services.run_agent", fake_run_agent)
+    monkeypatch.setattr("app.gateway.services.resolve_agent_factory", lambda assistant_id: object())
+
+    record = await start_run_with_deps(
+        RunLaunchRequest(
+            assistant_id="finalis",
+            input={"messages": [{"role": "user", "content": "hi"}]},
+            context={"model_name": "deepseek-v3", "is_plan_mode": True},
+        ),
+        "thread-1",
+        bridge=request.app.state.stream_bridge,
+        run_mgr=request.app.state.run_manager,
+        checkpointer=request.app.state.checkpointer,
+        store=request.app.state.store,
+    )
+
+    await asyncio.wait_for(record.task, timeout=1)
+
+    config = captured["config"]
+    graph_input = captured["graph_input"]
+    assert record.thread_id == "thread-1"
+    assert record.status == RunStatus.success
+    assert graph_input["messages"][0].content == "hi"
+    assert config["configurable"]["thread_id"] == "thread-1"
+    assert config["configurable"]["agent_name"] == "finalis"
+    assert config["configurable"]["model_name"] == "deepseek-v3"
+    assert config["configurable"]["is_plan_mode"] is True
+
+
+@pytest.mark.anyio
+async def test_start_run_translates_conflict_error_to_http_exception(monkeypatch: pytest.MonkeyPatch):
+    """The HTTP wrapper should preserve FastAPI error semantics."""
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import ConflictError
+
+    request = _make_gateway_request()
+
+    async def fake_start_run_with_deps(*args, **kwargs):
+        raise ConflictError("thread busy")
+
+    monkeypatch.setattr("app.gateway.services.start_run_with_deps", fake_start_run_with_deps)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await start_run(RunCreateRequest(input=None), "thread-1", request)
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "thread busy"

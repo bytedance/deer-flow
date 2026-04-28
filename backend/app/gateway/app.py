@@ -6,12 +6,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.gateway.config import get_gateway_config
+from app.gateway.cron_scheduler import start_gateway_cron_scheduler, stop_gateway_cron_scheduler
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
     agents,
     artifacts,
     assistants_compat,
     channels,
+    cron,
     mcp,
     memory,
     models,
@@ -57,6 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app):
         logger.info("LangGraph runtime initialised")
+        await start_gateway_cron_scheduler(app)
 
         # Start IM channel service if any channels are configured
         try:
@@ -68,6 +71,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.exception("No IM channels configured or channel service failed to start")
 
         yield
+
+        await stop_gateway_cron_scheduler(app)
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:
@@ -171,6 +176,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
             },
             {
+                "name": "cron",
+                "description": "Manage built-in cron scheduler jobs and manual triggers",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -218,6 +227,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
+
+    # Cron scheduler job management API
+    app.include_router(cron.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
