@@ -1,8 +1,16 @@
-"""Password hashing utilities using bcrypt with SHA-256 pre-hashing.
+"""Password hashing utilities with versioned hash format.
 
-Passwords are pre-hashed with SHA-256 before bcrypt to avoid silent
-truncation at 72 bytes (bcrypt's internal limit). This ensures the
-full password contributes to the hash regardless of length.
+Hash format: ``$dfv<N>$<bcrypt_hash>`` where ``<N>`` is the version.
+
+- **v1** (legacy): ``bcrypt(password)`` — plain bcrypt, susceptible to
+  72-byte silent truncation.
+- **v2** (current): ``bcrypt(b64(sha256(password)))`` — SHA-256 pre-hash
+  avoids the 72-byte truncation limit so the full password contributes
+  to the hash.
+
+Verification auto-detects the version and falls back to v1 for hashes
+without a prefix, so existing deployments upgrade transparently on next
+login.
 """
 
 import asyncio
@@ -11,20 +19,43 @@ import hashlib
 
 import bcrypt
 
+_CURRENT_VERSION = 2
+_PREFIX_V2 = "$dfv2$"
+_PREFIX_V1 = "$dfv1$"
 
-def _pre_hash(password: str) -> bytes:
-    """Pre-hash password with SHA-256 to bypass bcrypt's 72-byte limit."""
+
+def _pre_hash_v2(password: str) -> bytes:
+    """SHA-256 pre-hash to bypass bcrypt's 72-byte limit."""
     return base64.b64encode(hashlib.sha256(password.encode("utf-8")).digest())
 
 
 def hash_password(password: str) -> str:
-    """Hash a password using bcrypt with SHA-256 pre-hashing."""
-    return bcrypt.hashpw(_pre_hash(password), bcrypt.gensalt()).decode("utf-8")
+    """Hash a password (current version: v2 — SHA-256 + bcrypt)."""
+    raw = bcrypt.hashpw(_pre_hash_v2(password), bcrypt.gensalt()).decode("utf-8")
+    return f"{_PREFIX_V2}{raw}"
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash."""
-    return bcrypt.checkpw(_pre_hash(plain_password), hashed_password.encode("utf-8"))
+    """Verify a password, auto-detecting the hash version.
+
+    Accepts v2 (``$dfv2$…``), v1 (``$dfv1$…``), and bare bcrypt hashes
+    (treated as v1 for backward compatibility with pre-versioning data).
+    """
+    if hashed_password.startswith(_PREFIX_V2):
+        bcrypt_hash = hashed_password[len(_PREFIX_V2) :]
+        return bcrypt.checkpw(_pre_hash_v2(plain_password), bcrypt_hash.encode("utf-8"))
+
+    if hashed_password.startswith(_PREFIX_V1):
+        bcrypt_hash = hashed_password[len(_PREFIX_V1) :]
+    else:
+        bcrypt_hash = hashed_password
+
+    return bcrypt.checkpw(plain_password.encode("utf-8"), bcrypt_hash.encode("utf-8"))
+
+
+def needs_rehash(hashed_password: str) -> bool:
+    """Return True if the hash uses an older version and should be rehashed."""
+    return not hashed_password.startswith(_PREFIX_V2)
 
 
 async def hash_password_async(password: str) -> str:

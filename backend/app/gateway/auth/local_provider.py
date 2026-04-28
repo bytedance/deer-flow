@@ -1,7 +1,7 @@
 """Local email/password authentication provider."""
 
 from app.gateway.auth.models import User
-from app.gateway.auth.password import hash_password_async, verify_password_async
+from app.gateway.auth.password import hash_password_async, needs_rehash, verify_password_async
 from app.gateway.auth.providers import AuthProvider
 from app.gateway.auth.repositories.base import UserRepository
 
@@ -42,6 +42,10 @@ class LocalAuthProvider(AuthProvider):
 
         if not await verify_password_async(password, user.password_hash):
             return None
+
+        if needs_rehash(user.password_hash):
+            user.password_hash = await hash_password_async(password)
+            await self._repo.update_user(user)
 
         return user
 
