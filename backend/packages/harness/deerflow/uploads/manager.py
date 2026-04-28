@@ -4,8 +4,10 @@ Pure business logic — no FastAPI/HTTP dependencies.
 Both Gateway and Client delegate to these functions.
 """
 
+import errno
 import os
 import re
+import stat
 from pathlib import Path
 from urllib.parse import quote
 
@@ -15,6 +17,10 @@ from deerflow.runtime.user_context import get_effective_user_id
 
 class PathTraversalError(ValueError):
     """Raised when a path escapes its allowed base directory."""
+
+
+class UnsafeUploadPathError(ValueError):
+    """Raised when an upload destination is not a safe regular file path."""
 
 
 # thread_id must be alphanumeric, hyphens, underscores, or dots only.
@@ -107,6 +113,45 @@ def validate_path_traversal(path: Path, base: Path) -> None:
         path.resolve().relative_to(base.resolve())
     except ValueError:
         raise PathTraversalError("Path traversal detected") from None
+
+
+def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
+    """Write upload bytes without following a pre-existing destination symlink.
+
+    Upload directories may be mounted into local sandboxes. A sandbox process can
+    therefore leave a symlink at a future upload filename. Normal ``Path.write_bytes``
+    follows that link and can overwrite files outside the uploads directory with
+    gateway privileges. This helper rejects symlink destinations and uses
+    ``O_NOFOLLOW`` where available so the final path component cannot be raced into
+    a symlink between validation and open.
+    """
+    safe_name = normalize_filename(filename)
+    dest = base_dir / safe_name
+
+    try:
+        st = os.lstat(dest)
+    except FileNotFoundError:
+        st = None
+
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
+
+    validate_path_traversal(dest, base_dir)
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    try:
+        fd = os.open(dest, flags, 0o666)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR}:
+            raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
+        raise
+
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    return dest
 
 
 def list_files_in_dir(directory: Path) -> dict:

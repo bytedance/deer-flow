@@ -15,6 +15,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
     PathTraversalError,
+    UnsafeUploadPathError,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
@@ -23,6 +24,7 @@ from deerflow.uploads.manager import (
     normalize_filename,
     upload_artifact_url,
     upload_virtual_path,
+    write_upload_file_no_symlink,
 )
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
@@ -200,16 +202,15 @@ async def upload_files(
             continue
 
         try:
-            file_path = uploads_dir / safe_filename
+            content = await file.read()
+            file_size = len(content)
+            total_size += file_size
+            if file_size > limits.max_file_size:
+                raise HTTPException(status_code=413, detail=f"File too large: {safe_filename}")
+            if total_size > limits.max_total_size:
+                raise HTTPException(status_code=413, detail="Total upload size too large")
+            file_path = write_upload_file_no_symlink(uploads_dir, safe_filename, content)
             written_paths.append(file_path)
-            file_size, total_size = await _write_upload_file_streaming(
-                file,
-                file_path,
-                display_filename=safe_filename,
-                max_single_file_size=limits.max_file_size,
-                max_total_size=limits.max_total_size,
-                total_size=total_size,
-            )
 
             virtual_path = upload_virtual_path(safe_filename)
 
@@ -246,6 +247,9 @@ async def upload_files(
         except HTTPException as e:
             _cleanup_uploaded_paths(written_paths)
             raise e
+        except UnsafeUploadPathError as e:
+            logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
+            continue
         except Exception as e:
             logger.error(f"Failed to upload {file.filename}: {e}")
             _cleanup_uploaded_paths(written_paths)
