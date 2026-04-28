@@ -334,7 +334,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 6. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
 7. DingTalk AI Card mode (when `card_template_id` configured): `runs.stream()` → create card with initial text → stream updates via `PUT /v1.0/card/streaming` → finalize on `is_final=True`. Falls back to `sampleMarkdown` if card creation or streaming fails
 8. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`): handle locally or query Gateway API
-8. Outbound → channel callbacks → platform reply
+9. Outbound → channel callbacks → platform reply
 
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph-compatible Gateway API base URL (default: `http://localhost:8001/api`)
