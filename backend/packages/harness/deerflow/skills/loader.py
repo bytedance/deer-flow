@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from deerflow.config.app_config import AppConfig
+from deerflow.config.runtime_paths import project_root
 
 from .parser import parse_skill_file
 from .types import Skill
@@ -15,13 +16,9 @@ def get_skills_root_path() -> Path:
     Get the root path of the skills directory.
 
     Returns:
-        Path to the skills directory (deer-flow/skills)
+        Path to the caller project's skills directory.
     """
-    # loader.py lives at packages/harness/deerflow/skills/loader.py — 5 parents up reaches backend/
-    backend_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
-    # skills directory is sibling to backend directory
-    skills_dir = backend_dir.parent / "skills"
-    return skills_dir
+    return project_root() / "skills"
 
 
 def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False, *, app_config: AppConfig | None = None) -> list[Skill]:
