@@ -133,7 +133,7 @@ class TestSafeExtract:
             with pytest.raises(ValueError, match="unsafe"):
                 safe_extract_skill_archive(zf, dest)
 
-    def test_skips_symlinks(self, tmp_path):
+    def test_rejects_symlinks(self, tmp_path):
         zip_path = tmp_path / "sym.zip"
         with zipfile.ZipFile(zip_path, "w") as zf:
             info = zipfile.ZipInfo("link.txt")
@@ -143,9 +143,50 @@ class TestSafeExtract:
         dest = tmp_path / "out"
         dest.mkdir()
         with zipfile.ZipFile(zip_path) as zf:
-            safe_extract_skill_archive(zf, dest)
-        assert (dest / "normal.txt").exists()
+            with pytest.raises(ValueError, match="symlink"):
+                safe_extract_skill_archive(zf, dest)
         assert not (dest / "link.txt").exists()
+
+    def test_rejects_too_many_entries(self, tmp_path):
+        zip_path = self._make_zip(tmp_path, {f"file-{i}.txt": "x" for i in range(4)})
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="too many entries"):
+                safe_extract_skill_archive(zf, dest, max_entries=3)
+
+    def test_rejects_oversized_member(self, tmp_path):
+        zip_path = self._make_zip(tmp_path, {"large.txt": "x" * 10})
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="member is too large"):
+                safe_extract_skill_archive(zf, dest, max_member_size=5)
+
+    @pytest.mark.parametrize("extension", ["zip", "skill", "tar", "tgz", "gz", "7z", "rar"])
+    def test_rejects_nested_archives(self, tmp_path, extension):
+        zip_path = self._make_zip(tmp_path, {f"payload.{extension}": "nested"})
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="nested archive"):
+                safe_extract_skill_archive(zf, dest)
+
+    def test_rejects_control_character_in_member_name(self, tmp_path):
+        zip_path = self._make_zip(tmp_path, {"bad\x01name.txt": "x"})
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="unsafe member name"):
+                safe_extract_skill_archive(zf, dest)
+
+    def test_rejects_too_long_member_name(self, tmp_path):
+        zip_path = self._make_zip(tmp_path, {f"{'a' * 256}.txt": "x"})
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="name is too long"):
+                safe_extract_skill_archive(zf, dest)
 
     def test_normal_archive(self, tmp_path):
         zip_path = self._make_zip(
@@ -200,6 +241,13 @@ class TestInstallSkillFromArchive:
         bad_path.write_text("not a skill")
         with pytest.raises(ValueError, match=".skill"):
             install_skill_from_archive(bad_path)
+
+    def test_oversized_archive_file_rejected_before_open(self, tmp_path, monkeypatch):
+        zip_path = tmp_path / "large.skill"
+        zip_path.write_bytes(b"x" * 11)
+        monkeypatch.setattr("deerflow.skills.installer.MAX_COMPRESSED_ARCHIVE_SIZE_BYTES", 10)
+        with pytest.raises(ValueError, match="archive file is too large"):
+            install_skill_from_archive(zip_path, skills_root=tmp_path / "skills")
 
     def test_bad_frontmatter(self, tmp_path):
         zip_path = tmp_path / "bad.skill"

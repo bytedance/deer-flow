@@ -17,6 +17,13 @@ from deerflow.skills.validation import _validate_skill_frontmatter
 
 logger = logging.getLogger(__name__)
 
+MAX_ARCHIVE_SIZE_BYTES = 50 * 1024 * 1024
+MAX_COMPRESSED_ARCHIVE_SIZE_BYTES = 25 * 1024 * 1024
+MAX_ARCHIVE_ENTRIES = 500
+MAX_ARCHIVE_MEMBER_SIZE_BYTES = 5 * 1024 * 1024
+MAX_ARCHIVE_MEMBER_NAME_BYTES = 255
+NESTED_ARCHIVE_EXTENSIONS = (".zip", ".skill", ".tar", ".tgz", ".gz", ".7z", ".rar")
+
 
 class SkillAlreadyExistsError(ValueError):
     """Raised when a skill with the same name is already installed."""
@@ -46,6 +53,24 @@ def is_symlink_member(info: zipfile.ZipInfo) -> bool:
     return stat.S_ISLNK(mode)
 
 
+def has_control_characters(name: str) -> bool:
+    """Return True if a zip member name contains NUL or control characters."""
+    return any(ord(char) < 32 or ord(char) == 127 for char in name)
+
+
+def has_too_long_path_component(name: str) -> bool:
+    """Return True if any path component exceeds common filesystem name limits."""
+    return any(len(part.encode("utf-8")) > MAX_ARCHIVE_MEMBER_NAME_BYTES for part in PurePosixPath(name).parts)
+
+
+def is_nested_archive_member(info: zipfile.ZipInfo) -> bool:
+    """Return True if the member is itself an archive payload."""
+    if info.is_dir():
+        return False
+    normalized = posixpath.normpath(info.filename.replace("\\", "/")).rstrip("/")
+    return normalized.lower().endswith(NESTED_ARCHIVE_EXTENSIONS)
+
+
 def should_ignore_archive_entry(path: Path) -> bool:
     """Return True for macOS metadata dirs and dotfiles."""
     return path.name.startswith(".") or path.name == "__MACOSX"
@@ -73,30 +98,49 @@ def resolve_skill_dir_from_archive(temp_path: Path) -> Path:
 def safe_extract_skill_archive(
     zip_ref: zipfile.ZipFile,
     dest_path: Path,
-    max_total_size: int = 512 * 1024 * 1024,
+    max_total_size: int = MAX_ARCHIVE_SIZE_BYTES,
+    max_entries: int = MAX_ARCHIVE_ENTRIES,
+    max_member_size: int = MAX_ARCHIVE_MEMBER_SIZE_BYTES,
 ) -> None:
     """Safely extract a skill archive with security protections.
 
     Protections:
     - Reject absolute paths and directory traversal (..).
-    - Skip symlink entries instead of materialising them.
-    - Enforce a hard limit on total uncompressed size (zip bomb defence).
+    - Reject symlink entries instead of materialising them.
+    - Enforce hard limits on entry count and uncompressed sizes.
+    - Reject nested archives and unsafe member names.
 
     Raises:
         ValueError: If unsafe members or size limit exceeded.
     """
     dest_root = dest_path.resolve()
     total_written = 0
+    infos = zip_ref.infolist()
 
-    for info in zip_ref.infolist():
+    if len(infos) > max_entries:
+        raise ValueError(f"Skill archive contains too many entries ({len(infos)} > {max_entries})")
+
+    declared_size = sum(info.file_size for info in infos)
+    if declared_size > max_total_size:
+        raise ValueError("Skill archive is too large or appears highly compressed.")
+
+    for info in infos:
         if is_unsafe_zip_member(info):
             raise ValueError(f"Archive contains unsafe member path: {info.filename!r}")
 
         if is_symlink_member(info):
-            logger.warning("Skipping symlink entry in skill archive: %s", info.filename)
-            continue
+            raise ValueError(f"Archive contains symlink member: {info.filename!r}")
 
         normalized_name = posixpath.normpath(info.filename.replace("\\", "/"))
+        if normalized_name in {"", "."} or has_control_characters(info.filename):
+            raise ValueError(f"Archive contains unsafe member name: {info.filename!r}")
+        if has_too_long_path_component(normalized_name):
+            raise ValueError(f"Archive member name is too long: {info.filename!r}")
+        if is_nested_archive_member(info):
+            raise ValueError(f"Archive contains nested archive member: {info.filename!r}")
+        if info.file_size > max_member_size:
+            raise ValueError(f"Archive member is too large: {info.filename!r}")
+
         member_path = dest_root.joinpath(*PurePosixPath(normalized_name).parts)
         if not member_path.resolve().is_relative_to(dest_root):
             raise ValueError(f"Zip entry escapes destination: {info.filename!r}")
@@ -118,7 +162,7 @@ def install_skill_from_archive(
     zip_path: str | Path,
     *,
     skills_root: Path | None = None,
-) -> dict:
+) -> dict[str, bool | str]:
     """Install a skill from a .skill archive (ZIP).
 
     Args:
@@ -142,6 +186,8 @@ def install_skill_from_archive(
         raise ValueError(f"Path is not a file: {zip_path}")
     if path.suffix != ".skill":
         raise ValueError("File must have .skill extension")
+    if path.stat().st_size > MAX_COMPRESSED_ARCHIVE_SIZE_BYTES:
+        raise ValueError("Skill archive file is too large.")
 
     if skills_root is None:
         skills_root = get_skills_root_path()

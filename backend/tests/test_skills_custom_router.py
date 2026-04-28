@@ -1,5 +1,7 @@
 import errno
 import json
+import stat
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +35,37 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
         category="public",
         enabled=enabled,
     )
+
+
+def test_install_skill_router_rejects_symlink_archive(monkeypatch, tmp_path):
+    archive = tmp_path / "sym-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("sym-skill/SKILL.md", "---\nname: sym-skill\ndescription: test\n---\nBody")
+        link_info = zipfile.ZipInfo("sym-skill/sneaky_link")
+        link_info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(link_info, "/etc/passwd")
+
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    refresh_calls = []
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    monkeypatch.setattr("app.gateway.routers.skills.resolve_thread_virtual_path", lambda _thread_id, _path: archive)
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr("deerflow.skills.installer.get_skills_root_path", lambda: skills_root)
+
+    app = FastAPI()
+    app.include_router(skills_router.router)
+
+    with TestClient(app) as client:
+        response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/sym-skill.skill"})
+
+    assert response.status_code == 400
+    assert "symlink" in response.json()["detail"]
+    assert refresh_calls == []
+    assert not (skills_root / "custom" / "sym-skill").exists()
 
 
 def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
