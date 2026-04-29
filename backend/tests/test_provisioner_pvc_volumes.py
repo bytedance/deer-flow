@@ -2,6 +2,11 @@
 
 import pytest
 
+
+def _allow_extra_mount_host_paths(provisioner_module, *paths: str) -> None:
+    provisioner_module.EXTRA_MOUNT_HOST_PATH_ALLOWLIST = ",".join(paths)
+
+
 # ── _build_volumes ─────────────────────────────────────────────────────
 
 
@@ -81,6 +86,7 @@ class TestBuildVolumes:
 
     def test_extra_mounts_are_added_as_hostpath_volumes(self, provisioner_module):
         """Caller-provided mounts should become extra hostPath volumes."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
         extra_mounts = [
             provisioner_module.ExtraMountRequest(
                 host_path="/host/shared",
@@ -145,6 +151,7 @@ class TestBuildVolumeMounts:
 
     def test_extra_mounts_are_added_as_volume_mounts(self, provisioner_module):
         """Caller-provided mounts should become extra container mounts."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
         extra_mounts = [
             provisioner_module.ExtraMountRequest(
                 host_path="/host/shared",
@@ -162,6 +169,7 @@ class TestBuildVolumeMounts:
 
     def test_rejects_duplicate_extra_mount_targets(self, provisioner_module):
         """Extra mounts may not collide with each other or built-in mount paths."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
         extra_mounts = [
             provisioner_module.ExtraMountRequest(
                 host_path="/host/a",
@@ -188,8 +196,34 @@ class TestBuildVolumeMounts:
         with pytest.raises(ValueError, match="host_path must be absolute"):
             provisioner_module._build_volume_mounts("thread-1", extra_mounts)
 
+    def test_rejects_extra_mount_host_paths_without_allowlist(self, provisioner_module):
+        """Extra hostPath mounts must be explicitly allowed by the operator."""
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/shared",
+                container_path="/mnt/shared",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="ALLOWLIST"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
+    def test_rejects_extra_mount_host_paths_outside_allowlist(self, provisioner_module):
+        """Allowed host paths must be inside an allowlisted base directory."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host/shared")
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/shared2",
+                container_path="/mnt/shared",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="ALLOWLIST"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
     def test_rejects_reserved_extra_mount_subpaths(self, provisioner_module):
         """Extra mounts may not shadow provisioner-managed mount trees."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
         extra_mounts = [
             provisioner_module.ExtraMountRequest(
                 host_path="/host/user-data",
@@ -244,6 +278,7 @@ class TestBuildPodVolumes:
 
     def test_pod_includes_extra_mounts(self, provisioner_module):
         """Pod spec should wire extra volumes and volume mounts together."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
         extra_mounts = [
             provisioner_module.ExtraMountRequest(
                 host_path="/host/shared",

@@ -30,7 +30,9 @@ Architecture (docker-compose-dev):
 from __future__ import annotations
 
 import logging
+import ntpath
 import os
+import posixpath
 import re
 import time
 from contextlib import asynccontextmanager
@@ -72,6 +74,10 @@ KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
 # services on the host Kubernetes node.  On Docker Desktop for macOS this
 # is ``host.docker.internal``; on Linux it may be the host's LAN IP.
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
+EXTRA_MOUNT_HOST_PATH_ALLOWLIST = os.environ.get(
+    "EXTRA_MOUNT_HOST_PATH_ALLOWLIST",
+    "",
+)
 
 
 def join_host_path(base: str, *parts: str) -> str:
@@ -105,6 +111,49 @@ def _validate_thread_id(thread_id: str) -> str:
 
 def _is_absolute_host_path(path: str) -> bool:
     return path.startswith("/") or bool(re.match(r"^[A-Za-z]:[\\/]", path)) or path.startswith("\\\\")
+
+
+def _is_windows_host_path(path: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", path)) or path.startswith("\\\\")
+
+
+def _normalize_host_path_for_policy(path: str) -> tuple[str, str]:
+    if _is_windows_host_path(path):
+        return "windows", ntpath.normcase(ntpath.normpath(path))
+    return "posix", posixpath.normpath(path).rstrip("/") or "/"
+
+
+def _extra_mount_host_path_allowlist() -> list[str]:
+    return [path.strip() for path in EXTRA_MOUNT_HOST_PATH_ALLOWLIST.split(",") if path.strip()]
+
+
+def _is_extra_mount_host_path_allowed(host_path: str) -> bool:
+    allowed_base_paths = _extra_mount_host_path_allowlist()
+    if not allowed_base_paths:
+        return False
+
+    host_kind, normalized_host_path = _normalize_host_path_for_policy(host_path)
+    for base_path in allowed_base_paths:
+        if not _is_absolute_host_path(base_path):
+            raise ValueError("EXTRA_MOUNT_HOST_PATH_ALLOWLIST entries must be absolute")
+
+        base_kind, normalized_base_path = _normalize_host_path_for_policy(base_path)
+        if host_kind != base_kind:
+            continue
+
+        try:
+            common_path = (
+                ntpath.commonpath([normalized_base_path, normalized_host_path])
+                if host_kind == "windows"
+                else posixpath.commonpath([normalized_base_path, normalized_host_path])
+            )
+        except ValueError:
+            continue
+
+        if common_path == normalized_base_path:
+            return True
+
+    return False
 
 
 def _is_reserved_extra_mount_path(container_path: str) -> bool:
@@ -278,6 +327,8 @@ def _normalize_extra_mounts(extra_mounts: list[ExtraMountRequest] | None) -> lis
             raise ValueError("extra_mounts.host_path must not be empty")
         if not _is_absolute_host_path(host_path):
             raise ValueError(f"extra_mounts.host_path must be absolute: {host_path}")
+        if not _is_extra_mount_host_path_allowed(host_path):
+            raise ValueError(f"extra_mounts.host_path is not in EXTRA_MOUNT_HOST_PATH_ALLOWLIST: {host_path}")
         if not container_path.startswith("/"):
             raise ValueError(f"extra_mounts.container_path must be absolute: {mount.container_path}")
         if container_path == "/":
