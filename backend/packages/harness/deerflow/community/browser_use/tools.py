@@ -1,21 +1,37 @@
 """BrowserUse tool — drives a real Chromium browser to complete web tasks.
 
-Wraps the `browser-use` library as a single LangChain tool.  The tool
-accepts a natural-language task description and returns the final result
-after the browser automation finishes.
-
-Requirements (in the langgraph container):
-  - pip: browser-use playwright
-  - system: chromium-browser (or `playwright install chromium`)
+Resource management:
+- Browser is opened/closed as an async context manager — guaranteed cleanup
+  even when the task raises an exception or times out.
+- asyncio.wait_for() enforces a hard wall-clock timeout so the LangGraph
+  coroutine cannot be blocked indefinitely by a hanging page.
+- A module-level semaphore caps concurrent Chromium instances to avoid OOM.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from langchain.tools import tool
 
 logger = logging.getLogger(__name__)
+
+# Max simultaneous Chromium instances in this LangGraph process.
+# Each headless Chromium uses ~200-400 MB; keep this low.
+_MAX_CONCURRENT = 2
+_SEMAPHORE: asyncio.Semaphore | None = None
+
+# Hard timeout per browser task (seconds).
+_TIMEOUT_SECONDS = 120
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Return (or lazily create) the module-level semaphore."""
+    global _SEMAPHORE
+    if _SEMAPHORE is None:
+        _SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT)
+    return _SEMAPHORE
 
 
 @tool("browser_use", parse_docstring=True)
@@ -36,7 +52,7 @@ async def browser_use_tool(task: str) -> str:
     """
     try:
         from browser_use import Agent as BrowserAgent
-        from browser_use import BrowserConfig
+        from browser_use import Browser, BrowserConfig
     except ImportError:
         return (
             "ERROR: browser-use is not installed. "
@@ -44,34 +60,37 @@ async def browser_use_tool(task: str) -> str:
         )
 
     from deerflow.config import get_app_config
+    from langchain_openai import ChatOpenAI
 
     config = get_app_config()
+    model_cfg = config.models[0] if config.models else None
+    if model_cfg is None:
+        return "ERROR: No models configured in config.yaml"
 
-    # Reuse the first configured model — browser-use needs an LLM internally.
-    # We use ChatOpenAI-compatible interface since that's what config.yaml defines.
-    try:
-        from langchain_openai import ChatOpenAI
+    llm = ChatOpenAI(
+        model=getattr(model_cfg, "model", "gpt-4o"),
+        base_url=getattr(model_cfg, "base_url", None),
+        api_key=getattr(model_cfg, "api_key", None),
+        temperature=0,
+    )
 
-        model_cfg = config.models[0] if config.models else None
-        if model_cfg is None:
-            return "ERROR: No models configured in config.yaml"
+    sem = _get_semaphore()
+    browser_cfg = BrowserConfig(headless=True, disable_security=True)
 
-        llm = ChatOpenAI(
-            model=getattr(model_cfg, "model", "gpt-4o"),
-            base_url=getattr(model_cfg, "base_url", None),
-            api_key=getattr(model_cfg, "api_key", None),
-            temperature=0,
-        )
-    except Exception as e:
-        return f"ERROR: Failed to initialize LLM for browser-use: {e}"
-
-    try:
-        browser_config = BrowserConfig(headless=True, disable_security=True)
-        agent = BrowserAgent(task=task, llm=llm, browser_config=browser_config)
-        result = await agent.run(max_steps=20)
-        # browser-use returns an AgentHistoryList; get the final output
-        final = result.final_result()
-        return str(final) if final else "Task completed but produced no text output."
-    except Exception as e:
-        logger.exception("browser_use_tool failed: %s", e)
-        return f"Browser automation failed: {e}"
+    async with sem:
+        # Browser is always closed when this block exits — exception or not.
+        async with Browser(config=browser_cfg) as browser:
+            try:
+                agent = BrowserAgent(task=task, llm=llm, browser=browser)
+                result = await asyncio.wait_for(
+                    agent.run(max_steps=20),
+                    timeout=_TIMEOUT_SECONDS,
+                )
+                final = result.final_result()
+                return str(final) if final else "Task completed but produced no text output."
+            except asyncio.TimeoutError:
+                logger.warning("browser_use_tool: task timed out after %ds", _TIMEOUT_SECONDS)
+                return f"Browser task timed out after {_TIMEOUT_SECONDS}s. Try a simpler or more specific task."
+            except Exception as e:
+                logger.exception("browser_use_tool: task failed")
+                return f"Browser automation failed: {e}"
