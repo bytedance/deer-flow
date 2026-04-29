@@ -321,7 +321,7 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     enabled_state = {"value": True}
     refresh_calls = []
 
-    def _load_skills(*, enabled_only: bool, app_config=None):
+    def _load_skills(*, enabled_only: bool):
         skill = _make_skill("demo-skill", enabled=enabled_state["value"])
         if enabled_only and not skill.enabled:
             return []
@@ -331,7 +331,8 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
         refresh_calls.append("refresh")
         enabled_state["value"] = False
 
-    monkeypatch.setattr("app.gateway.routers.skills.load_skills", _load_skills)
+    mock_storage = SimpleNamespace(load_skills=_load_skills)
+    monkeypatch.setattr("app.gateway.routers.skills.get_or_new_skill_storage", lambda **kwargs: mock_storage)
     monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
