@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 _CHANNEL_REGISTRY: dict[str, str] = {
     "discord": "app.channels.discord:DiscordChannel",
     "feishu": "app.channels.feishu:FeishuChannel",
+    "jira": "app.channels.jira:JiraChannel",
     "slack": "app.channels.slack:SlackChannel",
     "telegram": "app.channels.telegram:TelegramChannel",
     "wechat": "app.channels.wechat:WechatChannel",

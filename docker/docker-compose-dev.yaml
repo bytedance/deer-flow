@@ -163,6 +163,9 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Channel URLs: use Docker service names so gateway can reach sibling containers
+      - LANGGRAPH_URL=http://langgraph:2024
+      - GATEWAY_URL=http://gateway:8001
     env_file:
       - ../.env
     extra_hosts:
