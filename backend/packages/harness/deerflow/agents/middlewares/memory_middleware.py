@@ -11,6 +11,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.config.memory_config import get_memory_config
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +87,16 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         # Queue the filtered conversation for memory update
         correction_detected = detect_correction(filtered_messages)
         reinforcement_detected = not correction_detected and detect_reinforcement(filtered_messages)
+        # Capture user_id at enqueue time while the request context is still alive.
+        # threading.Timer fires on a different thread where ContextVar values are not
+        # propagated, so we must store user_id explicitly in ConversationContext.
+        user_id = get_effective_user_id()
         queue = get_memory_queue()
         queue.add(
             thread_id=thread_id,
             messages=filtered_messages,
             agent_name=self._agent_name,
+            user_id=user_id,
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
         )

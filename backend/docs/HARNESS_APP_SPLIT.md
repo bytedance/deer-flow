@@ -277,7 +277,7 @@ LangGraph Server 只需要 harness 包。`langgraph.json` 更新：
     "lead_agent": "deerflow.agents:make_lead_agent"
   },
   "checkpointer": {
-    "path": "./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer"
+    "path": "./packages/harness/deerflow/runtime/checkpointer/async_provider.py:make_checkpointer"
   }
 }
 ```

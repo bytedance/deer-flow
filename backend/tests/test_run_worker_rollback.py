@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, call
 
 import pytest
 
-from deerflow.runtime.runs.worker import _rollback_to_pre_run_checkpoint
+from deerflow.runtime.runs.worker import _agent_factory_supports_app_config, _rollback_to_pre_run_checkpoint
 
 
 class FakeCheckpointer:
@@ -212,3 +212,20 @@ async def test_rollback_propagates_aput_writes_failure():
     # aput succeeded, aput_writes was called but failed
     checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_awaited_once()
+
+
+def test_agent_factory_supports_app_config_detects_supported_signature():
+    def factory(*, config, app_config=None):
+        return (config, app_config)
+
+    assert _agent_factory_supports_app_config(factory) is True
+
+
+def test_agent_factory_supports_app_config_returns_false_when_signature_lookup_fails(monkeypatch):
+    class BrokenCallable:
+        def __call__(self, **kwargs):
+            return kwargs
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker.inspect.signature", lambda _obj: (_ for _ in ()).throw(ValueError("boom")))
+
+    assert _agent_factory_supports_app_config(BrokenCallable()) is False

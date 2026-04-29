@@ -1,0 +1,72 @@
+---
+title: DeerFlow 应用
+description: DeerFlow 应用是 DeerFlow 生产体验的参考实现。它将 Harness 运行时、基于 Web 的对话工作区、API Gateway 和反向代理组合成一个可部署的完整系统。
+---
+
+import { Callout, Cards } from "nextra/components";
+
+# DeerFlow 应用
+
+<Callout type="info" emoji="🚀">
+  DeerFlow 应用是构建在 DeerFlow Harness 之上的完整 Super Agent
+  应用。它将运行时能力打包成一个可部署的产品，包含 Web 界面、API Gateway
+  和运维工具。
+</Callout>
+
+DeerFlow 应用是 DeerFlow 生产体验的参考实现。它将 Harness 运行时、基于 Web 的对话工作区、API Gateway 和反向代理组合成一个可部署的完整系统。
+
+## 应用提供什么
+
+| 能力             | 描述                                                  |
+| ---------------- | ----------------------------------------------------- |
+| **Web 工作区**   | 浏览器对话界面，支持线程、产出物、文件上传和技能选择  |
+| **自定义 Agent** | 创建和管理具有不同模型、技能和工具集的命名 Agent      |
+| **线程管理**     | 带检查点和历史记录的持久化对话线程                    |
+| **流式响应**     | 实时 token 流式传输，带思考步骤和工具调用可见性       |
+| **产出物查看器** | Agent 生成文件和输出的浏览器内预览和下载              |
+| **扩展界面**     | 无需编辑配置文件即可启用/禁用 MCP 服务器和技能        |
+| **Gateway API**  | 桥接前端和 LangGraph 运行时的基于 FastAPI 的 REST API |
+
+## 架构
+
+DeerFlow 应用以四个服务的形式运行，通过单个 nginx 反向代理提供：
+
+```
+                ┌──────────────────┐
+     浏览器 → │  nginx :2026      │
+                └──────────────────┘
+                  │          │
+         ┌────────┘          └────────┐
+         ▼                            ▼
+┌──────────────────┐       ┌──────────────────────┐
+│  前端 :3000      │       │  Gateway API :8001    │
+│  (Next.js)       │       │  (FastAPI)            │
+└──────────────────┘       └──────────────────────┘
+                                      │
+                            ┌─────────┘
+                            ▼
+                  ┌──────────────────────┐
+                  │  LangGraph :2024     │
+                  │  (DeerFlow Harness)  │
+                  └──────────────────────┘
+```
+
+- **nginx**：路由请求——`/api/*` 到 Gateway，LangGraph 流式端点到 LangGraph，其余到前端。
+- **前端**（Next.js + React）：浏览器界面，与 Gateway 和 LangGraph 通信。
+- **Gateway**（FastAPI）：处理 API 操作——模型列表、Agent CRUD、记忆、扩展管理、文件上传。
+- **LangGraph**：DeerFlow Harness 运行时，管理线程状态、Agent 执行和流式传输。
+
+## 技术栈
+
+| 层次         | 技术                                                    |
+| ------------ | ------------------------------------------------------- |
+| 前端         | Next.js 16、React 19、TypeScript、pnpm                  |
+| Gateway      | FastAPI、Python 3.12、uvicorn                           |
+| Agent 运行时 | LangGraph、LangChain、DeerFlow Harness                  |
+| 反向代理     | nginx                                                   |
+| 状态持久化   | LangGraph Server（默认）+ 可选 SQLite/PostgreSQL 检查点 |
+
+<Cards num={2}>
+  <Cards.Card title="快速上手" href="/docs/application/quick-start" />
+  <Cards.Card title="部署指南" href="/docs/application/deployment-guide" />
+</Cards>

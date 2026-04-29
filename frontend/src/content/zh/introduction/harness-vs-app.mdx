@@ -1,0 +1,62 @@
+---
+title: Harness 与应用
+description: DeerFlow 有两个紧密相关但服务于不同目的的层次：.
+---
+
+import { Callout, Cards } from "nextra/components";
+
+# Harness 与应用
+
+<Callout type="info" emoji="⚙️">
+  DeerFlow 应用是构建在 DeerFlow Harness 之上的最佳实践 Super Agent 应用，而
+  DeerFlow Harness 是构建自己 Agent 系统的 Python SDK 和运行时基础。
+</Callout>
+
+DeerFlow 有两个紧密相关但服务于不同目的的层次：
+
+- **DeerFlow Harness** 是运行时基础层。
+- **DeerFlow 应用** 是构建在该基础之上的最佳实践应用。
+
+理解这一区别，能让其余文档更易于阅读。
+
+## Harness 是运行时层
+
+**DeerFlow Harness** 是用于构建和运行长时序 Agent 的可复用系统。
+
+它提供：长时序任务的规划和执行、工具调用和沙箱执行、技能加载和上下文注入、记忆和跨会话持久化、子 Agent 协调、以及完整的配置和扩展系统。
+
+Harness 是 Python 库和运行时引擎。你可以将它导入到自己的应用中，或者直接使用 DeerFlow 应用，后者已经为你完成了所有集成工作。
+
+## 应用是产品层
+
+**DeerFlow 应用**是一个完整的、可部署的产品，它将 Harness 功能封装成可用的体验：
+
+- 基于浏览器的对话工作区（Next.js 前端）
+- FastAPI Gateway，处理 API 操作
+- nginx 反向代理，统一所有服务
+- LangGraph 服务器，运行 DeerFlow Harness
+
+应用是 Harness 所有功能的参考实现。它展示了如何将运行时能力组装成一个对最终用户和运维团队都易于使用的产品。
+
+## 应该从哪里开始
+
+### 我想将 DeerFlow 集成到自己的系统中
+
+使用 **Harness**。将其作为 Python 库导入，使用 `DeerFlowClient` API 发送消息和流式传输响应，并通过 `config.yaml` 配置行为。
+
+→ 从 [Harness 快速上手](/docs/harness/quick-start) 开始
+
+### 我想运行 DeerFlow 作为对话工作区
+
+使用**应用**。运行 `make dev` 或部署 Docker Compose 配置，然后通过浏览器访问。
+
+→ 从 [应用快速上手](/docs/application/quick-start) 开始
+
+### 我想了解架构原理
+
+先阅读**简介**，然后是 Harness 的[设计理念](/docs/harness/design-principles)。
+
+<Cards num={2}>
+  <Cards.Card title="Harness 快速上手" href="/docs/harness/quick-start" />
+  <Cards.Card title="应用快速上手" href="/docs/application/quick-start" />
+</Cards>
