@@ -45,10 +45,16 @@ WORKDIR /app
 # Copy backend source code
 COPY backend ./backend
 
-# Install dependencies with cache mount
+# Install Python dependencies with cache mount.
 # When UV_EXTRAS is set (e.g. "postgres"), installs optional dependencies.
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync ${UV_EXTRAS:+--extra $UV_EXTRAS}"
+
+# Install Playwright Chromium browser into a fixed path so it can be COPY'd
+# into the runtime stage without re-downloading.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN cd backend && uv run --no-sync playwright install chromium --with-deps \
+    && rm -rf /var/lib/apt/lists/*
 
 # ── Stage 2: Dev ──────────────────────────────────────────────────────────────
 # Retains compiler toolchain from builder so startup-time `uv sync` can build
@@ -58,6 +64,8 @@ FROM builder AS dev
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 EXPOSE 8001 2024
 
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]
@@ -65,6 +73,13 @@ CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
 # Clean image without build-essential — reduces size (~200 MB) and attack surface.
 FROM python:3.12-slim-bookworm
+
+# Optionally override apt mirror (must repeat here — fresh base image)
+ARG APT_MIRROR
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
+    fi
 
 # Copy Node.js runtime from builder (provides npx for MCP servers)
 COPY --from=builder /usr/bin/node /usr/bin/node
@@ -83,6 +98,15 @@ WORKDIR /app
 
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend
+
+# Copy pre-downloaded Chromium browser binary from builder
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+COPY --from=builder /ms-playwright /ms-playwright
+
+# Install Chromium system dependencies only (browser binary already copied above).
+# playwright install-deps does NOT re-download the browser.
+RUN cd /app/backend && uv run --no-sync playwright install-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 # Expose ports (gateway: 8001, langgraph: 2024)
 EXPOSE 8001 2024
