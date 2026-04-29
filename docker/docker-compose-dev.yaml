@@ -24,7 +24,23 @@ services:
   #     args:
   #       APT_MIRROR: ${APT_MIRROR:-}
   #   container_name: deer-flow-provisioner
-  #   volumes:
+  #   
+  browser-use-mcp:
+    build:
+      context: ../services/browser-use-mcp
+      dockerfile: Dockerfile
+    container_name: deer-flow-browser-use-mcp
+    environment:
+      - LLM_MODEL=${BROWSER_USE_LLM_MODEL:-glm-5}
+      - LLM_BASE_URL=${BROWSER_USE_LLM_BASE_URL:-}
+      - LLM_API_KEY=${BROWSER_USE_LLM_API_KEY:-}
+      - BROWSER_MAX_CONCURRENT=2
+      - BROWSER_TIMEOUT_SECONDS=120
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+
+volumes:
   #     - ~/.kube/config:/root/.kube/config:ro
   #   environment:
   #     - K8S_NAMESPACE=deer-flow
