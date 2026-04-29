@@ -192,22 +192,6 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
         await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=_is_script_support_file(rel_path))
 
 
-async def ainstall_skill_from_archive(
-    zip_path: str | Path,
-    *,
-    skills_root: Path | None = None,
-) -> dict:
-    """Install a skill from a .skill archive (ZIP).
-
-    Delegates to :class:`~deerflow.skills.storage.local_skill_storage.LocalSkillStorage`.
-    The ``skills_root`` parameter overrides the storage root; when ``None``,
-    the default from config is used.
-    """
-    from deerflow.skills.storage import get_or_new_skill_storage
-
-    return await get_or_new_skill_storage(skills_path=skills_root).ainstall_skill_from_archive(zip_path)
-
-
 def _run_async_install(coro):
     try:
         loop = asyncio.get_running_loop()
@@ -218,12 +202,3 @@ def _run_async_install(coro):
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             return executor.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
-
-
-def install_skill_from_archive(
-    zip_path: str | Path,
-    *,
-    skills_root: Path | None = None,
-) -> dict:
-    """Install a skill from a .skill archive (ZIP)."""
-    return _run_async_install(ainstall_skill_from_archive(zip_path, skills_root=skills_root))

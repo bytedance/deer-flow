@@ -12,7 +12,6 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.skills import Skill
 from deerflow.skills.installer import SkillAlreadyExistsError
-from deerflow.skills.loader import load_skills
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
@@ -311,7 +310,7 @@ async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) ->
 async def update_skill(skill_name: str, request: SkillUpdateRequest, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        skills = load_skills(enabled_only=False, app_config=config)
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -337,7 +336,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
         reload_extensions_config()
         await refresh_skills_system_prompt_cache_async()
 
-        skills = load_skills(enabled_only=False, app_config=config)
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
         updated_skill = next((s for s in skills if s.name == skill_name), None)
 
         if updated_skill is None:

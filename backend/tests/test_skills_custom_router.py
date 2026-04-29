@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import skills as skills_router
-from deerflow.skills.manager import get_skill_history_file
+from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import Skill
 
 
@@ -136,7 +136,6 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
     monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
     refresh_calls = []
 
@@ -185,8 +184,7 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
-    history_file = get_skill_history_file("demo-skill", app_config=config)
+    history_file = get_or_new_skill_storage(app_config=config).get_skill_history_file("demo-skill")
     history_file.parent.mkdir(parents=True, exist_ok=True)
     history_file.write_text(
         '{"action":"human_edit","prev_content":' + json.dumps(original_content) + ',"new_content":' + json.dumps(edited_content) + "}\n",
@@ -228,7 +226,6 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
     monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
     refresh_calls = []
 
@@ -265,7 +262,6 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
     refresh_calls = []
 
     async def _refresh():
@@ -298,7 +294,6 @@ def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
     refresh_calls = []
 
     async def _refresh():
