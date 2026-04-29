@@ -574,7 +574,8 @@ class TestUpdateMemoryStructuredResponse:
 
         assert result is True
 
-    def test_async_update_memory_uses_ainvoke(self):
+    def test_async_update_memory_delegates_to_sync(self):
+        """aupdate_memory should delegate to sync _do_update_memory_sync via to_thread."""
         updater = MemoryUpdater()
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
         model = self._make_mock_model(valid_json)
@@ -595,8 +596,9 @@ class TestUpdateMemoryStructuredResponse:
             result = asyncio.run(updater.aupdate_memory([msg, ai_msg]))
 
         assert result is True
-        model.ainvoke.assert_awaited_once()
-        assert model.ainvoke.await_args.kwargs["config"] == {"run_name": "memory_agent"}
+        # aupdate_memory delegates to sync path — model.invoke, not ainvoke
+        model.invoke.assert_called_once()
+        model.ainvoke.assert_not_called()
 
     def test_correction_hint_injected_when_detected(self):
         updater = MemoryUpdater()
@@ -965,3 +967,78 @@ class TestFinalizeCacheIsolation:
         # original_memory must not have been mutated — deepcopy isolates the mutation
         assert len(original_memory["facts"]) == 1, "original_memory must not be mutated by _apply_updates"
         assert original_memory["facts"][0]["content"] == "original"
+
+
+class TestUserIdForwarding:
+    """Regression: user_id must flow through the entire sync update path.
+
+    When MemoryUpdateQueue captures context.user_id and passes it into
+    update_memory(..., user_id=context.user_id), the sync path must forward
+    it into _prepare_update_prompt → get_memory_data() and
+    _finalize_update → save(), so per-user memory isolation is maintained.
+    """
+
+    @staticmethod
+    def _make_mock_model(content):
+        model = MagicMock()
+        response = MagicMock()
+        response.content = content
+        model.invoke = MagicMock(return_value=response)
+        return model
+
+    def test_sync_update_forwards_user_id_to_load_and_save(self):
+        """update_memory must pass user_id to get_memory_data and storage.save."""
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+        mock_storage = MagicMock()
+        mock_storage.save = MagicMock(return_value=True)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()) as mock_load,
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Hello"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Hi"
+            ai_msg.tool_calls = []
+            result = updater.update_memory([msg, ai_msg], user_id="user-42")
+
+        assert result is True
+        mock_load.assert_called_once_with(None, user_id="user-42")
+        mock_storage.save.assert_called_once()
+        save_call = mock_storage.save.call_args
+        assert save_call.kwargs.get("user_id") == "user-42" or (len(save_call.args) > 2 and save_call.args[2] == "user-42")
+
+    def test_async_update_forwards_user_id_to_load_and_save(self):
+        """aupdate_memory must pass user_id through to the sync delegate."""
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+        mock_storage = MagicMock()
+        mock_storage.save = MagicMock(return_value=True)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()) as mock_load,
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Hello"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Hi"
+            ai_msg.tool_calls = []
+            result = asyncio.run(updater.aupdate_memory([msg, ai_msg], user_id="user-99"))
+
+        assert result is True
+        mock_load.assert_called_once_with(None, user_id="user-99")
+        save_call = mock_storage.save.call_args
+        assert save_call.kwargs.get("user_id") == "user-99" or (len(save_call.args) > 2 and save_call.args[2] == "user-99")
