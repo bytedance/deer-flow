@@ -217,11 +217,7 @@ def create_app() -> FastAPI:
         Configured FastAPI application instance.
     """
     config = get_gateway_config()
-    docs_kwargs = (
-        {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
-        if config.enable_docs
-        else {"docs_url": None, "redoc_url": None, "openapi_url": None}
-    )
+    docs_kwargs = {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"} if config.enable_docs else {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
     app = FastAPI(
         title="DeerFlow API Gateway",
