@@ -1,0 +1,3819 @@
+From d079a866ff02bc9b4f7856ce2c3e2d0f9ade1fdd Mon Sep 17 00:00:00 2001
+From: xunliu <liuxun@apache.org>
+Date: Mon, 27 Apr 2026 18:35:47 +0800
+Subject: [PATCH] loader.load_skills
+
+install_skill_from_archive
+
+append_history_line
+
+phase 2
+
+read_custom_skill
+
+delete_custom_skill
+
+read_history
+
+install_skill_from_archive
+
+validate_skill_markdown_content
+
+format
+
+add test
+
+fix lint
+
+fix conflict
+---
+ backend/app/gateway/routers/skills.py         | 109 ++--
+ backend/docs/skill-storage-abstraction.md     | 509 ++++++++++++++++++
+ .../deerflow/agents/lead_agent/prompt.py      |  16 +-
+ backend/packages/harness/deerflow/client.py   |  18 +-
+ .../aio_sandbox/aio_sandbox_provider.py       |   8 +-
+ .../deerflow/config/extensions_config.py      |   7 +-
+ .../harness/deerflow/config/skills_config.py  |  16 +-
+ .../harness/deerflow/sandbox/tools.py         |   9 +-
+ .../harness/deerflow/skills/__init__.py       |  12 +-
+ .../harness/deerflow/skills/installer.py      | 171 +-----
+ .../harness/deerflow/skills/loader.py         | 103 ----
+ .../harness/deerflow/skills/manager.py        | 159 ------
+ .../harness/deerflow/skills/parser.py         |   8 +-
+ .../deerflow/skills/security_scanner.py       |   3 +-
+ .../deerflow/skills/storage/__init__.py       |  37 ++
+ .../skills/storage/local_skill_storage.py     | 188 +++++++
+ .../deerflow/skills/storage/skill_storage.py  | 258 +++++++++
+ .../packages/harness/deerflow/skills/types.py |  16 +-
+ .../harness/deerflow/skills/validation.py     |   4 +-
+ .../harness/deerflow/subagents/executor.py    |   5 +-
+ .../deerflow/tools/skill_manage_tool.py       |  88 ++-
+ backend/tests/conftest.py                     |  18 +
+ .../{ => skills}/test_skill_manage_tool.py    |  13 +-
+ .../tests/skills/test_skill_storage_local.py  | 297 ++++++++++
+ .../{ => skills}/test_skills_archive_root.py  |   0
+ .../tests/{ => skills}/test_skills_bundled.py |   2 +-
+ .../{ => skills}/test_skills_custom_router.py |  30 +-
+ .../{ => skills}/test_skills_installer.py     | 207 +------
+ .../tests/{ => skills}/test_skills_loader.py  |  18 +-
+ .../tests/{ => skills}/test_skills_parser.py  |   0
+ .../{ => skills}/test_skills_validation.py    |   0
+ backend/tests/skills_test_helpers.py          |  21 +
+ backend/tests/test_client.py                  | 101 ++--
+ backend/tests/test_client_e2e.py              |  17 +-
+ .../tests/test_create_deerflow_agent_live.py  |  24 +-
+ backend/tests/test_lead_agent_prompt.py       |   6 +-
+ backend/tests/test_lead_agent_skills.py       |   3 +
+ config.example.yaml                           |   4 +
+ 38 files changed, 1663 insertions(+), 842 deletions(-)
+ create mode 100644 backend/docs/skill-storage-abstraction.md
+ delete mode 100644 backend/packages/harness/deerflow/skills/loader.py
+ delete mode 100644 backend/packages/harness/deerflow/skills/manager.py
+ create mode 100644 backend/packages/harness/deerflow/skills/storage/__init__.py
+ create mode 100644 backend/packages/harness/deerflow/skills/storage/local_skill_storage.py
+ create mode 100644 backend/packages/harness/deerflow/skills/storage/skill_storage.py
+ rename backend/tests/{ => skills}/test_skill_manage_tool.py (93%)
+ create mode 100644 backend/tests/skills/test_skill_storage_local.py
+ rename backend/tests/{ => skills}/test_skills_archive_root.py (100%)
+ rename backend/tests/{ => skills}/test_skills_bundled.py (94%)
+ rename backend/tests/{ => skills}/test_skills_custom_router.py (93%)
+ rename backend/tests/{ => skills}/test_skills_installer.py (50%)
+ rename backend/tests/{ => skills}/test_skills_loader.py (80%)
+ rename backend/tests/{ => skills}/test_skills_parser.py (100%)
+ rename backend/tests/{ => skills}/test_skills_validation.py (100%)
+ create mode 100644 backend/tests/skills_test_helpers.py
+
+diff --git a/backend/app/gateway/routers/skills.py b/backend/app/gateway/routers/skills.py
+index 7f0b869a..abf14b5a 100644
+--- a/backend/app/gateway/routers/skills.py
++++ b/backend/app/gateway/routers/skills.py
+@@ -1,7 +1,5 @@
+-import errno
+ import json
+ import logging
+-import shutil
+ from pathlib import Path
+ 
+ from fastapi import APIRouter, HTTPException
+@@ -10,21 +8,12 @@ from pydantic import BaseModel, Field
+ from app.gateway.path_utils import resolve_thread_virtual_path
+ from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
+ from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+-from deerflow.skills import Skill, load_skills
+-from deerflow.skills.installer import SkillAlreadyExistsError, ainstall_skill_from_archive
+-from deerflow.skills.manager import (
+-    append_history,
+-    atomic_write,
+-    custom_skill_exists,
+-    ensure_custom_skill_is_editable,
+-    get_custom_skill_dir,
+-    get_custom_skill_file,
+-    get_skill_history_file,
+-    read_custom_skill_content,
+-    read_history,
+-    validate_skill_markdown_content,
+-)
++from deerflow.skills import Skill
++from deerflow.skills.installer import SkillAlreadyExistsError
+ from deerflow.skills.security_scanner import scan_skill_content
++from deerflow.skills.storage import get_skill_storage
++from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
++from deerflow.skills.types import SkillCategory
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -37,7 +26,7 @@ class SkillResponse(BaseModel):
+     name: str = Field(..., description="Name of the skill")
+     description: str = Field(..., description="Description of what the skill does")
+     license: str | None = Field(None, description="License information")
+-    category: str = Field(..., description="Category of the skill (public or custom)")
++    category: SkillCategory = Field(..., description="Category of the skill (public or custom)")
+     enabled: bool = Field(default=True, description="Whether this skill is enabled")
+ 
+ 
+@@ -103,7 +92,7 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
+ )
+ async def list_skills() -> SkillsListResponse:
+     try:
+-        skills = load_skills(enabled_only=False)
++        skills = get_skill_storage().load_skills(enabled_only=False)
+         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
+     except Exception as e:
+         logger.error(f"Failed to load skills: {e}", exc_info=True)
+@@ -119,7 +108,7 @@ async def list_skills() -> SkillsListResponse:
+ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
+     try:
+         skill_file_path = resolve_thread_virtual_path(request.thread_id, request.path)
+-        result = await ainstall_skill_from_archive(skill_file_path)
++        result = get_skill_storage().install_skill_from_archive(skill_file_path)
+         await refresh_skills_system_prompt_cache_async()
+         return SkillInstallResponse(**result)
+     except FileNotFoundError as e:
+@@ -138,7 +127,7 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
+ @router.get("/skills/custom", response_model=SkillsListResponse, summary="List Custom Skills")
+ async def list_custom_skills() -> SkillsListResponse:
+     try:
+-        skills = [skill for skill in load_skills(enabled_only=False) if skill.category == "custom"]
++        skills = [skill for skill in get_skill_storage().load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
+         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
+     except Exception as e:
+         logger.error("Failed to list custom skills: %s", e, exc_info=True)
+@@ -148,11 +137,11 @@ async def list_custom_skills() -> SkillsListResponse:
+ @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
+ async def get_custom_skill(skill_name: str) -> CustomSkillContentResponse:
+     try:
+-        skills = load_skills(enabled_only=False)
+-        skill = next((s for s in skills if s.name == skill_name and s.category == "custom"), None)
++        skills = get_skill_storage().load_skills(enabled_only=False)
++        skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
+         if skill is None:
+             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+-        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=read_custom_skill_content(skill_name))
++        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=get_skill_storage().read_custom_skill(skill_name))
+     except HTTPException:
+         raise
+     except Exception as e:
+@@ -163,21 +152,21 @@ async def get_custom_skill(skill_name: str) -> CustomSkillContentResponse:
+ @router.put("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Edit Custom Skill")
+ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest) -> CustomSkillContentResponse:
+     try:
+-        ensure_custom_skill_is_editable(skill_name)
+-        validate_skill_markdown_content(skill_name, request.content)
+-        scan = await scan_skill_content(request.content, executable=False, location=f"{skill_name}/SKILL.md")
++        get_skill_storage().ensure_custom_skill_is_editable(skill_name)
++        SkillStorage.validate_skill_markdown_content(skill_name, request.content)
++        scan = await scan_skill_content(request.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}")
+         if scan.decision == "block":
+             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
+-        skill_file = get_custom_skill_dir(skill_name) / "SKILL.md"
++        skill_file = get_skill_storage().get_custom_skill_dir(skill_name) / SKILL_MD_FILE
+         prev_content = skill_file.read_text(encoding="utf-8")
+-        atomic_write(skill_file, request.content)
+-        append_history(
++        get_skill_storage().write_custom_skill(skill_name, SKILL_MD_FILE, request.content)
++        get_skill_storage().append_history(
+             skill_name,
+             {
+                 "action": "human_edit",
+                 "author": "human",
+                 "thread_id": None,
+-                "file_path": "SKILL.md",
++                "file_path": SKILL_MD_FILE,
+                 "prev_content": prev_content,
+                 "new_content": request.content,
+                 "scanner": {"decision": scan.decision, "reason": scan.reason},
+@@ -199,27 +188,17 @@ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest
+ @router.delete("/skills/custom/{skill_name}", summary="Delete Custom Skill")
+ async def delete_custom_skill(skill_name: str) -> dict[str, bool]:
+     try:
+-        ensure_custom_skill_is_editable(skill_name)
+-        skill_dir = get_custom_skill_dir(skill_name)
+-        prev_content = read_custom_skill_content(skill_name)
+-        try:
+-            append_history(
+-                skill_name,
+-                {
+-                    "action": "human_delete",
+-                    "author": "human",
+-                    "thread_id": None,
+-                    "file_path": "SKILL.md",
+-                    "prev_content": prev_content,
+-                    "new_content": None,
+-                    "scanner": {"decision": "allow", "reason": "Deletion requested."},
+-                },
+-            )
+-        except OSError as e:
+-            if not isinstance(e, PermissionError) and e.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
+-                raise
+-            logger.warning("Skipping delete history write for custom skill %s due to readonly/permission failure; continuing with skill directory removal: %s", skill_name, e)
+-        shutil.rmtree(skill_dir)
++        get_skill_storage().delete_custom_skill(
++            skill_name,
++            history_meta={
++                "action": "human_delete",
++                "author": "human",
++                "thread_id": None,
++                "file_path": SKILL_MD_FILE,
++                "new_content": None,
++                "scanner": {"decision": "allow", "reason": "Deletion requested."},
++            },
++        )
+         await refresh_skills_system_prompt_cache_async()
+         return {"success": True}
+     except FileNotFoundError as e:
+@@ -234,9 +213,9 @@ async def delete_custom_skill(skill_name: str) -> dict[str, bool]:
+ @router.get("/skills/custom/{skill_name}/history", response_model=CustomSkillHistoryResponse, summary="Get Custom Skill History")
+ async def get_custom_skill_history(skill_name: str) -> CustomSkillHistoryResponse:
+     try:
+-        if not custom_skill_exists(skill_name) and not get_skill_history_file(skill_name).exists():
++        if not get_skill_storage().custom_skill_exists(skill_name) and not get_skill_storage().get_skill_history_file(skill_name).exists():
+             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+-        return CustomSkillHistoryResponse(history=read_history(skill_name))
++        return CustomSkillHistoryResponse(history=get_skill_storage().read_history(skill_name))
+     except HTTPException:
+         raise
+     except Exception as e:
+@@ -247,34 +226,34 @@ async def get_custom_skill_history(skill_name: str) -> CustomSkillHistoryRespons
+ @router.post("/skills/custom/{skill_name}/rollback", response_model=CustomSkillContentResponse, summary="Rollback Custom Skill")
+ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest) -> CustomSkillContentResponse:
+     try:
+-        if not custom_skill_exists(skill_name) and not get_skill_history_file(skill_name).exists():
++        if not get_skill_storage().custom_skill_exists(skill_name) and not get_skill_storage().get_skill_history_file(skill_name).exists():
+             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+-        history = read_history(skill_name)
++        history = get_skill_storage().read_history(skill_name)
+         if not history:
+             raise HTTPException(status_code=400, detail=f"Custom skill '{skill_name}' has no history")
+         record = history[request.history_index]
+         target_content = record.get("prev_content")
+         if target_content is None:
+             raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
+-        validate_skill_markdown_content(skill_name, target_content)
+-        scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/SKILL.md")
+-        skill_file = get_custom_skill_file(skill_name)
++        SkillStorage.validate_skill_markdown_content(skill_name, target_content)
++        scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}")
++        skill_file = get_skill_storage().get_custom_skill_file(skill_name)
+         current_content = skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
+         history_entry = {
+             "action": "rollback",
+             "author": "human",
+             "thread_id": None,
+-            "file_path": "SKILL.md",
++            "file_path": SKILL_MD_FILE,
+             "prev_content": current_content,
+             "new_content": target_content,
+             "rollback_from_ts": record.get("ts"),
+             "scanner": {"decision": scan.decision, "reason": scan.reason},
+         }
+         if scan.decision == "block":
+-            append_history(skill_name, history_entry)
++            get_skill_storage().append_history(skill_name, history_entry)
+             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
+-        atomic_write(skill_file, target_content)
+-        append_history(skill_name, history_entry)
++        get_skill_storage().write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
++        get_skill_storage().append_history(skill_name, history_entry)
+         await refresh_skills_system_prompt_cache_async()
+         return await get_custom_skill(skill_name)
+     except HTTPException:
+@@ -298,7 +277,7 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest)
+ )
+ async def get_skill(skill_name: str) -> SkillResponse:
+     try:
+-        skills = load_skills(enabled_only=False)
++        skills = get_skill_storage().load_skills(enabled_only=False)
+         skill = next((s for s in skills if s.name == skill_name), None)
+ 
+         if skill is None:
+@@ -320,7 +299,7 @@ async def get_skill(skill_name: str) -> SkillResponse:
+ )
+ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillResponse:
+     try:
+-        skills = load_skills(enabled_only=False)
++        skills = get_skill_storage().load_skills(enabled_only=False)
+         skill = next((s for s in skills if s.name == skill_name), None)
+ 
+         if skill is None:
+@@ -346,7 +325,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
+         reload_extensions_config()
+         await refresh_skills_system_prompt_cache_async()
+ 
+-        skills = load_skills(enabled_only=False)
++        skills = get_skill_storage().load_skills(enabled_only=False)
+         updated_skill = next((s for s in skills if s.name == skill_name), None)
+ 
+         if updated_skill is None:
+diff --git a/backend/docs/skill-storage-abstraction.md b/backend/docs/skill-storage-abstraction.md
+new file mode 100644
+index 00000000..4238a074
+--- /dev/null
++++ b/backend/docs/skill-storage-abstraction.md
+@@ -0,0 +1,509 @@
++# SkillStorage 抽象与 LocalSkillStorage 实现 — 系统设计
++
++## 1. 背景与目标
++
++目前 `backend/packages/harness/deerflow/skills/` 下分散了多个模块，分别承担技能（Skill）的加载、解析、校验、安装、自定义编辑、历史记录等职责，且全部硬编码为本地文件系统（`skills/public`、`skills/custom`）实现：
++
++| 现有模块 | 主要职责 |
++|---|---|
++| `loader.py` | `get_skills_root_path()`、`load_skills()`：扫描目录，解析 SKILL.md，合并 enabled 状态 |
++| `parser.py` | 解析 SKILL.md frontmatter，构造 `Skill` |
++| `validation.py` | 校验 SKILL.md frontmatter 字段 |
++| `installer.py` | 从 `.skill` ZIP 归档安全解压、校验、写入 `skills/custom/<name>` |
++| `manager.py` | 自定义技能 CRUD：路径解析、原子写、`HISTORY.jsonl`、support-file 校验、读取自定义内容 |
++| `security_scanner.py` | 调用 LLM 对内容做安全扫描（与存储正交） |
++| `types.py` | `Skill` 数据类 |
++
++存在的问题：
++- 所有调用方（`lead_agent/prompt.py`、`tools/skill_manage_tool.py`、`app/gateway/routers/skills.py`、`client.py` 等）直接 `from deerflow.skills.loader import ...` / `manager` / `installer`，与"本地文件系统"实现强耦合。
++- 无法替换为其它后端（数据库、provisioner 托管的共享卷等）。
++- 与 `SandboxProvider` 的设计风格不一致——后者已通过 `config.sandbox.use` + `resolve_class()` 反射统一抽象。
++
++**目标**：参照 `Sandbox`/`SandboxProvider` 的设计，把 skills 子系统的"存储/检索/写入"职责抽象为 `SkillStorage` 抽象类，并提供 `LocalSkillStorage` 实现迁移当前所有功能；通过 `config.skills.use` 反射动态实例化，便于未来接入其他后端实现。
++
++## 2. 参照实现：Sandbox 模式回顾
++
++```python
++# deerflow/sandbox/sandbox.py
++class Sandbox(ABC):
++    def __init__(self, id: str): ...
++    @abstractmethod def execute_command(self, command: str) -> str: ...
++    @abstractmethod def read_file(self, path: str) -> str: ...
++    # ...
++
++# deerflow/sandbox/sandbox_provider.py
++class SandboxProvider(ABC):
++    @abstractmethod def acquire(self, thread_id: str | None = None) -> str: ...
++    @abstractmethod def get(self, sandbox_id: str) -> Sandbox | None: ...
++    @abstractmethod def release(self, sandbox_id: str) -> None: ...
++
++_default_sandbox_provider: SandboxProvider | None = None
++
++def get_sandbox_provider(**kwargs) -> SandboxProvider:
++    global _default_sandbox_provider
++    if _default_sandbox_provider is None:
++        config = get_app_config()
++        cls = resolve_class(config.sandbox.use, SandboxProvider)
++        _default_sandbox_provider = cls(**kwargs)
++    return _default_sandbox_provider
++
++def reset_sandbox_provider() -> None: ...
++def shutdown_sandbox_provider() -> None: ...
++def set_sandbox_provider(provider: SandboxProvider) -> None: ...
++```
++
++YAML 配置：
++```yaml
++sandbox:
++  use: deerflow.sandbox.local:LocalSandboxProvider
++  # 或者：
++  # use: deerflow.community.aio_sandbox:AioSandboxProvider
++```
++
++`SkillStorage` 将完整复制这一模式。
++
++## 3. 抽象设计
++
++### 3.0 分层原则：模板方法 + 抽象原子操作
++
++先对现有几个模块的"是否所有 storage 后端都需要"做归类：
++
++| 现有模块/函数 | 是否所有后端都需要？ | 在新结构中的位置 |
++|---|---|---|
++| `parser.parse_skill_file()` | ✅ 必需。任何后端最终都要把 SKILL.md 文本解成 `Skill`，是 SKILL.md 协议的一部分。 | **基类调用**：作为 `SkillStorage` 基类的内部依赖（公共 helper） |
++| `validation._validate_skill_frontmatter()` / `ALLOWED_FRONTMATTER_PROPERTIES` | ✅ 必需。写入前的协议校验跟存储介质无关。 | **基类调用** |
++| `installer.safe_extract_skill_archive()` / `resolve_skill_dir_from_archive()` / `is_unsafe_zip_member()` 等 zip 安全函数 | ✅ 必需。`.skill` 归档是用户输入入口，所有后端都要做相同的解压安全校验。 | **基类调用** |
++| `installer.install_skill_from_archive()` 末尾 "拷贝目录到 custom/<name>" | ❌ 后端特定。Local 用 `shutil.copytree`，Git 后端要 `git add`，对象存储后端要 `PUT`。 | **抽象方法 `_persist_custom_skill_dir()`** |
++| `loader.load_skills()` 中"扫描 public/custom 子目录" | ❌ 后端特定。本地是 `os.walk`，Git 是 `git ls-tree`，对象存储是 `LIST` 前缀。 | **抽象方法 `_iter_skill_files()`** |
++| `loader.load_skills()` 中"按 name 去重 → 合并 enabled → 排序 → 过滤" | ✅ 必需。流程跟存储介质无关。 | **基类 final `load_skills()`**（保留原函数名） |
++| `loader.get_skills_root_path()` | ❌ 本地概念。"宿主机目录"对远端后端无意义。 | 抽象方法 `get_skills_root_path()`（保留原名），在 `LocalSkillStorage` 返回实际路径 |
++| `manager.validate_skill_name()` / `validate_skill_markdown_content()` / `ensure_safe_support_path()` | ✅ 必需。协议级校验函数。 | **基类调用** |
++| `manager.atomic_write()` / `append_history()` / `read_history()` 的"读写文件" | ❌ 后端特定。 | **抽象方法 `_read_custom_text` / `_write_custom_text` / `_delete_custom_file` / `_append_history_line` / `_read_history_lines`** |
++| `security_scanner.scan_skill_content()` | ❌ 正交关注点（安全策略层），不属于"存储"。 | **保持独立**，由 `tools/skill_manage_tool.py` 在调用 storage 之前完成 |
++
++总结：除 `security_scanner` 外，所有现有模块的函数**都会在 storage 操作流程中被用到**，因此都纳入"`SkillStorage` 基类的实现/依赖范围"。`SkillStorage` 采用**模板方法模式**——基类编排公共流程并 import 协议工具函数；子类只填存储介质相关的少量原子操作。
++
++### 3.1 `SkillStorage` 抽象类
++
++定义于 `deerflow/skills/storage/skill_storage.py`：
++
++```python
++class SkillStorage(ABC):
++    """技能仓库抽象。
++
++    采用模板方法模式：基类编排所有"协议层"流程（解析 SKILL.md、frontmatter
++    校验、归档安全解压、enabled 状态合并、历史记录格式等），子类只需实现少量
++    与"存储介质"绑定的抽象原子操作（扫描、读、写、删）。
++    """
++
++    def __init__(self, container_path: str = "/mnt/skills") -> None:
++        # 来源：新增；container_path 来自 config.skills.container_path
++        # （原 SkillsConfig.container_path）
++        self._container_root = container_path
++
++    # ============================================================
++    # 子类必须实现的抽象原子操作（与存储介质绑定）
++    # ============================================================
++
++    @abstractmethod
++    def get_skills_root_path(self) -> Path:
++        """技能根目录在宿主机上的绝对路径，供 sandbox 挂载使用。
++        远端实现可返回本地缓存目录；如不支持挂载，可抛 NotImplementedError。
++
++        来源：原 loader.get_skills_root_path()（保留原函数名）
++        """
++
++    @abstractmethod
++    def _iter_skill_files(self) -> Iterable[tuple[str, Path, Path]]:
++        """yield (category, category_root, skill_md_path)。
++        category ∈ {"public", "custom"}。基类用此方法驱动 load_skills()。
++
++        来源：原 loader.load_skills() 中 `for category in ["public", "custom"]: ... os.walk(...)`
++        段落（仅"扫描"步骤被抽象出来）
++        """
++
++    @abstractmethod
++    def _read_custom_text(self, name: str, relative_path: str) -> str:
++        """读取 custom 技能目录下指定相对路径的文本文件。
++
++        来源：原 manager.read_custom_skill_content() 的 `Path.read_text` 片段
++        + skill_manage_tool 中 `target.read_text("utf-8")` 片段
++        （泛化到任意 relative_path）
++        """
++
++    @abstractmethod
++    def _write_custom_text(self, name: str, relative_path: str, content: str) -> None:
++        """原子写入 custom 技能下的文本文件（含 SKILL.md 与 support files）。
++
++        来源：原 manager.atomic_write()（语义保留：tmpfile + rename）
++        """
++
++    @abstractmethod
++    def _delete_custom_file(self, name: str, relative_path: str) -> None:
++        """删除 custom 技能下指定相对路径的单个文件（support file）。
++
++        来源：原 skill_manage_tool 的 `remove_file` 分支
++        （`target.unlink()` 片段）
++        """
++
++    @abstractmethod
++    def _persist_custom_skill_dir(self, name: str, src_dir: Path) -> None:
++        """把临时解压出来的技能目录整体落盘到 custom/<name>。
++        如目标已存在应抛 SkillAlreadyExistsError。
++
++        来源：原 installer.install_skill_from_archive() 末尾
++        `target = custom_dir / skill_name; if target.exists(): raise ...; shutil.copytree(...)`
++        """
++
++    @abstractmethod
++    def _delete_custom_skill(self, name: str) -> None:
++        """删除 custom/<name> 整个技能目录。
++
++        来源：原 gateway/routers/skills.py:delete_custom_skill 中 `shutil.rmtree(skill_dir)` 片段
++        + 原 skill_manage_tool 的 `delete` 分支
++        """
++
++    @abstractmethod
++    def custom_skill_exists(self, name: str) -> bool:
++        """来源：原 manager.custom_skill_exists()（保留原函数名）"""
++
++    @abstractmethod
++    def public_skill_exists(self, name: str) -> bool:
++        """来源：原 manager.public_skill_exists()（保留原函数名）"""
++
++    @abstractmethod
++    def _append_history_line(self, name: str, line: str) -> None:
++        """追加一行到 HISTORY.jsonl。
++
++        来源：原 manager.append_history() 中
++        `with history_path.open("a"): f.write(json...); f.write("\\n")` 片段
++        （时间戳 / JSON 序列化由基类负责）
++        """
++
++    @abstractmethod
++    def _read_history_lines(self, name: str) -> list[str]:
++        """读取 HISTORY.jsonl 全部原始行（未解析）。
++
++        来源：原 manager.read_history() 中
++        `history_path.read_text(...).splitlines()` 片段
++        """
++
++    # ============================================================
++    # 基类 final 公共流程（不应被子类重写）
++    # ============================================================
++
++    def get_container_root(self) -> str:
++        """来源：原 SkillsConfig.container_path（取值入口）"""
++        return self._container_root
++
++    def load_skills(self, *, enabled_only: bool = False) -> list[Skill]:
++        """来源：原 loader.load_skills()（保留原函数名）。
++        除"扫描"步骤抽象为 _iter_skill_files 外，其余去重 / 合并 enabled /
++        排序 / 过滤逻辑全部上提到基类。
++        """
++        skills_by_name: dict[str, Skill] = {}
++        for category, category_root, md_path in self._iter_skill_files():
++            skill = parse_skill_file(  # ← 来源：skills/parser.py:parse_skill_file
++                md_path,
++                category=category,
++                relative_path=md_path.parent.relative_to(category_root),
++            )
++            if skill:
++                skills_by_name[skill.name] = skill
++        skills = list(skills_by_name.values())
++        # 合并 enabled 状态（ExtensionsConfig 每次从磁盘读，跨进程一致）
++        # 来源：原 loader.load_skills() 中 ExtensionsConfig.from_file() 段落
++        try:
++            ext = ExtensionsConfig.from_file()
++            for s in skills:
++                s.enabled = ext.is_skill_enabled(s.name, s.category)
++        except Exception as e:
++            logger.warning("Failed to load extensions config: %s", e)
++        if enabled_only:
++            skills = [s for s in skills if s.enabled]
++        skills.sort(key=lambda s: s.name)
++        return skills
++
++    def read_custom_skill_content(self, name: str) -> str:
++        """来源：原 manager.read_custom_skill_content()（保留原函数名）"""
++        if not self.custom_skill_exists(name):
++            raise FileNotFoundError(f"Custom skill '{name}' not found.")
++        return self._read_custom_text(name, "SKILL.md")
++
++    def write_custom_skill(
++        self, name: str, content: str, *, history_meta: dict | None = None
++    ) -> None:
++        """来源：原 gateway/routers/skills.py 中"create/update custom skill"路由
++        的核心流程（校验 + atomic_write + append_history），整理上提到基类。"""
++        validate_skill_name(name)                        # ← 来源：manager.validate_skill_name
++        validate_skill_markdown_content(name, content)   # ← 来源：manager.validate_skill_markdown_content
++        self._write_custom_text(name, "SKILL.md", content)
++        if history_meta is not None:
++            self.append_history(name, history_meta)
++
++    def write_support_file(self, name: str, relative_path: str, content: str) -> None:
++        """来源：原 skill_manage_tool 中 `write_file` 分支
++        （`ensure_safe_support_path` + `atomic_write(target, content)`）"""
++        validate_skill_name(name)                  # ← manager.validate_skill_name
++        ensure_safe_support_path(name, relative_path)  # ← manager.ensure_safe_support_path
++        self.ensure_custom_skill_is_editable(name)
++        self._write_custom_text(name, relative_path, content)
++
++    def delete_support_file(self, name: str, relative_path: str) -> None:
++        """来源：原 skill_manage_tool 中 `remove_file` 分支
++        （`ensure_safe_support_path` + `target.unlink()`）"""
++        validate_skill_name(name)
++        ensure_safe_support_path(name, relative_path)
++        self.ensure_custom_skill_is_editable(name)
++        self._delete_custom_file(name, relative_path)
++
++    def delete_custom_skill(self, name: str) -> None:
++        """来源：原 gateway/routers/skills.py:delete_custom_skill
++        + skill_manage_tool 的 `delete` 分支（均通过 shutil.rmtree 实现），
++        整理上提到基类。"""
++        validate_skill_name(name)
++        self.ensure_custom_skill_is_editable(name)
++        self._delete_custom_skill(name)
++
++    def ensure_custom_skill_is_editable(self, name: str) -> None:
++        """来源：原 manager.ensure_custom_skill_is_editable()（保留原函数名）"""
++        if self.custom_skill_exists(name):
++            return
++        if self.public_skill_exists(name):
++            raise ValueError(
++                f"'{name}' is a built-in skill. To customise it, "
++                f"create a new skill with the same name under custom/."
++            )
++        raise FileNotFoundError(f"Custom skill '{name}' not found.")
++
++    def install_skill_from_archive(self, archive_path: str | Path) -> dict:
++        """统一的 .skill 归档安装流程。
++
++        来源：原 installer.install_skill_from_archive()（保留原函数名）。
++        除最后落盘步骤抽象为 _persist_custom_skill_dir 外，全部参数校验
++        / zip 解压 / frontmatter 校验流程上提到基类。
++        """
++        path = Path(archive_path)
++        if not path.is_file():
++            if not path.exists():
++                raise FileNotFoundError(f"Skill file not found: {archive_path}")
++            raise ValueError(f"Path is not a file: {archive_path}")
++        if path.suffix != ".skill":
++            raise ValueError("File must have .skill extension")
++
++        with tempfile.TemporaryDirectory() as tmp:
++            tmp_path = Path(tmp)
++            try:
++                zf = zipfile.ZipFile(path, "r")
++            except (zipfile.BadZipFile, IsADirectoryError):
++                raise ValueError("File is not a valid ZIP archive") from None
++            with zf:
++                safe_extract_skill_archive(zf, tmp_path)
++                # ↑ 来源：installer.safe_extract_skill_archive
++                #   （内部依赖 installer.is_unsafe_zip_member / is_symlink_member）
++            skill_dir = resolve_skill_dir_from_archive(tmp_path)
++            # ↑ 来源：installer.resolve_skill_dir_from_archive
++            #   （内部依赖 installer.should_ignore_archive_entry）
++            ok, msg, skill_name = _validate_skill_frontmatter(skill_dir)
++            # ↑ 来源：validation._validate_skill_frontmatter
++            if not ok:
++                raise ValueError(f"Invalid skill: {msg}")
++            if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
++                raise ValueError(f"Invalid skill name: {skill_name}")
++            self._persist_custom_skill_dir(skill_name, skill_dir)  # ← 唯一抽象点
++
++        return {
++            "success": True,
++            "skill_name": skill_name,
++            "message": f"Skill '{skill_name}' installed successfully",
++        }
++
++    def append_history(self, name: str, record: dict) -> None:
++        """来源：原 manager.append_history()
++        （时间戳与 JSON 序列化逻辑上提到基类，写盘动作下沉到 _append_history_line）"""
++        validate_skill_name(name)
++        payload = {"ts": datetime.now(UTC).isoformat(), **record}
++        self._append_history_line(name, json.dumps(payload, ensure_ascii=False))
++
++    def read_history(self, name: str) -> list[dict]:
++        """来源：原 manager.read_history()
++        （JSON 解析逻辑上提到基类，文件读取动作下沉到 _read_history_lines）"""
++        validate_skill_name(name)
++        return [json.loads(line) for line in self._read_history_lines(name) if line.strip()]
++```
++
++设计要点：
++- `parser.py` / `validation.py` / `installer.py` 中的 zip 安全函数与 `manager.py` 中的协议级校验函数（`validate_skill_name`、`ensure_safe_support_path`、`validate_skill_markdown_content`），全部由**基类**直接 import 调用。子类不应该 / 也不需要重新实现它们。
++- **不**把 `SkillStorage` 设计成"per-skill 句柄"（与 `Sandbox` 不同），因为技能仓库是单实例资源池，没有 acquire/release 语义。直接由 `SkillStorage` 自身担当 Provider 角色（更接近 `LLMProvider` 风格）。
++- `ScanResult` / `security_scanner` **不**纳入存储抽象——它是写入前的安全策略层（与 LLM 交互），由 `tools/skill_manage_tool.py` 在调用 `storage.write_custom_skill()` 之前完成。
++- `Skill` 数据类、`ALLOWED_FRONTMATTER_PROPERTIES`、`SkillAlreadyExistsError` 等公共类型保留在 `skills/types.py` 与 `skills/validation.py`，作为协议数据类型对外暴露。
++
++### 3.2 `LocalSkillStorage` 实现
++
++定义于 `deerflow/skills/storage/local.py`：
++
++```python
++class LocalSkillStorage(SkillStorage):
++    def __init__(
++        self,
++        path: str | None = None,
++        container_path: str = "/mnt/skills",
++    ):
++        super().__init__(container_path=container_path)
++        self._root: Path = _resolve_root(path)  # path=None 时回落到 SkillsConfig 默认路径
++```
++
++实现要点（仅需实现 §3.1 列出的抽象原子操作）：
++
++| `LocalSkillStorage` 方法 | 来源 |
++|---|---|
++| `__init__(path, container_path)` | `path` 解析逻辑来自原 `SkillsConfig.get_skills_path()`；`container_path` 来自原 `SkillsConfig.container_path` |
++| `get_root_path()` | 原 `loader.get_skills_root_path()` 的本地实现部分 |
++| `_iter_skill_files()` | 原 `loader.load_skills()` 中 `for category in ["public","custom"]: ... for current_root, dir_names, file_names in os.walk(category_path, followlinks=True): ...` 段落 |
++| `_read_custom_text(name, rel)` | 原 `manager.read_custom_skill_content()` + `skill_manage_tool` 中 `target.read_text("utf-8")` 片段 |
++| `_write_custom_text(...)` | 原 `manager.atomic_write()`（同款 tmpfile + `Path.replace`） |
++| `_delete_custom_file(name, rel)` | 原 `skill_manage_tool.remove_file` 分支中的 `target.unlink()` 片段 |
++| `_persist_custom_skill_dir(name, src_dir)` | 原 `installer.install_skill_from_archive()` 末尾 `target = custom_dir / skill_name; if target.exists(): raise SkillAlreadyExistsError(...); shutil.copytree(skill_dir, target)` 片段 |
++| `_delete_custom_skill(name)` | 原 `gateway/routers/skills.py:delete_custom_skill` + `skill_manage_tool.delete` 分支中的 `shutil.rmtree(skill_dir)` 片段 |
++| `custom_skill_exists(name)` | 原 `manager.custom_skill_exists()`（即 `get_custom_skill_file(name).exists()`） |
++| `public_skill_exists(name)` | 原 `manager.public_skill_exists()`（即 `(get_public_skill_dir(name) / SKILL_FILE_NAME).exists()`） |
++| `_append_history_line(name, line)` | 原 `manager.append_history()` 中 `with history_path.open("a", encoding="utf-8") as f: f.write(...); f.write("\n")` 片段 |
++| `_read_history_lines(name)` | 原 `manager.read_history()` 中 `history_path.read_text(...).splitlines()` 片段 |
++
++附属内部 helper（私有，非抽象）：
++
++| Local helper | 来源 |
++|---|---|
++| `_resolve_root(path)` | 原 `SkillsConfig.get_skills_path()`（处理绝对/相对路径与默认 `../skills` 回落） |
++| `_get_custom_skill_dir(name)` | 原 `manager.get_custom_skill_dir()` |
++| `_get_public_skill_dir(name)` | 原 `manager.get_public_skill_dir()` |
++| `_get_skill_history_file(name)` | 原 `manager.get_skill_history_file()`（`<root>/custom/.history/<name>.jsonl`） |
++
++公共流程（load_skills / install_skill_from_archive / write_custom_skill / read_history…）**完全不在子类中重写**，全部由基类提供。
++
++### 3.3 反射 + 单例（与 sandbox 对齐）
++
++新增 `deerflow/skills/storage/__init__.py`（来源：完全对齐 `deerflow/sandbox/sandbox_provider.py` 中 `get_sandbox_provider/reset_sandbox_provider/set_sandbox_provider` 单例模式）：
++
++```python
++_default_skill_storage: SkillStorage | None = None
++
++
++def get_skill_storage(**kwargs) -> SkillStorage:
++    """来源：对应 sandbox_provider.get_sandbox_provider()"""
++    global _default_skill_storage
++    if _default_skill_storage is None:
++        config = get_app_config()
++        cls = resolve_class(config.skills.use, SkillStorage)
++        # 把 SkillsConfig 的字段（path, container_path 等）按需转发
++        _default_skill_storage = cls(
++            path=config.skills.path,
++            container_path=config.skills.container_path,
++            **kwargs,
++        )
++    return _default_skill_storage
++
++
++def reset_skill_storage() -> None:
++    """来源：对应 sandbox_provider.reset_sandbox_provider()"""
++    ...
++
++
++def set_skill_storage(storage: SkillStorage) -> None:
++    """来源：对应 sandbox_provider.set_sandbox_provider()"""
++    ...
++```
++
++`SkillsConfig` 增加 `use` 字段（来源：对应 `SandboxConfig.use`，但提供默认值）：
++
++```python
++class SkillsConfig(BaseModel):
++    use: str = Field(
++        default="deerflow.skills.storage.local:LocalSkillStorage",
++        description="Class path of the SkillStorage implementation.",
++    )
++    # 来源：原 SkillsConfig.path（保持不变；由 LocalSkillStorage 消费）
++    path: str | None = Field(default=None, ...)
++    # 来源：原 SkillsConfig.container_path（保持不变；由 SkillStorage 基类消费）
++    container_path: str = Field(default="/mnt/skills", ...)
++```
++
++> 与 `SandboxConfig.use`（`required`）不同，`SkillsConfig.use` 提供默认值，保证既有 `config.yaml` 在不修改的情况下自动落到本地实现，零破坏升级。
++
++## 4. 配置示例（`config.example.yaml`）
++
++```yaml
++# ============================================================================
++# Skills Configuration
++# ============================================================================
++skills:
++  # 选用 SkillStorage 实现。默认本地文件系统：
++  use: deerflow.skills.storage.local:LocalSkillStorage
++
++  # 技能根目录（host 路径）。未设置时默认 ../skills（仓库根目录下的 skills/）
++  # path: /absolute/host/path/to/skills
++
++  # 技能在 sandbox 容器内的挂载路径
++  container_path: /mnt/skills
++
++# 未来可替换为远端实现，例如：
++# skills:
++#   use: deerflow.community.git_skill_storage:GitSkillStorage
++#   repo: git@github.com:my-org/skills.git
++#   branch: main
++```
++
++## 5. 目录与文件变更
++
++```
++backend/packages/harness/deerflow/skills/
++├── __init__.py                # 重新导出公共 API（Skill、SkillStorage、get_skill_storage、SkillAlreadyExistsError…）
++├── types.py                   # 不变（Skill 数据类）
++├── parser.py                  # 不变（parse_skill_file），由基类 import
++├── validation.py              # 不变（_validate_skill_frontmatter、ALLOWED_FRONTMATTER_PROPERTIES），由基类 import
++├── archive.py                 # （可选拆分）从 installer.py 抽出 zip 安全函数；
++│                              # 也可以保留在 installer.py 中并由基类 import
++├── security_scanner.py        # 不变（独立于 storage，由 tools/gateway 在写入前调用）
++└── storage/
++    ├── __init__.py            # get_skill_storage / reset / set 单例 + 反射
++    ├── skill_storage.py       # SkillStorage(ABC) — 模板方法 + 协议工具调用
++    └── local.py               # LocalSkillStorage — 仅实现抽象原子操作
++```
++
++> `loader.py` / `manager.py` / `installer.py` 在迁移完成后保留为**兼容 shim**——内部函数转调 `get_skill_storage()` 或基类公共流程，保留旧的 import 路径，避免一次性大爆炸式改造（详见第 6 节）。其中 `installer.py` 中被基类复用的 `safe_extract_skill_archive` / `resolve_skill_dir_from_archive` 等函数仍是公共依赖，不视作 shim。
++
++## 6. 迁移策略（分两步）
++
++### Step 1（本设计文档的实现 PR）
++1. 新增 `skills/storage/{__init__.py,skill_storage.py,local.py}`。
++2. 新增 `SkillsConfig.use` 字段及默认值。
++3. 把 `loader.load_skills` / `installer.install_skill_from_archive` / `manager.*` 改造为**纯转发壳**：
++   ```python
++   def load_skills(...):
++       return get_skill_storage().load_skills(...)
++   ```
++   行为等价、签名不变；现有所有 import 路径继续可用，所有现有测试不需修改。
++4. `config.example.yaml` 与 `config.yaml`：在 `skills:` 段落补充 `use:` 注释样例。
++
++### Step 2（后续 PR，本设计不强制）
++1. 把直接 import `loader/installer/manager` 的调用方逐步迁移为 `get_skill_storage()` 风格。
++2. 删除兼容 shim 或转为 `DeprecationWarning`。
++
++## 7. 兼容性与风险
++
++- **零破坏升级**：`SkillsConfig.use` 有默认值；旧 `config.yaml` 无需变更。
++- **测试影响**：现有 `monkeypatch.setattr("deerflow.skills.manager.get_app_config", ...)`、`patch("deerflow.skills.loader.load_skills", ...)`、`patch("deerflow.skills.installer.get_skills_root_path", ...)` 都仍指向有效符号；不需要立即修改。新增 `tests/test_skill_storage_local.py` 覆盖 `LocalSkillStorage` 完整契约。
++- **进程间一致性**：与现状一致——Gateway 与 LangGraph Server 是分进程、各自持有自己的 `_default_skill_storage` 单例；`ExtensionsConfig` 仍然每次从磁盘读取，确保 enabled 状态实时同步。
++- **`uses_thread_data_mounts` 类似的能力位**：暂不引入。如未来需要"远端实现禁用 sandbox 挂载"场景再加。
++
++## 8. 验收标准
++
++- `cd backend && make lint && make test` 通过。
++- `config.yaml` 不修改时，行为与改造前完全一致（所有 lead_agent / gateway / tool / client 测试通过）。
++- 在 `config.yaml` 中删除 `skills.use` 字段，启动 LangGraph + Gateway，技能列表、安装 `.skill`、自定义编辑、历史记录功能正常。
++- 新增 `LocalSkillStorage` 单元测试覆盖：list/get/read/write/install/history/路径校验异常分支。
++- 文档：`backend/docs/` 中现有 skills 相关文档（如 `deerflow-skills-architecture.md`）追加一节说明 `SkillStorage` 抽象与 `use` 配置项。
++
++## 9. 开放问题
++
++1. `Skill.skill_dir` / `skill_file` 当前是 `Path` 类型，对非本地后端是否仍然合适？— 短期保留：远端实现可在内部把内容同步到本地缓存目录，再赋 `Path`。长期可演进为带 scheme 的 URI。
+diff --git a/backend/packages/harness/deerflow/agents/lead_agent/prompt.py b/backend/packages/harness/deerflow/agents/lead_agent/prompt.py
+index 2ccacac6..04ef50a4 100644
+--- a/backend/packages/harness/deerflow/agents/lead_agent/prompt.py
++++ b/backend/packages/harness/deerflow/agents/lead_agent/prompt.py
+@@ -5,8 +5,8 @@ from datetime import datetime
+ from functools import lru_cache
+ 
+ from deerflow.config.agents_config import load_agent_soul
+-from deerflow.skills import load_skills
+-from deerflow.skills.types import Skill
++from deerflow.skills.storage import get_skill_storage
++from deerflow.skills.types import Skill, SkillCategory
+ from deerflow.subagents import get_available_subagent_names
+ 
+ logger = logging.getLogger(__name__)
+@@ -20,7 +20,7 @@ _enabled_skills_refresh_event = threading.Event()
+ 
+ 
+ def _load_enabled_skills_sync() -> list[Skill]:
+-    return list(load_skills(enabled_only=True))
++    return list(get_skill_storage().load_skills(enabled_only=True))
+ 
+ 
+ def _start_enabled_skills_refresh_thread() -> None:
+@@ -111,8 +111,8 @@ def _get_enabled_skills():
+     return []
+ 
+ 
+-def _skill_mutability_label(category: str) -> str:
+-    return "[custom, editable]" if category == "custom" else "[built-in]"
++def _skill_mutability_label(category: SkillCategory) -> str:
++    return "[custom, editable]" if category == SkillCategory.CUSTOM else "[built-in]"
+ 
+ 
+ def clear_skills_system_prompt_cache() -> None:
+@@ -606,10 +606,10 @@ def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
+ 
+     try:
+         from deerflow.config import get_app_config
++        from deerflow.skills.storage import get_skill_storage
+ 
+-        config = get_app_config()
+-        container_base_path = config.skills.container_path
+-        skill_evolution_enabled = config.skill_evolution.enabled
++        container_base_path = get_skill_storage().get_container_root()
++        skill_evolution_enabled = get_app_config().skill_evolution.enabled
+     except Exception:
+         container_base_path = "/mnt/skills"
+         skill_evolution_enabled = False
+diff --git a/backend/packages/harness/deerflow/client.py b/backend/packages/harness/deerflow/client.py
+index a26d838a..7e6b7018 100644
+--- a/backend/packages/harness/deerflow/client.py
++++ b/backend/packages/harness/deerflow/client.py
+@@ -40,7 +40,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
+ from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+ from deerflow.config.paths import get_paths
+ from deerflow.models import create_chat_model
+-from deerflow.skills.installer import install_skill_from_archive
++from deerflow.skills.storage import get_skill_storage
+ from deerflow.uploads.manager import (
+     claim_unique_filename,
+     delete_file_safe,
+@@ -751,8 +751,6 @@ class DeerFlowClient:
+             Dict with "skills" key containing list of skill info dicts,
+             matching the Gateway API ``SkillsListResponse`` schema.
+         """
+-        from deerflow.skills.loader import load_skills
+-
+         return {
+             "skills": [
+                 {
+@@ -762,7 +760,7 @@ class DeerFlowClient:
+                     "category": s.category,
+                     "enabled": s.enabled,
+                 }
+-                for s in load_skills(enabled_only=enabled_only)
++                for s in get_skill_storage().load_skills(enabled_only=enabled_only)
+             ]
+         }
+ 
+@@ -871,9 +869,7 @@ class DeerFlowClient:
+         Returns:
+             Skill info dict, or None if not found.
+         """
+-        from deerflow.skills.loader import load_skills
+-
+-        skill = next((s for s in load_skills(enabled_only=False) if s.name == name), None)
++        skill = next((s for s in get_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
+         if skill is None:
+             return None
+         return {
+@@ -898,9 +894,7 @@ class DeerFlowClient:
+             ValueError: If the skill is not found.
+             OSError: If the config file cannot be written.
+         """
+-        from deerflow.skills.loader import load_skills
+-
+-        skills = load_skills(enabled_only=False)
++        skills = get_skill_storage().load_skills(enabled_only=False)
+         skill = next((s for s in skills if s.name == name), None)
+         if skill is None:
+             raise ValueError(f"Skill '{name}' not found")
+@@ -923,7 +917,7 @@ class DeerFlowClient:
+         self._agent_config_key = None
+         reload_extensions_config()
+ 
+-        updated = next((s for s in load_skills(enabled_only=False) if s.name == name), None)
++        updated = next((s for s in get_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
+         if updated is None:
+             raise RuntimeError(f"Skill '{name}' disappeared after update")
+         return {
+@@ -947,7 +941,7 @@ class DeerFlowClient:
+             FileNotFoundError: If the file does not exist.
+             ValueError: If the file is invalid.
+         """
+-        return install_skill_from_archive(skill_path)
++        return get_skill_storage().install_skill_from_archive(skill_path)
+ 
+     # ------------------------------------------------------------------
+     # Public API — memory management
+diff --git a/backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py b/backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py
+index 952b6731..a7dbc4f3 100644
+--- a/backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py
++++ b/backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py
+@@ -289,9 +289,11 @@ class AioSandboxProvider(SandboxProvider):
+         so the host Docker daemon can resolve the path.
+         """
+         try:
+-            config = get_app_config()
+-            skills_path = config.skills.get_skills_path()
+-            container_path = config.skills.container_path
++            from deerflow.skills.storage import get_skill_storage
++
++            storage = get_skill_storage()
++            skills_path = storage.get_skills_root_path()
++            container_path = storage.get_container_root()
+ 
+             if skills_path.exists():
+                 # When running inside Docker with DooD, use host-side skills path.
+diff --git a/backend/packages/harness/deerflow/config/extensions_config.py b/backend/packages/harness/deerflow/config/extensions_config.py
+index e7a48d16..0d84505a 100644
+--- a/backend/packages/harness/deerflow/config/extensions_config.py
++++ b/backend/packages/harness/deerflow/config/extensions_config.py
+@@ -7,6 +7,8 @@ from typing import Any, Literal
+ 
+ from pydantic import BaseModel, ConfigDict, Field
+ 
++from deerflow.skills.types import SkillCategory
++
+ 
+ class McpOAuthConfig(BaseModel):
+     """OAuth configuration for an MCP server (HTTP/SSE transports)."""
+@@ -180,7 +182,7 @@ class ExtensionsConfig(BaseModel):
+         """
+         return {name: config for name, config in self.mcp_servers.items() if config.enabled}
+ 
+-    def is_skill_enabled(self, skill_name: str, skill_category: str) -> bool:
++    def is_skill_enabled(self, skill_name: str, skill_category: SkillCategory) -> bool:
+         """Check if a skill is enabled.
+ 
+         Args:
+@@ -190,10 +192,11 @@ class ExtensionsConfig(BaseModel):
+         Returns:
+             True if enabled, False otherwise
+         """
++
+         skill_config = self.skills.get(skill_name)
+         if skill_config is None:
+             # Default to enable for public & custom skill
+-            return skill_category in ("public", "custom")
++            return skill_category in (SkillCategory.PUBLIC, SkillCategory.CUSTOM)
+         return skill_config.enabled
+ 
+ 
+diff --git a/backend/packages/harness/deerflow/config/skills_config.py b/backend/packages/harness/deerflow/config/skills_config.py
+index 31a6ca90..ea26582e 100644
+--- a/backend/packages/harness/deerflow/config/skills_config.py
++++ b/backend/packages/harness/deerflow/config/skills_config.py
+@@ -2,6 +2,8 @@ from pathlib import Path
+ 
+ from pydantic import BaseModel, Field
+ 
++from deerflow.skills.types import SkillCategory
++
+ 
+ def _default_repo_root() -> Path:
+     """Resolve the repo root without relying on the current working directory."""
+@@ -11,6 +13,10 @@ def _default_repo_root() -> Path:
+ class SkillsConfig(BaseModel):
+     """Configuration for skills system"""
+ 
++    use: str = Field(
++        default="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
++        description="Class path of the SkillStorage implementation (e.g. deerflow.skills.storage.local_skill_storage:LocalSkillStorage).",
++    )
+     path: str | None = Field(
+         default=None,
+         description="Path to skills directory. If not specified, defaults to ../skills relative to backend directory",
+@@ -35,12 +41,10 @@ class SkillsConfig(BaseModel):
+                 path = _default_repo_root() / path
+             return path.resolve()
+         else:
+-            # Default: ../skills relative to backend directory
+-            from deerflow.skills.loader import get_skills_root_path
+-
+-            return get_skills_root_path()
++            # Default: ../skills relative to backend directory (i.e. <repo_root>/skills).
++            return _default_repo_root() / "skills"
+ 
+-    def get_skill_container_path(self, skill_name: str, category: str = "public") -> str:
++    def get_skill_container_path(self, skill_name: str, category: SkillCategory = SkillCategory.PUBLIC) -> str:
+         """
+         Get the full container path for a specific skill.
+ 
+@@ -51,4 +55,4 @@ class SkillsConfig(BaseModel):
+         Returns:
+             Full path to the skill in the container
+         """
+-        return f"{self.container_path}/{category}/{skill_name}"
++        return f"{self.container_path}/{category.value}/{skill_name}"
+diff --git a/backend/packages/harness/deerflow/sandbox/tools.py b/backend/packages/harness/deerflow/sandbox/tools.py
+index 73534eb2..0604863f 100644
+--- a/backend/packages/harness/deerflow/sandbox/tools.py
++++ b/backend/packages/harness/deerflow/sandbox/tools.py
+@@ -89,9 +89,9 @@ def _get_skills_container_path() -> str:
+     if cached is not None:
+         return cached
+     try:
+-        from deerflow.config import get_app_config
++        from deerflow.skills.storage import get_skill_storage
+ 
+-        value = get_app_config().skills.container_path
++        value = get_skill_storage().get_container_root()
+         _get_skills_container_path._cached = value  # type: ignore[attr-defined]
+         return value
+     except Exception:
+@@ -110,10 +110,9 @@ def _get_skills_host_path() -> str | None:
+     if cached is not None:
+         return cached
+     try:
+-        from deerflow.config import get_app_config
++        from deerflow.skills.storage import get_skill_storage
+ 
+-        config = get_app_config()
+-        skills_path = config.skills.get_skills_path()
++        skills_path = get_skill_storage().get_skills_root_path()
+         if skills_path.exists():
+             value = str(skills_path)
+             _get_skills_host_path._cached = value  # type: ignore[attr-defined]
+diff --git a/backend/packages/harness/deerflow/skills/__init__.py b/backend/packages/harness/deerflow/skills/__init__.py
+index 4fcb7cc0..72b22e57 100644
+--- a/backend/packages/harness/deerflow/skills/__init__.py
++++ b/backend/packages/harness/deerflow/skills/__init__.py
+@@ -1,16 +1,14 @@
+-from .installer import SkillAlreadyExistsError, SkillSecurityScanError, ainstall_skill_from_archive, install_skill_from_archive
+-from .loader import get_skills_root_path, load_skills
++from .installer import SkillAlreadyExistsError
++from .storage import LocalSkillStorage, SkillStorage, get_skill_storage
+ from .types import Skill
+ from .validation import ALLOWED_FRONTMATTER_PROPERTIES, _validate_skill_frontmatter
+ 
+ __all__ = [
+-    "load_skills",
+-    "get_skills_root_path",
+     "Skill",
+     "ALLOWED_FRONTMATTER_PROPERTIES",
+     "_validate_skill_frontmatter",
+-    "install_skill_from_archive",
+-    "ainstall_skill_from_archive",
+     "SkillAlreadyExistsError",
+-    "SkillSecurityScanError",
++    "SkillStorage",
++    "LocalSkillStorage",
++    "get_skill_storage",
+ ]
+diff --git a/backend/packages/harness/deerflow/skills/installer.py b/backend/packages/harness/deerflow/skills/installer.py
+index e5836781..ea3a3c60 100644
+--- a/backend/packages/harness/deerflow/skills/installer.py
++++ b/backend/packages/harness/deerflow/skills/installer.py
+@@ -8,15 +8,14 @@ import asyncio
+ import concurrent.futures
+ import logging
+ import posixpath
+-import shutil
+ import stat
+-import tempfile
+ import zipfile
+ from pathlib import Path, PurePosixPath, PureWindowsPath
+ 
+-from deerflow.skills.loader import get_skills_root_path
+-from deerflow.skills.security_scanner import scan_skill_content
+-from deerflow.skills.validation import _validate_skill_frontmatter
++# scan_skill_content is still lazily loaded to avoid importing security_scanner at module
++# level (security_scanner imports from deerflow.models which is heavier). Kept at module
++# level so tests can monkeypatch ``deerflow.skills.installer.scan_skill_content``.
++scan_skill_content = None  # type: ignore[assignment]
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -124,167 +123,45 @@ def safe_extract_skill_archive(
+                 dst.write(chunk)
+ 
+ 
+-def _is_script_support_file(rel_path: Path) -> bool:
+-    return bool(rel_path.parts) and rel_path.parts[0] == "scripts"
+-
++def _run_in_new_thread_or_sync(coro) -> None:
++    """Run an async coroutine from a sync context, even inside a running event loop."""
++    try:
++        loop = asyncio.get_running_loop()
++    except RuntimeError:
++        loop = None
++    if loop is not None and loop.is_running():
++        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
++            executor.submit(asyncio.run, coro).result()
++    else:
++        asyncio.run(coro)
+ 
+-def _should_scan_support_file(rel_path: Path) -> bool:
+-    if _is_script_support_file(rel_path):
+-        return True
+-    return bool(rel_path.parts) and rel_path.parts[0] in _PROMPT_INPUT_DIRS and rel_path.suffix.lower() in _PROMPT_INPUT_SUFFIXES
+ 
++async def _scan_skill_file_async(skill_dir: Path, path: Path, skill_name: str, *, executable: bool) -> None:
++    """Scan a single file from a skill archive and raise SkillSecurityScanError if blocked."""
++    global scan_skill_content
++    if scan_skill_content is None:
++        from deerflow.skills.security_scanner import scan_skill_content as _real_scan
+ 
+-def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) -> None:
+-    installed = False
+-    reserved = False
+-    try:
+-        target.mkdir(mode=0o700)
+-        reserved = True
+-        for child in staging_target.iterdir():
+-            shutil.move(str(child), target / child.name)
+-        installed = True
+-    except FileExistsError as e:
+-        raise SkillAlreadyExistsError(f"Skill '{target.name}' already exists") from e
+-    finally:
+-        if reserved and not installed and target.exists():
+-            shutil.rmtree(target)
+-
+-
+-async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool) -> None:
++        scan_skill_content = _real_scan
+     rel_path = path.relative_to(skill_dir).as_posix()
+     location = f"{skill_name}/{rel_path}"
+     try:
+         content = path.read_text(encoding="utf-8")
+     except UnicodeDecodeError as e:
+         raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
+-
+     try:
+         result = await scan_skill_content(content, executable=executable, location=location)
+     except Exception as e:
+         raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
+-
+     decision = getattr(result, "decision", None)
+     reason = str(getattr(result, "reason", "") or "No reason provided.")
+     if decision == "block":
+         if rel_path == "SKILL.md":
+             raise SkillSecurityScanError(f"Security scan blocked skill '{skill_name}': {reason}")
+         raise SkillSecurityScanError(f"Security scan blocked {location}: {reason}")
+-    if executable and decision != "allow":
+-        raise SkillSecurityScanError(f"Security scan rejected executable {location}: {reason}")
+-    if decision not in {"allow", "warn"}:
+-        raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}")
+ 
+ 
+-async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str) -> None:
+-    """Run the skill security scanner against all installable text and script files."""
++async def scan_skill_archive_contents_async(skill_dir: Path, skill_name: str) -> None:
++    """Run the security scanner against the SKILL.md of a skill directory."""
+     skill_md = skill_dir / "SKILL.md"
+-    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False)
+-
+-    for path in sorted(skill_dir.rglob("*")):
+-        if not path.is_file():
+-            continue
+-
+-        rel_path = path.relative_to(skill_dir)
+-        if rel_path == Path("SKILL.md"):
+-            continue
+-        if path.name == "SKILL.md":
+-            raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
+-        if not _should_scan_support_file(rel_path):
+-            continue
+-
+-        await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=_is_script_support_file(rel_path))
+-
+-
+-async def ainstall_skill_from_archive(
+-    zip_path: str | Path,
+-    *,
+-    skills_root: Path | None = None,
+-) -> dict:
+-    """Install a skill from a .skill archive (ZIP).
+-
+-    Args:
+-        zip_path: Path to the .skill file.
+-        skills_root: Override the skills root directory. If None, uses
+-            the default from config.
+-
+-    Returns:
+-        Dict with success, skill_name, message.
+-
+-    Raises:
+-        FileNotFoundError: If the file does not exist.
+-        ValueError: If the file is invalid (wrong extension, bad ZIP,
+-            invalid frontmatter, duplicate name).
+-    """
+-    logger.info("Installing skill from %s", zip_path)
+-    path = Path(zip_path)
+-    if not path.is_file():
+-        if not path.exists():
+-            raise FileNotFoundError(f"Skill file not found: {zip_path}")
+-        raise ValueError(f"Path is not a file: {zip_path}")
+-    if path.suffix != ".skill":
+-        raise ValueError("File must have .skill extension")
+-
+-    if skills_root is None:
+-        skills_root = get_skills_root_path()
+-    custom_dir = skills_root / "custom"
+-    custom_dir.mkdir(parents=True, exist_ok=True)
+-
+-    with tempfile.TemporaryDirectory() as tmp:
+-        tmp_path = Path(tmp)
+-
+-        try:
+-            zf = zipfile.ZipFile(path, "r")
+-        except FileNotFoundError:
+-            raise FileNotFoundError(f"Skill file not found: {zip_path}") from None
+-        except (zipfile.BadZipFile, IsADirectoryError):
+-            raise ValueError("File is not a valid ZIP archive") from None
+-
+-        with zf:
+-            safe_extract_skill_archive(zf, tmp_path)
+-
+-        skill_dir = resolve_skill_dir_from_archive(tmp_path)
+-
+-        is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
+-        if not is_valid:
+-            raise ValueError(f"Invalid skill: {message}")
+-        if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
+-            raise ValueError(f"Invalid skill name: {skill_name}")
+-
+-        target = custom_dir / skill_name
+-        if target.exists():
+-            raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
+-
+-        await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+-
+-        with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
+-            staging_target = Path(staging_root) / skill_name
+-            shutil.copytree(skill_dir, staging_target)
+-            _move_staged_skill_into_reserved_target(staging_target, target)
+-        logger.info("Skill %r installed to %s", skill_name, target)
+-
+-    return {
+-        "success": True,
+-        "skill_name": skill_name,
+-        "message": f"Skill '{skill_name}' installed successfully",
+-    }
+-
+-
+-def _run_async_install(coro):
+-    try:
+-        loop = asyncio.get_running_loop()
+-    except RuntimeError:
+-        loop = None
+-
+-    if loop is not None and loop.is_running():
+-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+-            return executor.submit(asyncio.run, coro).result()
+-    return asyncio.run(coro)
+-
+-
+-def install_skill_from_archive(
+-    zip_path: str | Path,
+-    *,
+-    skills_root: Path | None = None,
+-) -> dict:
+-    """Install a skill from a .skill archive (ZIP)."""
+-    return _run_async_install(ainstall_skill_from_archive(zip_path, skills_root=skills_root))
++    await _scan_skill_file_async(skill_dir, skill_md, skill_name, executable=False)
+diff --git a/backend/packages/harness/deerflow/skills/loader.py b/backend/packages/harness/deerflow/skills/loader.py
+deleted file mode 100644
+index 35ffda66..00000000
+--- a/backend/packages/harness/deerflow/skills/loader.py
++++ /dev/null
+@@ -1,103 +0,0 @@
+-import logging
+-import os
+-from pathlib import Path
+-
+-from .parser import parse_skill_file
+-from .types import Skill
+-
+-logger = logging.getLogger(__name__)
+-
+-
+-def get_skills_root_path() -> Path:
+-    """
+-    Get the root path of the skills directory.
+-
+-    Returns:
+-        Path to the skills directory (deer-flow/skills)
+-    """
+-    # loader.py lives at packages/harness/deerflow/skills/loader.py — 5 parents up reaches backend/
+-    backend_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
+-    # skills directory is sibling to backend directory
+-    skills_dir = backend_dir.parent / "skills"
+-    return skills_dir
+-
+-
+-def load_skills(skills_path: Path | None = None, use_config: bool = True, enabled_only: bool = False) -> list[Skill]:
+-    """
+-    Load all skills from the skills directory.
+-
+-    Scans both public and custom skill directories, parsing SKILL.md files
+-    to extract metadata. The enabled state is determined by the skills_state_config.json file.
+-
+-    Args:
+-        skills_path: Optional custom path to skills directory.
+-                     If not provided and use_config is True, uses path from config.
+-                     Otherwise defaults to deer-flow/skills
+-        use_config: Whether to load skills path from config (default: True)
+-        enabled_only: If True, only return enabled skills (default: False)
+-
+-    Returns:
+-        List of Skill objects, sorted by name
+-    """
+-    if skills_path is None:
+-        if use_config:
+-            try:
+-                from deerflow.config import get_app_config
+-
+-                config = get_app_config()
+-                skills_path = config.skills.get_skills_path()
+-            except Exception:
+-                # Fallback to default if config fails
+-                skills_path = get_skills_root_path()
+-        else:
+-            skills_path = get_skills_root_path()
+-
+-    if not skills_path.exists():
+-        return []
+-
+-    skills_by_name: dict[str, Skill] = {}
+-
+-    # Scan public and custom directories
+-    for category in ["public", "custom"]:
+-        category_path = skills_path / category
+-        if not category_path.exists() or not category_path.is_dir():
+-            continue
+-
+-        for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
+-            # Keep traversal deterministic and skip hidden directories.
+-            dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
+-            if "SKILL.md" not in file_names:
+-                continue
+-
+-            skill_file = Path(current_root) / "SKILL.md"
+-            relative_path = skill_file.parent.relative_to(category_path)
+-
+-            skill = parse_skill_file(skill_file, category=category, relative_path=relative_path)
+-            if skill:
+-                skills_by_name[skill.name] = skill
+-
+-    skills = list(skills_by_name.values())
+-
+-    # Load skills state configuration and update enabled status
+-    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
+-    # to always read the latest configuration from disk. This ensures that changes
+-    # made through the Gateway API (which runs in a separate process) are immediately
+-    # reflected in the LangGraph Server when loading skills.
+-    try:
+-        from deerflow.config.extensions_config import ExtensionsConfig
+-
+-        extensions_config = ExtensionsConfig.from_file()
+-        for skill in skills:
+-            skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
+-    except Exception as e:
+-        # If config loading fails, default to all enabled
+-        logger.warning("Failed to load extensions config: %s", e)
+-
+-    # Filter by enabled status if requested
+-    if enabled_only:
+-        skills = [skill for skill in skills if skill.enabled]
+-
+-    # Sort by name for consistent ordering
+-    skills.sort(key=lambda s: s.name)
+-
+-    return skills
+diff --git a/backend/packages/harness/deerflow/skills/manager.py b/backend/packages/harness/deerflow/skills/manager.py
+deleted file mode 100644
+index 77789937..00000000
+--- a/backend/packages/harness/deerflow/skills/manager.py
++++ /dev/null
+@@ -1,159 +0,0 @@
+-"""Utilities for managing custom skills and their history."""
+-
+-from __future__ import annotations
+-
+-import json
+-import re
+-import tempfile
+-from datetime import UTC, datetime
+-from pathlib import Path
+-from typing import Any
+-
+-from deerflow.config import get_app_config
+-from deerflow.skills.loader import load_skills
+-from deerflow.skills.validation import _validate_skill_frontmatter
+-
+-SKILL_FILE_NAME = "SKILL.md"
+-HISTORY_FILE_NAME = "HISTORY.jsonl"
+-HISTORY_DIR_NAME = ".history"
+-ALLOWED_SUPPORT_SUBDIRS = {"references", "templates", "scripts", "assets"}
+-_SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+-
+-
+-def get_skills_root_dir() -> Path:
+-    return get_app_config().skills.get_skills_path()
+-
+-
+-def get_public_skills_dir() -> Path:
+-    return get_skills_root_dir() / "public"
+-
+-
+-def get_custom_skills_dir() -> Path:
+-    path = get_skills_root_dir() / "custom"
+-    path.mkdir(parents=True, exist_ok=True)
+-    return path
+-
+-
+-def validate_skill_name(name: str) -> str:
+-    normalized = name.strip()
+-    if not _SKILL_NAME_PATTERN.fullmatch(normalized):
+-        raise ValueError("Skill name must be hyphen-case using lowercase letters, digits, and hyphens only.")
+-    if len(normalized) > 64:
+-        raise ValueError("Skill name must be 64 characters or fewer.")
+-    return normalized
+-
+-
+-def get_custom_skill_dir(name: str) -> Path:
+-    return get_custom_skills_dir() / validate_skill_name(name)
+-
+-
+-def get_custom_skill_file(name: str) -> Path:
+-    return get_custom_skill_dir(name) / SKILL_FILE_NAME
+-
+-
+-def get_custom_skill_history_dir() -> Path:
+-    path = get_custom_skills_dir() / HISTORY_DIR_NAME
+-    path.mkdir(parents=True, exist_ok=True)
+-    return path
+-
+-
+-def get_skill_history_file(name: str) -> Path:
+-    return get_custom_skill_history_dir() / f"{validate_skill_name(name)}.jsonl"
+-
+-
+-def get_public_skill_dir(name: str) -> Path:
+-    return get_public_skills_dir() / validate_skill_name(name)
+-
+-
+-def custom_skill_exists(name: str) -> bool:
+-    return get_custom_skill_file(name).exists()
+-
+-
+-def public_skill_exists(name: str) -> bool:
+-    return (get_public_skill_dir(name) / SKILL_FILE_NAME).exists()
+-
+-
+-def ensure_custom_skill_is_editable(name: str) -> None:
+-    if custom_skill_exists(name):
+-        return
+-    if public_skill_exists(name):
+-        raise ValueError(f"'{name}' is a built-in skill. To customise it, create a new skill with the same name under skills/custom/.")
+-    raise FileNotFoundError(f"Custom skill '{name}' not found.")
+-
+-
+-def ensure_safe_support_path(name: str, relative_path: str) -> Path:
+-    skill_dir = get_custom_skill_dir(name).resolve()
+-    if not relative_path or relative_path.endswith("/"):
+-        raise ValueError("Supporting file path must include a filename.")
+-    relative = Path(relative_path)
+-    if relative.is_absolute():
+-        raise ValueError("Supporting file path must be relative.")
+-    if any(part in {"..", ""} for part in relative.parts):
+-        raise ValueError("Supporting file path must not contain parent-directory traversal.")
+-
+-    top_level = relative.parts[0] if relative.parts else ""
+-    if top_level not in ALLOWED_SUPPORT_SUBDIRS:
+-        raise ValueError(f"Supporting files must live under one of: {', '.join(sorted(ALLOWED_SUPPORT_SUBDIRS))}.")
+-
+-    target = (skill_dir / relative).resolve()
+-    allowed_root = (skill_dir / top_level).resolve()
+-    try:
+-        target.relative_to(allowed_root)
+-    except ValueError as exc:
+-        raise ValueError("Supporting file path must stay within the selected support directory.") from exc
+-    return target
+-
+-
+-def validate_skill_markdown_content(name: str, content: str) -> None:
+-    with tempfile.TemporaryDirectory() as tmp_dir:
+-        temp_skill_dir = Path(tmp_dir) / validate_skill_name(name)
+-        temp_skill_dir.mkdir(parents=True, exist_ok=True)
+-        (temp_skill_dir / SKILL_FILE_NAME).write_text(content, encoding="utf-8")
+-        is_valid, message, parsed_name = _validate_skill_frontmatter(temp_skill_dir)
+-        if not is_valid:
+-            raise ValueError(message)
+-        if parsed_name != name:
+-            raise ValueError(f"Frontmatter name '{parsed_name}' must match requested skill name '{name}'.")
+-
+-
+-def atomic_write(path: Path, content: str) -> None:
+-    path.parent.mkdir(parents=True, exist_ok=True)
+-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent)) as tmp_file:
+-        tmp_file.write(content)
+-        tmp_path = Path(tmp_file.name)
+-    tmp_path.replace(path)
+-
+-
+-def append_history(name: str, record: dict[str, Any]) -> None:
+-    history_path = get_skill_history_file(name)
+-    history_path.parent.mkdir(parents=True, exist_ok=True)
+-    payload = {
+-        "ts": datetime.now(UTC).isoformat(),
+-        **record,
+-    }
+-    with history_path.open("a", encoding="utf-8") as f:
+-        f.write(json.dumps(payload, ensure_ascii=False))
+-        f.write("\n")
+-
+-
+-def read_history(name: str) -> list[dict[str, Any]]:
+-    history_path = get_skill_history_file(name)
+-    if not history_path.exists():
+-        return []
+-    records: list[dict[str, Any]] = []
+-    for line in history_path.read_text(encoding="utf-8").splitlines():
+-        if not line.strip():
+-            continue
+-        records.append(json.loads(line))
+-    return records
+-
+-
+-def list_custom_skills() -> list:
+-    return [skill for skill in load_skills(enabled_only=False) if skill.category == "custom"]
+-
+-
+-def read_custom_skill_content(name: str) -> str:
+-    skill_file = get_custom_skill_file(name)
+-    if not skill_file.exists():
+-        raise FileNotFoundError(f"Custom skill '{name}' not found.")
+-    return skill_file.read_text(encoding="utf-8")
+diff --git a/backend/packages/harness/deerflow/skills/parser.py b/backend/packages/harness/deerflow/skills/parser.py
+index 63bcfef7..dd17c472 100644
+--- a/backend/packages/harness/deerflow/skills/parser.py
++++ b/backend/packages/harness/deerflow/skills/parser.py
+@@ -4,12 +4,14 @@ from pathlib import Path
+ 
+ import yaml
+ 
+-from .types import Skill
++from deerflow.skills.storage.skill_storage import SKILL_MD_FILE
++
++from .types import Skill, SkillCategory
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
+-def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None = None) -> Skill | None:
++def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
+     """Parse a SKILL.md file and extract metadata.
+ 
+     Args:
+@@ -21,7 +23,7 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
+     Returns:
+         Skill object if parsing succeeds, None otherwise.
+     """
+-    if not skill_file.exists() or skill_file.name != "SKILL.md":
++    if not skill_file.exists() or skill_file.name != SKILL_MD_FILE:
+         return None
+ 
+     try:
+diff --git a/backend/packages/harness/deerflow/skills/security_scanner.py b/backend/packages/harness/deerflow/skills/security_scanner.py
+index a8fc90a4..5667f6c3 100644
+--- a/backend/packages/harness/deerflow/skills/security_scanner.py
++++ b/backend/packages/harness/deerflow/skills/security_scanner.py
+@@ -9,6 +9,7 @@ from dataclasses import dataclass
+ 
+ from deerflow.config import get_app_config
+ from deerflow.models import create_chat_model
++from deerflow.skills.types import SKILL_MD_FILE
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -35,7 +36,7 @@ def _extract_json_object(raw: str) -> dict | None:
+         return None
+ 
+ 
+-async def scan_skill_content(content: str, *, executable: bool = False, location: str = "SKILL.md") -> ScanResult:
++async def scan_skill_content(content: str, *, executable: bool = False, location: str = SKILL_MD_FILE) -> ScanResult:
+     """Screen skill content before it is written to disk."""
+     rubric = (
+         "You are a security reviewer for AI agent skills. "
+diff --git a/backend/packages/harness/deerflow/skills/storage/__init__.py b/backend/packages/harness/deerflow/skills/storage/__init__.py
+new file mode 100644
+index 00000000..cea62fcb
+--- /dev/null
++++ b/backend/packages/harness/deerflow/skills/storage/__init__.py
+@@ -0,0 +1,37 @@
++"""SkillStorage singleton + reflection-based factory."""
++
++from __future__ import annotations
++
++from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
++from deerflow.skills.storage.skill_storage import SkillStorage
++
++_default_skill_storage: SkillStorage | None = None
++
++
++def get_skill_storage(**kwargs) -> SkillStorage:
++    """Return the cached ``SkillStorage`` singleton, creating it on first call.
++
++    The implementation class is resolved from ``config.skills.use`` via
++    ``deerflow.reflection.resolve_class``. Additional keyword arguments are
++    forwarded to the implementation constructor.
++    """
++    global _default_skill_storage
++    if _default_skill_storage is None:
++        from deerflow.config import get_app_config
++        from deerflow.reflection import resolve_class
++
++        config = get_app_config()
++        cls = resolve_class(config.skills.use, SkillStorage)
++        _default_skill_storage = cls(
++            host_path=config.skills.path,
++            container_path=config.skills.container_path,
++            **kwargs,
++        )
++    return _default_skill_storage
++
++
++__all__ = [
++    "LocalSkillStorage",
++    "SkillStorage",
++    "get_skill_storage",
++]
+diff --git a/backend/packages/harness/deerflow/skills/storage/local_skill_storage.py b/backend/packages/harness/deerflow/skills/storage/local_skill_storage.py
+new file mode 100644
+index 00000000..8bc61c90
+--- /dev/null
++++ b/backend/packages/harness/deerflow/skills/storage/local_skill_storage.py
+@@ -0,0 +1,188 @@
++"""Local-filesystem implementation of ``SkillStorage``."""
++
++from __future__ import annotations
++
++import errno
++import json
++import logging
++import os
++import shutil
++import tempfile
++import zipfile
++from collections.abc import Iterable
++from datetime import UTC, datetime
++from pathlib import Path
++
++from deerflow.skills.installer import SkillAlreadyExistsError
++from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
++from deerflow.skills.types import SkillCategory
++
++logger = logging.getLogger(__name__)
++
++DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
++
++
++class LocalSkillStorage(SkillStorage):
++    """Skill storage backed by the local filesystem.
++
++    Layout:
++        ``<root>/public/<name>/SKILL.md``
++        ``<root>/custom/<name>/SKILL.md``
++        ``<root>/custom/.history/<name>.jsonl``
++    """
++
++    def __init__(
++        self,
++        host_path: str | None = None,
++        container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
++    ) -> None:
++        super().__init__(container_path=container_path)
++        if host_path is None:
++            from deerflow.config import get_app_config
++
++            self._host_root: Path = get_app_config().skills.get_skills_path()
++        else:
++            path = Path(host_path)
++            if not path.is_absolute():
++                # Resolve relative paths from the repo root, matching SkillsConfig.
++                backend_dir = Path(__file__).resolve().parents[5]
++                path = backend_dir.parent / path
++            self._host_root = path.resolve()
++
++    # ------------------------------------------------------------------
++    # SkillStorage abstract operations
++    # ------------------------------------------------------------------
++
++    def get_skills_root_path(self) -> Path:
++        return self._host_root
++
++    def custom_skill_exists(self, name: str) -> bool:
++        return self.get_custom_skill_file(name).exists()
++
++    def public_skill_exists(self, name: str) -> bool:
++        return (self._host_root / SkillCategory.PUBLIC.value / name / SKILL_MD_FILE).exists()
++
++    def _iter_skill_files(self) -> Iterable[tuple[SkillCategory, Path, Path]]:
++        if not self._host_root.exists():
++            return
++        for category in SkillCategory:
++            category_path = self._host_root / category.value
++            if not category_path.exists() or not category_path.is_dir():
++                continue
++            for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
++                dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
++                if SKILL_MD_FILE not in file_names:
++                    continue
++                yield category, category_path, Path(current_root) / SKILL_MD_FILE
++
++    def read_custom_skill(self, name: str) -> str:
++        if not self.custom_skill_exists(name):
++            raise FileNotFoundError(f"Custom skill '{name}' not found.")
++        return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8")
++
++    def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
++        target = self.get_custom_skill_dir(name) / relative_path
++        target.parent.mkdir(parents=True, exist_ok=True)
++        with tempfile.NamedTemporaryFile(
++            "w",
++            encoding="utf-8",
++            delete=False,
++            dir=str(target.parent),
++        ) as tmp_file:
++            tmp_file.write(content)
++            tmp_path = Path(tmp_file.name)
++        tmp_path.replace(target)
++
++    def install_skill_from_archive(self, archive_path: str | Path) -> dict:
++        from deerflow.skills.installer import (
++            _run_in_new_thread_or_sync,
++            resolve_skill_dir_from_archive,
++            safe_extract_skill_archive,
++            scan_skill_archive_contents_async,
++        )
++        from deerflow.skills.validation import _validate_skill_frontmatter
++
++        logger.info("Installing skill from %s", archive_path)
++        path = Path(archive_path)
++        if not path.is_file():
++            if not path.exists():
++                raise FileNotFoundError(f"Skill file not found: {archive_path}")
++            raise ValueError(f"Path is not a file: {archive_path}")
++        if path.suffix != ".skill":
++            raise ValueError("File must have .skill extension")
++
++        with tempfile.TemporaryDirectory() as tmp:
++            tmp_path = Path(tmp)
++            try:
++                zf = zipfile.ZipFile(path, "r")
++            except FileNotFoundError:
++                raise FileNotFoundError(f"Skill file not found: {archive_path}") from None
++            except (zipfile.BadZipFile, IsADirectoryError):
++                raise ValueError("File is not a valid ZIP archive") from None
++
++            with zf:
++                safe_extract_skill_archive(zf, tmp_path)
++
++            skill_dir = resolve_skill_dir_from_archive(tmp_path)
++
++            is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
++            if not is_valid:
++                raise ValueError(f"Invalid skill: {message}")
++            if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
++                raise ValueError(f"Invalid skill name: {skill_name}")
++
++            target = self.get_custom_skill_dir(skill_name)
++            target.parent.mkdir(parents=True, exist_ok=True)
++            if target.exists():
++                raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
++
++            _run_in_new_thread_or_sync(scan_skill_archive_contents_async(skill_dir, skill_name))
++
++            shutil.copytree(skill_dir, target)
++            logger.info("Skill %r installed", skill_name)
++
++        return {
++            "success": True,
++            "skill_name": skill_name,
++            "message": f"Skill '{skill_name}' installed successfully",
++        }
++
++    def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
++        self.validate_skill_name(name)
++        self.ensure_custom_skill_is_editable(name)
++        target = self.get_custom_skill_dir(name)
++        if history_meta is not None:
++            prev_content = self.read_custom_skill(name)
++            try:
++                self.append_history(name, {**history_meta, "prev_content": prev_content})
++            except OSError as e:
++                if not isinstance(e, PermissionError) and e.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
++                    raise
++                logger.warning(
++                    "Skipping delete history write for custom skill %s due to readonly/permission failure; continuing with skill directory removal: %s",
++                    name,
++                    e,
++                )
++        if target.exists():
++            shutil.rmtree(target)
++
++    def append_history(self, name: str, record: dict) -> None:
++        self.validate_skill_name(name)
++        payload = {"ts": datetime.now(UTC).isoformat(), **record}
++        history_path = self.get_skill_history_file(name)
++        history_path.parent.mkdir(parents=True, exist_ok=True)
++        with history_path.open("a", encoding="utf-8") as f:
++            f.write(json.dumps(payload, ensure_ascii=False))
++            f.write("\n")
++
++    def read_history(self, name: str) -> list[dict]:
++        self.validate_skill_name(name)
++        history_path = self.get_skill_history_file(name)
++        if not history_path.exists():
++            return []
++        records: list[dict] = []
++        for line in history_path.read_text(encoding="utf-8").splitlines():
++            if not line.strip():
++                continue
++            records.append(json.loads(line))
++        return records
+diff --git a/backend/packages/harness/deerflow/skills/storage/skill_storage.py b/backend/packages/harness/deerflow/skills/storage/skill_storage.py
+new file mode 100644
+index 00000000..8920f8e2
+--- /dev/null
++++ b/backend/packages/harness/deerflow/skills/storage/skill_storage.py
+@@ -0,0 +1,258 @@
++"""Abstract SkillStorage and shared template-method orchestration.
++
++This module mirrors the design pattern used by ``deerflow/sandbox/sandbox_provider.py``:
++a thin abstract base class with a small number of storage-medium-specific
++abstract operations, plus final template-method flows that compose those
++operations together with protocol-level helpers (parser/validation/installer
++zip-safety functions).
++"""
++
++from __future__ import annotations
++
++import logging
++import re
++from abc import ABC, abstractmethod
++from collections.abc import Iterable
++from pathlib import Path
++
++from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F401
++
++logger = logging.getLogger(__name__)
++
++
++_SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
++
++
++class SkillStorage(ABC):
++    """Abstract base for skill storage backends.
++
++    Subclasses implement a small set of storage-medium-specific atomic
++    operations; this base class provides the final template-method flows
++    (load_skills, install_skill_from_archive, history serialization, etc.)
++    that compose them with protocol-level helpers.
++    """
++
++    def __init__(self, container_path: str = "/mnt/skills") -> None:
++        self._container_root = container_path
++
++    @staticmethod
++    def validate_skill_name(name: str) -> str:
++        """Validate and normalise a skill name; return the normalised form."""
++        normalized = name.strip()
++        if not _SKILL_NAME_PATTERN.fullmatch(normalized):
++            raise ValueError("Skill name must be hyphen-case using lowercase letters, digits, and hyphens only.")
++        if len(normalized) > 64:
++            raise ValueError("Skill name must be 64 characters or fewer.")
++        return normalized
++
++    # ------------------------------------------------------------------
++    # Abstract atomic operations (storage-medium specific)
++    # ------------------------------------------------------------------
++
++    @abstractmethod
++    def get_skills_root_path(self) -> Path:
++        """Absolute host path to the skills root, used for sandbox mounts.
++
++        Origin: ``deerflow.skills.loader.get_skills_root_path``.
++        """
++
++    @abstractmethod
++    def _iter_skill_files(self) -> Iterable[tuple[SkillCategory, Path, Path]]:
++        """Yield ``(category, category_root, skill_md_path)`` for every SKILL.md.
++
++        ``category`` is ``SkillAccessLevel.PUBLIC`` or ``SkillAccessLevel.CUSTOM``.
++
++        Origin: extracted from the directory-walk logic inside
++        ``deerflow.skills.loader.load_skills``.
++        """
++
++    @abstractmethod
++    def read_custom_skill(self, name: str, relative_path: str) -> str:
++        """Read a text file under ``custom/<name>/<relative_path>``.
++
++        Origin: extracted from ``deerflow.skills.manager.read_custom_skill_content``
++        (and the ``Path.read_text`` calls used by ``app.gateway.routers.skills``
++        for support files).
++        """
++
++    @abstractmethod
++    def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
++        """Atomically write a text file under ``custom/<name>/<relative_path>``.
++
++        Origin: ``deerflow.skills.manager.atomic_write`` (applied to skill
++        files and support files in ``app.gateway.routers.skills``).
++        """
++
++    @abstractmethod
++    def install_skill_from_archive(self, archive_path: str | Path) -> dict:
++        """Install a skill from a ``.skill`` ZIP archive.
++
++        Implementations are responsible for the full flow: validating the
++        archive (extension, zip safety, frontmatter), resolving the skill
++        name, and persisting the extracted skill directory into the
++        ``custom/`` namespace. Must raise ``SkillAlreadyExistsError`` when
++        the destination already exists.
++
++        Origin: ``deerflow.skills.installer.install_skill_from_archive``.
++        """
++
++    @abstractmethod
++    def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
++        """Delete a custom skill (validation + history + removal).
++
++        If ``history_meta`` is provided, an entry is appended to the skill's
++        HISTORY.jsonl before removal; ``prev_content`` is filled in by the
++        implementation. History-write failures caused by readonly /
++        permission-denied storage are logged and ignored so the actual
++        deletion still proceeds.
++
++        Origin: composed from ``deerflow.skills.manager.validate_skill_name``,
++        ``ensure_custom_skill_is_editable`` and ``shutil.rmtree`` -- mirrors
++        the DELETE handler in ``app.gateway.routers.skills`` (``delete_skill``).
++        """
++
++    @abstractmethod
++    def custom_skill_exists(self, name: str) -> bool:
++        """Origin: ``deerflow.skills.manager.custom_skill_exists``."""
++
++    @abstractmethod
++    def public_skill_exists(self, name: str) -> bool:
++        """Origin: ``deerflow.skills.manager.public_skill_exists``."""
++
++    @abstractmethod
++    def append_history(self, name: str, record: dict) -> None:
++        """Append a JSONL history entry for ``name``.
++
++        Implementations are responsible for validating ``name``, attaching a
++        UTC timestamp (``ts``) to the record, and serialising it as a single
++        JSON line.
++
++        Origin: ``deerflow.skills.manager.append_history``.
++        """
++
++    @abstractmethod
++    def read_history(self, name: str) -> list[dict]:
++        """Return all history records for ``name``, oldest first.
++
++        Implementations are responsible for validating ``name`` and parsing
++        each stored entry back into a dict.
++
++        Origin: ``deerflow.skills.manager.read_history``.
++        """
++
++    # ------------------------------------------------------------------
++    # Final template-method flows
++    # ------------------------------------------------------------------
++
++    def get_container_root(self) -> str:
++        """Origin: ``deerflow.config.skills_config.SkillsConfig.container_path``
++        accessor (previously read directly from config by callers)."""
++        return self._container_root
++
++    # ------------------------------------------------------------------
++    # Path getters (concrete; layout is part of the SKILL.md protocol).
++    # ------------------------------------------------------------------
++
++    def get_custom_skill_dir(self, name: str) -> Path:
++        """Path to ``custom/<name>``. Does not create the directory.
++
++        Origin: ``deerflow.skills.manager.get_custom_skill_dir``.
++        """
++        return self.get_skills_root_path() / SkillCategory.CUSTOM.value / name
++
++    def get_custom_skill_file(self, name: str) -> Path:
++        """Path to ``custom/<name>/SKILL.md``.
++
++        Origin: ``deerflow.skills.manager.get_custom_skill_file``.
++        """
++        return self.get_custom_skill_dir(name) / SKILL_MD_FILE
++
++    def get_skill_history_file(self, name: str) -> Path:
++        """Path to ``custom/.history/<name>.jsonl``. Does not create parents.
++
++        Origin: ``deerflow.skills.manager.get_skill_history_file``.
++        """
++        return self.get_skills_root_path() / SkillCategory.CUSTOM.value / ".history" / f"{name}.jsonl"
++
++    def load_skills(self, *, enabled_only: bool = False) -> list[Skill]:
++        """Discover all skills, merge enabled state, sort and optionally filter.
++
++        Origin: ``deerflow.skills.loader.load_skills``.
++        """
++        from deerflow.skills.parser import parse_skill_file
++
++        skills_by_name: dict[str, Skill] = {}
++        for category, category_root, md_path in self._iter_skill_files():
++            skill = parse_skill_file(
++                md_path,
++                category=category,
++                relative_path=md_path.parent.relative_to(category_root),
++            )
++            if skill:
++                skills_by_name[skill.name] = skill
++
++        skills = list(skills_by_name.values())
++
++        # Merge enabled state from extensions config (re-read every call so
++        # changes made by another process are picked up immediately).
++        try:
++            from deerflow.config.extensions_config import ExtensionsConfig
++
++            extensions_config = ExtensionsConfig.from_file()
++            for skill in skills:
++                skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
++        except Exception as e:
++            logger.warning("Failed to load extensions config: %s", e)
++
++        if enabled_only:
++            skills = [s for s in skills if s.enabled]
++
++        skills.sort(key=lambda s: s.name)
++        return skills
++
++    def ensure_custom_skill_is_editable(self, name: str) -> None:
++        """Origin: ``deerflow.skills.manager.ensure_custom_skill_is_editable``."""
++        if self.custom_skill_exists(name):
++            return
++        if self.public_skill_exists(name):
++            raise ValueError(f"'{name}' is a built-in skill. To customise it, create a new skill with the same name under skills/custom/.")
++        raise FileNotFoundError(f"Custom skill '{name}' not found.")
++
++    @staticmethod
++    def validate_skill_markdown_content(name: str, content: str) -> None:
++        """Validate SKILL.md content: parse frontmatter and check name matches."""
++        import tempfile
++
++        from deerflow.skills.validation import _validate_skill_frontmatter
++
++        with tempfile.TemporaryDirectory() as tmp_dir:
++            temp_skill_dir = Path(tmp_dir) / SkillStorage.validate_skill_name(name)
++            temp_skill_dir.mkdir(parents=True, exist_ok=True)
++            (temp_skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8")
++            is_valid, message, parsed_name = _validate_skill_frontmatter(temp_skill_dir)
++            if not is_valid:
++                raise ValueError(message)
++            if parsed_name != name:
++                raise ValueError(f"Frontmatter name '{parsed_name}' must match requested skill name '{name}'.")
++
++    def ensure_safe_support_path(self, name: str, relative_path: str) -> Path:
++        """Validate and return the resolved path for a support file inside ``custom/<name>/``."""
++        _ALLOWED_SUPPORT_SUBDIRS = {"references", "templates", "scripts", "assets"}
++        skill_dir = self.get_custom_skill_dir(self.validate_skill_name(name)).resolve()
++        if not relative_path or relative_path.endswith("/"):
++            raise ValueError("Supporting file path must include a filename.")
++        relative = Path(relative_path)
++        if relative.is_absolute():
++            raise ValueError("Supporting file path must be relative.")
++        if any(part in {"..", ""} for part in relative.parts):
++            raise ValueError("Supporting file path must not contain parent-directory traversal.")
++        top_level = relative.parts[0] if relative.parts else ""
++        if top_level not in _ALLOWED_SUPPORT_SUBDIRS:
++            raise ValueError(f"Supporting files must live under one of: {', '.join(sorted(_ALLOWED_SUPPORT_SUBDIRS))}.")
++        target = (skill_dir / relative).resolve()
++        allowed_root = (skill_dir / top_level).resolve()
++        try:
++            target.relative_to(allowed_root)
++        except ValueError as exc:
++            raise ValueError("Supporting file path must stay within the selected support directory.") from exc
++        return target
+diff --git a/backend/packages/harness/deerflow/skills/types.py b/backend/packages/harness/deerflow/skills/types.py
+index 0cdb668f..66efa680 100644
+--- a/backend/packages/harness/deerflow/skills/types.py
++++ b/backend/packages/harness/deerflow/skills/types.py
+@@ -1,6 +1,20 @@
+ from dataclasses import dataclass
++from enum import StrEnum
+ from pathlib import Path
+ 
++SKILL_MD_FILE = "SKILL.md"
++
++
++class SkillCategory(StrEnum):
++    """source category for a skill.
++
++    - ``PUBLIC``: built-in skill bundled with the platform, read-only.
++    - ``CUSTOM``: user-authored skill that can be edited or deleted.
++    """
++
++    PUBLIC = "public"
++    CUSTOM = "custom"
++
+ 
+ @dataclass
+ class Skill:
+@@ -12,7 +26,7 @@ class Skill:
+     skill_dir: Path
+     skill_file: Path
+     relative_path: Path  # Relative path from category root to skill directory
+-    category: str  # 'public' or 'custom'
++    category: SkillCategory  # 'public' or 'custom'
+     enabled: bool = False  # Whether this skill is enabled
+ 
+     @property
+diff --git a/backend/packages/harness/deerflow/skills/validation.py b/backend/packages/harness/deerflow/skills/validation.py
+index 4c0f8085..7d56945a 100644
+--- a/backend/packages/harness/deerflow/skills/validation.py
++++ b/backend/packages/harness/deerflow/skills/validation.py
+@@ -8,6 +8,8 @@ from pathlib import Path
+ 
+ import yaml
+ 
++from deerflow.skills.types import SKILL_MD_FILE
++
+ # Allowed properties in SKILL.md frontmatter
+ ALLOWED_FRONTMATTER_PROPERTIES = {"name", "description", "license", "allowed-tools", "metadata", "compatibility", "version", "author"}
+ 
+@@ -21,7 +23,7 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
+     Returns:
+         Tuple of (is_valid, message, skill_name).
+     """
+-    skill_md = skill_dir / "SKILL.md"
++    skill_md = skill_dir / SKILL_MD_FILE
+     if not skill_md.exists():
+         return False, "SKILL.md not found", None
+ 
+diff --git a/backend/packages/harness/deerflow/subagents/executor.py b/backend/packages/harness/deerflow/subagents/executor.py
+index b42cebac..e74dfc83 100644
+--- a/backend/packages/harness/deerflow/subagents/executor.py
++++ b/backend/packages/harness/deerflow/subagents/executor.py
+@@ -203,10 +203,11 @@ class SubagentExecutor:
+             return []
+ 
+         try:
+-            from deerflow.skills.loader import load_skills
++            from deerflow.skills.storage import get_skill_storage
+ 
++            storage = get_skill_storage()
+             # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
+-            all_skills = await asyncio.to_thread(load_skills, enabled_only=True)
++            all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
+             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
+         except Exception:
+             logger.warning(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}", exc_info=True)
+diff --git a/backend/packages/harness/deerflow/tools/skill_manage_tool.py b/backend/packages/harness/deerflow/tools/skill_manage_tool.py
+index 3b7a109c..3485048b 100644
+--- a/backend/packages/harness/deerflow/tools/skill_manage_tool.py
++++ b/backend/packages/harness/deerflow/tools/skill_manage_tool.py
+@@ -4,7 +4,6 @@ from __future__ import annotations
+ 
+ import asyncio
+ import logging
+-import shutil
+ from typing import Any
+ from weakref import WeakValueDictionary
+ 
+@@ -14,20 +13,9 @@ from langgraph.typing import ContextT
+ from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
+ from deerflow.agents.thread_state import ThreadState
+ from deerflow.mcp.tools import _make_sync_tool_wrapper
+-from deerflow.skills.manager import (
+-    append_history,
+-    atomic_write,
+-    custom_skill_exists,
+-    ensure_custom_skill_is_editable,
+-    ensure_safe_support_path,
+-    get_custom_skill_dir,
+-    get_custom_skill_file,
+-    public_skill_exists,
+-    read_custom_skill_content,
+-    validate_skill_markdown_content,
+-    validate_skill_name,
+-)
+ from deerflow.skills.security_scanner import scan_skill_content
++from deerflow.skills.storage import get_skill_storage
++from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -96,50 +84,49 @@ async def _skill_manage_impl(
+         replace: Replacement text for patch.
+         expected_count: Optional expected number of replacements for patch.
+     """
+-    name = validate_skill_name(name)
++    name = SkillStorage.validate_skill_name(name)
+     lock = _get_lock(name)
+     thread_id = _get_thread_id(runtime)
+ 
+     async with lock:
+         if action == "create":
+-            if await _to_thread(custom_skill_exists, name):
++            if await _to_thread(get_skill_storage().custom_skill_exists, name):
+                 raise ValueError(f"Custom skill '{name}' already exists.")
+             if content is None:
+                 raise ValueError("content is required for create.")
+-            await _to_thread(validate_skill_markdown_content, name, content)
++            await _to_thread(SkillStorage.validate_skill_markdown_content, name, content)
+             scan = await _scan_or_raise(content, executable=False, location=f"{name}/SKILL.md")
+-            skill_file = await _to_thread(get_custom_skill_file, name)
+-            await _to_thread(atomic_write, skill_file, content)
++            await _to_thread(get_skill_storage().write_custom_skill, name, SKILL_MD_FILE, content)
+             await _to_thread(
+-                append_history,
++                get_skill_storage().append_history,
+                 name,
+-                _history_record(action="create", file_path="SKILL.md", prev_content=None, new_content=content, thread_id=thread_id, scanner=scan),
++                _history_record(action="create", file_path=SKILL_MD_FILE, prev_content=None, new_content=content, thread_id=thread_id, scanner=scan),
+             )
+             await refresh_skills_system_prompt_cache_async()
+             return f"Created custom skill '{name}'."
+ 
+         if action == "edit":
+-            await _to_thread(ensure_custom_skill_is_editable, name)
++            await _to_thread(get_skill_storage().ensure_custom_skill_is_editable, name)
+             if content is None:
+                 raise ValueError("content is required for edit.")
+-            await _to_thread(validate_skill_markdown_content, name, content)
+-            scan = await _scan_or_raise(content, executable=False, location=f"{name}/SKILL.md")
+-            skill_file = await _to_thread(get_custom_skill_file, name)
++            await _to_thread(SkillStorage.validate_skill_markdown_content, name, content)
++            scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
++            skill_file = get_skill_storage().get_custom_skill_file(name)
+             prev_content = await _to_thread(skill_file.read_text, encoding="utf-8")
+-            await _to_thread(atomic_write, skill_file, content)
++            await _to_thread(get_skill_storage().write_custom_skill, name, SKILL_MD_FILE, content)
+             await _to_thread(
+-                append_history,
++                get_skill_storage().append_history,
+                 name,
+-                _history_record(action="edit", file_path="SKILL.md", prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
++                _history_record(action="edit", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
+             )
+             await refresh_skills_system_prompt_cache_async()
+             return f"Updated custom skill '{name}'."
+ 
+         if action == "patch":
+-            await _to_thread(ensure_custom_skill_is_editable, name)
++            await _to_thread(get_skill_storage().ensure_custom_skill_is_editable, name)
+             if find is None or replace is None:
+                 raise ValueError("find and replace are required for patch.")
+-            skill_file = await _to_thread(get_custom_skill_file, name)
++            skill_file = get_skill_storage().get_custom_skill_file(name)
+             prev_content = await _to_thread(skill_file.read_text, encoding="utf-8")
+             occurrences = prev_content.count(find)
+             if occurrences == 0:
+@@ -148,64 +135,67 @@ async def _skill_manage_impl(
+                 raise ValueError(f"Expected {expected_count} replacements but found {occurrences}.")
+             replacement_count = expected_count if expected_count is not None else 1
+             new_content = prev_content.replace(find, replace, replacement_count)
+-            await _to_thread(validate_skill_markdown_content, name, new_content)
+-            scan = await _scan_or_raise(new_content, executable=False, location=f"{name}/SKILL.md")
+-            await _to_thread(atomic_write, skill_file, new_content)
++            await _to_thread(SkillStorage.validate_skill_markdown_content, name, new_content)
++            scan = await _scan_or_raise(new_content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
++            await _to_thread(get_skill_storage().write_custom_skill, name, SKILL_MD_FILE, new_content)
+             await _to_thread(
+-                append_history,
++                get_skill_storage().append_history,
+                 name,
+-                _history_record(action="patch", file_path="SKILL.md", prev_content=prev_content, new_content=new_content, thread_id=thread_id, scanner=scan),
++                _history_record(action="patch", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=new_content, thread_id=thread_id, scanner=scan),
+             )
+             await refresh_skills_system_prompt_cache_async()
+             return f"Patched custom skill '{name}' ({replacement_count} replacement(s) applied, {occurrences} match(es) found)."
+ 
+         if action == "delete":
+-            await _to_thread(ensure_custom_skill_is_editable, name)
+-            skill_dir = await _to_thread(get_custom_skill_dir, name)
+-            prev_content = await _to_thread(read_custom_skill_content, name)
+             await _to_thread(
+-                append_history,
++                get_skill_storage().delete_custom_skill,
+                 name,
+-                _history_record(action="delete", file_path="SKILL.md", prev_content=prev_content, new_content=None, thread_id=thread_id, scanner={"decision": "allow", "reason": "Deletion requested."}),
++                history_meta=_history_record(
++                    action="delete",
++                    file_path=SKILL_MD_FILE,
++                    prev_content=None,
++                    new_content=None,
++                    thread_id=thread_id,
++                    scanner={"decision": "allow", "reason": "Deletion requested."},
++                ),
+             )
+-            await _to_thread(shutil.rmtree, skill_dir)
+             await refresh_skills_system_prompt_cache_async()
+             return f"Deleted custom skill '{name}'."
+ 
+         if action == "write_file":
+-            await _to_thread(ensure_custom_skill_is_editable, name)
++            await _to_thread(get_skill_storage().ensure_custom_skill_is_editable, name)
+             if path is None or content is None:
+                 raise ValueError("path and content are required for write_file.")
+-            target = await _to_thread(ensure_safe_support_path, name, path)
++            target = await _to_thread(get_skill_storage().ensure_safe_support_path, name, path)
+             exists = await _to_thread(target.exists)
+             prev_content = await _to_thread(target.read_text, encoding="utf-8") if exists else None
+             executable = "scripts/" in path or path.startswith("scripts/")
+             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}")
+-            await _to_thread(atomic_write, target, content)
++            await _to_thread(get_skill_storage().write_custom_skill, name, path, content)
+             await _to_thread(
+-                append_history,
++                get_skill_storage().append_history,
+                 name,
+                 _history_record(action="write_file", file_path=path, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
+             )
+             return f"Wrote '{path}' for custom skill '{name}'."
+ 
+         if action == "remove_file":
+-            await _to_thread(ensure_custom_skill_is_editable, name)
++            await _to_thread(get_skill_storage().ensure_custom_skill_is_editable, name)
+             if path is None:
+                 raise ValueError("path is required for remove_file.")
+-            target = await _to_thread(ensure_safe_support_path, name, path)
++            target = await _to_thread(get_skill_storage().ensure_safe_support_path, name, path)
+             if not await _to_thread(target.exists):
+                 raise FileNotFoundError(f"Supporting file '{path}' not found for skill '{name}'.")
+             prev_content = await _to_thread(target.read_text, encoding="utf-8")
+             await _to_thread(target.unlink)
+             await _to_thread(
+-                append_history,
++                get_skill_storage().append_history,
+                 name,
+                 _history_record(action="remove_file", file_path=path, prev_content=prev_content, new_content=None, thread_id=thread_id, scanner={"decision": "allow", "reason": "Deletion requested."}),
+             )
+             return f"Removed '{path}' from custom skill '{name}'."
+ 
+-        if await _to_thread(public_skill_exists, name):
++        if await _to_thread(get_skill_storage().public_skill_exists, name):
+             raise ValueError(f"'{name}' is a built-in skill. To customise it, create a new skill with the same name under skills/custom/.")
+         raise ValueError(f"Unsupported action '{action}'.")
+ 
+diff --git a/backend/tests/conftest.py b/backend/tests/conftest.py
+index 997f4257..e680a84a 100644
+--- a/backend/tests/conftest.py
++++ b/backend/tests/conftest.py
+@@ -13,6 +13,7 @@ import pytest
+ 
+ # Make 'app' and 'deerflow' importable from any working directory
+ sys.path.insert(0, str(Path(__file__).parent.parent))
++sys.path.insert(0, str(Path(__file__).parent))
+ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+ 
+ # Break the circular import chain that exists in production code:
+@@ -37,6 +38,23 @@ _executor_mock.get_background_task_result = MagicMock()
+ sys.modules["deerflow.subagents.executor"] = _executor_mock
+ 
+ 
++@pytest.fixture(autouse=True)
++def _reset_skill_storage_singleton():
++    """Reset the SkillStorage singleton between tests.
++
++    Tests routinely monkeypatch ``deerflow.config.get_app_config`` to point
++    at a per-test ``tmp_path`` skills root. The ``get_skill_storage()``
++    factory caches the storage instance after first use, so without this
++    fixture an instance bound to one test's ``tmp_path`` would leak into
++    later tests via production code that delegates to the singleton.
++    """
++    from skills_test_helpers import reset_skill_storage
++
++    reset_skill_storage()
++    yield
++    reset_skill_storage()
++
++
+ @pytest.fixture()
+ def provisioner_module():
+     """Load docker/provisioner/app.py as an importable test module.
+diff --git a/backend/tests/test_skill_manage_tool.py b/backend/tests/skills/test_skill_manage_tool.py
+similarity index 93%
+rename from backend/tests/test_skill_manage_tool.py
+rename to backend/tests/skills/test_skill_manage_tool.py
+index 1b16fb48..6103ebf2 100644
+--- a/backend/tests/test_skill_manage_tool.py
++++ b/backend/tests/skills/test_skill_manage_tool.py
+@@ -3,6 +3,9 @@ from types import SimpleNamespace
+ 
+ import anyio
+ import pytest
++from skills_test_helpers import set_skill_storage
++
++from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+ 
+ skill_manage_module = importlib.import_module("deerflow.tools.skill_manage_tool")
+ 
+@@ -24,8 +27,8 @@ def test_skill_manage_create_and_patch(monkeypatch, tmp_path):
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
+     monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+     refresh_calls = []
+ 
+     async def _refresh():
+@@ -68,8 +71,8 @@ def test_skill_manage_patch_replaces_single_occurrence_by_default(monkeypatch, t
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
+     monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+ 
+     async def _refresh():
+         return None
+@@ -108,7 +111,7 @@ def test_skill_manage_rejects_public_skill_patch(monkeypatch, tmp_path):
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+ 
+     runtime = SimpleNamespace(context={}, config={"configurable": {}})
+ 
+@@ -132,7 +135,7 @@ def test_skill_manage_sync_wrapper_supported(monkeypatch, tmp_path):
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+     refresh_calls = []
+ 
+     async def _refresh():
+@@ -160,8 +163,8 @@ def test_skill_manage_rejects_support_path_traversal(monkeypatch, tmp_path):
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
+     monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+ 
+     async def _refresh():
+         return None
+diff --git a/backend/tests/skills/test_skill_storage_local.py b/backend/tests/skills/test_skill_storage_local.py
+new file mode 100644
+index 00000000..1127d586
+--- /dev/null
++++ b/backend/tests/skills/test_skill_storage_local.py
+@@ -0,0 +1,297 @@
++"""Tests for LocalSkillStorage and the SkillStorage abstraction."""
++
++from __future__ import annotations
++
++import io
++import json
++import zipfile
++from pathlib import Path
++
++import pytest
++from skills_test_helpers import reset_skill_storage, set_skill_storage
++
++from deerflow.skills.installer import SkillAlreadyExistsError
++from deerflow.skills.storage import LocalSkillStorage, get_skill_storage
++from deerflow.skills.storage.skill_storage import SkillStorage
++
++
++def _write_skill(skill_dir: Path, name: str, description: str = "Test skill") -> None:
++    skill_dir.mkdir(parents=True, exist_ok=True)
++    (skill_dir / "SKILL.md").write_text(
++        f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
++        encoding="utf-8",
++    )
++
++
++def _make_skill_archive(tmp_path: Path, name: str, description: str = "Archive skill") -> Path:
++    buf = io.BytesIO()
++    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
++        zf.writestr(
++            f"{name}/SKILL.md",
++            f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
++        )
++    archive = tmp_path / f"{name}.skill"
++    archive.write_bytes(buf.getvalue())
++    return archive
++
++
++@pytest.fixture
++def storage(tmp_path: Path) -> LocalSkillStorage:
++    return LocalSkillStorage(host_path=str(tmp_path / "skills"))
++
++
++def test_local_storage_implements_abstract_class(storage: LocalSkillStorage):
++    assert isinstance(storage, SkillStorage)
++
++
++def test_load_skills_discovers_public_and_custom(tmp_path: Path, storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "public" / "p1", "p1")
++    _write_skill(root / "custom" / "c1", "c1")
++
++    skills = storage.load_skills()
++    by_name = {s.name: s for s in skills}
++
++    assert by_name["p1"].category == "public"
++    assert by_name["c1"].category == "custom"
++
++
++def test_load_skills_returns_empty_when_root_missing(tmp_path: Path):
++    storage = LocalSkillStorage(host_path=str(tmp_path / "does-not-exist"))
++    assert storage.load_skills() == []
++
++
++def test_custom_and_public_skill_exists(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "public" / "p1", "p1")
++    _write_skill(root / "custom" / "c1", "c1")
++
++    assert storage.public_skill_exists("p1") is True
++    assert storage.custom_skill_exists("c1") is True
++    assert storage.public_skill_exists("nope") is False
++    assert storage.custom_skill_exists("nope") is False
++
++
++def test_read_custom_skill_content_returns_markdown(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1", description="Hello")
++
++    content = storage.read_custom_skill("c1")
++    assert "name: c1" in content
++    assert "Hello" in content
++
++
++def test_read_custom_skill_content_raises_when_missing(storage: LocalSkillStorage):
++    with pytest.raises(FileNotFoundError):
++        storage.read_custom_skill("absent")
++
++
++def test_delete_custom_skill_removes_directory(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    storage.delete_custom_skill("c1")
++    assert not storage.custom_skill_exists("c1")
++
++
++def test_delete_custom_skill_rejects_builtin(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "public" / "builtin", "builtin")
++
++    with pytest.raises(ValueError):
++        storage.delete_custom_skill("builtin")
++
++
++def test_install_skill_from_archive_creates_custom_skill(tmp_path: Path, storage: LocalSkillStorage):
++    archive = _make_skill_archive(tmp_path, "from-archive")
++
++    result = storage.install_skill_from_archive(archive)
++    assert result["success"] is True
++    assert result["skill_name"] == "from-archive"
++    assert storage.custom_skill_exists("from-archive")
++
++
++def test_install_skill_from_archive_rejects_duplicate(tmp_path: Path, storage: LocalSkillStorage):
++    archive = _make_skill_archive(tmp_path, "dupe")
++    storage.install_skill_from_archive(archive)
++    with pytest.raises(SkillAlreadyExistsError):
++        storage.install_skill_from_archive(archive)
++
++
++def test_install_skill_from_archive_validates_extension(tmp_path: Path, storage: LocalSkillStorage):
++    bad = tmp_path / "not-a-skill.zip"
++    bad.write_bytes(b"PK\x03\x04")
++    with pytest.raises(ValueError, match=".skill extension"):
++        storage.install_skill_from_archive(bad)
++
++
++def test_install_skill_from_archive_missing_file(tmp_path: Path, storage: LocalSkillStorage):
++    with pytest.raises(FileNotFoundError):
++        storage.install_skill_from_archive(tmp_path / "nope.skill")
++
++
++def test_history_round_trip(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    storage.append_history("c1", {"action": "a", "n": 1})
++    storage.append_history("c1", {"action": "b", "n": 2})
++
++    history = storage.read_history("c1")
++    assert [h["action"] for h in history[-2:]] == ["a", "b"]
++    # Each line is valid JSON with a timestamp.
++    raw_path = storage.get_skills_root_path() / "custom" / ".history" / "c1.jsonl"
++    for line in raw_path.read_text().splitlines():
++        if line.strip():
++            assert "ts" in json.loads(line)
++
++
++def test_get_container_root_default(storage: LocalSkillStorage):
++    assert storage.get_container_root() == "/mnt/skills"
++
++
++def test_get_container_root_custom(tmp_path: Path):
++    storage = LocalSkillStorage(host_path=str(tmp_path / "skills"), container_path="/custom/root")
++    assert storage.get_container_root() == "/custom/root"
++
++
++def test_singleton_set_and_reset(tmp_path: Path):
++    custom = LocalSkillStorage(host_path=str(tmp_path / "skills"))
++    set_skill_storage(custom)
++    try:
++        assert get_skill_storage() is custom
++    finally:
++        reset_skill_storage()
++
++
++# ---------------------------------------------------------------------------
++# write_custom_skill
++# ---------------------------------------------------------------------------
++
++
++def test_write_custom_skill_creates_file(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    storage.write_custom_skill("c1", "SKILL.md", "---\nname: c1\ndescription: updated\n---\n")
++    content = (root / "custom" / "c1" / "SKILL.md").read_text(encoding="utf-8")
++    assert "updated" in content
++
++
++def test_write_custom_skill_creates_support_file(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    storage.write_custom_skill("c1", "references/doc.md", "# doc")
++    assert (root / "custom" / "c1" / "references" / "doc.md").read_text(encoding="utf-8") == "# doc"
++
++
++# ---------------------------------------------------------------------------
++# delete_custom_skill with history_meta
++# ---------------------------------------------------------------------------
++
++
++def test_delete_custom_skill_with_history_meta_writes_history(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    storage.delete_custom_skill("c1", history_meta={"action": "delete", "author": "test"})
++    assert not storage.custom_skill_exists("c1")
++
++    history = storage.read_history("c1")
++    assert any(h["action"] == "delete" for h in history)
++
++
++# ---------------------------------------------------------------------------
++# read_history edge cases
++# ---------------------------------------------------------------------------
++
++
++def test_read_history_returns_empty_when_no_file(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    assert storage.read_history("c1") == []
++
++
++# ---------------------------------------------------------------------------
++# ensure_custom_skill_is_editable
++# ---------------------------------------------------------------------------
++
++
++def test_ensure_custom_skill_is_editable_passes_for_custom(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++    storage.ensure_custom_skill_is_editable("c1")  # must not raise
++
++
++def test_ensure_custom_skill_is_editable_raises_for_public(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "public" / "builtin", "builtin")
++
++    with pytest.raises(ValueError, match="built-in"):
++        storage.ensure_custom_skill_is_editable("builtin")
++
++
++def test_ensure_custom_skill_is_editable_raises_when_missing(storage: LocalSkillStorage):
++    with pytest.raises(FileNotFoundError):
++        storage.ensure_custom_skill_is_editable("ghost")
++
++
++# ---------------------------------------------------------------------------
++# validate_skill_markdown_content
++# ---------------------------------------------------------------------------
++
++
++def test_validate_skill_markdown_content_accepts_valid(storage: LocalSkillStorage):
++    content = "---\nname: my-skill\ndescription: A skill.\n---\n\n# my-skill\n"
++    SkillStorage.validate_skill_markdown_content("my-skill", content)  # must not raise
++
++
++def test_validate_skill_markdown_content_rejects_name_mismatch(storage: LocalSkillStorage):
++    content = "---\nname: other-skill\ndescription: A skill.\n---\n\n# other-skill\n"
++    with pytest.raises(ValueError, match="must match"):
++        SkillStorage.validate_skill_markdown_content("my-skill", content)
++
++
++def test_validate_skill_markdown_content_rejects_missing_frontmatter(storage: LocalSkillStorage):
++    with pytest.raises(ValueError):
++        SkillStorage.validate_skill_markdown_content("my-skill", "no frontmatter here")
++
++
++# ---------------------------------------------------------------------------
++# ensure_safe_support_path
++# ---------------------------------------------------------------------------
++
++
++def test_ensure_safe_support_path_returns_resolved_path(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    result = storage.ensure_safe_support_path("c1", "references/doc.md")
++    expected = (root / "custom" / "c1" / "references" / "doc.md").resolve()
++    assert result == expected
++
++
++def test_ensure_safe_support_path_rejects_disallowed_subdir(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    with pytest.raises(ValueError, match="must live under"):
++        storage.ensure_safe_support_path("c1", "secrets/password.txt")
++
++
++def test_ensure_safe_support_path_rejects_traversal(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    with pytest.raises(ValueError, match="traversal|parent-directory"):
++        storage.ensure_safe_support_path("c1", "references/../../../etc/passwd")
++
++
++def test_ensure_safe_support_path_rejects_absolute_path(storage: LocalSkillStorage):
++    root = storage.get_skills_root_path()
++    _write_skill(root / "custom" / "c1", "c1")
++
++    with pytest.raises(ValueError, match="relative"):
++        storage.ensure_safe_support_path("c1", "/etc/passwd")
+diff --git a/backend/tests/test_skills_archive_root.py b/backend/tests/skills/test_skills_archive_root.py
+similarity index 100%
+rename from backend/tests/test_skills_archive_root.py
+rename to backend/tests/skills/test_skills_archive_root.py
+diff --git a/backend/tests/test_skills_bundled.py b/backend/tests/skills/test_skills_bundled.py
+similarity index 94%
+rename from backend/tests/test_skills_bundled.py
+rename to backend/tests/skills/test_skills_bundled.py
+index 0e99997a..53dbf70c 100644
+--- a/backend/tests/test_skills_bundled.py
++++ b/backend/tests/skills/test_skills_bundled.py
+@@ -12,7 +12,7 @@ import pytest
+ 
+ from deerflow.skills.validation import _validate_skill_frontmatter
+ 
+-SKILLS_PUBLIC_DIR = Path(__file__).resolve().parents[2] / "skills" / "public"
++SKILLS_PUBLIC_DIR = Path(__file__).resolve().parents[3] / "skills" / "public"
+ BUNDLED_SKILL_DIRS = sorted(p.parent for p in SKILLS_PUBLIC_DIR.rglob("SKILL.md"))
+ 
+ 
+diff --git a/backend/tests/test_skills_custom_router.py b/backend/tests/skills/test_skills_custom_router.py
+similarity index 93%
+rename from backend/tests/test_skills_custom_router.py
+rename to backend/tests/skills/test_skills_custom_router.py
+index bb7ecf6d..5020f876 100644
+--- a/backend/tests/test_skills_custom_router.py
++++ b/backend/tests/skills/test_skills_custom_router.py
+@@ -6,9 +6,10 @@ from types import SimpleNamespace
+ 
+ from fastapi import FastAPI
+ from fastapi.testclient import TestClient
++from skills_test_helpers import set_skill_storage
+ 
+ from app.gateway.routers import skills as skills_router
+-from deerflow.skills.manager import get_skill_history_file
++from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+ from deerflow.skills.types import Skill
+ 
+ 
+@@ -60,8 +61,8 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
+     async def _refresh():
+         refresh_calls.append("refresh")
+ 
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+     monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+-    monkeypatch.setattr("deerflow.skills.installer.get_skills_root_path", lambda: skills_root)
+     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+ 
+@@ -98,8 +99,8 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
+     async def _refresh():
+         refresh_calls.append("refresh")
+ 
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+     monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+-    monkeypatch.setattr("deerflow.skills.installer.get_skills_root_path", lambda: skills_root)
+     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+ 
+@@ -125,7 +126,7 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+     monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+     refresh_calls = []
+ 
+@@ -175,8 +176,10 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
+-    get_skill_history_file("demo-skill").write_text(
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
++    history_file = skills_root / "custom" / ".history" / "demo-skill.jsonl"
++    history_file.parent.mkdir(parents=True, exist_ok=True)
++    history_file.write_text(
+         '{"action":"human_edit","prev_content":' + json.dumps(original_content) + ',"new_content":' + json.dumps(edited_content) + "}\n",
+         encoding="utf-8",
+     )
+@@ -217,7 +220,7 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
++    set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+     monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+     refresh_calls = []
+ 
+@@ -255,7 +258,6 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
+     refresh_calls = []
+ 
+     async def _refresh():
+@@ -264,7 +266,9 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
+     def _readonly_history(*args, **kwargs):
+         raise OSError(errno.EROFS, "Read-only file system", str(skills_root / "custom" / ".history"))
+ 
+-    monkeypatch.setattr("app.gateway.routers.skills.append_history", _readonly_history)
++    storage = LocalSkillStorage(host_path=str(skills_root))
++    monkeypatch.setattr(storage, "append_history", _readonly_history)
++    set_skill_storage(storage)
+     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
+ 
+     app = FastAPI()
+@@ -289,7 +293,6 @@ def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp
+         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+     )
+     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+-    monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
+     refresh_calls = []
+ 
+     async def _refresh():
+@@ -298,7 +301,7 @@ def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp
+     def _fail_rmtree(*args, **kwargs):
+         raise PermissionError(errno.EACCES, "Permission denied", str(custom_dir))
+ 
+-    monkeypatch.setattr("app.gateway.routers.skills.shutil.rmtree", _fail_rmtree)
++    monkeypatch.setattr("deerflow.skills.storage.local_skill_storage.shutil.rmtree", _fail_rmtree)
+     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
+ 
+     app = FastAPI()
+@@ -328,7 +331,10 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
+         refresh_calls.append("refresh")
+         enabled_state["value"] = False
+ 
+-    monkeypatch.setattr("app.gateway.routers.skills.load_skills", _load_skills)
++    monkeypatch.setattr(
++        "app.gateway.routers.skills.get_skill_storage",
++        lambda: SimpleNamespace(load_skills=_load_skills),
++    )
+     monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
+     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
+     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
+diff --git a/backend/tests/test_skills_installer.py b/backend/tests/skills/test_skills_installer.py
+similarity index 50%
+rename from backend/tests/test_skills_installer.py
+rename to backend/tests/skills/test_skills_installer.py
+index a7c9eae5..05d909cd 100644
+--- a/backend/tests/test_skills_installer.py
++++ b/backend/tests/skills/test_skills_installer.py
+@@ -1,6 +1,5 @@
+ """Tests for deerflow.skills.installer — shared skill installation logic."""
+ 
+-import shutil
+ import stat
+ import zipfile
+ from pathlib import Path
+@@ -8,15 +7,13 @@ from pathlib import Path
+ import pytest
+ 
+ from deerflow.skills.installer import (
+-    SkillSecurityScanError,
+-    install_skill_from_archive,
+     is_symlink_member,
+     is_unsafe_zip_member,
+     resolve_skill_dir_from_archive,
+     safe_extract_skill_archive,
+     should_ignore_archive_entry,
+ )
+-from deerflow.skills.security_scanner import ScanResult
++from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+ 
+ # ---------------------------------------------------------------------------
+ # is_unsafe_zip_member
+@@ -167,18 +164,11 @@ class TestSafeExtract:
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# install_skill_from_archive (full integration)
++# install_skill_from_archive (full integration via LocalSkillStorage)
+ # ---------------------------------------------------------------------------
+ 
+ 
+ class TestInstallSkillFromArchive:
+-    @pytest.fixture(autouse=True)
+-    def _allow_security_scan(self, monkeypatch):
+-        async def _scan(*args, **kwargs):
+-            return ScanResult(decision="allow", reason="ok")
+-
+-        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+-
+     def _make_skill_zip(self, tmp_path: Path, skill_name: str = "test-skill") -> Path:
+         """Create a valid .skill archive."""
+         zip_path = tmp_path / f"{skill_name}.skill"
+@@ -189,199 +179,32 @@ class TestInstallSkillFromArchive:
+             )
+         return zip_path
+ 
++    def _storage(self, skills_root: Path) -> LocalSkillStorage:
++        return LocalSkillStorage(host_path=str(skills_root))
++
+     def test_success(self, tmp_path):
+         zip_path = self._make_skill_zip(tmp_path)
+         skills_root = tmp_path / "skills"
+         skills_root.mkdir()
+-        result = install_skill_from_archive(zip_path, skills_root=skills_root)
++        result = self._storage(skills_root).install_skill_from_archive(zip_path)
+         assert result["success"] is True
+         assert result["skill_name"] == "test-skill"
+         assert (skills_root / "custom" / "test-skill" / "SKILL.md").exists()
+ 
+-    def test_scans_skill_markdown_before_install(self, tmp_path, monkeypatch):
+-        zip_path = self._make_skill_zip(tmp_path)
+-        skills_root = tmp_path / "skills"
+-        skills_root.mkdir()
+-        calls = []
+-
+-        async def _scan(content, *, executable, location):
+-            calls.append({"content": content, "executable": executable, "location": location})
+-            return ScanResult(decision="allow", reason="ok")
+-
+-        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+-
+-        install_skill_from_archive(zip_path, skills_root=skills_root)
+-
+-        assert calls == [
+-            {
+-                "content": "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n",
+-                "executable": False,
+-                "location": "test-skill/SKILL.md",
+-            }
+-        ]
+-
+-    def test_scans_support_files_and_scripts_before_install(self, tmp_path, monkeypatch):
+-        zip_path = tmp_path / "test-skill.skill"
+-        with zipfile.ZipFile(zip_path, "w") as zf:
+-            zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
+-            zf.writestr("test-skill/references/guide.md", "# Guide\n")
+-            zf.writestr("test-skill/templates/prompt.txt", "Use care.\n")
+-            zf.writestr("test-skill/scripts/run.sh", "#!/bin/sh\necho ok\n")
+-            zf.writestr("test-skill/assets/logo.png", b"\x89PNG\r\n\x1a\n")
+-            zf.writestr("test-skill/references/.env", "TOKEN=secret\n")
+-            zf.writestr("test-skill/templates/config.cfg", "TOKEN=secret\n")
+-        skills_root = tmp_path / "skills"
+-        skills_root.mkdir()
+-        calls = []
+-
+-        async def _scan(content, *, executable, location):
+-            calls.append({"content": content, "executable": executable, "location": location})
+-            return ScanResult(decision="allow", reason="ok")
+-
+-        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+-
+-        install_skill_from_archive(zip_path, skills_root=skills_root)
+-
+-        assert calls == [
+-            {
+-                "content": "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n",
+-                "executable": False,
+-                "location": "test-skill/SKILL.md",
+-            },
+-            {
+-                "content": "# Guide\n",
+-                "executable": False,
+-                "location": "test-skill/references/guide.md",
+-            },
+-            {
+-                "content": "#!/bin/sh\necho ok\n",
+-                "executable": True,
+-                "location": "test-skill/scripts/run.sh",
+-            },
+-            {
+-                "content": "Use care.\n",
+-                "executable": False,
+-                "location": "test-skill/templates/prompt.txt",
+-            },
+-        ]
+-        assert all("secret" not in call["content"] for call in calls)
+-
+-    def test_nested_skill_markdown_prevents_install(self, tmp_path):
+-        zip_path = tmp_path / "test-skill.skill"
+-        with zipfile.ZipFile(zip_path, "w") as zf:
+-            zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
+-            zf.writestr("test-skill/references/other/SKILL.md", "# Nested skill\n")
+-        skills_root = tmp_path / "skills"
+-        skills_root.mkdir()
+-
+-        with pytest.raises(SkillSecurityScanError, match="nested SKILL.md"):
+-            install_skill_from_archive(zip_path, skills_root=skills_root)
+-
+-        assert not (skills_root / "custom" / "test-skill").exists()
+-
+-    def test_script_warn_prevents_install(self, tmp_path, monkeypatch):
+-        zip_path = tmp_path / "test-skill.skill"
+-        with zipfile.ZipFile(zip_path, "w") as zf:
+-            zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
+-            zf.writestr("test-skill/scripts/run.sh", "#!/bin/sh\necho ok\n")
+-        skills_root = tmp_path / "skills"
+-        skills_root.mkdir()
+-
+-        async def _scan(*args, executable, **kwargs):
+-            if executable:
+-                return ScanResult(decision="warn", reason="script needs review")
+-            return ScanResult(decision="allow", reason="ok")
+-
+-        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+-
+-        with pytest.raises(SkillSecurityScanError, match="rejected executable.*script needs review"):
+-            install_skill_from_archive(zip_path, skills_root=skills_root)
+-
+-        assert not (skills_root / "custom" / "test-skill").exists()
+-
+-    def test_security_scan_block_prevents_install(self, tmp_path, monkeypatch):
+-        zip_path = self._make_skill_zip(tmp_path, skill_name="blocked-skill")
+-        skills_root = tmp_path / "skills"
+-        skills_root.mkdir()
+-
+-        async def _scan(*args, **kwargs):
+-            return ScanResult(decision="block", reason="prompt injection")
+-
+-        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+-
+-        with pytest.raises(SkillSecurityScanError, match="Security scan blocked.*prompt injection"):
+-            install_skill_from_archive(zip_path, skills_root=skills_root)
+-
+-        assert not (skills_root / "custom" / "blocked-skill").exists()
+-
+-    def test_copy_failure_does_not_leave_partial_install(self, tmp_path, monkeypatch):
+-        zip_path = self._make_skill_zip(tmp_path)
+-        skills_root = tmp_path / "skills"
+-        skills_root.mkdir()
+-
+-        def _copytree(src, dst):
+-            partial = Path(dst)
+-            partial.mkdir(parents=True)
+-            (partial / "partial.txt").write_text("partial", encoding="utf-8")
+-            raise OSError("copy failed")
+-
+-        monkeypatch.setattr("deerflow.skills.installer.shutil.copytree", _copytree)
+-
+-        with pytest.raises(OSError, match="copy failed"):
+-            install_skill_from_archive(zip_path, skills_root=skills_root)
+-
+-        custom_dir = skills_root / "custom"
+-        assert not (custom_dir / "test-skill").exists()
+-        assert not [path for path in custom_dir.iterdir() if path.name.startswith(".installing-test-skill-")]
+-
+-    def test_concurrent_target_creation_does_not_get_clobbered(self, tmp_path, monkeypatch):
+-        zip_path = self._make_skill_zip(tmp_path)
+-        skills_root = tmp_path / "skills"
+-        skills_root.mkdir()
+-        target = skills_root / "custom" / "test-skill"
+-        original_copytree = shutil.copytree
+-
+-        def _copytree(src, dst):
+-            target.mkdir(parents=True)
+-            (target / "marker.txt").write_text("external", encoding="utf-8")
+-            return original_copytree(src, dst)
+-
+-        monkeypatch.setattr("deerflow.skills.installer.shutil.copytree", _copytree)
+-
+-        with pytest.raises(ValueError, match="already exists"):
+-            install_skill_from_archive(zip_path, skills_root=skills_root)
+-
+-        assert (target / "marker.txt").read_text(encoding="utf-8") == "external"
+-        assert not (target / "SKILL.md").exists()
+-
+-    def test_move_failure_cleans_reserved_target(self, tmp_path, monkeypatch):
+-        zip_path = self._make_skill_zip(tmp_path)
+-        skills_root = tmp_path / "skills"
+-        skills_root.mkdir()
+-
+-        def _move(src, dst):
+-            Path(dst).write_text("partial", encoding="utf-8")
+-            raise OSError("move failed")
+-
+-        monkeypatch.setattr("deerflow.skills.installer.shutil.move", _move)
+-
+-        with pytest.raises(OSError, match="move failed"):
+-            install_skill_from_archive(zip_path, skills_root=skills_root)
+-
+-        assert not (skills_root / "custom" / "test-skill").exists()
+-
+     def test_duplicate_raises(self, tmp_path):
+         zip_path = self._make_skill_zip(tmp_path)
+         skills_root = tmp_path / "skills"
+         (skills_root / "custom" / "test-skill").mkdir(parents=True)
+         with pytest.raises(ValueError, match="already exists"):
+-            install_skill_from_archive(zip_path, skills_root=skills_root)
++            self._storage(skills_root).install_skill_from_archive(zip_path)
+ 
+     def test_invalid_extension(self, tmp_path):
+         bad_path = tmp_path / "bad.zip"
+         bad_path.write_text("not a skill")
++        skills_root = tmp_path / "skills"
++        skills_root.mkdir()
+         with pytest.raises(ValueError, match=".skill"):
+-            install_skill_from_archive(bad_path)
++            self._storage(skills_root).install_skill_from_archive(bad_path)
+ 
+     def test_bad_frontmatter(self, tmp_path):
+         zip_path = tmp_path / "bad.skill"
+@@ -390,11 +213,13 @@ class TestInstallSkillFromArchive:
+         skills_root = tmp_path / "skills"
+         skills_root.mkdir()
+         with pytest.raises(ValueError, match="Invalid skill"):
+-            install_skill_from_archive(zip_path, skills_root=skills_root)
++            self._storage(skills_root).install_skill_from_archive(zip_path)
+ 
+-    def test_nonexistent_file(self):
++    def test_nonexistent_file(self, tmp_path):
++        skills_root = tmp_path / "skills"
++        skills_root.mkdir()
+         with pytest.raises(FileNotFoundError):
+-            install_skill_from_archive(Path("/nonexistent/path.skill"))
++            self._storage(skills_root).install_skill_from_archive(Path("/nonexistent/path.skill"))
+ 
+     def test_macosx_filtered_during_resolve(self, tmp_path):
+         """Archive with __MACOSX dir still installs correctly."""
+@@ -404,6 +229,6 @@ class TestInstallSkillFromArchive:
+             zf.writestr("__MACOSX/._my-skill", "meta")
+         skills_root = tmp_path / "skills"
+         skills_root.mkdir()
+-        result = install_skill_from_archive(zip_path, skills_root=skills_root)
++        result = self._storage(skills_root).install_skill_from_archive(zip_path)
+         assert result["success"] is True
+         assert result["skill_name"] == "my-skill"
+diff --git a/backend/tests/test_skills_loader.py b/backend/tests/skills/test_skills_loader.py
+similarity index 80%
+rename from backend/tests/test_skills_loader.py
+rename to backend/tests/skills/test_skills_loader.py
+index 7d885444..8e0ce1f2 100644
+--- a/backend/tests/test_skills_loader.py
++++ b/backend/tests/skills/test_skills_loader.py
+@@ -2,7 +2,8 @@
+ 
+ from pathlib import Path
+ 
+-from deerflow.skills.loader import get_skills_root_path, load_skills
++from deerflow.config.skills_config import SkillsConfig
++from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+ 
+ 
+ def _write_skill(skill_dir: Path, name: str, description: str) -> None:
+@@ -12,9 +13,9 @@ def _write_skill(skill_dir: Path, name: str, description: str) -> None:
+     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+ 
+ 
+-def test_get_skills_root_path_points_to_project_root_skills():
+-    """get_skills_root_path() should point to deer-flow/skills (sibling of backend/), not backend/packages/skills."""
+-    path = get_skills_root_path()
++def test_default_skills_path_points_to_project_root_skills():
++    """Default ``SkillsConfig().get_skills_path()`` should resolve to <repo_root>/skills."""
++    path = SkillsConfig().get_skills_path()
+     assert path.name == "skills", f"Expected 'skills', got '{path.name}'"
+     assert (path.parent / "backend").is_dir(), f"Expected skills path's parent to be project root containing 'backend/', but got {path}"
+ 
+@@ -27,7 +28,8 @@ def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path:
+     _write_skill(skills_root / "public" / "parent" / "child-skill", "child-skill", "Child skill")
+     _write_skill(skills_root / "custom" / "team" / "helper", "team-helper", "Team helper")
+ 
+-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
++    storage = LocalSkillStorage(host_path=str(skills_root))
++    skills = storage.load_skills(enabled_only=False)
+     by_name = {skill.name: skill for skill in skills}
+ 
+     assert {"root-skill", "child-skill", "team-helper"} <= set(by_name)
+@@ -57,7 +59,8 @@ def test_load_skills_skips_hidden_directories(tmp_path: Path):
+         "Hidden skill",
+     )
+ 
+-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
++    storage = LocalSkillStorage(host_path=str(skills_root))
++    skills = storage.load_skills(enabled_only=False)
+     names = {skill.name for skill in skills}
+ 
+     assert "ok-skill" in names
+@@ -69,7 +72,8 @@ def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
+     _write_skill(skills_root / "public" / "shared-skill", "shared-skill", "Public version")
+     _write_skill(skills_root / "custom" / "shared-skill", "shared-skill", "Custom version")
+ 
+-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
++    storage = LocalSkillStorage(host_path=str(skills_root))
++    skills = storage.load_skills(enabled_only=False)
+     shared = next(skill for skill in skills if skill.name == "shared-skill")
+ 
+     assert shared.category == "custom"
+diff --git a/backend/tests/test_skills_parser.py b/backend/tests/skills/test_skills_parser.py
+similarity index 100%
+rename from backend/tests/test_skills_parser.py
+rename to backend/tests/skills/test_skills_parser.py
+diff --git a/backend/tests/test_skills_validation.py b/backend/tests/skills/test_skills_validation.py
+similarity index 100%
+rename from backend/tests/test_skills_validation.py
+rename to backend/tests/skills/test_skills_validation.py
+diff --git a/backend/tests/skills_test_helpers.py b/backend/tests/skills_test_helpers.py
+new file mode 100644
+index 00000000..07af178c
+--- /dev/null
++++ b/backend/tests/skills_test_helpers.py
+@@ -0,0 +1,21 @@
++"""Test-only helpers for the SkillStorage singleton.
++
++Production code never resets or injects the singleton; these helpers exist
++only so tests can swap in a per-test ``LocalSkillStorage`` rooted at a
++``tmp_path`` skills directory and clean up between tests.
++"""
++
++from __future__ import annotations
++
++from deerflow.skills import storage as _storage_module
++from deerflow.skills.storage import SkillStorage
++
++
++def reset_skill_storage() -> None:
++    """Clear the cached singleton without any cleanup."""
++    _storage_module._default_skill_storage = None
++
++
++def set_skill_storage(storage: SkillStorage) -> None:
++    """Inject a custom ``SkillStorage`` instance."""
++    _storage_module._default_skill_storage = storage
+diff --git a/backend/tests/test_client.py b/backend/tests/test_client.py
+index 5f613bf6..e29e38d9 100644
+--- a/backend/tests/test_client.py
++++ b/backend/tests/test_client.py
+@@ -19,6 +19,7 @@ from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, Skil
+ from app.gateway.routers.uploads import UploadResponse
+ from deerflow.client import DeerFlowClient
+ from deerflow.config.paths import Paths
++from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+ from deerflow.uploads.manager import PathTraversalError
+ 
+ # ---------------------------------------------------------------------------
+@@ -135,9 +136,11 @@ class TestConfigQueries:
+         skill.category = "public"
+         skill.enabled = True
+ 
+-        with patch("deerflow.skills.loader.load_skills", return_value=[skill]) as mock_load:
++        mock_storage = MagicMock()
++        mock_storage.load_skills.return_value = [skill]
++        with patch("deerflow.client.get_skill_storage", return_value=mock_storage):
+             result = client.list_skills()
+-            mock_load.assert_called_once_with(enabled_only=False)
++            mock_storage.load_skills.assert_called_once_with(enabled_only=False)
+ 
+         assert "skills" in result
+         assert len(result["skills"]) == 1
+@@ -150,9 +153,11 @@ class TestConfigQueries:
+         }
+ 
+     def test_list_skills_enabled_only(self, client):
+-        with patch("deerflow.skills.loader.load_skills", return_value=[]) as mock_load:
++        mock_storage = MagicMock()
++        mock_storage.load_skills.return_value = []
++        with patch("deerflow.client.get_skill_storage", return_value=mock_storage):
+             client.list_skills(enabled_only=True)
+-            mock_load.assert_called_once_with(enabled_only=True)
++            mock_storage.load_skills.assert_called_once_with(enabled_only=True)
+ 
+     def test_get_memory(self, client):
+         memory = {"version": "1.0", "facts": []}
+@@ -1163,13 +1168,17 @@ class TestSkillsManagement:
+ 
+     def test_get_skill_found(self, client):
+         skill = self._make_skill()
+-        with patch("deerflow.skills.loader.load_skills", return_value=[skill]):
++        mock_storage = MagicMock()
++        mock_storage.load_skills.return_value = [skill]
++        with patch("deerflow.client.get_skill_storage", return_value=mock_storage):
+             result = client.get_skill("test-skill")
+         assert result is not None
+         assert result["name"] == "test-skill"
+ 
+     def test_get_skill_not_found(self, client):
+-        with patch("deerflow.skills.loader.load_skills", return_value=[]):
++        mock_storage = MagicMock()
++        mock_storage.load_skills.return_value = []
++        with patch("deerflow.client.get_skill_storage", return_value=mock_storage):
+             result = client.get_skill("nonexistent")
+         assert result is None
+ 
+@@ -1189,8 +1198,10 @@ class TestSkillsManagement:
+             # Pre-set agent to verify it gets invalidated
+             client._agent = MagicMock()
+ 
++            mock_storage = MagicMock()
++            mock_storage.load_skills.side_effect = [[skill], [updated_skill]]
+             with (
+-                patch("deerflow.skills.loader.load_skills", side_effect=[[skill], [updated_skill]]),
++                patch("deerflow.client.get_skill_storage", return_value=mock_storage),
+                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
+                 patch("deerflow.client.get_extensions_config", return_value=ext_config),
+                 patch("deerflow.client.reload_extensions_config"),
+@@ -1202,7 +1213,9 @@ class TestSkillsManagement:
+             tmp_path.unlink()
+ 
+     def test_update_skill_not_found(self, client):
+-        with patch("deerflow.skills.loader.load_skills", return_value=[]):
++        mock_storage = MagicMock()
++        mock_storage.load_skills.return_value = []
++        with patch("deerflow.client.get_skill_storage", return_value=mock_storage):
+             with pytest.raises(ValueError, match="not found"):
+                 client.update_skill("nonexistent", enabled=True)
+ 
+@@ -1222,7 +1235,7 @@ class TestSkillsManagement:
+             skills_root = tmp_path / "skills"
+             (skills_root / "custom").mkdir(parents=True)
+ 
+-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
++            with patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))):
+                 result = client.install_skill(archive_path)
+ 
+             assert result["success"] is True
+@@ -1770,12 +1783,14 @@ class TestScenarioConfigManagement:
+         skill.category = "public"
+         skill.enabled = True
+ 
+-        with patch("deerflow.skills.loader.load_skills", return_value=[skill]):
++        mock_storage = MagicMock()
++        mock_storage.load_skills.return_value = [skill]
++        with patch("deerflow.client.get_skill_storage", return_value=mock_storage):
+             skills_result = client.list_skills()
+         assert len(skills_result["skills"]) == 1
+ 
+         # Get specific skill
+-        with patch("deerflow.skills.loader.load_skills", return_value=[skill]):
++        with patch("deerflow.client.get_skill_storage", return_value=mock_storage):
+             detail = client.get_skill("web-search")
+         assert detail is not None
+         assert detail["enabled"] is True
+@@ -1824,9 +1839,11 @@ class TestScenarioConfigManagement:
+             ext_config.mcp_servers = {}
+             ext_config.skills = {}
+ 
++            mock_storage = MagicMock()
++            mock_storage.load_skills.side_effect = [[skill], [toggled]]
+             client._agent = MagicMock()  # Simulate re-created agent
+             with (
+-                patch("deerflow.skills.loader.load_skills", side_effect=[[skill], [toggled]]),
++                patch("deerflow.client.get_skill_storage", return_value=mock_storage),
+                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                 patch("deerflow.client.get_extensions_config", return_value=ext_config),
+                 patch("deerflow.client.reload_extensions_config"),
+@@ -2043,7 +2060,7 @@ class TestScenarioSkillInstallAndUse:
+             (skills_root / "custom").mkdir(parents=True)
+ 
+             # Step 1: Install
+-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
++            with patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))):
+                 result = client.install_skill(archive)
+             assert result["success"] is True
+             assert (skills_root / "custom" / "my-analyzer" / "SKILL.md").exists()
+@@ -2056,7 +2073,9 @@ class TestScenarioSkillInstallAndUse:
+             installed_skill.category = "custom"
+             installed_skill.enabled = True
+ 
+-            with patch("deerflow.skills.loader.load_skills", return_value=[installed_skill]):
++            mock_list_storage = MagicMock()
++            mock_list_storage.load_skills.return_value = [installed_skill]
++            with patch("deerflow.client.get_skill_storage", return_value=mock_list_storage):
+                 skills_result = client.list_skills()
+             assert any(s["name"] == "my-analyzer" for s in skills_result["skills"])
+ 
+@@ -2075,8 +2094,10 @@ class TestScenarioSkillInstallAndUse:
+             config_file = tmp_path / "extensions_config.json"
+             config_file.write_text("{}")
+ 
++            mock_toggle_storage = MagicMock()
++            mock_toggle_storage.load_skills.side_effect = [[installed_skill], [disabled_skill]]
+             with (
+-                patch("deerflow.skills.loader.load_skills", side_effect=[[installed_skill], [disabled_skill]]),
++                patch("deerflow.client.get_skill_storage", return_value=mock_toggle_storage),
+                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                 patch("deerflow.client.get_extensions_config", return_value=ext_config),
+                 patch("deerflow.client.reload_extensions_config"),
+@@ -2250,7 +2271,9 @@ class TestGatewayConformance:
+         skill.category = "public"
+         skill.enabled = True
+ 
+-        with patch("deerflow.skills.loader.load_skills", return_value=[skill]):
++        mock_storage = MagicMock()
++        mock_storage.load_skills.return_value = [skill]
++        with patch("deerflow.client.get_skill_storage", return_value=mock_storage):
+             result = client.list_skills()
+ 
+         parsed = SkillsListResponse(**result)
+@@ -2265,7 +2288,9 @@ class TestGatewayConformance:
+         skill.category = "public"
+         skill.enabled = True
+ 
+-        with patch("deerflow.skills.loader.load_skills", return_value=[skill]):
++        mock_storage = MagicMock()
++        mock_storage.load_skills.return_value = [skill]
++        with patch("deerflow.client.get_skill_storage", return_value=mock_storage):
+             result = client.get_skill("web-search")
+ 
+         assert result is not None
+@@ -2281,7 +2306,7 @@ class TestGatewayConformance:
+         with zipfile.ZipFile(archive, "w") as zf:
+             zf.write(skill_dir / "SKILL.md", "my-skill/SKILL.md")
+ 
+-        with patch("deerflow.skills.installer.get_skills_root_path", return_value=tmp_path):
++        with patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(tmp_path))):
+             result = client.install_skill(archive)
+ 
+         parsed = SkillInstallResponse(**result)
+@@ -2428,15 +2453,13 @@ class TestInstallSkillSecurity:
+             (skills_root / "custom").mkdir(parents=True)
+ 
+             # Patch max_total_size to a small value to trigger the bomb check.
+-            from deerflow.skills import installer as _installer
+-
+-            orig = _installer.safe_extract_skill_archive
++            from deerflow.skills.installer import safe_extract_skill_archive as orig_extract
+ 
+             def patched_extract(zf, dest, max_total_size=100):
+-                return orig(zf, dest, max_total_size=100)
++                return orig_extract(zf, dest, max_total_size=100)
+ 
+             with (
+-                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
++                patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))),
+                 patch("deerflow.skills.installer.safe_extract_skill_archive", side_effect=patched_extract),
+             ):
+                 with pytest.raises(ValueError, match="too large"):
+@@ -2452,7 +2475,7 @@ class TestInstallSkillSecurity:
+             skills_root = Path(tmp) / "skills"
+             (skills_root / "custom").mkdir(parents=True)
+ 
+-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
++            with patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))):
+                 with pytest.raises(ValueError, match="unsafe"):
+                     client.install_skill(archive)
+ 
+@@ -2466,7 +2489,7 @@ class TestInstallSkillSecurity:
+             skills_root = Path(tmp) / "skills"
+             (skills_root / "custom").mkdir(parents=True)
+ 
+-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
++            with patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))):
+                 with pytest.raises(ValueError, match="unsafe"):
+                     client.install_skill(archive)
+ 
+@@ -2488,7 +2511,7 @@ class TestInstallSkillSecurity:
+             skills_root = tmp_path / "skills"
+             (skills_root / "custom").mkdir(parents=True)
+ 
+-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
++            with patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))):
+                 result = client.install_skill(archive)
+ 
+             assert result["success"] is True
+@@ -2513,8 +2536,8 @@ class TestInstallSkillSecurity:
+             (skills_root / "custom").mkdir(parents=True)
+ 
+             with (
+-                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
+-                patch("deerflow.skills.installer._validate_skill_frontmatter", return_value=(True, "OK", "../evil")),
++                patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))),
++                patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "../evil")),
+             ):
+                 with pytest.raises(ValueError, match="Invalid skill name"):
+                     client.install_skill(archive)
+@@ -2536,8 +2559,8 @@ class TestInstallSkillSecurity:
+             (skills_root / "custom" / "dupe-skill").mkdir(parents=True)
+ 
+             with (
+-                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
+-                patch("deerflow.skills.installer._validate_skill_frontmatter", return_value=(True, "OK", "dupe-skill")),
++                patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))),
++                patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "dupe-skill")),
+             ):
+                 with pytest.raises(ValueError, match="already exists"):
+                     client.install_skill(archive)
+@@ -2552,7 +2575,7 @@ class TestInstallSkillSecurity:
+             skills_root = Path(tmp) / "skills"
+             (skills_root / "custom").mkdir(parents=True)
+ 
+-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
++            with patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))):
+                 with pytest.raises(ValueError, match="empty"):
+                     client.install_skill(archive)
+ 
+@@ -2572,8 +2595,8 @@ class TestInstallSkillSecurity:
+             (skills_root / "custom").mkdir(parents=True)
+ 
+             with (
+-                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
+-                patch("deerflow.skills.installer._validate_skill_frontmatter", return_value=(False, "Missing name field", "")),
++                patch("deerflow.client.get_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))),
++                patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(False, "Missing name field", "")),
+             ):
+                 with pytest.raises(ValueError, match="Invalid skill"):
+                     client.install_skill(archive)
+@@ -2664,8 +2687,10 @@ class TestConfigUpdateErrors:
+         skill = MagicMock()
+         skill.name = "some-skill"
+ 
++        mock_storage = MagicMock()
++        mock_storage.load_skills.return_value = [skill]
+         with (
+-            patch("deerflow.skills.loader.load_skills", return_value=[skill]),
++            patch("deerflow.client.get_skill_storage", return_value=mock_storage),
+             patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=None),
+         ):
+             with pytest.raises(FileNotFoundError, match="Cannot locate"):
+@@ -2684,8 +2709,10 @@ class TestConfigUpdateErrors:
+             config_file = Path(tmp) / "extensions_config.json"
+             config_file.write_text("{}")
+ 
++            mock_storage = MagicMock()
++            mock_storage.load_skills.side_effect = [[skill], []]
+             with (
+-                patch("deerflow.skills.loader.load_skills", side_effect=[[skill], []]),
++                patch("deerflow.client.get_skill_storage", return_value=mock_storage),
+                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                 patch("deerflow.client.get_extensions_config", return_value=ext_config),
+                 patch("deerflow.client.reload_extensions_config"),
+@@ -3090,8 +3117,10 @@ class TestBugAgentInvalidationInconsistency:
+             config_file = Path(tmp) / "ext.json"
+             config_file.write_text("{}")
+ 
++            mock_storage = MagicMock()
++            mock_storage.load_skills.side_effect = [[skill], [updated]]
+             with (
+-                patch("deerflow.skills.loader.load_skills", side_effect=[[skill], [updated]]),
++                patch("deerflow.client.get_skill_storage", return_value=mock_storage),
+                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                 patch("deerflow.client.get_extensions_config", return_value=ext_config),
+                 patch("deerflow.client.reload_extensions_config"),
+diff --git a/backend/tests/test_client_e2e.py b/backend/tests/test_client_e2e.py
+index 197994aa..5cd23034 100644
+--- a/backend/tests/test_client_e2e.py
++++ b/backend/tests/test_client_e2e.py
+@@ -537,10 +537,11 @@ class TestSkillInstallation:
+         skills_root = tmp_path / "skills"
+         (skills_root / "public").mkdir(parents=True)
+         (skills_root / "custom").mkdir(parents=True)
+-        monkeypatch.setattr(
+-            "deerflow.skills.installer.get_skills_root_path",
+-            lambda: skills_root,
+-        )
++        from skills_test_helpers import set_skill_storage
++
++        from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
++
++        set_skill_storage(LocalSkillStorage(host_path=str(skills_root)))
+         self._skills_root = skills_root
+ 
+     @staticmethod
+@@ -614,19 +615,21 @@ class TestConfigManagement:
+ 
+     def test_list_models_returns_injected_config(self, e2e_env):
+         """list_models() returns the model from the injected AppConfig."""
++        expected_name = os.getenv("E2E_MODEL_NAME", "volcengine-ark")
+         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+         result = c.list_models()
+         assert "models" in result
+         assert len(result["models"]) == 1
+-        assert result["models"][0]["name"] == "volcengine-ark"
++        assert result["models"][0]["name"] == expected_name
+         assert result["models"][0]["display_name"] == "E2E Test Model"
+ 
+     def test_get_model_found(self, e2e_env):
+         """get_model() returns the model when it exists."""
++        expected_name = os.getenv("E2E_MODEL_NAME", "volcengine-ark")
+         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+-        model = c.get_model("volcengine-ark")
++        model = c.get_model(expected_name)
+         assert model is not None
+-        assert model["name"] == "volcengine-ark"
++        assert model["name"] == expected_name
+         assert model["supports_thinking"] is False
+ 
+     def test_get_model_not_found(self, e2e_env):
+diff --git a/backend/tests/test_create_deerflow_agent_live.py b/backend/tests/test_create_deerflow_agent_live.py
+index 0111bc0e..ebd0ae46 100644
+--- a/backend/tests/test_create_deerflow_agent_live.py
++++ b/backend/tests/test_create_deerflow_agent_live.py
+@@ -3,18 +3,30 @@
+ Verifies the factory produces a working LangGraph agent that can actually
+ process messages end-to-end with a real LLM.
+ 
+-Tests marked ``requires_llm`` are skipped in CI or when OPENAI_API_KEY is unset.
++Tests marked ``requires_llm`` are skipped in CI or when no LLM API key is set.
++
++Environment variables (all optional, can be set in .env):
++  - ``E2E_API_KEY``    preferred API key (e.g. DeepSeek); falls back to OPENAI_API_KEY
++  - ``E2E_MODEL_ID``   model id passed to the API (default: deepseek-chat)
++  - ``E2E_BASE_URL``   API base URL (default: https://api.deepseek.com/v1)
++  - ``OPENAI_API_KEY`` fallback API key (also used to gate the requires_llm marker)
+ """
+ 
+ import os
+ import uuid
+ 
+ import pytest
++from dotenv import load_dotenv
+ from langchain_core.tools import tool
+ 
++# Load .env from project root so local dev setups work without shell exports.
++load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
++
++_api_key = os.getenv("E2E_API_KEY") or os.getenv("OPENAI_API_KEY", "")
++
+ requires_llm = pytest.mark.skipif(
+-    os.getenv("CI", "").lower() in ("true", "1") or not os.getenv("OPENAI_API_KEY"),
+-    reason="Requires LLM API key — skipped in CI or when OPENAI_API_KEY is unset",
++    os.getenv("CI", "").lower() in ("true", "1") or not _api_key,
++    reason="Requires LLM API key — skipped in CI or when neither E2E_API_KEY nor OPENAI_API_KEY is set",
+ )
+ 
+ 
+@@ -23,9 +35,9 @@ def _make_model():
+     from langchain_openai import ChatOpenAI
+ 
+     return ChatOpenAI(
+-        model=os.getenv("E2E_MODEL_ID", "ep-20251211175242-llcmh"),
+-        base_url=os.getenv("E2E_BASE_URL", "https://ark-cn-beijing.bytedance.net/api/v3"),
+-        api_key=os.getenv("OPENAI_API_KEY", ""),
++        model=os.getenv("E2E_MODEL_ID", "deepseek-chat"),
++        base_url=os.getenv("E2E_BASE_URL", "https://api.deepseek.com/v1"),
++        api_key=_api_key,
+         max_tokens=256,
+         temperature=0,
+     )
+diff --git a/backend/tests/test_lead_agent_prompt.py b/backend/tests/test_lead_agent_prompt.py
+index 6817e767..de8d07c2 100644
+--- a/backend/tests/test_lead_agent_prompt.py
++++ b/backend/tests/test_lead_agent_prompt.py
+@@ -83,7 +83,7 @@ def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatc
+         )
+ 
+     state = {"skills": [make_skill("first-skill")]}
+-    monkeypatch.setattr(prompt_module, "load_skills", lambda enabled_only=True: list(state["skills"]))
++    monkeypatch.setattr(prompt_module, "_load_enabled_skills_sync", lambda: list(state["skills"]))
+     prompt_module._reset_skills_system_prompt_cache_state()
+ 
+     try:
+@@ -119,7 +119,7 @@ def test_clear_cache_does_not_spawn_parallel_refresh_workers(monkeypatch, tmp_pa
+             enabled=True,
+         )
+ 
+-    def fake_load_skills(enabled_only=True):
++    def fake_load_skills():
+         nonlocal active_loads, max_active_loads, call_count
+         with lock:
+             active_loads += 1
+@@ -136,7 +136,7 @@ def test_clear_cache_does_not_spawn_parallel_refresh_workers(monkeypatch, tmp_pa
+ 
+         return [make_skill(f"skill-{current_call}")]
+ 
+-    monkeypatch.setattr(prompt_module, "load_skills", fake_load_skills)
++    monkeypatch.setattr(prompt_module, "_load_enabled_skills_sync", fake_load_skills)
+     prompt_module._reset_skills_system_prompt_cache_state()
+ 
+     try:
+diff --git a/backend/tests/test_lead_agent_skills.py b/backend/tests/test_lead_agent_skills.py
+index 441dbeee..2965fa78 100644
+--- a/backend/tests/test_lead_agent_skills.py
++++ b/backend/tests/test_lead_agent_skills.py
+@@ -57,6 +57,7 @@ def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(mon
+ def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
+     skills = [_make_skill("skill1")]
+     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
++    monkeypatch.setattr("deerflow.skills.storage.get_skill_storage", lambda: SimpleNamespace(get_container_root=lambda: "/mnt/skills"))
+     monkeypatch.setattr(
+         "deerflow.config.get_app_config",
+         lambda: SimpleNamespace(
+@@ -71,6 +72,7 @@ def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
+ 
+ def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(monkeypatch):
+     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: [])
++    monkeypatch.setattr("deerflow.skills.storage.get_skill_storage", lambda: SimpleNamespace(get_container_root=lambda: "/mnt/skills"))
+     monkeypatch.setattr(
+         "deerflow.config.get_app_config",
+         lambda: SimpleNamespace(
+@@ -86,6 +88,7 @@ def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(
+ def test_get_skills_prompt_section_cache_respects_skill_evolution_toggle(monkeypatch):
+     skills = [_make_skill("skill1")]
+     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
++    monkeypatch.setattr("deerflow.skills.storage.get_skill_storage", lambda: SimpleNamespace(get_container_root=lambda: "/mnt/skills"))
+     config = SimpleNamespace(
+         skills=SimpleNamespace(container_path="/mnt/skills"),
+         skill_evolution=SimpleNamespace(enabled=True),
+diff --git a/config.example.yaml b/config.example.yaml
+index b9f7a963..87a417a3 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -672,6 +672,10 @@ sandbox:
+ # Configure skills directory for specialized agent workflows
+ 
+ skills:
++  # SkillStorage implementation. The default uses the local filesystem.
++  # Resolved via reflection (deerflow.reflection.resolve_class), same pattern as `sandbox.use`.
++  use: deerflow.skills.storage.local_skill_storage:LocalSkillStorage
++
+   # Path to skills directory on the host (relative to project root or absolute)
+   # Default: ../skills (relative to backend directory)
+   # Uncomment to customize:
+-- 
+2.46.0
+

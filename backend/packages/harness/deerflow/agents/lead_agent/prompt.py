@@ -8,8 +8,8 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
-from deerflow.skills import load_skills
-from deerflow.skills.types import Skill
+from deerflow.skills.loader import load_skills
+from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
 
 if TYPE_CHECKING:
@@ -130,8 +130,8 @@ def _get_enabled_skills_for_config(app_config: AppConfig | None = None) -> list[
     return list(load_skills(enabled_only=True, app_config=app_config))
 
 
-def _skill_mutability_label(category: str) -> str:
-    return "[custom, editable]" if category == "custom" else "[built-in]"
+def _skill_mutability_label(category: SkillCategory | str) -> str:
+    return "[custom, editable]" if category == SkillCategory.CUSTOM else "[built-in]"
 
 
 def clear_skills_system_prompt_cache() -> None:

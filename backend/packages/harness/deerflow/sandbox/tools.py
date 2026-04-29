@@ -89,9 +89,9 @@ def _get_skills_container_path() -> str:
     if cached is not None:
         return cached
     try:
-        from deerflow.config import get_app_config
+        from deerflow.skills.storage import get_skill_storage
 
-        value = get_app_config().skills.container_path
+        value = get_skill_storage().get_container_root()
         _get_skills_container_path._cached = value  # type: ignore[attr-defined]
         return value
     except Exception:
@@ -110,10 +110,9 @@ def _get_skills_host_path() -> str | None:
     if cached is not None:
         return cached
     try:
-        from deerflow.config import get_app_config
+        from deerflow.skills.storage import get_skill_storage
 
-        config = get_app_config()
-        skills_path = config.skills.get_skills_path()
+        skills_path = get_skill_storage().get_skills_root_path()
         if skills_path.exists():
             value = str(skills_path)
             _get_skills_host_path._cached = value  # type: ignore[attr-defined]

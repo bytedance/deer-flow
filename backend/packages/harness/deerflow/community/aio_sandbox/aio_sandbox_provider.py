@@ -291,9 +291,11 @@ class AioSandboxProvider(SandboxProvider):
         so the host Docker daemon can resolve the path.
         """
         try:
-            config = get_app_config()
-            skills_path = config.skills.get_skills_path()
-            container_path = config.skills.container_path
+            from deerflow.skills.storage import get_skill_storage
+
+            storage = get_skill_storage()
+            skills_path = storage.get_skills_root_path()
+            container_path = storage.get_container_root()
 
             if skills_path.exists():
                 # When running inside Docker with DooD, use host-side skills path.

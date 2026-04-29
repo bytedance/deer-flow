@@ -41,7 +41,7 @@ from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.skills.installer import install_skill_from_archive
+from deerflow.skills.storage import get_skill_storage
 from deerflow.uploads.manager import (
     claim_unique_filename,
     delete_file_safe,
@@ -948,7 +948,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        return install_skill_from_archive(skill_path)
+        return get_skill_storage().install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------
     # Public API — memory management

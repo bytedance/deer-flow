@@ -182,7 +182,9 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
-    get_skill_history_file("demo-skill", app_config=config).write_text(
+    history_file = get_skill_history_file("demo-skill", app_config=config)
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    history_file.write_text(
         '{"action":"human_edit","prev_content":' + json.dumps(original_content) + ',"new_content":' + json.dumps(edited_content) + "}\n",
         encoding="utf-8",
     )
@@ -268,7 +270,7 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
     def _readonly_history(*args, **kwargs):
         raise OSError(errno.EROFS, "Read-only file system", str(skills_root / "custom" / ".history"))
 
-    monkeypatch.setattr("app.gateway.routers.skills.append_history", _readonly_history)
+    monkeypatch.setattr("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.append_history", _readonly_history)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
     app = _make_test_app(config)
@@ -301,7 +303,7 @@ def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp
     def _fail_rmtree(*args, **kwargs):
         raise PermissionError(errno.EACCES, "Permission denied", str(custom_dir))
 
-    monkeypatch.setattr("app.gateway.routers.skills.shutil.rmtree", _fail_rmtree)
+    monkeypatch.setattr("deerflow.skills.storage.local_skill_storage.shutil.rmtree", _fail_rmtree)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
     app = _make_test_app(config)
