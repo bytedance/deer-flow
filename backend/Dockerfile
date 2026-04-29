@@ -64,8 +64,6 @@ FROM builder AS dev
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-
 EXPOSE 8001 2024
 
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]
@@ -98,15 +96,6 @@ WORKDIR /app
 
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend
-
-# Copy pre-downloaded Chromium browser binary from builder
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-COPY --from=builder /ms-playwright /ms-playwright
-
-# Install Chromium system dependencies only (browser binary already copied above).
-# playwright install-deps does NOT re-download the browser.
-RUN cd /app/backend && uv run --no-sync playwright install-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
 
 # Expose ports (gateway: 8001, langgraph: 2024)
 EXPOSE 8001 2024
