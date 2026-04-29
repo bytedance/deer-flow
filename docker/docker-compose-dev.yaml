@@ -17,47 +17,47 @@ services:
   # Manages per-sandbox Pod + Service lifecycle in the host Kubernetes
   # cluster via the K8s API.
   # Backend accesses sandboxes directly via host.docker.internal:{NodePort}.
-  provisioner:
-    build:
-      context: ./provisioner
-      dockerfile: Dockerfile
-      args:
-        APT_MIRROR: ${APT_MIRROR:-}
-    container_name: deer-flow-provisioner
-    volumes:
-      - ~/.kube/config:/root/.kube/config:ro
-    environment:
-      - K8S_NAMESPACE=deer-flow
-      - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
-      # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
-      # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
-      # Set these in your shell before running docker-compose:
-      #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
-      - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
-      - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
-      # Production: use PVC instead of hostPath to avoid data loss on node failure.
-      # When set, hostPath vars above are ignored for the corresponding volume.
-      # USERDATA_PVC_NAME uses subPath (threads/{thread_id}/user-data) automatically.
-      # - SKILLS_PVC_NAME=deer-flow-skills-pvc
-      # - USERDATA_PVC_NAME=deer-flow-userdata-pvc
-      - KUBECONFIG_PATH=/root/.kube/config
-      - NODE_HOST=host.docker.internal
-      # Override K8S API server URL since kubeconfig uses 127.0.0.1
-      # which is unreachable from inside the container
-      - K8S_API_SERVER=https://host.docker.internal:26443
-    env_file:
-      - ../.env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - deer-flow-dev
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 15s
+  # provisioner:
+  #   build:
+  #     context: ./provisioner
+  #     dockerfile: Dockerfile
+  #     args:
+  #       APT_MIRROR: ${APT_MIRROR:-}
+  #   container_name: deer-flow-provisioner
+  #   volumes:
+  #     - ~/.kube/config:/root/.kube/config:ro
+  #   environment:
+  #     - K8S_NAMESPACE=deer-flow
+  #     - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+  #     # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
+  #     # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
+  #     # Set these in your shell before running docker-compose:
+  #     #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
+  #     - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
+  #     - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+  #     # Production: use PVC instead of hostPath to avoid data loss on node failure.
+  #     # When set, hostPath vars above are ignored for the corresponding volume.
+  #     # USERDATA_PVC_NAME uses subPath (threads/{thread_id}/user-data) automatically.
+  #     # - SKILLS_PVC_NAME=deer-flow-skills-pvc
+  #     # - USERDATA_PVC_NAME=deer-flow-userdata-pvc
+  #     - KUBECONFIG_PATH=/root/.kube/config
+  #     - NODE_HOST=host.docker.internal
+  #     # Override K8S API server URL since kubeconfig uses 127.0.0.1
+  #     # which is unreachable from inside the container
+  #     - K8S_API_SERVER=https://host.docker.internal:26443
+  #   env_file:
+  #     - ../.env
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"
+  #   networks:
+  #     - deer-flow-dev
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 6
+  #     start_period: 15s
 
   # ── Reverse Proxy ──────────────────────────────────────────────────────
   # Routes API traffic to gateway and (optionally) provisioner.
@@ -160,6 +160,64 @@ services:
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
+      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+
+    env_file:
+      - ../.env
+    extra_hosts:
+      # For Linux: map host.docker.internal to host gateway
+      - "host.docker.internal:host-gateway"
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+
+  # Backend - LangGraph Server
+  langgraph:
+    build:
+      context: ../
+      dockerfile: backend/Dockerfile
+      target: dev
+      # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-langgraph
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
+        UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
+    container_name: deer-flow-langgraph
+    command: sh -c "cd backend && { (uv sync || (echo '[startup] uv sync failed; recreating .venv and retrying once' && uv venv --allow-existing .venv && uv sync)) && allow_blocking='' && if [ \"\${LANGGRAPH_ALLOW_BLOCKING:-0}\" = '1' ]; then allow_blocking='--allow-blocking'; fi && uv run langgraph dev --no-browser --no-reload \${allow_blocking} --host 0.0.0.0 --port 2024 --n-jobs-per-worker \${LANGGRAPH_JOBS_PER_WORKER:-10}; } > /app/logs/langgraph.log 2>&1"
+    volumes:
+      - ../backend/:/app/backend/
+      # Preserve the .venv built during Docker image build — mounting the full backend/
+      # directory above would otherwise shadow it with the (empty) host directory.
+      - langgraph-venv:/app/backend/.venv
+      - ../config.yaml:/app/config.yaml
+      - ../extensions_config.json:/app/extensions_config.json
+      - ../skills:/app/skills
+      - ../logs:/app/logs
+      # Use a Docker-managed uv cache volume instead of a host bind mount.
+      # On macOS/Docker Desktop, uv may fail to create symlinks inside shared
+      # host directories, which causes startup-time `uv sync` to crash.
+      - langgraph-uv-cache:/root/.cache/uv
+      # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
+      - type: bind
+        source: ${HOME:?HOME must be set}/.claude
+        target: /root/.claude
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME:?HOME must be set}/.codex
+        target: /root/.codex
+        read_only: true
+        bind:
+          create_host_path: true
+    working_dir: /app
+    environment:
+      - CI=true
+      - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
