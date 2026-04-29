@@ -418,7 +418,17 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
     seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
 
     created: list[dict[str, Any]] = []
-    file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
+    # Look up file reader, handling multi-bot channel names
+    file_reader = INBOUND_FILE_READERS.get(msg.channel_name)
+    if file_reader is None:
+        # Try base channel name for multi-bot instances (use CHANNEL_CAPABILITIES keys)
+        for base_name in CHANNEL_CAPABILITIES:
+            if msg.channel_name.startswith(f"{base_name}_") and base_name in INBOUND_FILE_READERS:
+                file_reader = INBOUND_FILE_READERS[base_name]
+                break
+        # Fall back to default HTTP reader
+        if file_reader is None:
+            file_reader = _read_http_inbound_file
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
         for idx, f in enumerate(msg.files):
             if not isinstance(f, dict):
@@ -543,7 +553,13 @@ class ChannelManager:
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
-        return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
+        if channel_name in CHANNEL_CAPABILITIES:
+            return CHANNEL_CAPABILITIES[channel_name].get("supports_streaming", False)
+        # Check for multi-bot channel names like feishu_xxx, wecom_xxx
+        for base_name, caps in CHANNEL_CAPABILITIES.items():
+            if channel_name.startswith(f"{base_name}_"):
+                return caps.get("supports_streaming", False)
+        return False
 
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
         channel_layer = _as_dict(self._channel_sessions.get(msg.channel_name))

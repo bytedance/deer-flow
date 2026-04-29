@@ -18,6 +18,11 @@ from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
 
+# Global lock to ensure Feishu channels start sequentially
+# This prevents race conditions when multiple Feishu channels try to
+# patch the module-level lark_oapi.ws.client.loop simultaneously
+_feishu_start_lock = threading.Lock()
+
 
 def _is_feishu_command(text: str) -> bool:
     if not text.startswith("/"):
@@ -43,11 +48,13 @@ class FeishuChannel(Channel):
         5. Bot adds "DONE" emoji reaction to the original message
     """
 
-    def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
-        super().__init__(name="feishu", bus=bus, config=config)
+    def __init__(self, bus: MessageBus, config: dict[str, Any], name: str = "feishu") -> None:
+        super().__init__(name=name, bus=bus, config=config)
         self._thread: threading.Thread | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._api_client = None
+        self._api_client_ready = threading.Event()
+        self._api_client_init_error: Exception | None = None
         self._CreateMessageReactionRequest = None
         self._CreateMessageReactionRequestBody = None
         self._Emoji = None
@@ -67,44 +74,6 @@ class FeishuChannel(Channel):
         if self._running:
             return
 
-        try:
-            import lark_oapi as lark
-            from lark_oapi.api.im.v1 import (
-                CreateFileRequest,
-                CreateFileRequestBody,
-                CreateImageRequest,
-                CreateImageRequestBody,
-                CreateMessageReactionRequest,
-                CreateMessageReactionRequestBody,
-                CreateMessageRequest,
-                CreateMessageRequestBody,
-                Emoji,
-                GetMessageResourceRequest,
-                PatchMessageRequest,
-                PatchMessageRequestBody,
-                ReplyMessageRequest,
-                ReplyMessageRequestBody,
-            )
-        except ImportError:
-            logger.error("lark-oapi is not installed. Install it with: uv add lark-oapi")
-            return
-
-        self._lark = lark
-        self._CreateMessageRequest = CreateMessageRequest
-        self._CreateMessageRequestBody = CreateMessageRequestBody
-        self._ReplyMessageRequest = ReplyMessageRequest
-        self._ReplyMessageRequestBody = ReplyMessageRequestBody
-        self._CreateMessageReactionRequest = CreateMessageReactionRequest
-        self._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
-        self._Emoji = Emoji
-        self._PatchMessageRequest = PatchMessageRequest
-        self._PatchMessageRequestBody = PatchMessageRequestBody
-        self._CreateFileRequest = CreateFileRequest
-        self._CreateFileRequestBody = CreateFileRequestBody
-        self._CreateImageRequest = CreateImageRequest
-        self._CreateImageRequestBody = CreateImageRequestBody
-        self._GetMessageResourceRequest = GetMessageResourceRequest
-
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
         domain = self.config.get("domain", "https://open.feishu.cn")
@@ -113,7 +82,6 @@ class FeishuChannel(Channel):
             logger.error("Feishu channel requires app_id and app_secret")
             return
 
-        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
         logger.info("[Feishu] using domain: %s", domain)
         self._main_loop = asyncio.get_event_loop()
 
@@ -141,29 +109,87 @@ class FeishuChannel(Channel):
         running, so ``loop.run_until_complete()`` inside ``Client.start()``
         raises ``RuntimeError``.
 
-        We work around this by creating a plain asyncio event loop for this
-        thread and patching the SDK's module-level reference before calling
-        ``start()``.
+        We work around this by:
+        1. Completely unloading any previously cached lark_oapi modules
+        2. Only importing lark_oapi inside this dedicated thread, with our
+           fresh event loop already set
+        3. Using a global lock to ensure only one Feishu channel initializes
+           the SDK at a time, preventing race conditions.
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._api_client_ready.clear()
+        self._api_client_init_error = None
         try:
-            import lark_oapi as lark
-            import lark_oapi.ws.client as _ws_client_mod
+            # Acquire the global lock to ensure sequential initialization
+            with _feishu_start_lock:
+                import sys
 
-            # Replace the SDK's module-level loop so Client.start() uses
-            # this thread's (non-running) event loop instead of the main
-            # thread's uvloop.
-            _ws_client_mod.loop = loop
+                try:
+                    # Completely unload any previously cached lark_oapi modules
+                    for module_name in list(sys.modules.keys()):
+                        if module_name.startswith("lark_oapi"):
+                            del sys.modules[module_name]
 
-            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
-            ws_client = lark.ws.Client(
-                app_id=app_id,
-                app_secret=app_secret,
-                event_handler=event_handler,
-                log_level=lark.LogLevel.INFO,
-                domain=domain,
-            )
+                    # Import lark_oapi ONLY inside this thread with the fresh loop
+                    import lark_oapi as lark
+                    import lark_oapi.ws.client as _ws_client_mod
+                    from lark_oapi.api.im.v1 import (
+                        CreateFileRequest,
+                        CreateFileRequestBody,
+                        CreateImageRequest,
+                        CreateImageRequestBody,
+                        CreateMessageReactionRequest,
+                        CreateMessageReactionRequestBody,
+                        CreateMessageRequest,
+                        CreateMessageRequestBody,
+                        Emoji,
+                        GetMessageResourceRequest,
+                        PatchMessageRequest,
+                        PatchMessageRequestBody,
+                        ReplyMessageRequest,
+                        ReplyMessageRequestBody,
+                    )
+
+                    # Store all the API components on self for use in other methods
+                    self._lark = lark
+                    self._CreateMessageRequest = CreateMessageRequest
+                    self._CreateMessageRequestBody = CreateMessageRequestBody
+                    self._ReplyMessageRequest = ReplyMessageRequest
+                    self._ReplyMessageRequestBody = ReplyMessageRequestBody
+                    self._CreateMessageReactionRequest = CreateMessageReactionRequest
+                    self._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+                    self._Emoji = Emoji
+                    self._PatchMessageRequest = PatchMessageRequest
+                    self._PatchMessageRequestBody = PatchMessageRequestBody
+                    self._CreateFileRequest = CreateFileRequest
+                    self._CreateFileRequestBody = CreateFileRequestBody
+                    self._CreateImageRequest = CreateImageRequest
+                    self._CreateImageRequestBody = CreateImageRequestBody
+                    self._GetMessageResourceRequest = GetMessageResourceRequest
+
+                    # Create the API client and mark it ready for outbound sends
+                    self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
+                    self._api_client_ready.set()
+
+                    # Replace the SDK's module-level loop just to be safe
+                    _ws_client_mod.loop = loop
+
+                    event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+                    ws_client = lark.ws.Client(
+                        app_id=app_id,
+                        app_secret=app_secret,
+                        event_handler=event_handler,
+                        log_level=lark.LogLevel.INFO,
+                        domain=domain,
+                    )
+                except Exception as exc:
+                    self._api_client = None
+                    self._api_client_init_error = exc
+                    self._api_client_ready.set()
+                    raise
+            # Release the lock before starting the client, so other channels
+            # can initialize while this one runs
             ws_client.start()
         except Exception:
             if self._running:
