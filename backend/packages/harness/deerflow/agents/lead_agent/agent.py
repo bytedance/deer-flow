@@ -99,7 +99,7 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
     # config is not expected to change after startup.
     try:
-        resolved_app_config = app_config or get_app_config()
+        resolved_app_config = get_app_config()
         skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
     except Exception:
         logger.exception("Failed to resolve skills container path; falling back to default")
@@ -260,7 +260,7 @@ def _build_middlewares(
         List of middleware instances.
     """
     middlewares = build_lead_runtime_middlewares(lazy_init=True)
-    resolved_app_config = app_config or get_app_config()
+    resolved_app_config = get_app_config()
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
@@ -314,13 +314,13 @@ def _build_middlewares(
     return middlewares
 
 
-def make_lead_agent(config: RunnableConfig, app_config: AppConfig | None = None):
+def make_lead_agent(config: RunnableConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent
 
     cfg = _get_runtime_config(config)
-    resolved_app_config = app_config or get_app_config()
+    resolved_app_config = get_app_config()
 
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
