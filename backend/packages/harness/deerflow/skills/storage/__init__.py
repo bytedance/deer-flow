@@ -61,17 +61,9 @@ def reset_skill_storage() -> None:
     global _default_skill_storage
     _default_skill_storage = None
 
-
-def set_skill_storage(storage: SkillStorage) -> None:
-    """Inject a custom ``SkillStorage`` instance (used in tests)."""
-    global _default_skill_storage
-    _default_skill_storage = storage
-
-
 __all__ = [
     "LocalSkillStorage",
     "SkillStorage",
     "get_or_new_skill_storage",
     "reset_skill_storage",
-    "set_skill_storage",
 ]
