@@ -4,6 +4,8 @@ Pure business logic — no FastAPI/HTTP dependencies.
 Both Gateway and Client delegate to these functions.
 """
 
+import asyncio
+import concurrent.futures
 import logging
 import posixpath
 import shutil
@@ -13,13 +15,21 @@ import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from deerflow.skills.loader import get_skills_root_path
+from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.validation import _validate_skill_frontmatter
 
 logger = logging.getLogger(__name__)
 
+_PROMPT_INPUT_DIRS = {"references", "templates"}
+_PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
+
 
 class SkillAlreadyExistsError(ValueError):
     """Raised when a skill with the same name is already installed."""
+
+
+class SkillSecurityScanError(ValueError):
+    """Raised when a skill archive fails security scanning."""
 
 
 def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
@@ -114,7 +124,78 @@ def safe_extract_skill_archive(
                 dst.write(chunk)
 
 
-def install_skill_from_archive(
+def _is_script_support_file(rel_path: Path) -> bool:
+    return bool(rel_path.parts) and rel_path.parts[0] == "scripts"
+
+
+def _should_scan_support_file(rel_path: Path) -> bool:
+    if _is_script_support_file(rel_path):
+        return True
+    return bool(rel_path.parts) and rel_path.parts[0] in _PROMPT_INPUT_DIRS and rel_path.suffix.lower() in _PROMPT_INPUT_SUFFIXES
+
+
+def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) -> None:
+    installed = False
+    reserved = False
+    try:
+        target.mkdir(mode=0o700)
+        reserved = True
+        for child in staging_target.iterdir():
+            shutil.move(str(child), target / child.name)
+        installed = True
+    except FileExistsError as e:
+        raise SkillAlreadyExistsError(f"Skill '{target.name}' already exists") from e
+    finally:
+        if reserved and not installed and target.exists():
+            shutil.rmtree(target)
+
+
+async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool) -> None:
+    rel_path = path.relative_to(skill_dir).as_posix()
+    location = f"{skill_name}/{rel_path}"
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
+
+    try:
+        result = await scan_skill_content(content, executable=executable, location=location)
+    except Exception as e:
+        raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
+
+    decision = getattr(result, "decision", None)
+    reason = str(getattr(result, "reason", "") or "No reason provided.")
+    if decision == "block":
+        if rel_path == "SKILL.md":
+            raise SkillSecurityScanError(f"Security scan blocked skill '{skill_name}': {reason}")
+        raise SkillSecurityScanError(f"Security scan blocked {location}: {reason}")
+    if executable and decision != "allow":
+        raise SkillSecurityScanError(f"Security scan rejected executable {location}: {reason}")
+    if decision not in {"allow", "warn"}:
+        raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}")
+
+
+async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str) -> None:
+    """Run the skill security scanner against all installable text and script files."""
+    skill_md = skill_dir / "SKILL.md"
+    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False)
+
+    for path in sorted(skill_dir.rglob("*")):
+        if not path.is_file():
+            continue
+
+        rel_path = path.relative_to(skill_dir)
+        if rel_path == Path("SKILL.md"):
+            continue
+        if path.name == "SKILL.md":
+            raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
+        if not _should_scan_support_file(rel_path):
+            continue
+
+        await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=_is_script_support_file(rel_path))
+
+
+async def ainstall_skill_from_archive(
     zip_path: str | Path,
     *,
     skills_root: Path | None = None,
@@ -173,7 +254,12 @@ def install_skill_from_archive(
         if target.exists():
             raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
 
-        shutil.copytree(skill_dir, target)
+        await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+
+        with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
+            staging_target = Path(staging_root) / skill_name
+            shutil.copytree(skill_dir, staging_target)
+            _move_staged_skill_into_reserved_target(staging_target, target)
         logger.info("Skill %r installed to %s", skill_name, target)
 
     return {
@@ -181,3 +267,24 @@ def install_skill_from_archive(
         "skill_name": skill_name,
         "message": f"Skill '{skill_name}' installed successfully",
     }
+
+
+def _run_async_install(coro):
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
+
+
+def install_skill_from_archive(
+    zip_path: str | Path,
+    *,
+    skills_root: Path | None = None,
+) -> dict:
+    """Install a skill from a .skill archive (ZIP)."""
+    return _run_async_install(ainstall_skill_from_archive(zip_path, skills_root=skills_root))

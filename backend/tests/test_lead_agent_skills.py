@@ -100,6 +100,24 @@ def test_get_skills_prompt_section_cache_respects_skill_evolution_toggle(monkeyp
     assert "Skill Self-Evolution" not in disabled_result
 
 
+def test_get_skills_prompt_section_uses_explicit_config_for_enabled_skills(monkeypatch):
+    explicit_config = SimpleNamespace(
+        skills=SimpleNamespace(container_path="/mnt/alt-skills"),
+        skill_evolution=SimpleNamespace(enabled=False),
+    )
+
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: [_make_skill("global-skill")])
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.load_skills",
+        lambda enabled_only=True, app_config=None: [_make_skill("explicit-skill")] if app_config is explicit_config else [],
+    )
+
+    result = get_skills_prompt_section(app_config=explicit_config)
+
+    assert "explicit-skill" in result
+    assert "global-skill" not in result
+
+
 def test_make_lead_agent_empty_skills_passed_correctly(monkeypatch):
     from unittest.mock import MagicMock
 
@@ -107,7 +125,7 @@ def test_make_lead_agent_empty_skills_passed_correctly(monkeypatch):
 
     # Mock dependencies
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: MagicMock())
-    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None: "default-model")
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda *args, **kwargs: [])

@@ -1,3 +1,141 @@
+---
+title: Agents and Threads
+description: DeerFlow App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
+---
+
+import { Callout, Cards, Steps } from "nextra/components";
+
 # Agents and Threads
 
-TBD
+DeerFlow App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
+
+## Agents
+
+### The default agent
+
+The default agent is the Lead Agent with no custom configuration. It loads all globally enabled skills, has access to all configured tools, and uses the first model in `config.yaml` as its default.
+
+### Custom agents
+
+Custom agents are named variants of the Lead Agent. Each one can have:
+
+- a **display name** and an auto-derived ASCII slug (the `name` used internally)
+- a specific **model** to use by default
+- a restricted set of **skills** (or all globally enabled skills if unspecified)
+- a restricted set of **tool groups**
+- a custom **system prompt** or agent-specific instructions
+
+Custom agents are created and managed through:
+
+- **The App UI**: open the Agents section in the settings panel.
+- **The Gateway API**: `POST /api/agents` with the agent definition.
+
+The slug (`name`) is automatically derived from the `display_name` and must be unique. The system checks for conflicts and appends a suffix if needed (`/api/agents/check`).
+
+Agent configuration is stored in `agents/{name}/config.yaml` relative to the backend directory.
+
+### Restricting agent capabilities
+
+To restrict a custom agent to specific skills:
+
+```yaml
+# agents/my-researcher/config.yaml
+name: my-researcher
+display_name: My Researcher
+skills:
+  - deep-research
+  - academic-paper-review
+# Omit skills key entirely to inherit all globally enabled skills
+# Set skills: [] to disable all skills for this agent
+```
+
+To restrict to specific tool groups:
+
+```yaml
+tool_groups:
+  - research # only tools in the 'research' group are available
+```
+
+## Threads
+
+A **thread** is a persistent conversation session. Each thread has:
+
+- a unique thread ID
+- a message history
+- accumulated artifacts (output files)
+- a title (auto-generated after the first exchange)
+- a reference to the agent used
+
+Threads are listed in the sidebar. Clicking a thread resumes the conversation from where it left off.
+
+### Thread lifecycle
+
+<Steps>
+
+#### Create
+
+A new thread is created when you start a conversation. The thread ID is generated and the initial configuration (model, agent, skills) is recorded.
+
+#### Run
+
+Each user message triggers an agent run. The run streams tokens and tool calls back to the browser in real time. The thread state (messages, artifacts) is updated after each turn.
+
+#### Checkpoint
+
+If a checkpointer is configured, the thread state is persisted after each turn. This means the conversation survives process restarts.
+
+#### Resume
+
+Opening a thread from the sidebar loads its full history from the checkpointer. The agent picks up from where it left off.
+
+</Steps>
+
+### Checkpointer configuration
+
+The checkpointer controls how thread state is persisted:
+
+```yaml
+# In-memory (default if omitted — state lost on restart)
+# checkpointer:
+#   type: memory
+
+# SQLite (survives restarts, single-process)
+checkpointer:
+  type: sqlite
+  connection_string: checkpoints.db
+
+# PostgreSQL (multi-process, production)
+# checkpointer:
+#   type: postgres
+#   connection_string: postgresql://user:password@localhost:5432/deerflow
+```
+
+<Callout type="info">
+  The LangGraph Server manages its own state separately. The
+  <code>checkpointer</code> setting in <code>config.yaml</code> applies to the
+  embedded <code>DeerFlowClient</code> (used in direct Python integrations), not
+  to the LangGraph Server deployment used by DeerFlow App.
+</Callout>
+
+### Thread data storage
+
+Working files produced during a thread (uploads, intermediate files, output artifacts) are stored under:
+
+```
+backend/.deer-flow/threads/{thread_id}/user-data/
+```
+
+This directory is mounted into the sandbox as `/mnt/user-data/` for the agent to read and write.
+
+In Docker deployments, this path is bind-mounted from the host so that thread data persists across container restarts. Set `DEER_FLOW_ROOT` to the absolute path of your deer-flow repository root to ensure the correct host path is used.
+
+<Cards num={2}>
+  <Cards.Card
+    title="Workspace Usage"
+    href="/docs/application/workspace-usage"
+  />
+  <Cards.Card
+    title="Operations & Troubleshooting"
+    href="/docs/application/operations-and-troubleshooting"
+  />
+</Cards>

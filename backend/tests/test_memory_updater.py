@@ -305,8 +305,8 @@ def test_import_memory_data_saves_and_returns_imported_memory() -> None:
     with patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage):
         result = import_memory_data(imported_memory)
 
-    mock_storage.save.assert_called_once_with(imported_memory, None)
-    mock_storage.load.assert_called_once_with(None)
+    mock_storage.save.assert_called_once_with(imported_memory, None, user_id=None)
+    mock_storage.load.assert_called_once_with(None, user_id=None)
     assert result == imported_memory
 
 

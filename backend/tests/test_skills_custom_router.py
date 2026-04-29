@@ -1,5 +1,6 @@
 import errno
 import json
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +36,92 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
     )
 
 
+def _make_test_app(config) -> FastAPI:
+    app = FastAPI()
+    app.state.config = config
+    app.include_router(skills_router.router)
+    return app
+
+
+def _make_skill_archive(tmp_path: Path, name: str, content: str | None = None) -> Path:
+    archive = tmp_path / f"{name}.skill"
+    skill_content = content or _skill_content(name)
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(f"{name}/SKILL.md", skill_content)
+    return archive
+
+
+def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = _make_skill_archive(tmp_path, "archive-skill")
+    scan_calls = []
+    refresh_calls = []
+
+    async def _scan(content, *, executable, location):
+        from deerflow.skills.security_scanner import ScanResult
+
+        scan_calls.append({"content": content, "executable": executable, "location": location})
+        return ScanResult(decision="allow", reason="ok")
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr("deerflow.skills.installer.get_skills_root_path", lambda: skills_root)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+
+    app = FastAPI()
+    app.include_router(skills_router.router)
+
+    with TestClient(app) as client:
+        response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/archive-skill.skill"})
+
+    assert response.status_code == 200
+    assert response.json()["skill_name"] == "archive-skill"
+    assert (skills_root / "custom" / "archive-skill" / "SKILL.md").exists()
+    assert scan_calls == [
+        {
+            "content": _skill_content("archive-skill"),
+            "executable": False,
+            "location": "archive-skill/SKILL.md",
+        }
+    ]
+    assert refresh_calls == ["refresh"]
+
+
+def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = _make_skill_archive(tmp_path, "blocked-skill")
+    refresh_calls = []
+
+    async def _scan(*args, **kwargs):
+        from deerflow.skills.security_scanner import ScanResult
+
+        return ScanResult(decision="block", reason="prompt injection")
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr("deerflow.skills.installer.get_skills_root_path", lambda: skills_root)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+
+    app = FastAPI()
+    app.include_router(skills_router.router)
+
+    with TestClient(app) as client:
+        response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/blocked-skill.skill"})
+
+    assert response.status_code == 400
+    assert "Security scan blocked skill 'blocked-skill': prompt injection" in response.json()["detail"]
+    assert not (skills_root / "custom" / "blocked-skill").exists()
+    assert refresh_calls == []
+
+
 def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     custom_dir = skills_root / "custom" / "demo-skill"
@@ -54,8 +141,7 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         response = client.get("/api/skills/custom")
@@ -96,7 +182,7 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr("deerflow.skills.manager.get_app_config", lambda: config)
-    get_skill_history_file("demo-skill").write_text(
+    get_skill_history_file("demo-skill", app_config=config).write_text(
         '{"action":"human_edit","prev_content":' + json.dumps(original_content) + ',"new_content":' + json.dumps(edited_content) + "}\n",
         encoding="utf-8",
     )
@@ -113,8 +199,7 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _scan)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
@@ -146,8 +231,7 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
 
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         delete_response = client.delete("/api/skills/custom/demo-skill")
@@ -187,8 +271,7 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
     monkeypatch.setattr("app.gateway.routers.skills.append_history", _readonly_history)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         delete_response = client.delete("/api/skills/custom/demo-skill")
@@ -221,8 +304,7 @@ def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp
     monkeypatch.setattr("app.gateway.routers.skills.shutil.rmtree", _fail_rmtree)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         delete_response = client.delete("/api/skills/custom/demo-skill")
@@ -238,7 +320,7 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     enabled_state = {"value": True}
     refresh_calls = []
 
-    def _load_skills(*, enabled_only: bool):
+    def _load_skills(*, enabled_only: bool, app_config=None):
         skill = _make_skill("demo-skill", enabled=enabled_state["value"])
         if enabled_only and not skill.enabled:
             return []
@@ -254,8 +336,7 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(SimpleNamespace())
 
     with TestClient(app) as client:
         response = client.put("/api/skills/demo-skill", json={"enabled": False})

@@ -49,6 +49,17 @@ def client(mock_app_config):
         return DeerFlowClient()
 
 
+@pytest.fixture
+def allow_skill_security_scan():
+    async def _scan(*args, **kwargs):
+        from deerflow.skills.security_scanner import ScanResult
+
+        return ScanResult(decision="allow", reason="ok")
+
+    with patch("deerflow.skills.installer.scan_skill_content", _scan):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # __init__
 # ---------------------------------------------------------------------------
@@ -819,7 +830,7 @@ class TestEnsureAgent:
             patch("deerflow.client._build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
             patch.object(client, "_get_tools", return_value=[]),
-            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._agent_name = "custom-agent"
             client._available_skills = {"test_skill"}
@@ -844,7 +855,7 @@ class TestEnsureAgent:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
-            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=mock_checkpointer),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=mock_checkpointer),
         ):
             client._ensure_agent(config)
 
@@ -869,7 +880,7 @@ class TestEnsureAgent:
             patch("deerflow.client._build_middlewares", side_effect=fake_build_middlewares),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
-            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config)
 
@@ -888,7 +899,7 @@ class TestEnsureAgent:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
-            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=None),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
         ):
             client._ensure_agent(config)
 
@@ -1017,7 +1028,7 @@ class TestThreadQueries:
         mock_checkpointer = MagicMock()
         mock_checkpointer.list.return_value = []
 
-        with patch("deerflow.agents.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
+        with patch("deerflow.runtime.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
             # No internal checkpointer, should fetch from provider
             result = client.list_threads()
 
@@ -1071,7 +1082,7 @@ class TestThreadQueries:
         mock_checkpointer = MagicMock()
         mock_checkpointer.list.return_value = []
 
-        with patch("deerflow.agents.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
+        with patch("deerflow.runtime.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
             result = client.get_thread("t99")
 
         assert result["thread_id"] == "t99"
@@ -1195,7 +1206,7 @@ class TestSkillsManagement:
             with pytest.raises(ValueError, match="not found"):
                 client.update_skill("nonexistent", enabled=True)
 
-    def test_install_skill(self, client):
+    def test_install_skill(self, client, allow_skill_security_scan):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
@@ -1243,7 +1254,10 @@ class TestMemoryManagement:
         with patch("deerflow.agents.memory.updater.import_memory_data", return_value=imported) as mock_import:
             result = client.import_memory(imported)
 
-        mock_import.assert_called_once_with(imported)
+        assert mock_import.call_count == 1
+        call_args = mock_import.call_args
+        assert call_args.args == (imported,)
+        assert "user_id" in call_args.kwargs
         assert result == imported
 
     def test_reload_memory(self, client):
@@ -1489,9 +1503,12 @@ class TestUploads:
 
 class TestArtifacts:
     def test_get_artifact(self, client):
+        from deerflow.runtime.user_context import get_effective_user_id
+
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            outputs = paths.sandbox_outputs_dir("t1")
+            user_id = get_effective_user_id()
+            outputs = paths.sandbox_outputs_dir("t1", user_id=user_id)
             outputs.mkdir(parents=True)
             (outputs / "result.txt").write_text("artifact content")
 
@@ -1502,9 +1519,12 @@ class TestArtifacts:
             assert "text" in mime
 
     def test_get_artifact_not_found(self, client):
+        from deerflow.runtime.user_context import get_effective_user_id
+
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            paths.sandbox_user_data_dir("t1").mkdir(parents=True)
+            user_id = get_effective_user_id()
+            paths.sandbox_outputs_dir("t1", user_id=user_id).mkdir(parents=True)
 
             with patch("deerflow.client.get_paths", return_value=paths):
                 with pytest.raises(FileNotFoundError):
@@ -1515,9 +1535,12 @@ class TestArtifacts:
             client.get_artifact("t1", "bad/path/file.txt")
 
     def test_get_artifact_path_traversal(self, client):
+        from deerflow.runtime.user_context import get_effective_user_id
+
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            paths.sandbox_user_data_dir("t1").mkdir(parents=True)
+            user_id = get_effective_user_id()
+            paths.sandbox_outputs_dir("t1", user_id=user_id).mkdir(parents=True)
 
             with patch("deerflow.client.get_paths", return_value=paths):
                 with pytest.raises(PathTraversalError):
@@ -1701,13 +1724,16 @@ class TestScenarioFileLifecycle:
 
     def test_upload_then_read_artifact(self, client):
         """Upload a file, simulate agent producing artifact, read it back."""
+        from deerflow.runtime.user_context import get_effective_user_id
+
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             uploads_dir = tmp_path / "uploads"
             uploads_dir.mkdir()
 
             paths = Paths(base_dir=tmp_path)
-            outputs_dir = paths.sandbox_outputs_dir("t-artifact")
+            user_id = get_effective_user_id()
+            outputs_dir = paths.sandbox_outputs_dir("t-artifact", user_id=user_id)
             outputs_dir.mkdir(parents=True)
 
             # Upload phase
@@ -1846,7 +1872,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
-            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config_a)
             first_agent = client._agent
@@ -1874,7 +1900,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
-            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config)
             client._ensure_agent(config)
@@ -1899,7 +1925,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client._build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
-            patch("deerflow.agents.checkpointer.get_checkpointer", return_value=MagicMock()),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config)
             client.reset_agent()
@@ -1957,11 +1983,14 @@ class TestScenarioThreadIsolation:
 
     def test_artifacts_isolated_per_thread(self, client):
         """Artifacts in thread-A are not accessible from thread-B."""
+        from deerflow.runtime.user_context import get_effective_user_id
+
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            outputs_a = paths.sandbox_outputs_dir("thread-a")
+            user_id = get_effective_user_id()
+            outputs_a = paths.sandbox_outputs_dir("thread-a", user_id=user_id)
             outputs_a.mkdir(parents=True)
-            paths.sandbox_user_data_dir("thread-b").mkdir(parents=True)
+            paths.sandbox_outputs_dir("thread-b", user_id=user_id).mkdir(parents=True)
             (outputs_a / "result.txt").write_text("thread-a artifact")
 
             with patch("deerflow.client.get_paths", return_value=paths):
@@ -2015,7 +2044,7 @@ class TestScenarioMemoryWorkflow:
 class TestScenarioSkillInstallAndUse:
     """Scenario: Install a skill → verify it appears → toggle it."""
 
-    def test_install_then_toggle(self, client):
+    def test_install_then_toggle(self, client, allow_skill_security_scan):
         """Install .skill archive → list to verify → disable → verify disabled."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2261,7 +2290,7 @@ class TestGatewayConformance:
         parsed = SkillResponse(**result)
         assert parsed.name == "web-search"
 
-    def test_install_skill(self, client, tmp_path):
+    def test_install_skill(self, client, tmp_path, allow_skill_security_scan):
         skill_dir = tmp_path / "my-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("---\nname: my-skill\ndescription: A test skill\n---\nBody\n")
@@ -2459,7 +2488,7 @@ class TestInstallSkillSecurity:
                 with pytest.raises(ValueError, match="unsafe"):
                     client.install_skill(archive)
 
-    def test_symlinks_skipped_during_extraction(self, client):
+    def test_symlinks_skipped_during_extraction(self, client, allow_skill_security_scan):
         """Symlink entries in the archive are skipped (never written to disk)."""
         import stat as stat_mod
 
@@ -2869,9 +2898,12 @@ class TestUploadDeleteSymlink:
 class TestArtifactHardening:
     def test_artifact_directory_rejected(self, client):
         """get_artifact rejects paths that resolve to a directory."""
+        from deerflow.runtime.user_context import get_effective_user_id
+
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            subdir = paths.sandbox_outputs_dir("t1") / "subdir"
+            user_id = get_effective_user_id()
+            subdir = paths.sandbox_outputs_dir("t1", user_id=user_id) / "subdir"
             subdir.mkdir(parents=True)
 
             with patch("deerflow.client.get_paths", return_value=paths):
@@ -2880,9 +2912,12 @@ class TestArtifactHardening:
 
     def test_artifact_leading_slash_stripped(self, client):
         """Paths with leading slash are handled correctly."""
+        from deerflow.runtime.user_context import get_effective_user_id
+
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            outputs = paths.sandbox_outputs_dir("t1")
+            user_id = get_effective_user_id()
+            outputs = paths.sandbox_outputs_dir("t1", user_id=user_id)
             outputs.mkdir(parents=True)
             (outputs / "file.txt").write_text("content")
 
@@ -2996,9 +3031,12 @@ class TestBugArtifactPrefixMatchTooLoose:
 
     def test_exact_prefix_without_subpath_accepted(self, client):
         """Bare 'mnt/user-data' is accepted (will later fail as directory, not at prefix)."""
+        from deerflow.runtime.user_context import get_effective_user_id
+
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            paths.sandbox_user_data_dir("t1").mkdir(parents=True)
+            user_id = get_effective_user_id()
+            paths.sandbox_outputs_dir("t1", user_id=user_id).mkdir(parents=True)
 
             with patch("deerflow.client.get_paths", return_value=paths):
                 # Accepted at prefix check, but fails because it's a directory.

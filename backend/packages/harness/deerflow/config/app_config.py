@@ -11,10 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skills_config import SkillsConfig
@@ -29,6 +31,12 @@ from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_searc
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+CONFIG_FILE_DATABASE_DEFAULTS = {
+    "backend": "sqlite",
+    "sqlite_dir": ".deer-flow/data",
+}
 
 
 class CircuitBreakerConfig(BaseModel):
@@ -65,7 +73,9 @@ class AppConfig(BaseModel):
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
-    model_config = ConfigDict(extra="allow", frozen=False)
+    model_config = ConfigDict(extra="allow")
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig, description="Unified database backend configuration")
+    run_events: RunEventsConfig = Field(default_factory=RunEventsConfig, description="Run event storage configuration")
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
 
@@ -114,6 +124,7 @@ class AppConfig(BaseModel):
         cls._check_config_version(config_data, resolved_path)
 
         config_data = cls.resolve_env_variables(config_data)
+        cls._apply_database_defaults(config_data)
 
         # Load title config if present
         if "title" in config_data:
@@ -164,6 +175,18 @@ class AppConfig(BaseModel):
 
         result = cls.model_validate(config_data)
         return result
+
+    @classmethod
+    def _apply_database_defaults(cls, config_data: dict[str, Any]) -> None:
+        """Apply config.yaml defaults for persistence when the section is absent."""
+        database_config = config_data.get("database")
+        if database_config is None:
+            database_config = {}
+            config_data["database"] = database_config
+        if not isinstance(database_config, dict):
+            return
+        for key, value in CONFIG_FILE_DATABASE_DEFAULTS.items():
+            database_config.setdefault(key, value)
 
     @classmethod
     def _check_config_version(cls, config_data: dict, config_path: Path) -> None:
@@ -269,6 +292,9 @@ class AppConfig(BaseModel):
         return next((group for group in self.tool_groups if group.name == name), None)
 
 
+# Compatibility singleton layer for code paths that have not yet been
+# migrated to explicit ``AppConfig`` threading. New composition roots should
+# prefer constructing ``AppConfig`` once and passing it down directly.
 _app_config: AppConfig | None = None
 _app_config_path: Path | None = None
 _app_config_mtime: float | None = None

@@ -231,7 +231,7 @@ class TestResolveAttachments:
         mock_paths = MagicMock()
         mock_paths.sandbox_outputs_dir.return_value = outputs_dir
 
-        def resolve_side_effect(tid, vpath):
+        def resolve_side_effect(tid, vpath, *, user_id=None):
             if "data.csv" in vpath:
                 return good_file
             return tmp_path / "missing.txt"
