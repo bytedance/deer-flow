@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
+from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
 from deerflow.subagents.config import SubagentConfig
 
@@ -132,6 +133,7 @@ class SubagentExecutor:
         self,
         config: SubagentConfig,
         tools: list[BaseTool],
+        app_config: AppConfig | None = None,
         parent_model: str | None = None,
         sandbox_state: SandboxState | None = None,
         thread_data: ThreadDataState | None = None,
@@ -143,6 +145,9 @@ class SubagentExecutor:
         Args:
             config: Subagent configuration.
             tools: List of all available tools (will be filtered).
+            app_config: Resolved AppConfig; threaded into middleware factories
+                at agent-build time. When None, ``_create_agent`` falls back to
+                ``get_app_config()`` (matches the lead-agent factory's pattern).
             parent_model: The parent agent's model name for inheritance.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
@@ -150,6 +155,7 @@ class SubagentExecutor:
             trace_id: Trace ID from parent for distributed tracing.
         """
         self.config = config
+        self.app_config = app_config
         self.parent_model = parent_model
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
@@ -173,8 +179,12 @@ class SubagentExecutor:
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
-        # Reuse shared middleware composition with lead agent.
-        middlewares = build_subagent_runtime_middlewares(lazy_init=True)
+        # Mirror lead-agent factory pattern: prefer explicit app_config,
+        # fall back to ambient lookup at agent-build time.
+        from deerflow.config import get_app_config
+
+        resolved_app_config = self.app_config or get_app_config()
+        middlewares = build_subagent_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
 
         return create_agent(
             model=model,
