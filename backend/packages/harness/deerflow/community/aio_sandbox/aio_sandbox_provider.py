@@ -291,9 +291,9 @@ class AioSandboxProvider(SandboxProvider):
         so the host Docker daemon can resolve the path.
         """
         try:
-            from deerflow.skills.storage import get_skill_storage
+            from deerflow.skills.storage import get_or_new_skill_storage
 
-            storage = get_skill_storage()
+            storage = get_or_new_skill_storage()
             skills_path = storage.get_skills_root_path()
             container_path = storage.get_container_root()
 

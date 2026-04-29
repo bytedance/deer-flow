@@ -1222,7 +1222,9 @@ class TestSkillsManagement:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
                 result = client.install_skill(archive_path)
 
             assert result["success"] is True
@@ -2061,7 +2063,9 @@ class TestScenarioSkillInstallAndUse:
             (skills_root / "custom").mkdir(parents=True)
 
             # Step 1: Install
-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
                 result = client.install_skill(archive)
             assert result["success"] is True
             assert (skills_root / "custom" / "my-analyzer" / "SKILL.md").exists()
@@ -2299,7 +2303,9 @@ class TestGatewayConformance:
         with zipfile.ZipFile(archive, "w") as zf:
             zf.write(skill_dir / "SKILL.md", "my-skill/SKILL.md")
 
-        with patch("deerflow.skills.installer.get_skills_root_path", return_value=tmp_path):
+        from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+        with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(tmp_path))):
             result = client.install_skill(archive)
 
         parsed = SkillInstallResponse(**result)
@@ -2453,8 +2459,10 @@ class TestInstallSkillSecurity:
             def patched_extract(zf, dest, max_total_size=100):
                 return orig(zf, dest, max_total_size=100)
 
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
             with (
-                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
+                patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))),
                 patch("deerflow.skills.installer.safe_extract_skill_archive", side_effect=patched_extract),
             ):
                 with pytest.raises(ValueError, match="too large"):
@@ -2470,7 +2478,9 @@ class TestInstallSkillSecurity:
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
                 with pytest.raises(ValueError, match="unsafe"):
                     client.install_skill(archive)
 
@@ -2484,7 +2494,9 @@ class TestInstallSkillSecurity:
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
                 with pytest.raises(ValueError, match="unsafe"):
                     client.install_skill(archive)
 
@@ -2506,7 +2518,9 @@ class TestInstallSkillSecurity:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
                 result = client.install_skill(archive)
 
             assert result["success"] is True
@@ -2530,9 +2544,11 @@ class TestInstallSkillSecurity:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
             with (
-                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
-                patch("deerflow.skills.installer._validate_skill_frontmatter", return_value=(True, "OK", "../evil")),
+                patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))),
+                patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "../evil")),
             ):
                 with pytest.raises(ValueError, match="Invalid skill name"):
                     client.install_skill(archive)
@@ -2553,9 +2569,11 @@ class TestInstallSkillSecurity:
             skills_root = tmp_path / "skills"
             (skills_root / "custom" / "dupe-skill").mkdir(parents=True)
 
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
             with (
-                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
-                patch("deerflow.skills.installer._validate_skill_frontmatter", return_value=(True, "OK", "dupe-skill")),
+                patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))),
+                patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "dupe-skill")),
             ):
                 with pytest.raises(ValueError, match="already exists"):
                     client.install_skill(archive)
@@ -2570,7 +2588,9 @@ class TestInstallSkillSecurity:
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
                 with pytest.raises(ValueError, match="empty"):
                     client.install_skill(archive)
 
@@ -2589,9 +2609,11 @@ class TestInstallSkillSecurity:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
             with (
-                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
-                patch("deerflow.skills.installer._validate_skill_frontmatter", return_value=(False, "Missing name field", "")),
+                patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))),
+                patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(False, "Missing name field", "")),
             ):
                 with pytest.raises(ValueError, match="Invalid skill"):
                     client.install_skill(archive)

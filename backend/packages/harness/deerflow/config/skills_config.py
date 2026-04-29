@@ -2,8 +2,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from deerflow.skills.types import SkillCategory
-
 
 def _default_repo_root() -> Path:
     """Resolve the repo root without relying on the current working directory."""
@@ -41,10 +39,12 @@ class SkillsConfig(BaseModel):
                 path = _default_repo_root() / path
             return path.resolve()
         else:
-            # Default: ../skills relative to backend directory (i.e. <repo_root>/skills).
-            return _default_repo_root() / "skills"
+            # Default: ../skills relative to backend directory
+            from deerflow.skills.loader import get_skills_root_path
 
-    def get_skill_container_path(self, skill_name: str, category: SkillCategory | str = SkillCategory.PUBLIC) -> str:
+            return get_skills_root_path()
+
+    def get_skill_container_path(self, skill_name: str, category: str = "public") -> str:
         """
         Get the full container path for a specific skill.
 
@@ -55,5 +55,4 @@ class SkillsConfig(BaseModel):
         Returns:
             Full path to the skill in the container
         """
-        cat_value = category.value if isinstance(category, SkillCategory) else category
-        return f"{self.container_path}/{cat_value}/{skill_name}"
+        return f"{self.container_path}/{category}/{skill_name}"

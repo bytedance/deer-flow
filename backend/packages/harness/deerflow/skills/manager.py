@@ -13,30 +13,23 @@ from pathlib import Path
 from typing import Any
 
 from deerflow.config.app_config import AppConfig, get_app_config  # noqa: F401 — kept for test monkeypatching
-from deerflow.skills.types import SKILL_MD_FILE
+from deerflow.skills.storage import get_or_new_skill_storage
 
-SKILL_FILE_NAME = SKILL_MD_FILE
 HISTORY_FILE_NAME = "HISTORY.jsonl"
 HISTORY_DIR_NAME = ".history"
 ALLOWED_SUPPORT_SUBDIRS = {"references", "templates", "scripts", "assets"}
 
 
-def _storage(app_config: AppConfig | None = None):
-    from deerflow.skills.storage import get_skill_storage
-
-    return get_skill_storage(app_config=app_config) if app_config is not None else get_skill_storage()
-
-
 def get_skills_root_dir(*, app_config: AppConfig | None = None) -> Path:
-    return _storage(app_config).get_skills_root_path()
+    return get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
 
 
 def get_public_skills_dir(*, app_config: AppConfig | None = None) -> Path:
-    return _storage(app_config).get_skills_root_path() / "public"
+    return get_or_new_skill_storage(app_config=app_config).get_skills_root_path() / "public"
 
 
 def get_custom_skills_dir(*, app_config: AppConfig | None = None) -> Path:
-    path = _storage(app_config).get_skills_root_path() / "custom"
+    path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path() / "custom"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -48,41 +41,41 @@ def validate_skill_name(name: str) -> str:
 
 
 def get_custom_skill_dir(name: str, *, app_config: AppConfig | None = None) -> Path:
-    return _storage(app_config).get_custom_skill_dir(name)
+    return get_or_new_skill_storage(app_config=app_config).get_custom_skill_dir(name)
 
 
 def get_custom_skill_file(name: str, *, app_config: AppConfig | None = None) -> Path:
-    return _storage(app_config).get_custom_skill_file(name)
+    return get_or_new_skill_storage(app_config=app_config).get_custom_skill_file(name)
 
 
 def get_custom_skill_history_dir(*, app_config: AppConfig | None = None) -> Path:
-    path = _storage(app_config).get_skills_root_path() / "custom" / ".history"
+    path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path() / "custom" / ".history"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def get_skill_history_file(name: str, *, app_config: AppConfig | None = None) -> Path:
-    return _storage(app_config).get_skill_history_file(name)
+    return get_or_new_skill_storage(app_config=app_config).get_skill_history_file(name)
 
 
 def get_public_skill_dir(name: str, *, app_config: AppConfig | None = None) -> Path:
-    return _storage(app_config).get_skills_root_path() / "public" / validate_skill_name(name)
+    return get_or_new_skill_storage(app_config=app_config).get_skills_root_path() / "public" / validate_skill_name(name)
 
 
 def custom_skill_exists(name: str, *, app_config: AppConfig | None = None) -> bool:
-    return _storage(app_config).custom_skill_exists(name)
+    return get_or_new_skill_storage(app_config=app_config).custom_skill_exists(name)
 
 
 def public_skill_exists(name: str, *, app_config: AppConfig | None = None) -> bool:
-    return _storage(app_config).public_skill_exists(name)
+    return get_or_new_skill_storage(app_config=app_config).public_skill_exists(name)
 
 
 def ensure_custom_skill_is_editable(name: str, *, app_config: AppConfig | None = None) -> None:
-    _storage(app_config).ensure_custom_skill_is_editable(name)
+    get_or_new_skill_storage(app_config=app_config).ensure_custom_skill_is_editable(name)
 
 
 def ensure_safe_support_path(name: str, relative_path: str, *, app_config: AppConfig | None = None) -> Path:
-    return _storage(app_config).ensure_safe_support_path(name, relative_path)
+    return get_or_new_skill_storage(app_config=app_config).ensure_safe_support_path(name, relative_path)
 
 
 def validate_skill_markdown_content(name: str, content: str) -> None:
@@ -101,18 +94,18 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 def append_history(name: str, record: dict[str, Any], *, app_config: AppConfig | None = None) -> None:
-    _storage(app_config).append_history(name, record)
+    get_or_new_skill_storage(app_config=app_config).append_history(name, record)
 
 
 def read_history(name: str, *, app_config: AppConfig | None = None) -> list[dict[str, Any]]:
-    return _storage(app_config).read_history(name)
+    return get_or_new_skill_storage(app_config=app_config).read_history(name)
 
 
 def list_custom_skills(*, app_config: AppConfig | None = None) -> list:
     from deerflow.skills.types import SkillCategory
 
-    return [skill for skill in _storage(app_config).load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
+    return [skill for skill in get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
 
 
 def read_custom_skill_content(name: str, *, app_config: AppConfig | None = None) -> str:
-    return _storage(app_config).read_custom_skill(name)
+    return get_or_new_skill_storage(app_config=app_config).read_custom_skill(name)

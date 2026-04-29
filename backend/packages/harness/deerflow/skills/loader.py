@@ -25,9 +25,9 @@ def get_skills_root_path() -> Path:
 
     Origin: preserved for backwards compatibility.
     """
-    from deerflow.skills.storage import get_skill_storage
+    from deerflow.skills.storage import get_or_new_skill_storage
 
-    return get_skill_storage().get_skills_root_path()
+    return get_or_new_skill_storage().get_skills_root_path()
 
 
 def load_skills(
@@ -50,14 +50,7 @@ def load_skills(
         enabled_only: If True, only return enabled skills.
         app_config: Optional ``AppConfig`` forwarded to the storage factory.
     """
-    from deerflow.skills.storage import get_skill_storage
-    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+    from deerflow.skills.storage import get_or_new_skill_storage
 
-    if skills_path is not None:
-        storage = LocalSkillStorage(host_path=str(skills_path))
-    elif app_config is not None:
-        storage = get_skill_storage(app_config=app_config)
-    else:
-        storage = get_skill_storage()
-
+    storage = get_or_new_skill_storage(skills_path=skills_path, app_config=app_config)
     return storage.load_skills(enabled_only=enabled_only)

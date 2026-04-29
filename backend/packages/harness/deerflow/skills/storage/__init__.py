@@ -11,57 +11,48 @@ from deerflow.skills.storage.skill_storage import SkillStorage
 _default_skill_storage: SkillStorage | None = None
 
 
-_DEFAULT_STORAGE_CLASS = "deerflow.skills.storage.local_skill_storage:LocalSkillStorage"
+def get_or_new_skill_storage(**kwargs) -> SkillStorage:
+    """Return a ``SkillStorage`` instance — either a new one or the process singleton.
 
+    **New instance** is created (never cached) when:
+    - ``skills_path`` is provided — uses it as the ``host_path`` override (class still resolved via config).
+    - ``app_config`` is provided — constructs a storage from ``app_config.skills``
+      so that per-request config (e.g. Gateway ``Depends(get_config)``) is respected
+      without polluting the process-level singleton.
 
-def _resolve_host_path(skills_config) -> str | None:
-    """Extract host_path from a skills config, supporting both real SkillsConfig and test SimpleNamespace."""
-    if hasattr(skills_config, "path") and not callable(skills_config.path):
-        return skills_config.path  # real SkillsConfig: str | None
-    if callable(getattr(skills_config, "get_skills_path", None)):
-        return str(skills_config.get_skills_path())  # test SimpleNamespace
-    return None
-
-
-def get_skill_storage(**kwargs) -> SkillStorage:
-    """Return the cached ``SkillStorage`` singleton, creating it on first call.
-
-    The implementation class is resolved from ``config.skills.use`` via
-    ``deerflow.reflection.resolve_class``.  Additional keyword arguments are
-    forwarded to the implementation constructor.
-
-    If ``app_config`` is present in ``kwargs``, a fresh (non-cached) instance
-    is constructed so that per-request config (e.g. Gateway ``Depends(get_config)``)
-    is respected without polluting the process-level singleton.
+    **Singleton** is returned (created on first call, then reused) when neither
+    ``skills_path`` nor ``app_config`` is given — uses ``get_app_config()`` to
+    resolve the active configuration.
     """
     global _default_skill_storage
 
-    # Per-request path: construct a fresh instance bound to the given config.
-    app_config = kwargs.pop("app_config", None)
-    if app_config is not None:
+    from deerflow.config import get_app_config
+    from deerflow.config.skills_config import SkillsConfig
+
+    def _make_storage(skills_config: SkillsConfig, *, host_path: str | None = None, **kwargs) -> SkillStorage:
         from deerflow.reflection import resolve_class
 
-        use = getattr(app_config.skills, "use", _DEFAULT_STORAGE_CLASS)
-        cls = resolve_class(use, SkillStorage)
+        cls = resolve_class(skills_config.use, SkillStorage)
         return cls(
-            host_path=_resolve_host_path(app_config.skills),
-            container_path=app_config.skills.container_path,
+            host_path=host_path if host_path is not None else str(skills_config.get_skills_path()),
+            container_path=skills_config.container_path,
             **kwargs,
         )
 
-    # Process-level singleton path.
+    skills_path = kwargs.pop("skills_path", None)
+    app_config = kwargs.pop("app_config", None)
+
+    if skills_path is not None:
+        if app_config is not None:
+            return _make_storage(app_config.skills, host_path=str(skills_path), **kwargs)
+
+        return _make_storage(get_app_config().skills, host_path=str(skills_path), **kwargs)
+
+    if app_config is not None:
+        return _make_storage(app_config.skills, **kwargs)
+
     if _default_skill_storage is None:
-        import deerflow.config as _df_config
-        from deerflow.reflection import resolve_class
-
-        config = _df_config.get_app_config()
-        use = getattr(config.skills, "use", _DEFAULT_STORAGE_CLASS)
-        cls = resolve_class(use, SkillStorage)
-        _default_skill_storage = cls(
-            host_path=_resolve_host_path(config.skills),
-            container_path=config.skills.container_path,
-            **kwargs,
-        )
+        _default_skill_storage = _make_storage(get_app_config().skills, **kwargs)
     return _default_skill_storage
 
 
@@ -80,7 +71,7 @@ def set_skill_storage(storage: SkillStorage) -> None:
 __all__ = [
     "LocalSkillStorage",
     "SkillStorage",
-    "get_skill_storage",
+    "get_or_new_skill_storage",
     "reset_skill_storage",
     "set_skill_storage",
 ]

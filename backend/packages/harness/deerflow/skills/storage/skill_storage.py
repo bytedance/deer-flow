@@ -120,11 +120,17 @@ class SkillStorage(ABC):
         """
 
     @abstractmethod
-    def install_skill_from_archive(self, archive_path: str | Path) -> dict:
-        """Install a skill from a ``.skill`` ZIP archive.
+    async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
+        """Async install of a skill from a ``.skill`` ZIP archive.
 
-        Origin: ``deerflow.skills.installer.install_skill_from_archive``.
+        Origin: ``deerflow.skills.installer.ainstall_skill_from_archive``.
         """
+
+    def install_skill_from_archive(self, archive_path: str | Path) -> dict:
+        """Sync wrapper — delegates to :meth:`ainstall_skill_from_archive`."""
+        from deerflow.skills.installer import _run_async_install
+
+        return _run_async_install(self.ainstall_skill_from_archive(archive_path))
 
     @abstractmethod
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
