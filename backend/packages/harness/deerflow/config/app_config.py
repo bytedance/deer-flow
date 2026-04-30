@@ -8,6 +8,7 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
+from deerflow.config.a2a_config import load_a2a_config_from_dict
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
@@ -168,6 +169,9 @@ class AppConfig(BaseModel):
 
         # Always refresh ACP agent config so removed entries do not linger across reloads.
         load_acp_config_from_dict(config_data.get("acp_agents", {}))
+
+        # Always refresh A2A config so disabled/removed entries do not linger across reloads.
+        load_a2a_config_from_dict(config_data.get("a2a", None))
 
         # Load extensions config separately (it's in a different file)
         extensions_config = ExtensionsConfig.from_file()

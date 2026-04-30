@@ -667,6 +667,29 @@ sandbox:
 #     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
 
 # ============================================================================
+# A2A Remote Agents Configuration
+# ============================================================================
+# Configure remote A2A-compatible agents for non-blocking, event-driven
+# multi-agent orchestration.  When enabled, the lead agent can dispatch tasks
+# to remote workers over the Agent-to-Agent (A2A) protocol and receive results
+# asynchronously — without blocking its own execution turn.
+#
+# NOTE: This feature is not yet functional. The config schema may change.
+# Do not enable — it will have no effect until the A2A tools are implemented.
+#
+# See: https://a2a-protocol.org
+
+# a2a:
+#   enabled: true
+#   agents:
+#     - name: researcher
+#       url: http://localhost:8001
+#       description: "Research agent for web search, data analysis, and report writing"
+#     - name: coder
+#       url: http://localhost:8002
+#       description: "Coding agent for implementation, debugging, and code review"
+
+# ============================================================================
 # Skills Configuration
 # ============================================================================
 # Configure skills directory for specialized agent workflows
