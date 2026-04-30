@@ -7,6 +7,8 @@ preserves existing secrets when the frontend round-trips masked values.
 
 from __future__ import annotations
 
+import pytest
+
 from app.gateway.routers.mcp import (
     McpOAuthConfigResponse,
     McpServerConfigResponse,
@@ -178,15 +180,6 @@ def test_merge_handles_no_existing_oauth():
     assert merged.oauth.client_secret == "new-secret"
 
 
-def test_merge_handles_new_env_key_not_in_existing():
-    """New env keys not in existing should use incoming value."""
-    incoming = McpServerConfigResponse(env={"NEW_KEY": "***"})
-    existing = McpServerConfigResponse(env={})
-    merged = _merge_preserving_secrets(incoming, existing)
-    # No existing value to preserve — keeps the masked placeholder
-    assert merged.env["NEW_KEY"] == "***"
-
-
 def test_merge_does_not_mutate_original():
     """Merge should return a new object, not modify the original."""
     incoming = McpServerConfigResponse(env={"KEY": "***"})
@@ -195,6 +188,82 @@ def test_merge_does_not_mutate_original():
     assert incoming.env["KEY"] == "***"
     assert existing.env["KEY"] == "secret"
     assert merged.env["KEY"] == "secret"
+
+
+# ---------------------------------------------------------------------------
+# Comment 2 fix: masked value for new key is rejected
+# ---------------------------------------------------------------------------
+
+
+def test_merge_rejects_masked_value_for_new_env_key():
+    """Sending '***' for a key that doesn't exist in existing should raise 400."""
+    from fastapi import HTTPException
+
+    incoming = McpServerConfigResponse(env={"NEW_KEY": "***"})
+    existing = McpServerConfigResponse(env={})
+    with pytest.raises(HTTPException) as exc_info:
+        _merge_preserving_secrets(incoming, existing)
+    assert exc_info.value.status_code == 400
+    assert "NEW_KEY" in exc_info.value.detail
+
+
+def test_merge_rejects_masked_value_for_new_header_key():
+    """Sending '***' for a header key that doesn't exist should raise 400."""
+    from fastapi import HTTPException
+
+    incoming = McpServerConfigResponse(headers={"X-New-Auth": "***"})
+    existing = McpServerConfigResponse(headers={})
+    with pytest.raises(HTTPException) as exc_info:
+        _merge_preserving_secrets(incoming, existing)
+    assert exc_info.value.status_code == 400
+    assert "X-New-Auth" in exc_info.value.detail
+
+
+# ---------------------------------------------------------------------------
+# Comment 4 fix: empty string clears OAuth secrets
+# ---------------------------------------------------------------------------
+
+
+def test_merge_empty_string_clears_oauth_client_secret():
+    """Sending '' for client_secret should clear the stored value."""
+    incoming = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            client_secret="",
+            refresh_token=None,
+            token_url="https://auth.example.com/token",
+        ),
+    )
+    existing = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            client_secret="existing-secret",
+            refresh_token="existing-refresh",
+            token_url="https://auth.example.com/token",
+        ),
+    )
+    merged = _merge_preserving_secrets(incoming, existing)
+    assert merged.oauth.client_secret is None
+    assert merged.oauth.refresh_token == "existing-refresh"
+
+
+def test_merge_empty_string_clears_oauth_refresh_token():
+    """Sending '' for refresh_token should clear the stored value."""
+    incoming = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            client_secret=None,
+            refresh_token="",
+            token_url="https://auth.example.com/token",
+        ),
+    )
+    existing = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            client_secret="existing-secret",
+            refresh_token="existing-refresh",
+            token_url="https://auth.example.com/token",
+        ),
+    )
+    merged = _merge_preserving_secrets(incoming, existing)
+    assert merged.oauth.client_secret == "existing-secret"
+    assert merged.oauth.refresh_token is None
 
 
 # ---------------------------------------------------------------------------

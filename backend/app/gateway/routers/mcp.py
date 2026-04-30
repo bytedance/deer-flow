@@ -101,15 +101,50 @@ def _merge_preserving_secrets(
     GET (masked) → modify enabled → PUT (masked values sent back).
     This function ensures masked values (``***``) are replaced with the
     real secrets from the current on-disk config.
+
+    ``***`` is only accepted for keys that already exist in *existing*.
+    New keys must provide a real value.
+
+    For OAuth secrets, ``None`` means "preserve the existing stored value"
+    so masked GET responses can be safely round-tripped. To explicitly clear
+    a stored secret, clients may send an empty string, which is converted
+    to ``None`` before persisting.
     """
-    merged_env = {k: (existing.env.get(k, v) if v == _MASKED_VALUE else v) for k, v in incoming.env.items()}
-    merged_headers = {k: (existing.headers.get(k, v) if v == _MASKED_VALUE else v) for k, v in incoming.headers.items()}
+    merged_env = {}
+    for k, v in incoming.env.items():
+        if v == _MASKED_VALUE:
+            if k in existing.env:
+                merged_env[k] = existing.env[k]
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot set env key '{k}' to masked value '***'; provide a real value.",
+                )
+        else:
+            merged_env[k] = v
+
+    merged_headers = {}
+    for k, v in incoming.headers.items():
+        if v == _MASKED_VALUE:
+            if k in existing.headers:
+                merged_headers[k] = existing.headers[k]
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot set header '{k}' to masked value '***'; provide a real value.",
+                )
+        else:
+            merged_headers[k] = v
+
     merged_oauth = incoming.oauth
     if incoming.oauth is not None and existing.oauth is not None:
+        # None = preserve (masked round-trip), "" = explicitly clear, else = new value
+        merged_client_secret = existing.oauth.client_secret if incoming.oauth.client_secret is None else (None if incoming.oauth.client_secret == "" else incoming.oauth.client_secret)
+        merged_refresh_token = existing.oauth.refresh_token if incoming.oauth.refresh_token is None else (None if incoming.oauth.refresh_token == "" else incoming.oauth.refresh_token)
         merged_oauth = incoming.oauth.model_copy(
             update={
-                "client_secret": (existing.oauth.client_secret if incoming.oauth.client_secret is None else incoming.oauth.client_secret),
-                "refresh_token": (existing.oauth.refresh_token if incoming.oauth.refresh_token is None else incoming.oauth.refresh_token),
+                "client_secret": merged_client_secret,
+                "refresh_token": merged_refresh_token,
             }
         )
     return incoming.model_copy(
@@ -201,26 +236,39 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
             config_path = Path.cwd().parent / "extensions_config.json"
             logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-        # Load current config to preserve skills and secrets
+        # Load current config to preserve skills
         current_config = get_extensions_config()
 
-        # Merge incoming server configs with existing secrets
+        # Load raw (un-resolved) JSON from disk to use as the merge source.
+        # This preserves $VAR placeholders in env values and top-level keys
+        # like mcpInterceptors that would otherwise be lost.
+        raw_servers: dict[str, dict] = {}
+        raw_other_keys: dict = {}
+        if config_path is not None and config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                raw_data = json.load(f)
+            raw_servers = raw_data.get("mcpServers", {})
+            # Preserve any top-level keys beyond mcpServers/skills
+            for key, value in raw_data.items():
+                if key not in ("mcpServers", "skills"):
+                    raw_other_keys[key] = value
+
+        # Merge incoming server configs with raw on-disk secrets
         merged_servers: dict[str, McpServerConfigResponse] = {}
         for name, incoming in request.mcp_servers.items():
-            existing_server = current_config.mcp_servers.get(name)
-            if existing_server is not None:
+            raw_server = raw_servers.get(name)
+            if raw_server is not None:
                 merged_servers[name] = _merge_preserving_secrets(
                     incoming,
-                    McpServerConfigResponse(**existing_server.model_dump()),
+                    McpServerConfigResponse(**raw_server),
                 )
             else:
                 merged_servers[name] = incoming
 
-        # Convert merged servers to dict format for JSON serialization
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in merged_servers.items()},
-            "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
-        }
+        # Build config data preserving all top-level keys from the original file
+        config_data = dict(raw_other_keys)
+        config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
+        config_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
 
         # Write the configuration to file
         with open(config_path, "w", encoding="utf-8") as f:
