@@ -9,6 +9,7 @@ from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SkillStorage
 
 _default_skill_storage: SkillStorage | None = None
+_default_skill_storage_config: object | None = None  # AppConfig identity the singleton was built from
 
 
 def get_or_new_skill_storage(**kwargs) -> SkillStorage:
@@ -24,7 +25,7 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
     ``skills_path`` nor ``app_config`` is given — uses ``get_app_config()`` to
     resolve the active configuration.
     """
-    global _default_skill_storage
+    global _default_skill_storage, _default_skill_storage_config
 
     from deerflow.config import get_app_config
     from deerflow.config.skills_config import SkillsConfig
@@ -54,15 +55,18 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
     if app_config is not None:
         return _make_storage(app_config.skills, **kwargs)
 
-    if _default_skill_storage is None:
-        _default_skill_storage = _make_storage(get_app_config().skills, **kwargs)
+    app_config_now = get_app_config()
+    if _default_skill_storage is None or (_default_skill_storage_config is not None and _default_skill_storage_config is not app_config_now):
+        _default_skill_storage = _make_storage(app_config_now.skills, **kwargs)
+        _default_skill_storage_config = app_config_now
     return _default_skill_storage
 
 
 def reset_skill_storage() -> None:
     """Clear the cached singleton (used in tests and hot-reload scenarios)."""
-    global _default_skill_storage
+    global _default_skill_storage, _default_skill_storage_config
     _default_skill_storage = None
+    _default_skill_storage_config = None
 
 
 __all__ = [

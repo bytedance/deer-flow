@@ -42,6 +42,24 @@ class SkillStorage(ABC):
         return normalized
 
     @staticmethod
+    def validate_relative_path(relative_path: str, base_dir: Path) -> Path:
+        """Validate *relative_path* against *base_dir* and return the resolved target.
+
+        Checks that *relative_path* is non-empty, then joins it with *base_dir*
+        and resolves the result (following symlinks).  Raises ``ValueError`` if
+        the resolved target does not lie within *base_dir*.
+        """
+        if not relative_path:
+            raise ValueError("relative_path must not be empty.")
+        resolved_base = base_dir.resolve()
+        target = (resolved_base / relative_path).resolve()
+        try:
+            target.relative_to(resolved_base)
+        except ValueError as exc:
+            raise ValueError("relative_path must resolve within the skill directory.") from exc
+        return target
+
+    @staticmethod
     def validate_skill_markdown_content(name: str, content: str) -> None:
         """Validate SKILL.md content: parse frontmatter and check name matches."""
         import tempfile

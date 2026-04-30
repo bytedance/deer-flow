@@ -58,7 +58,7 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     scan_calls = []
     refresh_calls = []
 
-    async def _scan(content, *, executable, location):
+    async def _scan(content, *, executable, location, app_config=None):
         from deerflow.skills.security_scanner import ScanResult
 
         scan_calls.append({"content": content, "executable": executable, "location": location})
@@ -67,15 +67,21 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     async def _refresh():
         refresh_calls.append("refresh")
 
-    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    from types import SimpleNamespace
+
     from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
-    monkeypatch.setattr("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root)))
+    storage = LocalSkillStorage(host_path=str(skills_root))
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/archive-skill.skill"})
@@ -107,15 +113,21 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
     async def _refresh():
         refresh_calls.append("refresh")
 
-    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    from types import SimpleNamespace
+
     from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
-    monkeypatch.setattr("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root)))
+    storage = LocalSkillStorage(host_path=str(skills_root))
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = FastAPI()
-    app.include_router(skills_router.router)
+    app = _make_test_app(config)
 
     with TestClient(app) as client:
         response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/blocked-skill.skill"})

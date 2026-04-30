@@ -106,10 +106,10 @@ async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResp
     summary="Install Skill",
     description="Install a skill from a .skill file (ZIP archive) located in the thread's user-data directory.",
 )
-async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
+async def install_skill(request: SkillInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
     try:
         skill_file_path = resolve_thread_virtual_path(request.thread_id, request.path)
-        result = await get_or_new_skill_storage().ainstall_skill_from_archive(skill_file_path)
+        result = await get_or_new_skill_storage(app_config=config).ainstall_skill_from_archive(skill_file_path)
         await refresh_skills_system_prompt_cache_async()
         return SkillInstallResponse(**result)
     except FileNotFoundError as e:

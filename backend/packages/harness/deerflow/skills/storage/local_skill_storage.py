@@ -81,7 +81,7 @@ class LocalSkillStorage(SkillStorage):
         return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8")
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
-        target = self.get_custom_skill_dir(name) / relative_path
+        target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             "w",
