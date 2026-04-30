@@ -216,6 +216,8 @@ def create_app() -> FastAPI:
     Returns:
         Configured FastAPI application instance.
     """
+    config = get_gateway_config()
+    docs_kwargs = {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"} if config.enable_docs else {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
     app = FastAPI(
         title="DeerFlow API Gateway",
@@ -240,9 +242,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         """,
         version="0.1.0",
         lifespan=lifespan,
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        **docs_kwargs,
         openapi_tags=[
             {
                 "name": "models",

@@ -63,6 +63,10 @@ class FeishuChannel(Channel):
         self._GetMessageResourceRequest = None
         self._thread_lock = threading.Lock()
 
+    @property
+    def supports_streaming(self) -> bool:
+        return True
+
     async def start(self) -> None:
         if self._running:
             return
