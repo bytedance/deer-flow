@@ -642,8 +642,12 @@ sandbox:
 # ACP Agents Configuration
 # ============================================================================
 # Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
+# Two modes are supported:
+#   1. stdio mode: Uses 'command' to spawn a local subprocess
+#   2. HTTP mode:  Uses 'url' to connect to a remote OpenCode ACP service
 
 # acp_agents:
+#   # --- stdio mode examples ---
 #   claude_code:
 #     # DeerFlow expects an ACP adapter here. The standard `claude` CLI does not
 #     # speak ACP directly. Install `claude-agent-acp` separately or use:
@@ -665,6 +669,12 @@ sandbox:
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
+#
+#   # --- HTTP mode example (remote OpenCode ACP service) ---
+#   opencode:
+#     url: http://localhost:3020
+#     description: OpenCode remote ACP agent for coding tasks
+#     # auto_approve_permissions: false  # Set to true to auto-approve permission requests
 
 # ============================================================================
 # Skills Configuration

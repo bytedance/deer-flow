@@ -12,6 +12,56 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
+class _OpenCodeHTTPClient:
+    """HTTP client for remote OpenCode ACP service with connection pooling."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._client: Any = None
+
+    async def _get_client(self) -> Any:
+        if self._client is None:
+            import httpx
+
+            self._client = httpx.AsyncClient(timeout=120.0)
+        return self._client
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def _request(self, method: str, path: str, data: dict | None = None) -> dict:
+        client = await self._get_client()
+        url = f"{self.base_url}{path}"
+        headers = {"Content-Type": "application/json"}
+        if method == "GET":
+            resp = await client.get(url, headers=headers)
+        else:
+            resp = await client.post(url, headers=headers, json=data)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def create_session(self, agent: str = "build", directory: str = "/tmp") -> str:
+        result = await self._request("POST", "/session", {"agent": agent, "directory": directory})
+        return result["id"]
+
+    async def send_message(self, session_id: str, text: str, agent: str = "build") -> str:
+        result = await self._request(
+            "POST",
+            f"/session/{session_id}/message",
+            {"parts": [{"type": "text", "text": text}], "agent": agent},
+        )
+        text_parts = [p for p in result.get("parts", []) if p.get("type") == "text"]
+        return "".join(p.get("text", "") for p in text_parts) or "(no response)"
+
+    async def delete_session(self, session_id: str) -> None:
+        try:
+            await self._request("DELETE", f"/session/{session_id}")
+        except Exception as e:
+            logger.warning("Failed to delete remote session %s: %s", session_id, e)
+
+
 class _InvokeACPAgentInput(BaseModel):
     agent: str = Field(description="Name of the ACP agent to invoke")
     prompt: str = Field(description="The concise task prompt to send to the agent")
@@ -170,84 +220,13 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             return f"Error: Unknown agent '{agent}'. Available: {available}"
 
         agent_config = _agents[agent]
-        thread_id: str | None = ((config or {}).get("configurable") or {}).get("thread_id")
 
-        try:
-            from acp import PROTOCOL_VERSION, Client, text_block
-            from acp.schema import ClientCapabilities, Implementation
-        except ImportError:
-            return "Error: agent-client-protocol package is not installed. Run `uv sync` to install project dependencies."
+        # stdio mode takes precedence when command is set
+        if agent_config.command:
+            return await _invoke_stdio(agent, agent_config, prompt, config)
 
-        class _CollectingClient(Client):
-            """Minimal ACP Client that collects streamed text from session updates."""
-
-            def __init__(self) -> None:
-                self._chunks: list[str] = []
-
-            @property
-            def collected_text(self) -> str:
-                return "".join(self._chunks)
-
-            async def session_update(self, session_id: str, update, **kwargs) -> None:  # type: ignore[override]
-                try:
-                    from acp.schema import TextContentBlock
-
-                    if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
-                        self._chunks.append(update.content.text)
-                except Exception:
-                    pass
-
-            async def request_permission(self, options, session_id: str, tool_call, **kwargs):  # type: ignore[override]
-                response = _build_permission_response(options, auto_approve=agent_config.auto_approve_permissions)
-                outcome = response.outcome.outcome
-                if outcome == "selected":
-                    logger.info("ACP permission auto-approved for tool call %s in session %s", tool_call.tool_call_id, session_id)
-                else:
-                    logger.warning("ACP permission denied for tool call %s in session %s (set auto_approve_permissions: true in config.yaml to enable)", tool_call.tool_call_id, session_id)
-                return response
-
-        client = _CollectingClient()
-        cmd = agent_config.command
-        args = agent_config.args or []
-        physical_cwd = _get_work_dir(thread_id)
-        try:
-            mcp_servers = _build_acp_mcp_servers()
-        except ValueError as exc:
-            logger.warning(
-                "Invalid MCP server configuration for ACP agent '%s'; continuing without MCP servers: %s",
-                agent,
-                exc,
-            )
-            mcp_servers = []
-        agent_env: dict[str, str] | None = None
-        if agent_config.env:
-            agent_env = {k: (os.environ.get(v[1:], "") if v.startswith("$") else v) for k, v in agent_config.env.items()}
-
-        try:
-            from acp import spawn_agent_process
-
-            async with spawn_agent_process(client, cmd, *args, env=agent_env, cwd=physical_cwd) as (conn, proc):
-                logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
-                await conn.initialize(
-                    protocol_version=PROTOCOL_VERSION,
-                    client_capabilities=ClientCapabilities(),
-                    client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
-                )
-                session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
-                if agent_config.model:
-                    session_kwargs["model"] = agent_config.model
-                session = await conn.new_session(**session_kwargs)
-                await conn.prompt(
-                    session_id=session.session_id,
-                    prompt=[text_block(prompt)],
-                )
-            result = client.collected_text
-            logger.info("ACP agent '%s' returned %s", agent, result[:1000])
-            logger.info("ACP agent '%s' returned %d characters", agent, len(result))
-            return result or "(no response)"
-        except Exception as e:
-            logger.error("ACP agent '%s' invocation failed: %s", agent, e)
-            return _format_invocation_error(agent, cmd, e)
+        # HTTP mode: use remote OpenCode ACP service
+        return await _invoke_http(agent, agent_config, prompt, config)
 
     return StructuredTool.from_function(
         name="invoke_acp_agent",
@@ -255,3 +234,121 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
         coroutine=_invoke,
         args_schema=_InvokeACPAgentInput,
     )
+
+
+async def _invoke_http(agent: str, agent_config: Any, prompt: str, config: Any) -> str:
+    """Invoke ACP agent via remote HTTP REST API."""
+    url = agent_config.url
+    thread_id: str | None = ((config or {}).get("configurable") or {}).get("thread_id")
+    directory = _get_work_dir(thread_id)
+
+    # Resolve remote agent name: prefer model hint, fall back to agent name
+    remote_agent = agent_config.model or agent
+
+    logger.info(
+        "Invoking ACP agent '%s' via HTTP at %s using remote agent '%s'",
+        agent,
+        url,
+        remote_agent,
+    )
+
+    client = _OpenCodeHTTPClient(url)
+    session_id: str | None = None
+    try:
+        session_id = await client.create_session(agent=remote_agent, directory=directory)
+        logger.info("Created session %s for ACP agent '%s'", session_id, agent)
+        result = await client.send_message(session_id, prompt, agent=remote_agent)
+        logger.info("ACP agent '%s' returned %d characters", agent, len(result))
+        return result
+    except Exception as e:
+        logger.error("HTTP ACP agent '%s' invocation failed: %s", agent, e)
+        return f"Error invoking ACP agent '{agent}' via {url}: {e}"
+    finally:
+        if session_id:
+            await client.delete_session(session_id)
+        await client.close()
+
+
+async def _invoke_stdio(agent: str, agent_config: Any, prompt: str, config: Any) -> str:
+    """Invoke ACP agent via local stdio subprocess."""
+    if not agent_config.command:
+        return f"Error: ACP agent '{agent}' requires 'command' field for stdio mode. Set 'url' for HTTP mode instead."
+
+    try:
+        from acp import PROTOCOL_VERSION, Client, text_block
+        from acp.schema import ClientCapabilities, Implementation
+    except ImportError:
+        return "Error: agent-client-protocol package is not installed. Run `uv sync` to install project dependencies."
+
+    thread_id: str | None = ((config or {}).get("configurable") or {}).get("thread_id")
+
+    class _CollectingClient(Client):
+        """Minimal ACP Client that collects streamed text from session updates."""
+
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        @property
+        def collected_text(self) -> str:
+            return "".join(self._chunks)
+
+        async def session_update(self, session_id: str, update, **kwargs) -> None:  # type: ignore[override]
+            try:
+                from acp.schema import TextContentBlock
+
+                if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
+                    self._chunks.append(update.content.text)
+            except Exception:
+                pass
+
+        async def request_permission(self, options, session_id: str, tool_call, **kwargs):  # type: ignore[override]
+            response = _build_permission_response(options, auto_approve=agent_config.auto_approve_permissions)
+            outcome = response.outcome.outcome
+            if outcome == "selected":
+                logger.info("ACP permission auto-approved for tool call %s in session %s", tool_call.tool_call_id, session_id)
+            else:
+                logger.warning("ACP permission denied for tool call %s in session %s (set auto_approve_permissions: true in config.yaml to enable)", tool_call.tool_call_id, session_id)
+            return response
+
+    client = _CollectingClient()
+    cmd = agent_config.command
+    args = agent_config.args or []
+    physical_cwd = _get_work_dir(thread_id)
+    try:
+        mcp_servers = _build_acp_mcp_servers()
+    except ValueError as exc:
+        logger.warning(
+            "Invalid MCP server configuration for ACP agent '%s'; continuing without MCP servers: %s",
+            agent,
+            exc,
+        )
+        mcp_servers = []
+    agent_env: dict[str, str] | None = None
+    if agent_config.env:
+        agent_env = {k: (os.environ.get(v[1:], "") if v.startswith("$") else v) for k, v in agent_config.env.items()}
+
+    try:
+        from acp import spawn_agent_process
+
+        async with spawn_agent_process(client, cmd, *args, env=agent_env, cwd=physical_cwd) as (conn, proc):
+            logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
+            await conn.initialize(
+                protocol_version=PROTOCOL_VERSION,
+                client_capabilities=ClientCapabilities(),
+                client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
+            )
+            session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
+            if agent_config.model:
+                session_kwargs["model"] = agent_config.model
+            session = await conn.new_session(**session_kwargs)
+            await conn.prompt(
+                session_id=session.session_id,
+                prompt=[text_block(prompt)],
+            )
+        result = client.collected_text
+        logger.info("ACP agent '%s' returned %s", agent, result[:1000])
+        logger.info("ACP agent '%s' returned %d characters", agent, len(result))
+        return result or "(no response)"
+    except Exception as e:
+        logger.error("ACP agent '%s' invocation failed: %s", agent, e)
+        return _format_invocation_error(agent, cmd, e)

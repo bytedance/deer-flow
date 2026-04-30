@@ -697,3 +697,365 @@ def test_get_available_tools_includes_invoke_acp_agent_when_agents_configured(mo
     assert "invoke_acp_agent" in [tool.name for tool in tools]
 
     load_acp_config_from_dict({})
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_http_mode_calls_remote_service(monkeypatch, tmp_path):
+    """HTTP mode: agent with url should use HTTP client instead of stdio subprocess."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+
+    captured: dict[str, object] = {}
+
+    class DummyHTTPClient:
+        def __init__(self, base_url: str) -> None:
+            captured["url"] = base_url
+
+        async def create_session(self, agent: str = "build", directory: str = "/tmp") -> str:
+            captured["create_session"] = {"agent": agent, "directory": directory}
+            return "http-session-123"
+
+        async def send_message(self, session_id: str, text: str, agent: str = "build") -> str:
+            captured["send_message"] = {"session_id": session_id, "text": text, "agent": agent}
+            return "HTTP agent response"
+
+        async def delete_session(self, session_id: str) -> None:
+            captured["delete_session"] = session_id
+
+        async def close(self) -> None:
+            captured["close_called"] = True
+
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool._OpenCodeHTTPClient",
+        DummyHTTPClient,
+    )
+
+    tool = build_invoke_acp_agent_tool(
+        {
+            "opencode": ACPAgentConfig(
+                url="http://localhost:3020",
+                description="OpenCode remote ACP agent",
+            )
+        }
+    )
+
+    result = await tool.coroutine(agent="opencode", prompt="Create a hello world script")
+
+    assert result == "HTTP agent response"
+    assert captured["url"] == "http://localhost:3020"
+    expected_dir = str(tmp_path / "acp-workspace")
+    assert captured["create_session"] == {"agent": "opencode", "directory": expected_dir}
+    assert captured["send_message"] == {
+        "session_id": "http-session-123",
+        "text": "Create a hello world script",
+        "agent": "opencode",
+    }
+    assert captured["delete_session"] == "http-session-123"
+    assert captured["close_called"] is True
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_http_mode_uses_model_as_remote_agent(monkeypatch, tmp_path):
+    """HTTP mode: should use model config as remote agent name when set."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+
+    captured: dict[str, object] = {}
+
+    class DummyHTTPClient:
+        def __init__(self, base_url: str) -> None:
+            pass
+
+        async def create_session(self, agent: str = "build", directory: str = "/tmp") -> str:
+            captured["create_session_agent"] = agent
+            return "s1"
+
+        async def send_message(self, session_id: str, text: str, agent: str = "build") -> str:
+            captured["send_message_agent"] = agent
+            return "ok"
+
+        async def delete_session(self, session_id: str) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool._OpenCodeHTTPClient",
+        DummyHTTPClient,
+    )
+
+    tool = build_invoke_acp_agent_tool(
+        {
+            "opencode": ACPAgentConfig(
+                url="http://localhost:3020",
+                description="OpenCode remote ACP agent",
+                model="claude-sonnet-4",
+            )
+        }
+    )
+
+    await tool.coroutine(agent="opencode", prompt="Do something")
+
+    assert captured["create_session_agent"] == "claude-sonnet-4"
+    assert captured["send_message_agent"] == "claude-sonnet-4"
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_http_mode_uses_per_thread_workspace(monkeypatch, tmp_path):
+    """HTTP mode: should use per-thread workspace directory when thread_id is available."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+
+    captured: dict[str, object] = {}
+
+    class DummyHTTPClient:
+        def __init__(self, base_url: str) -> None:
+            pass
+
+        async def create_session(self, agent: str = "build", directory: str = "/tmp") -> str:
+            captured["directory"] = directory
+            return "s1"
+
+        async def send_message(self, session_id: str, text: str, agent: str = "build") -> str:
+            return "ok"
+
+        async def delete_session(self, session_id: str) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool._OpenCodeHTTPClient",
+        DummyHTTPClient,
+    )
+
+    tool = build_invoke_acp_agent_tool(
+        {
+            "opencode": ACPAgentConfig(
+                url="http://localhost:3020",
+                description="OpenCode remote ACP agent",
+            )
+        }
+    )
+
+    await tool.coroutine(
+        agent="opencode",
+        prompt="Do something",
+        config={"configurable": {"thread_id": "thread-abc-123"}},
+    )
+
+    expected_dir = str(tmp_path / "threads" / "thread-abc-123" / "acp-workspace")
+    assert captured["directory"] == expected_dir
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_stdio_mode_takes_precedence_over_http(monkeypatch, tmp_path):
+    """When both command and url are set, stdio mode should take precedence."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+
+    stdio_called = False
+    http_called = False
+
+    class DummyHTTPClient:
+        def __init__(self, base_url: str) -> None:
+            nonlocal http_called
+            http_called = True
+
+        async def create_session(self, agent: str = "build", directory: str = "/tmp") -> str:
+            return "s1"
+
+        async def send_message(self, session_id: str, text: str, agent: str = "build") -> str:
+            return "http response"
+
+        async def delete_session(self, session_id: str) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool._OpenCodeHTTPClient",
+        DummyHTTPClient,
+    )
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        @property
+        def collected_text(self) -> str:
+            return "stdio response"
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            return SimpleNamespace(session_id="s1")
+
+        async def prompt(self, **kwargs):
+            pass
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, cwd):
+            nonlocal stdio_called
+            stdio_called = True
+            # Simulate a response by appending to client's chunks
+            if hasattr(client, "_chunks"):
+                client._chunks.append("stdio response")
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyRequestError(Exception):
+        @staticmethod
+        def method_not_found(method):
+            return DummyRequestError(method)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            RequestError=DummyRequestError,
+            spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            TextContentBlock=type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)}),
+        ),
+    )
+
+    tool = build_invoke_acp_agent_tool(
+        {
+            "hybrid": ACPAgentConfig(
+                command="my-agent",
+                url="http://localhost:3020",
+                description="Hybrid agent",
+            )
+        }
+    )
+
+    try:
+        result = await tool.coroutine(agent="hybrid", prompt="Do something")
+    finally:
+        sys.modules.pop("acp", None)
+        sys.modules.pop("acp.schema", None)
+
+    assert stdio_called is True
+    assert http_called is False
+    assert result == "stdio response"
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_http_mode_error_handling(monkeypatch, tmp_path):
+    """HTTP mode: connection errors should return user-friendly error message."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+
+    class DummyHTTPClient:
+        def __init__(self, base_url: str) -> None:
+            pass
+
+        async def create_session(self, agent: str = "build", directory: str = "/tmp") -> str:
+            raise ConnectionError("Connection refused")
+
+        async def delete_session(self, session_id: str) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool._OpenCodeHTTPClient",
+        DummyHTTPClient,
+    )
+
+    tool = build_invoke_acp_agent_tool(
+        {
+            "opencode": ACPAgentConfig(
+                url="http://unreachable-host:9999",
+                description="Unreachable ACP agent",
+            )
+        }
+    )
+
+    result = await tool.coroutine(agent="opencode", prompt="Do something")
+
+    assert "Error invoking ACP agent 'opencode'" in result
+    assert "http://unreachable-host:9999" in result
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_http_mode_description_includes_url(monkeypatch):
+    """HTTP mode agent description should be included in tool description."""
+    tool = build_invoke_acp_agent_tool(
+        {
+            "opencode": ACPAgentConfig(
+                url="http://localhost:3020",
+                description="OpenCode remote ACP agent for coding tasks",
+            )
+        }
+    )
+
+    assert "- opencode: OpenCode remote ACP agent for coding tasks" in tool.description
+    assert "invoke_acp_agent" == tool.name
+
+
+def test_get_available_tools_includes_http_acp_agent(monkeypatch):
+    """HTTP mode ACP agents should also be included in available tools."""
+    from deerflow.config.acp_config import load_acp_config_from_dict
+
+    load_acp_config_from_dict(
+        {
+            "opencode": {
+                "url": "http://localhost:3020",
+                "description": "OpenCode remote ACP",
+            }
+        }
+    )
+
+    fake_config = SimpleNamespace(
+        tools=[],
+        models=[],
+        tool_search=SimpleNamespace(enabled=False),
+        get_model_config=lambda name: None,
+    )
+    monkeypatch.setattr("deerflow.tools.tools.get_app_config", lambda: fake_config)
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+
+    tools = get_available_tools(include_mcp=True, subagent_enabled=False)
+    assert "invoke_acp_agent" in [tool.name for tool in tools]
+
+    load_acp_config_from_dict({})

@@ -106,8 +106,23 @@ def test_acp_agent_config_auto_approve_permissions():
 
 
 def test_acp_agent_config_missing_command_raises():
+    """Neither command nor url provided should raise ValidationError."""
     with pytest.raises(ValidationError):
         ACPAgentConfig(description="No command provided")
+
+
+def test_acp_agent_config_url_only_is_valid():
+    """HTTP mode: url without command should be valid."""
+    cfg = ACPAgentConfig(url="http://localhost:3020", description="OpenCode remote ACP")
+    assert cfg.url == "http://localhost:3020"
+    assert cfg.command is None
+
+
+def test_acp_agent_config_command_and_url_both_set():
+    """Both command and url set should be valid (command takes precedence for stdio mode)."""
+    cfg = ACPAgentConfig(command="my-agent", url="http://localhost:3020", description="Hybrid config")
+    assert cfg.command == "my-agent"
+    assert cfg.url == "http://localhost:3020"
 
 
 def test_acp_agent_config_missing_description_raises():
