@@ -2,7 +2,13 @@ import logging
 import os
 from types import SimpleNamespace
 
-from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend, _format_container_command_for_log, _format_container_mount, _redact_container_command_for_log
+from deerflow.community.aio_sandbox.local_backend import (
+    LocalContainerBackend,
+    _format_container_command_for_log,
+    _format_container_mount,
+    _redact_container_command_for_log,
+    _resolve_docker_bind_host,
+)
 
 
 def test_format_container_mount_uses_mount_syntax_for_docker_windows_paths():
@@ -116,3 +122,115 @@ def test_start_container_logs_redacted_env_values(monkeypatch, caplog):
     assert "NORMAL=<redacted>" in log_output
     assert "secret-value" not in log_output
     assert "visible-value" not in log_output
+
+
+def _capture_start_container_command(monkeypatch, backend: LocalContainerBackend, runtime: str = "docker") -> list[str]:
+    monkeypatch.setattr(backend, "_runtime", runtime)
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(stdout="container-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._start_container("sandbox-test", 18080)
+    return captured_cmd
+
+
+def test_resolve_docker_bind_host_defaults_loopback_for_localhost(monkeypatch):
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_HOST", raising=False)
+
+    assert _resolve_docker_bind_host() == "127.0.0.1"
+
+
+def test_resolve_docker_bind_host_keeps_dood_compatibility(monkeypatch):
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+
+    assert _resolve_docker_bind_host() == "0.0.0.0"
+
+
+def test_resolve_docker_bind_host_uses_ipv6_loopback_for_ipv6_sandbox_host(monkeypatch):
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "[::1]")
+
+    assert _resolve_docker_bind_host() == "[::1]"
+
+
+def test_resolve_docker_bind_host_logs_selected_bind_reason(caplog):
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.local_backend"):
+        assert _resolve_docker_bind_host(sandbox_host="localhost", bind_host="") == "127.0.0.1"
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Docker sandbox bind: 127.0.0.1 (loopback default)" in messages
+
+
+def test_resolve_docker_bind_host_allows_explicit_override(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "localhost")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "192.0.2.10")
+
+    assert _resolve_docker_bind_host() == "192.0.2.10"
+
+
+def test_start_container_binds_local_docker_port_to_loopback_by_default(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_HOST", raising=False)
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("-p") + 1] == "127.0.0.1:18080:8080"
+
+
+def test_start_container_keeps_broad_bind_for_dood_sandbox_host(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("-p") + 1] == "0.0.0.0:18080:8080"
+
+
+def test_start_container_binds_ipv6_sandbox_host_to_ipv6_loopback(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "[::1]")
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("-p") + 1] == "[::1]:18080:8080"
+
+
+def test_start_container_keeps_apple_container_port_format(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "127.0.0.1")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
+
+    assert captured_cmd[captured_cmd.index("-p") + 1] == "18080:8080"

@@ -127,6 +127,48 @@ def _format_container_command_for_log(cmd: list[str]) -> str:
     return shlex.join(cmd)
 
 
+def _normalize_sandbox_host(host: str) -> str:
+    return host.strip().lower()
+
+
+def _is_ipv6_loopback_sandbox_host(host: str) -> bool:
+    return _normalize_sandbox_host(host) in {"::1", "[::1]"}
+
+
+def _is_loopback_sandbox_host(host: str) -> bool:
+    return _normalize_sandbox_host(host) in {"", "localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | None = None) -> str:
+    """Choose the host interface for legacy Docker ``-p`` sandbox publishing.
+
+    Bare-metal/local runs talk to sandboxes through localhost and should not
+    expose the sandbox HTTP API on every host interface.  Docker-outside-of-
+    Docker deployments commonly use ``host.docker.internal`` from another
+    container; keep their legacy broad bind unless operators opt into a
+    narrower bind with ``DEER_FLOW_SANDBOX_BIND_HOST``.  When operators choose
+    an IPv6 loopback sandbox host, bind Docker to IPv6 loopback as well so the
+    advertised sandbox URL and published socket use the same address family.
+    """
+    explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST")
+    if explicit_bind is not None:
+        explicit_bind = explicit_bind.strip()
+        if explicit_bind:
+            logger.debug("Docker sandbox bind: %s (explicit bind host override)", explicit_bind)
+            return explicit_bind
+
+    host = sandbox_host if sandbox_host is not None else os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+    if _is_ipv6_loopback_sandbox_host(host):
+        logger.debug("Docker sandbox bind: [::1] (IPv6 loopback sandbox host)")
+        return "[::1]"
+    if _is_loopback_sandbox_host(host):
+        logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
+        return "127.0.0.1"
+
+    logger.debug("Docker sandbox bind: 0.0.0.0 (non-loopback sandbox host compatibility)")
+    return "0.0.0.0"
+
+
 class LocalContainerBackend(SandboxBackend):
     """Backend that manages sandbox containers locally using Docker or Apple Container.
 
@@ -465,12 +507,17 @@ class LocalContainerBackend(SandboxBackend):
         if self._runtime == "docker":
             cmd.extend(["--security-opt", "seccomp=unconfined"])
 
+        if self._runtime == "docker":
+            port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"
+        else:
+            port_mapping = f"{port}:8080"
+
         cmd.extend(
             [
                 "--rm",
                 "-d",
                 "-p",
-                f"{port}:8080",
+                port_mapping,
                 "--name",
                 container_name,
             ]
