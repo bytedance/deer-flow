@@ -175,9 +175,15 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers=_build_attachment_headers(actual_path.name))
 
     if mime_type and mime_type.startswith("text/"):
-        return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
+        try:
+            return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
+        except UnicodeDecodeError:
+            pass  # Fall through to binary response
 
     if is_text_file_by_content(actual_path):
-        return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
+        try:
+            return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
+        except UnicodeDecodeError:
+            pass  # Fall through to binary response
 
     return Response(content=actual_path.read_bytes(), media_type=mime_type, headers={"Content-Disposition": _build_content_disposition("inline", actual_path.name)})

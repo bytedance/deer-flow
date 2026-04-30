@@ -1569,6 +1569,9 @@ def str_replace_tool(
             if replace_all:
                 content = content.replace(old_str, new_str)
             else:
+                count = content.count(old_str)
+                if count > 1:
+                    return f"Error: The string to replace appears {count} times in {requested_path}. Use replace_all=True to replace all occurrences, or provide a more specific string that appears exactly once."
                 content = content.replace(old_str, new_str, 1)
             sandbox.write_file(path, content)
         return "OK"
