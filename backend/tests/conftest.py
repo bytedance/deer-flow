@@ -74,11 +74,14 @@ def _reset_skill_storage_singleton():
     try:
         from deerflow.skills.storage import reset_skill_storage
 
-        reset_skill_storage()
+    except ImportError:
         yield
-        reset_skill_storage()
-    except Exception:
+        return
+    reset_skill_storage()
+    try:
         yield
+    finally:
+        reset_skill_storage()
 
 
 @pytest.fixture(autouse=True)

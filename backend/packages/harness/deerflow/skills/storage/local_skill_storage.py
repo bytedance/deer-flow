@@ -12,17 +12,13 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from deerflow.config.skills_config import _default_repo_root
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
-
-
-def _default_repo_root() -> Path:
-    """Resolve the repo root without relying on the current working directory."""
-    return Path(__file__).resolve().parents[7]
 
 
 class LocalSkillStorage(SkillStorage):
