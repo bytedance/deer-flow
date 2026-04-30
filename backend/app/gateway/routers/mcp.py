@@ -63,6 +63,64 @@ class McpConfigUpdateRequest(BaseModel):
     )
 
 
+_MASKED_VALUE = "***"
+
+
+def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigResponse:
+    """Return a copy of server config with sensitive fields masked.
+
+    Masks env values, header values, and removes OAuth secrets so they
+    are not exposed through the GET API endpoint.
+    """
+    masked_env = {k: _MASKED_VALUE for k in server.env}
+    masked_headers = {k: _MASKED_VALUE for k in server.headers}
+    masked_oauth = None
+    if server.oauth is not None:
+        masked_oauth = server.oauth.model_copy(
+            update={
+                "client_secret": None,
+                "refresh_token": None,
+            }
+        )
+    return server.model_copy(
+        update={
+            "env": masked_env,
+            "headers": masked_headers,
+            "oauth": masked_oauth,
+        }
+    )
+
+
+def _merge_preserving_secrets(
+    incoming: McpServerConfigResponse,
+    existing: McpServerConfigResponse,
+) -> McpServerConfigResponse:
+    """Merge incoming config with existing, preserving secrets masked by GET.
+
+    When the frontend toggles ``enabled`` it round-trips the full config:
+    GET (masked) → modify enabled → PUT (masked values sent back).
+    This function ensures masked values (``***``) are replaced with the
+    real secrets from the current on-disk config.
+    """
+    merged_env = {k: (existing.env.get(k, v) if v == _MASKED_VALUE else v) for k, v in incoming.env.items()}
+    merged_headers = {k: (existing.headers.get(k, v) if v == _MASKED_VALUE else v) for k, v in incoming.headers.items()}
+    merged_oauth = incoming.oauth
+    if incoming.oauth is not None and existing.oauth is not None:
+        merged_oauth = incoming.oauth.model_copy(
+            update={
+                "client_secret": (existing.oauth.client_secret if incoming.oauth.client_secret is None else incoming.oauth.client_secret),
+                "refresh_token": (existing.oauth.refresh_token if incoming.oauth.refresh_token is None else incoming.oauth.refresh_token),
+            }
+        )
+    return incoming.model_copy(
+        update={
+            "env": merged_env,
+            "headers": merged_headers,
+            "oauth": merged_oauth,
+        }
+    )
+
+
 @router.get(
     "/mcp/config",
     response_model=McpConfigResponse,
@@ -83,7 +141,7 @@ async def get_mcp_configuration() -> McpConfigResponse:
                     "enabled": true,
                     "command": "npx",
                     "args": ["-y", "@modelcontextprotocol/server-github"],
-                    "env": {"GITHUB_TOKEN": "ghp_xxx"},
+                    "env": {"GITHUB_TOKEN": "***"},
                     "description": "GitHub MCP server for repository operations"
                 }
             }
@@ -92,7 +150,8 @@ async def get_mcp_configuration() -> McpConfigResponse:
     """
     config = get_extensions_config()
 
-    return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in config.mcp_servers.items()})
+    servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in config.mcp_servers.items()}
+    return McpConfigResponse(mcp_servers=servers)
 
 
 @router.put(
@@ -142,12 +201,24 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
             config_path = Path.cwd().parent / "extensions_config.json"
             logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-        # Load current config to preserve skills configuration
+        # Load current config to preserve skills and secrets
         current_config = get_extensions_config()
 
-        # Convert request to dict format for JSON serialization
+        # Merge incoming server configs with existing secrets
+        merged_servers: dict[str, McpServerConfigResponse] = {}
+        for name, incoming in request.mcp_servers.items():
+            existing_server = current_config.mcp_servers.get(name)
+            if existing_server is not None:
+                merged_servers[name] = _merge_preserving_secrets(
+                    incoming,
+                    McpServerConfigResponse(**existing_server.model_dump()),
+                )
+            else:
+                merged_servers[name] = incoming
+
+        # Convert merged servers to dict format for JSON serialization
         config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in request.mcp_servers.items()},
+            "mcpServers": {name: server.model_dump() for name, server in merged_servers.items()},
             "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
         }
 
@@ -162,7 +233,8 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
 
         # Reload the configuration and update the global cache
         reloaded_config = reload_extensions_config()
-        return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in reloaded_config.mcp_servers.items()})
+        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_config.mcp_servers.items()}
+        return McpConfigResponse(mcp_servers=servers)
 
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
