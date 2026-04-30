@@ -2,11 +2,13 @@
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import Paths
+from deerflow.config.runtime_paths import project_root
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.skills.loader import get_skills_root_path
 
@@ -66,3 +68,23 @@ def test_deer_flow_skills_path_overrides_project_default(tmp_path: Path, monkeyp
     monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", "team-skills")
 
     assert SkillsConfig().get_skills_path() == tmp_path / "team-skills"
+    assert get_skills_root_path() == tmp_path / "team-skills"
+
+
+def test_deer_flow_project_root_must_exist(tmp_path: Path, monkeypatch):
+    _clear_path_env(monkeypatch)
+    missing_root = tmp_path / "missing"
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(missing_root))
+
+    with pytest.raises(ValueError, match="does not exist"):
+        project_root()
+
+
+def test_deer_flow_project_root_must_be_directory(tmp_path: Path, monkeypatch):
+    _clear_path_env(monkeypatch)
+    project_root_file = tmp_path / "project-root"
+    project_root_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project_root_file))
+
+    with pytest.raises(ValueError, match="not a directory"):
+        project_root()

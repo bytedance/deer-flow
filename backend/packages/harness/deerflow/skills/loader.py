@@ -18,6 +18,8 @@ def get_skills_root_path() -> Path:
     Returns:
         Path to the caller project's skills directory.
     """
+    if skills_path_override := os.getenv("DEER_FLOW_SKILLS_PATH"):
+        return Path(skills_path_override).resolve()
     return project_root() / "skills"
 
 

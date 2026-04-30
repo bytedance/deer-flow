@@ -7,7 +7,16 @@ from pathlib import Path
 def project_root() -> Path:
     """Return the caller project root for runtime-owned files."""
     if env_root := os.getenv("DEER_FLOW_PROJECT_ROOT"):
-        return Path(env_root).resolve()
+        root = Path(env_root).resolve()
+        if not root.exists():
+            raise ValueError(
+                f"DEER_FLOW_PROJECT_ROOT is set to '{env_root}', but the resolved path '{root}' does not exist."
+            )
+        if not root.is_dir():
+            raise ValueError(
+                f"DEER_FLOW_PROJECT_ROOT is set to '{env_root}', but the resolved path '{root}' is not a directory."
+            )
+        return root
     return Path.cwd().resolve()
 
 
