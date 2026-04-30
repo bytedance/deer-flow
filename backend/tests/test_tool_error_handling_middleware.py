@@ -1,10 +1,32 @@
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 
-from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    ToolErrorHandlingMiddleware,
+    build_subagent_runtime_middlewares,
+)
+from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
+from deerflow.config.guardrails_config import GuardrailsConfig
+from deerflow.config.sandbox_config import SandboxConfig
+
+
+def _module(name: str, **attrs):
+    module = ModuleType(name)
+    for key, value in attrs.items():
+        setattr(module, key, value)
+    return module
+
+
+def _make_app_config() -> AppConfig:
+    return AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        guardrails=GuardrailsConfig(enabled=False),
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
+    )
 
 
 def _request(name: str = "web_search", tool_call_id: str | None = "tc-1"):
@@ -12,6 +34,56 @@ def _request(name: str = "web_search", tool_call_id: str | None = "tc-1"):
     if tool_call_id is not None:
         tool_call["id"] = tool_call_id
     return SimpleNamespace(tool_call=tool_call)
+
+
+def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, object] = {}
+
+    class FakeMiddleware:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    class FakeLLMErrorHandlingMiddleware:
+        def __init__(self, *, app_config):
+            captured["app_config"] = app_config
+
+    app_config = _make_app_config()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.llm_error_handling_middleware",
+        _module(
+            "deerflow.agents.middlewares.llm_error_handling_middleware",
+            LLMErrorHandlingMiddleware=FakeLLMErrorHandlingMiddleware,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.thread_data_middleware",
+        _module("deerflow.agents.middlewares.thread_data_middleware", ThreadDataMiddleware=FakeMiddleware),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.sandbox.middleware",
+        _module("deerflow.sandbox.middleware", SandboxMiddleware=FakeMiddleware),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.dangling_tool_call_middleware",
+        _module("deerflow.agents.middlewares.dangling_tool_call_middleware", DanglingToolCallMiddleware=FakeMiddleware),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.sandbox_audit_middleware",
+        _module("deerflow.agents.middlewares.sandbox_audit_middleware", SandboxAuditMiddleware=FakeMiddleware),
+    )
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
+
+    assert captured["app_config"] is app_config
+    assert len(middlewares) == 6
+    assert isinstance(middlewares[-1], ToolErrorHandlingMiddleware)
 
 
 def test_wrap_tool_call_passthrough_on_success():
