@@ -943,11 +943,11 @@ class TestFinalizeCacheIsolation:
         )
         mock_response = MagicMock()
         mock_response.content = new_fact_json
-        mock_model = AsyncMock()
-        mock_model.ainvoke = AsyncMock(return_value=mock_response)
+        mock_model = MagicMock()
+        mock_model.invoke = MagicMock(return_value=mock_response)
 
         saved_objects: list[dict] = []
-        save_mock = MagicMock(side_effect=lambda m, a=None: saved_objects.append(m) or False)  # always fails
+        save_mock = MagicMock(side_effect=lambda m, a=None, **_: saved_objects.append(m) or False)  # always fails
 
         with (
             patch.object(updater, "_get_model", return_value=mock_model),
@@ -963,6 +963,10 @@ class TestFinalizeCacheIsolation:
             ai_msg.content = "world"
             ai_msg.tool_calls = []
             updater.update_memory([msg, ai_msg], thread_id="t1")
+
+        # save_mock must have been exercised — otherwise the deepcopy-on-save-failure path isn't covered
+        save_mock.assert_called_once()
+        assert len(saved_objects) == 1, "save must have been called with the updated memory object"
 
         # original_memory must not have been mutated — deepcopy isolates the mutation
         assert len(original_memory["facts"]) == 1, "original_memory must not be mutated by _apply_updates"
