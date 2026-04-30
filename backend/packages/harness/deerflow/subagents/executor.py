@@ -174,16 +174,16 @@ class SubagentExecutor:
 
     def _create_agent(self):
         """Create the agent instance."""
-        model_name = _get_model_name(self.config, self.parent_model)
-        model = create_chat_model(name=model_name, thinking_enabled=False)
-
-        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
-
         # Mirror lead-agent factory pattern: prefer explicit app_config,
         # fall back to ambient lookup at agent-build time.
         from deerflow.config import get_app_config
 
         resolved_app_config = self.app_config or get_app_config()
+        model_name = _get_model_name(self.config, self.parent_model)
+        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=resolved_app_config)
+
+        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+
         middlewares = build_subagent_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
 
         return create_agent(
