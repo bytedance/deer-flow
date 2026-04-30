@@ -115,6 +115,17 @@ class TestWriteUploadFileNoSymlink:
         assert dest == tmp_path / "notes.txt"
         assert dest.read_bytes() == b"hello"
 
+    def test_overwrites_existing_regular_file_with_single_link(self, tmp_path):
+        dest = tmp_path / "notes.txt"
+        dest.write_bytes(b"old contents")
+        assert os.stat(dest).st_nlink == 1
+
+        result = write_upload_file_no_symlink(tmp_path, "notes.txt", b"new contents")
+
+        assert result == dest
+        assert dest.read_bytes() == b"new contents"
+        assert os.stat(dest).st_nlink == 1
+
     def test_fails_closed_without_no_follow_support(self, tmp_path, monkeypatch):
         monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
 

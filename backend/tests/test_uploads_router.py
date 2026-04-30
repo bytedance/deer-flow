@@ -500,6 +500,30 @@ def test_upload_files_rejects_hardlinked_destination_without_truncating(tmp_path
     assert (thread_uploads_dir / "victim.txt").read_text(encoding="utf-8") == "protected"
 
 
+def test_upload_files_overwrites_existing_regular_file(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    existing_file = thread_uploads_dir / "notes.txt"
+    existing_file.write_bytes(b"old upload")
+    assert existing_file.stat().st_nlink == 1
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        file = UploadFile(filename="notes.txt", file=BytesIO(b"new upload"))
+        result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+
+    assert result.success is True
+    assert [file_info["filename"] for file_info in result.files] == ["notes.txt"]
+    assert existing_file.read_bytes() == b"new upload"
+    assert existing_file.stat().st_nlink == 1
+
+
 def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
