@@ -158,6 +158,14 @@ def test_resolve_docker_bind_host_uses_ipv6_loopback_for_ipv6_sandbox_host(monke
     assert _resolve_docker_bind_host() == "[::1]"
 
 
+def test_resolve_docker_bind_host_logs_selected_bind_reason(caplog):
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.local_backend"):
+        assert _resolve_docker_bind_host(sandbox_host="localhost", bind_host="") == "127.0.0.1"
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Docker sandbox bind: 127.0.0.1 (loopback default)" in messages
+
+
 def test_resolve_docker_bind_host_allows_explicit_override(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "localhost")
     monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "192.0.2.10")

@@ -154,13 +154,18 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     if explicit_bind is not None:
         explicit_bind = explicit_bind.strip()
         if explicit_bind:
+            logger.debug("Docker sandbox bind: %s (explicit bind host override)", explicit_bind)
             return explicit_bind
 
     host = sandbox_host if sandbox_host is not None else os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
     if _is_ipv6_loopback_sandbox_host(host):
+        logger.debug("Docker sandbox bind: [::1] (IPv6 loopback sandbox host)")
         return "[::1]"
     if _is_loopback_sandbox_host(host):
+        logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
         return "127.0.0.1"
+
+    logger.debug("Docker sandbox bind: 0.0.0.0 (non-loopback sandbox host compatibility)")
     return "0.0.0.0"
 
 
