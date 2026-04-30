@@ -127,8 +127,16 @@ def _format_container_command_for_log(cmd: list[str]) -> str:
     return shlex.join(cmd)
 
 
+def _normalize_sandbox_host(host: str) -> str:
+    return host.strip().lower()
+
+
+def _is_ipv6_loopback_sandbox_host(host: str) -> bool:
+    return _normalize_sandbox_host(host) in {"::1", "[::1]"}
+
+
 def _is_loopback_sandbox_host(host: str) -> bool:
-    return host.strip().lower() in {"", "localhost", "127.0.0.1", "::1", "[::1]"}
+    return _normalize_sandbox_host(host) in {"", "localhost", "127.0.0.1", "::1", "[::1]"}
 
 
 def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | None = None) -> str:
@@ -138,7 +146,9 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     expose the sandbox HTTP API on every host interface.  Docker-outside-of-
     Docker deployments commonly use ``host.docker.internal`` from another
     container; keep their legacy broad bind unless operators opt into a
-    narrower bind with ``DEER_FLOW_SANDBOX_BIND_HOST``.
+    narrower bind with ``DEER_FLOW_SANDBOX_BIND_HOST``.  When operators choose
+    an IPv6 loopback sandbox host, bind Docker to IPv6 loopback as well so the
+    advertised sandbox URL and published socket use the same address family.
     """
     explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST")
     if explicit_bind is not None:
@@ -147,6 +157,8 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
             return explicit_bind
 
     host = sandbox_host if sandbox_host is not None else os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+    if _is_ipv6_loopback_sandbox_host(host):
+        return "[::1]"
     if _is_loopback_sandbox_host(host):
         return "127.0.0.1"
     return "0.0.0.0"

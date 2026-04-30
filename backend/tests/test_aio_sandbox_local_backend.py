@@ -151,6 +151,13 @@ def test_resolve_docker_bind_host_keeps_dood_compatibility(monkeypatch):
     assert _resolve_docker_bind_host() == "0.0.0.0"
 
 
+def test_resolve_docker_bind_host_uses_ipv6_loopback_for_ipv6_sandbox_host(monkeypatch):
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "[::1]")
+
+    assert _resolve_docker_bind_host() == "[::1]"
+
+
 def test_resolve_docker_bind_host_allows_explicit_override(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "localhost")
     monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "192.0.2.10")
@@ -188,6 +195,22 @@ def test_start_container_keeps_broad_bind_for_dood_sandbox_host(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend)
 
     assert captured_cmd[captured_cmd.index("-p") + 1] == "0.0.0.0:18080:8080"
+
+
+def test_start_container_binds_ipv6_sandbox_host_to_ipv6_loopback(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "[::1]")
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("-p") + 1] == "[::1]:18080:8080"
 
 
 def test_start_container_keeps_apple_container_port_format(monkeypatch):
