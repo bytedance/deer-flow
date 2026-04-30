@@ -11,6 +11,8 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.config.app_config import AppConfig
+
 logger = logging.getLogger(__name__)
 
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
@@ -67,7 +69,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
 def _build_runtime_middlewares(
     *,
-    app_config: "AppConfig",
+    app_config: AppConfig,
     include_uploads: bool,
     include_dangling_tool_call_patch: bool,
     lazy_init: bool = True,
@@ -124,7 +126,7 @@ def _build_runtime_middlewares(
     return middlewares
 
 
-def build_lead_runtime_middlewares(*, app_config: "AppConfig", lazy_init: bool = True) -> list[AgentMiddleware]:
+def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
         app_config=app_config,
@@ -134,7 +136,7 @@ def build_lead_runtime_middlewares(*, app_config: "AppConfig", lazy_init: bool =
     )
 
 
-def build_subagent_runtime_middlewares(*, app_config: "AppConfig", lazy_init: bool = True) -> list[AgentMiddleware]:
+def build_subagent_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     return _build_runtime_middlewares(
         app_config=app_config,
