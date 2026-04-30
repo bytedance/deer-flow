@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 # Channel name → import path for lazy loading
 _CHANNEL_REGISTRY: dict[str, str] = {
+    "dingtalk": "app.channels.dingtalk:DingTalkChannel",
     "discord": "app.channels.discord:DiscordChannel",
     "feishu": "app.channels.feishu:FeishuChannel",
     "slack": "app.channels.slack:SlackChannel",
@@ -28,6 +29,7 @@ _CHANNEL_REGISTRY: dict[str, str] = {
 
 # Keys that indicate a user has configured credentials for a channel.
 _CHANNEL_CREDENTIAL_KEYS: dict[str, list[str]] = {
+    "dingtalk": ["client_id", "client_secret"],
     "discord": ["bot_token"],
     "feishu": ["app_id", "app_secret"],
     "slack": ["bot_token", "app_token"],
@@ -166,11 +168,16 @@ class ChannelService:
 
         try:
             channel = channel_cls(bus=self.bus, config=config)
-            await channel.start()
             self._channels[name] = channel
+            await channel.start()
+            if not channel.is_running:
+                self._channels.pop(name, None)
+                logger.error("Channel %s did not enter a running state after start()", name)
+                return False
             logger.info("Channel %s started", name)
             return True
         except Exception:
+            self._channels.pop(name, None)
             logger.exception("Failed to start channel %s", name)
             return False
 

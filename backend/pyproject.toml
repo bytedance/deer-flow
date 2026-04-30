@@ -17,6 +17,7 @@ dependencies = [
     "langgraph-sdk>=0.1.51",
     "markdown-to-mrkdwn>=0.3.1",
     "wecom-aibot-python-sdk>=0.1.6",
+    "dingtalk-stream>=0.24.3",
     "bcrypt>=4.0.0",
     "pyjwt>=2.9.0",
     "email-validator>=2.0.0",
