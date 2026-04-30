@@ -249,6 +249,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Individual agent — agent chat page
   void page.route("**/api/agents/*", (route) => {
+    if (route.request().url().endsWith("/api/agents/status")) {
+      return route.fallback();
+    }
     if (route.request().method() === "GET") {
       const url = route.request().url();
       const agent = agents.find((a) => url.endsWith(`/api/agents/${a.name}`));
