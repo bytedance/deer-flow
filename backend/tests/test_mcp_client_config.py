@@ -26,6 +26,7 @@ def test_build_server_params_stdio_success():
 
 def test_extensions_config_resolves_env_variables_inside_nested_collections(monkeypatch):
     monkeypatch.setenv("MCP_TOKEN", "secret")
+    monkeypatch.delenv("MISSING_TOKEN", raising=False)
     raw_config = {
         "args": ["--token", "$MCP_TOKEN", {"nested": ["$MCP_TOKEN", "$MISSING_TOKEN"]}],
         "tuple_args": ("$MCP_TOKEN", "$MISSING_TOKEN"),

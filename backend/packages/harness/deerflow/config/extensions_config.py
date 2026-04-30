@@ -134,7 +134,7 @@ class ExtensionsConfig(BaseModel):
         try:
             with open(resolved_path, encoding="utf-8") as f:
                 config_data = json.load(f)
-            cls.resolve_env_variables(config_data)
+            config_data = cls.resolve_env_variables(config_data)
             return cls.model_validate(config_data)
         except json.JSONDecodeError as e:
             raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
@@ -165,9 +165,7 @@ class ExtensionsConfig(BaseModel):
             return env_value
 
         if isinstance(config, dict):
-            for key, value in config.items():
-                config[key] = cls.resolve_env_variables(value)
-            return config
+            return {key: cls.resolve_env_variables(value) for key, value in config.items()}
 
         if isinstance(config, list):
             return [cls.resolve_env_variables(item) for item in config]
