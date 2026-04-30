@@ -1,10 +1,4 @@
-"""Abstract SkillStorage base class with template-method flows.
-
-Design mirrors ``deerflow/sandbox/sandbox_provider.py``: a thin ABC with
-storage-medium-specific abstract operations, plus final template-method flows
-that compose those operations with protocol-level helpers (parser, validation,
-installer zip-safety functions).
-"""
+"""Abstract SkillStorage base class with template-method flows."""
 
 from __future__ import annotations
 
