@@ -381,7 +381,7 @@ class TestInstallSkillFromArchive:
         bad_path = tmp_path / "bad.zip"
         bad_path.write_text("not a skill")
         with pytest.raises(ValueError, match=".skill"):
-            get_or_new_skill_storage().install_skill_from_archive(bad_path)
+            get_or_new_skill_storage(skills_path=tmp_path).install_skill_from_archive(bad_path)
 
     def test_bad_frontmatter(self, tmp_path):
         zip_path = tmp_path / "bad.skill"
@@ -392,9 +392,9 @@ class TestInstallSkillFromArchive:
         with pytest.raises(ValueError, match="Invalid skill"):
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
-    def test_nonexistent_file(self):
+    def test_nonexistent_file(self, tmp_path):
         with pytest.raises(FileNotFoundError):
-            get_or_new_skill_storage().install_skill_from_archive(Path("/nonexistent/path.skill"))
+            get_or_new_skill_storage(skills_path=tmp_path).install_skill_from_archive(Path("/nonexistent/path.skill"))
 
     def test_macosx_filtered_during_resolve(self, tmp_path):
         """Archive with __MACOSX dir still installs correctly."""

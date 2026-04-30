@@ -45,8 +45,11 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
     if skills_path is not None:
         if app_config is not None:
             return _make_storage(app_config.skills, host_path=str(skills_path), **kwargs)
+        # No app_config: use a default SkillsConfig so we never need to read config.yaml
+        # when the caller has already supplied an explicit host path.
+        from deerflow.config.skills_config import SkillsConfig
 
-        return _make_storage(get_app_config().skills, host_path=str(skills_path), **kwargs)
+        return _make_storage(SkillsConfig(), host_path=str(skills_path), **kwargs)
 
     if app_config is not None:
         return _make_storage(app_config.skills, **kwargs)

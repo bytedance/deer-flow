@@ -1,7 +1,9 @@
 """Tests for recursive skills loading."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
+from deerflow.config.skills_config import SkillsConfig
 from deerflow.skills.storage import get_or_new_skill_storage
 
 
@@ -14,7 +16,8 @@ def _write_skill(skill_dir: Path, name: str, description: str) -> None:
 
 def test_get_skills_root_path_points_to_project_root_skills():
     """get_skills_root_path() should point to deer-flow/skills (sibling of backend/), not backend/packages/skills."""
-    path = get_or_new_skill_storage().get_skills_root_path()
+    app_config = SimpleNamespace(skills=SkillsConfig())
+    path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
     assert path.name == "skills", f"Expected 'skills', got '{path.name}'"
     assert (path.parent / "backend").is_dir(), f"Expected skills path's parent to be project root containing 'backend/', but got {path}"
 
