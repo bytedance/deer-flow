@@ -964,6 +964,13 @@ run_events:
 #     enabled: false
 #     bot_id: $WECOM_BOT_ID
 #     bot_secret: $WECOM_BOT_SECRET
+#
+#   dingtalk:
+#     enabled: false
+#     client_id: $DINGTALK_CLIENT_ID
+#     client_secret: $DINGTALK_CLIENT_SECRET
+#     allowed_users: []               # empty = allow all
+#     card_template_id: ""            # Optional: AI Card template ID for streaming updates
 
 # ============================================================================
 # Guardrails Configuration
