@@ -751,7 +751,10 @@ export function useRenameThread() {
           queryKey: ["threads", "search"],
           exact: false,
         },
-        (oldData: Array<AgentThread>) => {
+        (oldData: Array<AgentThread> | undefined) => {
+          if (oldData == null) {
+            return oldData;
+          }
           return oldData.map((t) => {
             if (t.thread_id === threadId) {
               return {

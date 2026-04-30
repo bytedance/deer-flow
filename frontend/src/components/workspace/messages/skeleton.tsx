@@ -26,7 +26,7 @@ export function MessageListSkeleton() {
   return (
     <div className="flex w-full max-w-(--container-width-md) flex-col gap-12 p-8 pt-16">
       <div
-        role="human-message"
+        data-role="human-message"
         className="flex w-[50%] flex-col items-end gap-2 self-end"
       >
         <SkeletonBar
@@ -40,7 +40,7 @@ export function MessageListSkeleton() {
           style={{ animationDelay: `${index++ * STAGGER_MS}ms` }}
         />
       </div>
-      <div role="assistant-message" className="flex flex-col gap-2">
+      <div data-role="assistant-message" className="flex flex-col gap-2">
         <SkeletonBar
           className="h-6 w-full"
           style={{ animationDelay: `${index++ * STAGGER_MS}ms` }}

@@ -33,7 +33,6 @@ function injectCsrfHeader(_url: URL, init: RequestInit): RequestInit {
 
 function createCompatibleClient(isMock?: boolean): LangGraphClient {
   const apiUrl = getLangGraphBaseURL(isMock);
-  console.log(`Creating API client with base URL: ${apiUrl}`);
   const client = new LangGraphClient({
     apiUrl,
     onRequest: injectCsrfHeader,
