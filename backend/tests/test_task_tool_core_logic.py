@@ -421,6 +421,7 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+    monkeypatch.setattr(task_tool_module, "get_app_config", lambda: SimpleNamespace(models=[SimpleNamespace(name="default-model")]))
 
     output = _run_task_tool(
         runtime=None,
@@ -431,8 +432,8 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
     )
 
     assert output == "Task Succeeded. Result: ok"
-    # runtime is None → metadata is empty dict → groups=None
-    get_available_tools.assert_called_once_with(model_name=None, groups=None, subagent_enabled=False)
+    # runtime is None -> metadata is empty dict -> groups=None, model falls back to app default.
+    get_available_tools.assert_called_once_with(model_name="default-model", groups=None, subagent_enabled=False)
 
     config = _make_subagent_config()
     events = []

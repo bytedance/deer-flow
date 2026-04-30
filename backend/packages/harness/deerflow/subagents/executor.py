@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
+from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -227,9 +228,9 @@ class SubagentExecutor:
             trace_id: Trace ID from parent for distributed tracing.
         """
         self.config = config
-        self.app_config = app_config
+        self.app_config = app_config or get_app_config()
         self.parent_model = parent_model
-        self.model_name = resolve_subagent_model_name(config, parent_model)
+        self.model_name = resolve_subagent_model_name(config, parent_model, app_config=self.app_config)
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.thread_id = thread_id
@@ -247,17 +248,12 @@ class SubagentExecutor:
 
     def _create_agent(self):
         """Create the agent instance."""
-        # Mirror lead-agent factory pattern: prefer explicit app_config,
-        # fall back to ambient lookup at agent-build time.
-        from deerflow.config import get_app_config
-
-        resolved_app_config = self.app_config or get_app_config()
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=resolved_app_config)
+        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=self.app_config)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
         # Reuse shared middleware composition with lead agent.
-        middlewares = build_subagent_runtime_middlewares(app_config=resolved_app_config, model_name=self.model_name, lazy_init=True)
+        middlewares = build_subagent_runtime_middlewares(app_config=self.app_config, model_name=self.model_name, lazy_init=True)
 
         return create_agent(
             model=model,

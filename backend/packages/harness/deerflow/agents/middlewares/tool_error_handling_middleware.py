@@ -155,11 +155,13 @@ def build_subagent_runtime_middlewares(
         lazy_init=lazy_init,
     )
 
-    if model_name:
-        model_config = app_config.get_model_config(model_name)
-        if model_config is not None and model_config.supports_vision:
-            from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+    if model_name is None and app_config.models:
+        model_name = app_config.models[0].name
 
-            middlewares.append(ViewImageMiddleware())
+    model_config = app_config.get_model_config(model_name) if model_name else None
+    if model_config is not None and model_config.supports_vision:
+        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+
+        middlewares.append(ViewImageMiddleware())
 
     return middlewares

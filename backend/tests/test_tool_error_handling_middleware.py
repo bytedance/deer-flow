@@ -48,6 +48,46 @@ def _make_app_config(*, supports_vision: bool = False) -> AppConfig:
     )
 
 
+def _stub_runtime_middleware_imports(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMiddleware:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    class FakeLLMErrorHandlingMiddleware:
+        def __init__(self, *, app_config):
+            self.app_config = app_config
+
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.llm_error_handling_middleware",
+        _module(
+            "deerflow.agents.middlewares.llm_error_handling_middleware",
+            LLMErrorHandlingMiddleware=FakeLLMErrorHandlingMiddleware,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.thread_data_middleware",
+        _module("deerflow.agents.middlewares.thread_data_middleware", ThreadDataMiddleware=FakeMiddleware),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.sandbox.middleware",
+        _module("deerflow.sandbox.middleware", SandboxMiddleware=FakeMiddleware),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.dangling_tool_call_middleware",
+        _module("deerflow.agents.middlewares.dangling_tool_call_middleware", DanglingToolCallMiddleware=FakeMiddleware),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.sandbox_audit_middleware",
+        _module("deerflow.agents.middlewares.sandbox_audit_middleware", SandboxAuditMiddleware=FakeMiddleware),
+    )
+
+
 def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, object] = {}
 
@@ -182,21 +222,26 @@ async def test_awrap_tool_call_reraises_graph_interrupt():
 
 def test_subagent_runtime_middlewares_include_view_image_for_vision_model(monkeypatch):
     app_config = _make_app_config(supports_vision=True)
+    _stub_runtime_middleware_imports(monkeypatch)
 
-    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
-    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.get_app_config", lambda: app_config)
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
 
-    middlewares = build_subagent_runtime_middlewares(model_name="test-model")
+    assert any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
+
+
+def test_subagent_runtime_middlewares_include_view_image_for_default_vision_model(monkeypatch):
+    app_config = _make_app_config(supports_vision=True)
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=None)
 
     assert any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
 
 
 def test_subagent_runtime_middlewares_skip_view_image_for_text_model(monkeypatch):
     app_config = _make_app_config(supports_vision=False)
+    _stub_runtime_middleware_imports(monkeypatch)
 
-    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
-    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.get_app_config", lambda: app_config)
-
-    middlewares = build_subagent_runtime_middlewares(model_name="test-model")
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
 
     assert not any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
