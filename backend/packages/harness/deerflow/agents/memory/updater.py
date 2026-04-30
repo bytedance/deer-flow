@@ -9,7 +9,6 @@ import logging
 import math
 import re
 import uuid
-from collections.abc import Awaitable
 from typing import Any
 
 from deerflow.agents.memory.prompt import (
@@ -26,6 +25,12 @@ from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
 
+
+# Thread pool for offloading sync memory updates when called from an async
+# context.  Unlike the previous asyncio.run() approach, this runs *sync*
+# model.invoke() calls — no event loop is created, so the langchain async
+# httpx client pool (globally cached via @lru_cache) is never touched and
+# cross-loop connection reuse is impossible.
 _SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="memory-updater-sync",
@@ -222,39 +227,6 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
-def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
-    """Run an async memory update from sync code, including nested-loop contexts."""
-    handed_off = False
-
-    try:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is not None and loop.is_running():
-            future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(asyncio.run, coro)
-            handed_off = True
-            return future.result()
-
-        handed_off = True
-        return asyncio.run(coro)
-    except Exception:
-        if not handed_off:
-            close = getattr(coro, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    logger.debug(
-                        "Failed to close un-awaited memory update coroutine",
-                        exc_info=True,
-                    )
-
-        logger.exception("Failed to run async memory update from sync context")
-        return False
-
-
 # Matches sentences that describe a file-upload *event* rather than general
 # file-related work.  Deliberately narrow to avoid removing legitimate facts
 # such as "User works with CSV files" or "prefers PDF export".
@@ -349,13 +321,14 @@ class MemoryUpdater:
         agent_name: str | None,
         correction_detected: bool,
         reinforcement_detected: bool,
+        user_id: str | None = None,
     ) -> tuple[dict[str, Any], str] | None:
         """Load memory and build the update prompt for a conversation."""
         config = get_memory_config()
         if not config.enabled or not messages:
             return None
 
-        current_memory = get_memory_data(agent_name)
+        current_memory = get_memory_data(agent_name, user_id=user_id)
         conversation_text = format_conversation_for_update(messages)
         if not conversation_text.strip():
             return None
@@ -377,6 +350,7 @@ class MemoryUpdater:
         response_content: Any,
         thread_id: str | None,
         agent_name: str | None,
+        user_id: str | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
         response_text = _extract_text(response_content).strip()
@@ -390,7 +364,7 @@ class MemoryUpdater:
         # cannot corrupt the still-cached original object reference.
         updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-        return get_memory_storage().save(updated_memory, agent_name)
+        return get_memory_storage().save(updated_memory, agent_name, user_id=user_id)
 
     async def aupdate_memory(
         self,
@@ -399,28 +373,63 @@ class MemoryUpdater:
         agent_name: str | None = None,
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
+        user_id: str | None = None,
     ) -> bool:
-        """Update memory asynchronously based on conversation messages."""
+        """Update memory asynchronously by delegating to the sync path.
+
+        Uses ``asyncio.to_thread`` to run the *sync* ``model.invoke()`` path
+        in a worker thread so no second event loop is created and the
+        langchain async httpx client pool (shared with the lead agent) is
+        never touched.  This eliminates the cross-loop connection-reuse bug
+        described in issue #2615.
+        """
+        return await asyncio.to_thread(
+            self._do_update_memory_sync,
+            messages=messages,
+            thread_id=thread_id,
+            agent_name=agent_name,
+            correction_detected=correction_detected,
+            reinforcement_detected=reinforcement_detected,
+            user_id=user_id,
+        )
+
+    def _do_update_memory_sync(
+        self,
+        messages: list[Any],
+        thread_id: str | None = None,
+        agent_name: str | None = None,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+        user_id: str | None = None,
+    ) -> bool:
+        """Pure-sync memory update using ``model.invoke()``.
+
+        Uses the *sync* LLM call path so no event loop is created.  This
+        guarantees that the langchain provider's globally cached async
+        httpx ``AsyncClient`` / connection pool (the one shared with the
+        lead agent) is never touched — no cross-loop connection reuse is
+        possible.
+        """
         try:
-            prepared = await asyncio.to_thread(
-                self._prepare_update_prompt,
+            prepared = self._prepare_update_prompt(
                 messages=messages,
                 agent_name=agent_name,
                 correction_detected=correction_detected,
                 reinforcement_detected=reinforcement_detected,
+                user_id=user_id,
             )
             if prepared is None:
                 return False
 
             current_memory, prompt = prepared
             model = self._get_model()
-            response = await model.ainvoke(prompt, config={"run_name": "memory_agent"})
-            return await asyncio.to_thread(
-                self._finalize_update,
+            response = model.invoke(prompt, config={"run_name": "memory_agent"})
+            return self._finalize_update(
                 current_memory=current_memory,
                 response_content=response.content,
                 thread_id=thread_id,
                 agent_name=agent_name,
+                user_id=user_id,
             )
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
@@ -438,7 +447,16 @@ class MemoryUpdater:
         reinforcement_detected: bool = False,
         user_id: str | None = None,
     ) -> bool:
-        """Synchronously update memory via the async updater path.
+        """Synchronously update memory using the sync LLM path.
+
+        Uses ``model.invoke()`` (sync HTTP) which operates on a completely
+        separate connection pool from the async ``AsyncClient`` shared by
+        the lead agent.  This eliminates the cross-loop connection-reuse
+        bug described in issue #2615.
+
+        When called from within a running event loop (e.g. from a LangGraph
+        node), the blocking sync call is offloaded to a thread pool so the
+        caller's loop is not blocked.
 
         Args:
             messages: List of conversation messages.
@@ -451,14 +469,34 @@ class MemoryUpdater:
         Returns:
             True if update was successful, False otherwise.
         """
-        return _run_async_update_sync(
-            self.aupdate_memory(
-                messages=messages,
-                thread_id=thread_id,
-                agent_name=agent_name,
-                correction_detected=correction_detected,
-                reinforcement_detected=reinforcement_detected,
-            )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            try:
+                future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(
+                    self._do_update_memory_sync,
+                    messages=messages,
+                    thread_id=thread_id,
+                    agent_name=agent_name,
+                    correction_detected=correction_detected,
+                    reinforcement_detected=reinforcement_detected,
+                    user_id=user_id,
+                )
+                return future.result()
+            except Exception:
+                logger.exception("Failed to offload memory update to executor")
+                return False
+
+        return self._do_update_memory_sync(
+            messages=messages,
+            thread_id=thread_id,
+            agent_name=agent_name,
+            correction_detected=correction_detected,
+            reinforcement_detected=reinforcement_detected,
+            user_id=user_id,
         )
 
     def _apply_updates(
