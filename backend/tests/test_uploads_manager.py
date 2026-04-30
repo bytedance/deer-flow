@@ -1,6 +1,8 @@
 """Tests for deerflow.uploads.manager — shared upload management logic."""
 
+import errno
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -120,6 +122,22 @@ class TestWriteUploadFileNoSymlink:
             write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
 
         assert not (tmp_path / "notes.txt").exists()
+
+    def test_open_uses_nonblocking_flag_when_available(self, tmp_path):
+        with patch("deerflow.uploads.manager.os.open", side_effect=OSError(errno.ENXIO, "no reader")) as open_mock:
+            with pytest.raises(UnsafeUploadPathError, match="Unsafe upload destination"):
+                write_upload_file_no_symlink(tmp_path, "pipe.txt", b"hello")
+
+        flags = open_mock.call_args.args[1]
+        assert flags & os.O_NONBLOCK
+
+    @pytest.mark.parametrize("open_errno", [errno.ENXIO, errno.EAGAIN])
+    def test_nonblocking_special_file_open_errors_are_unsafe(self, tmp_path, open_errno):
+        with patch("deerflow.uploads.manager.os.open", side_effect=OSError(open_errno, "would block")):
+            with pytest.raises(UnsafeUploadPathError, match="Unsafe upload destination"):
+                write_upload_file_no_symlink(tmp_path, "pipe.txt", b"hello")
+
+        assert not (tmp_path / "pipe.txt").exists()
 
 
 # ---------------------------------------------------------------------------
