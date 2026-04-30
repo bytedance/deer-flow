@@ -259,8 +259,8 @@ def _build_middlewares(
     Returns:
         List of middleware instances.
     """
-    middlewares = build_lead_runtime_middlewares(lazy_init=True)
     resolved_app_config = app_config or get_app_config()
+    middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)

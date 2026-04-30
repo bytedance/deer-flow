@@ -217,6 +217,40 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     assert len(middlewares) > 0 and isinstance(middlewares[-2], MagicMock)
 
 
+def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    captured: dict[str, object] = {}
+
+    def _raise_get_app_config():
+        raise AssertionError("ambient get_app_config() must not be used when app_config is explicit")
+
+    def _fake_build_lead_runtime_middlewares(*, app_config, lazy_init):
+        captured["app_config"] = app_config
+        captured["lazy_init"] = lazy_init
+        return ["base-middleware"]
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", _raise_get_app_config)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "build_lead_runtime_middlewares",
+        _fake_build_lead_runtime_middlewares,
+    )
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **kwargs: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module._build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        app_config=app_config,
+    )
+
+    assert captured == {
+        "app_config": app_config,
+        "lazy_init": True,
+    }
+    assert middlewares[0] == "base-middleware"
+
+
 def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch):
     monkeypatch.setattr(
         lead_agent_module,

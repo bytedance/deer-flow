@@ -17,6 +17,7 @@ import asyncio
 import sys
 import threading
 from datetime import datetime
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -153,6 +154,13 @@ def mock_agent():
     return agent
 
 
+def _module(name: str, **attrs):
+    module = ModuleType(name)
+    for key, value in attrs.items():
+        setattr(module, key, value)
+    return module
+
+
 # Helper to create real message objects
 class _MsgHelper:
     """Helper to create real message objects from fixture classes."""
@@ -174,6 +182,88 @@ class _MsgHelper:
 def msg(classes):
     """Provide message factory."""
     return _MsgHelper(classes)
+
+
+# -----------------------------------------------------------------------------
+# Agent Construction Tests
+# -----------------------------------------------------------------------------
+
+
+class TestAgentConstruction:
+    """Test _create_agent() wiring before execution starts."""
+
+    def test_create_agent_threads_explicit_app_config_to_model_and_middlewares(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Explicit app_config must flow into both model and middleware factories."""
+        import deerflow.config as config_module
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        app_config = object()
+        model = object()
+        middlewares = [object()]
+        agent = object()
+        captured: dict[str, dict] = {}
+
+        def fake_get_app_config():
+            raise AssertionError("ambient get_app_config() must not be used when app_config is explicit")
+
+        def fake_create_chat_model(**kwargs):
+            captured["model"] = kwargs
+            return model
+
+        def fake_build_subagent_runtime_middlewares(**kwargs):
+            captured["middlewares"] = kwargs
+            return middlewares
+
+        def fake_create_agent(**kwargs):
+            captured["agent"] = kwargs
+            return agent
+
+        monkeypatch.setattr(config_module, "get_app_config", fake_get_app_config)
+        monkeypatch.setattr(
+            executor_module,
+            "create_chat_model",
+            fake_create_chat_model,
+        )
+        monkeypatch.setattr(executor_module, "create_agent", fake_create_agent)
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=fake_build_subagent_runtime_middlewares,
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            parent_model="parent-model",
+        )
+
+        result = executor._create_agent()
+
+        assert result is agent
+        assert captured["model"] == {
+            "name": "parent-model",
+            "thinking_enabled": False,
+            "app_config": app_config,
+        }
+        assert captured["middlewares"] == {
+            "app_config": app_config,
+            "lazy_init": True,
+        }
+        assert captured["agent"]["model"] is model
+        assert captured["agent"]["middleware"] is middlewares
+        assert captured["agent"]["tools"] == []
+        assert captured["agent"]["system_prompt"] == base_config.system_prompt
 
 
 # -----------------------------------------------------------------------------
