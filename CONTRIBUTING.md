@@ -131,9 +131,8 @@ Host Machine
 Docker Compose (deer-flow-dev)
   ├→ nginx (port 2026) ← Reverse proxy
   ├→ web (port 3000) ← Frontend with hot-reload
-  ├→ api (port 8001) ← Gateway API with hot-reload
-   ├→ langgraph (port 2024) ← LangGraph server with hot-reload
-   └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
+  ├→ api (port 8001) ← Gateway API + embedded agent runtime with hot-reload
+  └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
 ```
 
 **Benefits of Docker Development**:
@@ -186,15 +185,11 @@ If you need to start services individually:
 
 1. **Start backend services**:
    ```bash
-   # Terminal 1: Start LangGraph Server (port 2024)
-   cd backend
-   make dev
-
-   # Terminal 2: Start Gateway API (port 8001)
+   # Terminal 1: Start Gateway API (port 8001)
    cd backend
    make gateway
 
-   # Terminal 3: Start Frontend (port 3000)
+   # Terminal 2: Start Frontend (port 3000)
    cd frontend
    pnpm dev
    ```
@@ -212,7 +207,7 @@ If you need to start services individually:
 
 The nginx configuration provides:
 - Unified entry point on port 2026
-- Routes `/api/langgraph/*` to LangGraph Server (2024)
+- Routes `/api/langgraph/*` to Gateway embedded runtime (8001)
 - Routes other `/api/*` endpoints to Gateway API (8001)
 - Routes non-API requests to Frontend (3000)
 - Centralized CORS handling
@@ -234,12 +229,16 @@ deer-flow/
 │       ├── nginx.conf      # Nginx config for Docker
 │       └── nginx.local.conf # Nginx config for local dev
 ├── backend/                 # Backend application
-│   ├── src/
+│   ├── app/
 │   │   ├── gateway/        # Gateway API (port 8001)
-│   │   ├── agents/         # LangGraph agents (port 2024)
-│   │   ├── mcp/            # Model Context Protocol integration
-│   │   ├── skills/         # Skills system
-│   │   └── sandbox/        # Sandbox execution
+│   │   └── channels/       # IM platform integrations
+│   ├── packages/
+│   │   └── harness/deerflow/  # Agent framework package
+│   │       ├── agents/     # LangGraph agents
+│   │       ├── mcp/        # Model Context Protocol integration
+│   │       ├── skills/     # Skills system
+│   │       ├── sandbox/    # Sandbox execution
+│   │       └── models/     # Model factory
 │   ├── docs/               # Backend documentation
 │   └── Makefile            # Backend commands
 ├── frontend/               # Frontend application
@@ -256,8 +255,7 @@ Browser
   ↓
 Nginx (port 2026) ← Unified entry point
   ├→ Frontend (port 3000) ← / (non-API requests)
-  ├→ Gateway API (port 8001) ← /api/models, /api/mcp, /api/skills, /api/threads/*/artifacts
-  └→ LangGraph Server (port 2024) ← /api/langgraph/* (agent interactions)
+  └→ Gateway API (port 8001) ← /api/* (models, mcp, skills, threads, agents)
 ```
 
 ## Development Workflow

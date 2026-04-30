@@ -29,12 +29,19 @@ services:
       - "${PORT:-2026}:2026"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
-    command: >
-      sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
-      && nginx -g 'daemon off;'"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
+        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
+        exec nginx -g 'daemon off;'
     depends_on:
-      - frontend
-      - gateway
+      gateway:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
     networks:
       - deer-flow
     restart: unless-stopped
@@ -57,6 +64,12 @@ services:
     networks:
       - deer-flow
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
 
   # ── Gateway API ────────────────────────────────────────────────────────────
   gateway:
@@ -109,6 +122,12 @@ services:
     networks:
       - deer-flow
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
 
   # ── Sandbox Provisioner (optional, Kubernetes mode) ────────────────────────
   provisioner:
@@ -141,6 +160,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+      start_period: 15s
 networks:
   deer-flow:
     driver: bridge
