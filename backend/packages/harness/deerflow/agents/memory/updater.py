@@ -38,27 +38,28 @@ def _create_empty_memory() -> dict[str, Any]:
     return create_empty_memory()
 
 
-def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
     """Backward-compatible wrapper around the configured memory storage save path."""
-    return get_memory_storage().save(memory_data, agent_name)
+    return get_memory_storage().save(memory_data, agent_name, user_id=user_id)
 
 
-def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+def get_memory_data(agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
     """Get the current memory data via storage provider."""
-    return get_memory_storage().load(agent_name)
+    return get_memory_storage().load(agent_name, user_id=user_id)
 
 
-def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+def reload_memory_data(agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
     """Reload memory data via storage provider."""
-    return get_memory_storage().reload(agent_name)
+    return get_memory_storage().reload(agent_name, user_id=user_id)
 
 
-def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = None) -> dict[str, Any]:
+def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
     """Persist imported memory data via storage provider.
 
     Args:
         memory_data: Full memory payload to persist.
         agent_name: If provided, imports into per-agent memory.
+        user_id: If provided, scopes memory to a specific user.
 
     Returns:
         The saved memory data after storage normalization.
@@ -67,15 +68,15 @@ def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = Non
         OSError: If persisting the imported memory fails.
     """
     storage = get_memory_storage()
-    if not storage.save(memory_data, agent_name):
+    if not storage.save(memory_data, agent_name, user_id=user_id):
         raise OSError("Failed to save imported memory data")
-    return storage.load(agent_name)
+    return storage.load(agent_name, user_id=user_id)
 
 
-def clear_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+def clear_memory_data(agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
     """Clear all stored memory data and persist an empty structure."""
     cleared_memory = create_empty_memory()
-    if not _save_memory_to_file(cleared_memory, agent_name):
+    if not _save_memory_to_file(cleared_memory, agent_name, user_id=user_id):
         raise OSError("Failed to save cleared memory data")
     return cleared_memory
 
@@ -92,6 +93,8 @@ def create_memory_fact(
     category: str = "context",
     confidence: float = 0.5,
     agent_name: str | None = None,
+    *,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a new fact and persist the updated memory data."""
     normalized_content = content.strip()
@@ -101,7 +104,7 @@ def create_memory_fact(
     normalized_category = category.strip() or "context"
     validated_confidence = _validate_confidence(confidence)
     now = utc_now_iso_z()
-    memory_data = get_memory_data(agent_name)
+    memory_data = get_memory_data(agent_name, user_id=user_id)
     updated_memory = dict(memory_data)
     facts = list(memory_data.get("facts", []))
     facts.append(
@@ -116,15 +119,15 @@ def create_memory_fact(
     )
     updated_memory["facts"] = facts
 
-    if not _save_memory_to_file(updated_memory, agent_name):
+    if not _save_memory_to_file(updated_memory, agent_name, user_id=user_id):
         raise OSError("Failed to save memory data after creating fact")
 
     return updated_memory
 
 
-def delete_memory_fact(fact_id: str, agent_name: str | None = None) -> dict[str, Any]:
+def delete_memory_fact(fact_id: str, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
     """Delete a fact by its id and persist the updated memory data."""
-    memory_data = get_memory_data(agent_name)
+    memory_data = get_memory_data(agent_name, user_id=user_id)
     facts = memory_data.get("facts", [])
     updated_facts = [fact for fact in facts if fact.get("id") != fact_id]
     if len(updated_facts) == len(facts):
@@ -133,7 +136,7 @@ def delete_memory_fact(fact_id: str, agent_name: str | None = None) -> dict[str,
     updated_memory = dict(memory_data)
     updated_memory["facts"] = updated_facts
 
-    if not _save_memory_to_file(updated_memory, agent_name):
+    if not _save_memory_to_file(updated_memory, agent_name, user_id=user_id):
         raise OSError(f"Failed to save memory data after deleting fact '{fact_id}'")
 
     return updated_memory
@@ -145,9 +148,11 @@ def update_memory_fact(
     category: str | None = None,
     confidence: float | None = None,
     agent_name: str | None = None,
+    *,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Update an existing fact and persist the updated memory data."""
-    memory_data = get_memory_data(agent_name)
+    memory_data = get_memory_data(agent_name, user_id=user_id)
     updated_memory = dict(memory_data)
     updated_facts: list[dict[str, Any]] = []
     found = False
@@ -174,7 +179,7 @@ def update_memory_fact(
 
     updated_memory["facts"] = updated_facts
 
-    if not _save_memory_to_file(updated_memory, agent_name):
+    if not _save_memory_to_file(updated_memory, agent_name, user_id=user_id):
         raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
 
     return updated_memory
@@ -409,7 +414,7 @@ class MemoryUpdater:
 
             current_memory, prompt = prepared
             model = self._get_model()
-            response = await model.ainvoke(prompt)
+            response = await model.ainvoke(prompt, config={"run_name": "memory_agent"})
             return await asyncio.to_thread(
                 self._finalize_update,
                 current_memory=current_memory,
@@ -431,6 +436,7 @@ class MemoryUpdater:
         agent_name: str | None = None,
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
+        user_id: str | None = None,
     ) -> bool:
         """Synchronously update memory via the async updater path.
 
@@ -440,6 +446,7 @@ class MemoryUpdater:
             agent_name: If provided, updates per-agent memory. If None, updates global memory.
             correction_detected: Whether recent turns include an explicit correction signal.
             reinforcement_detected: Whether recent turns include a positive reinforcement signal.
+            user_id: If provided, scopes memory to a specific user.
 
         Returns:
             True if update was successful, False otherwise.
@@ -547,6 +554,7 @@ def update_memory_from_conversation(
     agent_name: str | None = None,
     correction_detected: bool = False,
     reinforcement_detected: bool = False,
+    user_id: str | None = None,
 ) -> bool:
     """Convenience function to update memory from a conversation.
 
@@ -556,9 +564,10 @@ def update_memory_from_conversation(
         agent_name: If provided, updates per-agent memory. If None, updates global memory.
         correction_detected: Whether recent turns include an explicit correction signal.
         reinforcement_detected: Whether recent turns include a positive reinforcement signal.
+        user_id: If provided, scopes memory to a specific user.
 
     Returns:
         True if successful, False otherwise.
     """
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected)
+    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id)

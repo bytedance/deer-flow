@@ -93,6 +93,10 @@ class TestTitleMiddlewareCoreLogic:
         assert title == "短标题"
         title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False)
         model.ainvoke.assert_awaited_once()
+        assert model.ainvoke.await_args.kwargs["config"] == {
+            "run_name": "title_agent",
+            "tags": ["middleware:title"],
+        }
 
     def test_generate_title_normalizes_structured_message_content(self, monkeypatch):
         _set_test_title_config(max_chars=20)

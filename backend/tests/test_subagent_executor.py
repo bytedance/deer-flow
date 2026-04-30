@@ -3,7 +3,7 @@
 Covers:
 - SubagentExecutor.execute() synchronous execution path
 - SubagentExecutor._aexecute() asynchronous execution path
-- asyncio.run() properly executes async workflow within thread pool context
+- execute_async() routes background work without bouncing through execute()
 - Error handling in both sync and async paths
 - Async tool support (MCP tools)
 - Cooperative cancellation via cancel_event
@@ -17,6 +17,7 @@ import asyncio
 import sys
 import threading
 from datetime import datetime
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -153,6 +154,13 @@ def mock_agent():
     return agent
 
 
+def _module(name: str, **attrs):
+    module = ModuleType(name)
+    for key, value in attrs.items():
+        setattr(module, key, value)
+    return module
+
+
 # Helper to create real message objects
 class _MsgHelper:
     """Helper to create real message objects from fixture classes."""
@@ -174,6 +182,88 @@ class _MsgHelper:
 def msg(classes):
     """Provide message factory."""
     return _MsgHelper(classes)
+
+
+# -----------------------------------------------------------------------------
+# Agent Construction Tests
+# -----------------------------------------------------------------------------
+
+
+class TestAgentConstruction:
+    """Test _create_agent() wiring before execution starts."""
+
+    def test_create_agent_threads_explicit_app_config_to_model_and_middlewares(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Explicit app_config must flow into both model and middleware factories."""
+        import deerflow.config as config_module
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        app_config = object()
+        model = object()
+        middlewares = [object()]
+        agent = object()
+        captured: dict[str, dict] = {}
+
+        def fake_get_app_config():
+            raise AssertionError("ambient get_app_config() must not be used when app_config is explicit")
+
+        def fake_create_chat_model(**kwargs):
+            captured["model"] = kwargs
+            return model
+
+        def fake_build_subagent_runtime_middlewares(**kwargs):
+            captured["middlewares"] = kwargs
+            return middlewares
+
+        def fake_create_agent(**kwargs):
+            captured["agent"] = kwargs
+            return agent
+
+        monkeypatch.setattr(config_module, "get_app_config", fake_get_app_config)
+        monkeypatch.setattr(
+            executor_module,
+            "create_chat_model",
+            fake_create_chat_model,
+        )
+        monkeypatch.setattr(executor_module, "create_agent", fake_create_agent)
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=fake_build_subagent_runtime_middlewares,
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            parent_model="parent-model",
+        )
+
+        result = executor._create_agent()
+
+        assert result is agent
+        assert captured["model"] == {
+            "name": "parent-model",
+            "thinking_enabled": False,
+            "app_config": app_config,
+        }
+        assert captured["middlewares"] == {
+            "app_config": app_config,
+            "lazy_init": True,
+        }
+        assert captured["agent"]["model"] is model
+        assert captured["agent"]["middleware"] is middlewares
+        assert captured["agent"]["tools"] == []
+        assert captured["agent"]["system_prompt"] == base_config.system_prompt
 
 
 # -----------------------------------------------------------------------------
@@ -397,7 +487,7 @@ class TestSyncExecutionPath:
         """Test that execute() works correctly when called from a thread pool.
 
         This simulates the real-world usage where execute() is called from
-        _execution_pool in execute_async().
+        a worker thread outside the main event loop.
         """
         from concurrent.futures import ThreadPoolExecutor
 
@@ -425,7 +515,7 @@ class TestSyncExecutionPath:
             with patch.object(executor, "_create_agent", return_value=mock_agent):
                 return executor.execute("Task")
 
-        # Execute in thread pool (simulating _execution_pool usage)
+        # Execute in thread pool to simulate sync execution outside the main loop.
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(run_in_thread)
             result = future.result(timeout=5)
@@ -434,11 +524,13 @@ class TestSyncExecutionPath:
         assert result.result == "Thread pool result"
 
     @pytest.mark.anyio
-    async def test_execute_in_running_event_loop_uses_isolated_thread(self, classes, base_config, mock_agent, msg):
-        """Test that execute() uses the isolated-thread path inside a running loop."""
+    async def test_execute_in_running_event_loop_calls_isolated_loop_directly(self, classes, base_config, mock_agent, msg):
+        """Test that execute() calls the isolated-loop helper directly in a running loop."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 
+        caller_thread = threading.current_thread().name
+        isolated_helper_threads = []
         execution_threads = []
         final_state = {
             "messages": [
@@ -459,15 +551,58 @@ class TestSyncExecutionPath:
             thread_id="test-thread",
         )
 
+        original_isolated_execute = executor._execute_in_isolated_loop
+
+        def tracked_isolated_execute(task, result_holder=None):
+            isolated_helper_threads.append(threading.current_thread().name)
+            return original_isolated_execute(task, result_holder)
+
         with patch.object(executor, "_create_agent", return_value=mock_agent):
-            with patch.object(executor, "_execute_in_isolated_loop", wraps=executor._execute_in_isolated_loop) as isolated:
+            with patch.object(executor, "_execute_in_isolated_loop", side_effect=tracked_isolated_execute) as isolated:
                 result = executor.execute("Task")
 
         assert isolated.call_count == 1
+        assert isolated_helper_threads == [caller_thread]
         assert execution_threads
-        assert all(name.startswith("subagent-isolated-") for name in execution_threads)
+        assert execution_threads == ["subagent-persistent-loop"]
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "Async loop result"
+
+    @pytest.mark.anyio
+    async def test_execute_in_running_event_loop_reuses_persistent_isolated_loop(self, classes, base_config, mock_agent, msg):
+        """Regression: repeated isolated executions should reuse one long-lived loop."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        execution_loops = []
+
+        final_state = {
+            "messages": [
+                msg.human("Task"),
+                msg.ai("Async loop result", "msg-1"),
+            ]
+        }
+
+        async def mock_astream(*args, **kwargs):
+            execution_loops.append(asyncio.get_running_loop())
+            yield final_state
+
+        mock_agent.astream = mock_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            first = executor.execute("Task 1")
+            second = executor.execute("Task 2")
+
+        assert first.status == SubagentStatus.COMPLETED
+        assert second.status == SubagentStatus.COMPLETED
+        assert len(execution_loops) == 2
+        assert execution_loops[0] is execution_loops[1]
+        assert execution_loops[0].is_running()
 
     def test_execute_handles_asyncio_run_failure(self, classes, base_config):
         """Test handling when asyncio.run() itself fails."""
@@ -932,6 +1067,53 @@ class TestCooperativeCancellation:
         """Test that requesting cancellation on a nonexistent task does not raise."""
         executor_module.request_cancel_background_task("nonexistent-task")
 
+    def test_execute_async_runs_without_calling_execute(self, executor_module, classes, base_config):
+        """Regression: execute_async should not route through execute()/asyncio.run()."""
+        import concurrent.futures
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        def run_inline(fn, *args, **kwargs):
+            future = concurrent.futures.Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        async def fake_aexecute(task, result_holder=None):
+            result = result_holder or SubagentResult(
+                task_id="inline-task",
+                trace_id="test-trace",
+                status=SubagentStatus.RUNNING,
+            )
+            result.status = SubagentStatus.COMPLETED
+            result.result = f"done: {task}"
+            result.completed_at = datetime.now()
+            return result
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
+        with (
+            patch.object(executor_module._scheduler_pool, "submit", side_effect=run_inline),
+            patch.object(executor, "_aexecute", side_effect=fake_aexecute),
+            patch.object(executor, "execute", side_effect=AssertionError("execute() should not be called by execute_async")),
+        ):
+            task_id = executor.execute_async("Task")
+
+        result = executor_module._background_tasks.get(task_id)
+        assert result is not None
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "done: Task"
+        assert result.error is None
+
     def test_timeout_does_not_overwrite_cancelled(self, executor_module, classes, base_config, msg):
         """Test that the real timeout handler does not overwrite CANCELLED status.
 
@@ -953,25 +1135,13 @@ class TestCooperativeCancellation:
         )
 
         # Synchronisation primitives
-        execute_entered = threading.Event()  # signals that execute() has started
-        execute_release = threading.Event()  # lets execute() return
+        execute_entered = threading.Event()  # signals that _aexecute() has started
         run_task_done = threading.Event()  # signals that run_task() has finished
 
-        # A blocking execute() replacement so we control the timing exactly
-        def blocking_execute(task, result_holder=None):
-            # Cooperative cancellation: honour cancel_event like real _aexecute
-            if result_holder and result_holder.cancel_event.is_set():
-                result_holder.status = SubagentStatus.CANCELLED
-                result_holder.error = "Cancelled by user"
-                result_holder.completed_at = datetime.now()
-                execute_entered.set()
-                return result_holder
+        # A blocking _aexecute() replacement so we control the timing exactly.
+        async def blocking_aexecute(task, result_holder=None):
             execute_entered.set()
-            execute_release.wait(timeout=5)
-            # Return a minimal completed result (will be ignored because timeout fires first)
-            from deerflow.subagents.executor import SubagentResult as _R
-
-            return _R(task_id="x", trace_id="t", status=SubagentStatus.COMPLETED, result="late")
+            await asyncio.Event().wait()
 
         executor = SubagentExecutor(
             config=short_config,
@@ -992,11 +1162,11 @@ class TestCooperativeCancellation:
 
             return original_scheduler_submit(wrapper)
 
-        with patch.object(executor, "execute", blocking_execute), patch.object(executor_module._scheduler_pool, "submit", tracked_submit):
+        with patch.object(executor, "_aexecute", side_effect=blocking_aexecute), patch.object(executor_module._scheduler_pool, "submit", tracked_submit):
             task_id = executor.execute_async("Task")
 
-            # Wait until execute() is entered (i.e. it's running in _execution_pool)
-            assert execute_entered.wait(timeout=3), "execute() was never called"
+            # Wait until _aexecute() is entered on the persistent loop.
+            assert execute_entered.wait(timeout=3), "_aexecute() was never called"
 
             # Set CANCELLED on the result before the timeout handler runs.
             # The 50ms timeout will fire while execute() is blocked.
@@ -1008,11 +1178,6 @@ class TestCooperativeCancellation:
             # Wait for run_task to finish — the FuturesTimeoutError handler has
             # now executed and (should have) left CANCELLED intact.
             assert run_task_done.wait(timeout=5), "run_task() did not finish"
-
-            # Only NOW release the blocked execute() so the thread pool worker
-            # can be reclaimed.  This MUST come after run_task_done to avoid a
-            # race where execute() returns before the timeout fires.
-            execute_release.set()
 
         result = executor_module._background_tasks.get(task_id)
         assert result is not None

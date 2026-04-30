@@ -1,4 +1,4 @@
-"""ChannelManager — consumes inbound messages and dispatches them to the DeerFlow agent via LangGraph Server."""
+"""ChannelManager — consumes inbound messages and dispatches them to the DeerFlow agent via Gateway."""
 
 from __future__ import annotations
 
@@ -17,10 +17,13 @@ from langgraph_sdk.errors import ConflictError
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
+from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
+from app.gateway.internal_auth import create_internal_auth_headers
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
+DEFAULT_LANGGRAPH_URL = "http://localhost:8001/api"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
@@ -35,6 +38,7 @@ STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
+    "dingtalk": {"supports_streaming": False},
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
@@ -44,6 +48,13 @@ CHANNEL_CAPABILITIES = {
 }
 
 InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
+
+_METADATA_DROP_KEYS = frozenset({"raw_message", "ref_msg"})
+
+
+def _slim_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of *meta* with known-large keys removed."""
+    return {k: v for k, v in meta.items() if k not in _METADATA_DROP_KEYS}
 
 
 INBOUND_FILE_READERS: dict[str, InboundFileReader] = {}
@@ -342,14 +353,15 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
-    outputs_dir = paths.sandbox_outputs_dir(thread_id).resolve()
+    user_id = get_effective_user_id()
+    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve()
     for virtual_path in artifacts:
         # Security: only allow files from the agent outputs directory
         if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
             logger.warning("[Manager] rejected non-outputs artifact path: %s", virtual_path)
             continue
         try:
-            actual = paths.resolve_virtual_path(thread_id, virtual_path)
+            actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=user_id)
             # Verify the resolved path is actually under the outputs directory
             # (guards against path-traversal even after prefix check)
             try:
@@ -507,7 +519,7 @@ class ChannelManager:
     """Core dispatcher that bridges IM channels to the DeerFlow agent.
 
     It reads from the MessageBus inbound queue, creates/reuses threads on
-    the LangGraph Server, sends messages via ``runs.wait``, and publishes
+    Gateway's LangGraph-compatible API, sends messages via ``runs.wait``, and publishes
     outbound responses back through the bus.
     """
 
@@ -532,12 +544,20 @@ class ChannelManager:
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
         self._client = None  # lazy init — langgraph_sdk async client
+        self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
+        from .service import get_channel_service
+
+        service = get_channel_service()
+        if service:
+            channel = service.get_channel(channel_name)
+            if channel is not None:
+                return channel.supports_streaming
         return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
 
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -584,7 +604,14 @@ class ChannelManager:
         if self._client is None:
             from langgraph_sdk import get_client
 
-            self._client = get_client(url=self._langgraph_url)
+            self._client = get_client(
+                url=self._langgraph_url,
+                headers={
+                    **create_internal_auth_headers(),
+                    CSRF_HEADER_NAME: self._csrf_token,
+                    "Cookie": f"{CSRF_COOKIE_NAME}={self._csrf_token}",
+                },
+            )
         return self._client
 
     # -- lifecycle ---------------------------------------------------------
@@ -667,7 +694,7 @@ class ChannelManager:
     # -- chat handling -----------------------------------------------------
 
     async def _create_thread(self, client, msg: InboundMessage) -> str:
-        """Create a new thread on the LangGraph Server and store the mapping."""
+        """Create a new thread through Gateway and store the mapping."""
         thread = await client.threads.create()
         thread_id = thread["thread_id"]
         self.store.set_thread_id(
@@ -677,7 +704,7 @@ class ChannelManager:
             topic_id=msg.topic_id,
             user_id=msg.user_id,
         )
-        logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
+        logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
@@ -760,6 +787,7 @@ class ChannelManager:
             artifacts=artifacts,
             attachments=attachments,
             thread_ts=msg.thread_ts,
+            metadata=_slim_metadata(msg.metadata),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
@@ -821,6 +849,7 @@ class ChannelManager:
                         text=latest_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
+                        metadata=_slim_metadata(msg.metadata),
                     )
                 )
                 last_published_text = latest_text
@@ -865,6 +894,7 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
+                    metadata=_slim_metadata(msg.metadata),
                 )
             )
 
@@ -884,7 +914,7 @@ class ChannelManager:
             return
 
         if command == "new":
-            # Create a new thread on the LangGraph Server
+            # Create a new thread through Gateway
             client = self._get_client()
             thread = await client.threads.create()
             new_thread_id = thread["thread_id"]
@@ -923,6 +953,7 @@ class ChannelManager:
             thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=reply,
             thread_ts=msg.thread_ts,
+            metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
 
@@ -956,5 +987,6 @@ class ChannelManager:
             thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
+            metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)

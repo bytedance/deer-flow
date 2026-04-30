@@ -243,9 +243,6 @@ make up     # Build images and start all production services
 make down   # Stop and remove containers
 ```
 
-> [!NOTE]
-> The LangGraph agent server currently runs via `langgraph dev` (the open-source CLI server).
-
 Access: http://localhost:2026
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
@@ -264,7 +261,7 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 2. **Install dependencies**:
    ```bash
-   make install  # Install backend + frontend dependencies
+   make install  # Install backend + frontend dependencies + pre-commit hooks
    ```
 
 3. **(Optional) Pre-pull sandbox image**:
@@ -289,53 +286,31 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 #### Startup Modes
 
-DeerFlow supports multiple startup modes across two dimensions:
-
-- **Dev / Prod** — dev enables hot-reload; prod uses pre-built frontend
-- **Standard / Gateway** — standard uses a separate LangGraph server (4 processes); Gateway mode (experimental) embeds the agent runtime in the Gateway API (3 processes)
+DeerFlow runs the agent runtime inside the Gateway API. Development mode enables hot-reload; production mode uses a pre-built frontend.
 
 | | **Local Foreground** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
 |---|---|---|---|---|
 | **Dev** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
-| **Dev + Gateway** | `./scripts/serve.sh --dev --gateway`<br/>`make dev-pro` | `./scripts/serve.sh --dev --gateway --daemon`<br/>`make dev-daemon-pro` | `./scripts/docker.sh start --gateway`<br/>`make docker-start-pro` | — |
 | **Prod** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
-| **Prod + Gateway** | `./scripts/serve.sh --prod --gateway`<br/>`make start-pro` | `./scripts/serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `./scripts/deploy.sh --gateway`<br/>`make up-pro` |
 
 | Action | Local | Docker Dev | Docker Prod |
 |---|---|---|---|
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
-> **Gateway mode** eliminates the LangGraph server process — the Gateway API handles agent execution directly via async tasks, managing its own concurrency.
-
-#### Why Gateway Mode?
-
-In standard mode, DeerFlow runs a dedicated [LangGraph Platform](https://langchain-ai.github.io/langgraph/) server alongside the Gateway API. This architecture works well but has trade-offs:
-
-| | Standard Mode | Gateway Mode |
-|---|---|---|
-| **Architecture** | Gateway (REST API) + LangGraph (agent runtime) | Gateway embeds agent runtime |
-| **Concurrency** | `--n-jobs-per-worker` per worker (requires license) | `--workers` × async tasks (no per-worker cap) |
-| **Containers / Processes** | 4 (frontend, gateway, langgraph, nginx) | 3 (frontend, gateway, nginx) |
-| **Resource usage** | Higher (two Python runtimes) | Lower (single Python runtime) |
-| **LangGraph Platform license** | Required for production images | Not required |
-| **Cold start** | Slower (two services to initialize) | Faster |
-
-Both modes are functionally equivalent — the same agents, tools, and skills work in either mode.
+Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
 #### Docker Production Deployment
 
-`deploy.sh` supports building and starting separately. Images are mode-agnostic — runtime mode is selected at start time:
+`deploy.sh` supports building and starting separately:
 
 ```bash
 # One-step (build + start)
-deploy.sh                    # standard mode (default)
-deploy.sh --gateway          # gateway mode
+deploy.sh
 
-# Two-step (build once, start with any mode)
+# Two-step (build once, start later)
 deploy.sh build              # build all images
-deploy.sh start              # start in standard mode
-deploy.sh start --gateway    # start in gateway mode
+deploy.sh start              # start pre-built images
 
 # Stop
 deploy.sh down
@@ -370,13 +345,14 @@ DeerFlow supports receiving tasks from messaging apps. Channels auto-start when 
 | Feishu / Lark | WebSocket | Moderate |
 | WeChat | Tencent iLink (long-polling) | Moderate |
 | WeCom | WebSocket | Moderate |
+| DingTalk | Stream Push (WebSocket) | Moderate |
 
 **Configuration in `config.yaml`:**
 
 ```yaml
 channels:
-  # LangGraph Server URL (default: http://localhost:2024)
-  langgraph_url: http://localhost:2024
+  # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)
+  langgraph_url: http://localhost:8001/api
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
 
@@ -439,11 +415,19 @@ channels:
           context:
             thinking_enabled: true
             subagent_enabled: true
+
+  dingtalk:
+    enabled: true
+    client_id: $DINGTALK_CLIENT_ID             # Client ID of your DingTalk application
+    client_secret: $DINGTALK_CLIENT_SECRET     # Client Secret of your DingTalk application
+    allowed_users: []                          # empty = allow all
+    card_template_id: ""                       # Optional: AI Card template ID for streaming typewriter effect
 ```
 
 Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
+- IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
 
 Set the corresponding API keys in your `.env` file:
 
@@ -466,6 +450,10 @@ WECHAT_ILINK_BOT_ID=your_ilink_bot_id
 # WeCom
 WECOM_BOT_ID=your_bot_id
 WECOM_BOT_SECRET=your_bot_secret
+
+# DingTalk
+DINGTALK_CLIENT_ID=your_client_id
+DINGTALK_CLIENT_SECRET=your_client_secret
 ```
 
 **Telegram Setup**
@@ -504,7 +492,15 @@ WECOM_BOT_SECRET=your_bot_secret
 4. Make sure backend dependencies include `wecom-aibot-python-sdk`. The channel uses a WebSocket long connection and does not require a public callback URL.
 5. The current integration supports inbound text, image, and file messages. Final images/files generated by the agent are also sent back to the WeCom conversation.
 
-When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://langgraph:2024` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
+**DingTalk Setup**
+
+1. Create a DingTalk application in the [DingTalk Developer Console](https://open.dingtalk.com/) and enable **Robot** capability.
+2. Set the message receiving mode to **Stream Mode** in the robot configuration page.
+3. Copy the `Client ID` and `Client Secret`, set `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` in `.env`, and enable the channel in `config.yaml`.
+4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
+
+
+When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 
 **Commands**
 

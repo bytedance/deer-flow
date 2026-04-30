@@ -1,0 +1,134 @@
+---
+title: Lead Agent
+description: Lead Agent 是 DeerFlow 线程中的核心执行者。每个对话、任务和工作流都通过它进行。理解它的工作方式有助于你有效地配置它，并在需要时扩展它。
+---
+
+import { Callout, Cards, Steps } from "nextra/components";
+
+# Lead Agent
+
+<Callout type="info" emoji="🧠">
+  Lead Agent 是每个 DeerFlow
+  线程中的主要推理和编排单元。它决定要做什么、调用工具、委派子
+  Agent，并返回产出物。
+</Callout>
+
+Lead Agent 是 DeerFlow 线程中的核心执行者。每个对话、任务和工作流都通过它进行。理解它的工作方式有助于你有效地配置它，并在需要时扩展它。
+
+## Lead Agent 的职责
+
+Lead Agent 负责：
+
+- 接收用户消息并维护对话状态
+- 推断接下来要做什么（规划、工具选择、委派）
+- 调用工具——内置工具、社区工具、MCP 工具或技能工具
+- 通过 `task` 工具将子任务委派给子 Agent
+- 管理产出物（文件、输出、交付物）
+- 在计划模式下更新待办列表
+- 向用户返回最终响应或产出物
+
+Lead Agent 不硬编码特定的工作流。它使用模型的推理能力来适应用户提供的任何任务，由系统提示和当前范围内的技能引导。
+
+## 运行时基础
+
+Lead Agent 基于 **LangGraph** 和 **LangChain Agent** 原语构建：
+
+- `langchain.agents` 的 [`create_agent`](https://python.langchain.com/docs/concepts/agents/) 将 LLM 封装成工具调用 Agent 循环。
+- LangGraph 管理 `ThreadState`，提供检查点、流式传输和图执行模型。
+- **中间件链**包裹 Agent 循环的每一轮，提供记忆、摘要和澄清等跨领域能力。
+
+## 执行流程
+
+<Steps>
+
+### 接收消息
+
+用户消息到达并添加到 `ThreadState.messages`。`ThreadState` 保存完整的对话历史、任何活跃的待办列表、累积的产出物和运行时元数据。
+
+### 中间件前处理
+
+在调用模型之前，每个活跃的中间件都有机会修改状态。例如，`MemoryMiddleware` 将持久化的记忆事实注入到系统提示中，`SummarizationMiddleware` 在 token 预算超出时可能压缩旧消息。
+
+### LLM 推理
+
+模型接收当前消息（包括带有活跃技能指令的系统提示），并产生直接回复或一个或多个工具调用请求。
+
+### 工具执行
+
+如果请求了工具调用，它们会被分发到相应的处理器——用于文件和命令操作的沙箱工具、用于网络访问的社区工具，或用于子 Agent 委派的 `task` 工具。
+
+### 中间件后处理
+
+工具结果返回后、下一次模型调用之前，中间件再次运行。`TitleMiddleware` 可能在第一次交互后生成线程标题，`TodoMiddleware` 可能更新任务列表。
+
+### 循环或响应
+
+如果模型需要更多信息（例如，工具返回了部分结果），循环继续。当模型决定任务完成时，它产生最终消息，循环结束。
+
+### 状态更新
+
+`ThreadState` 更新为新消息、产出物和记忆队列。如果配置了检查点，状态将被持久化。
+
+</Steps>
+
+## 模型选择
+
+Lead Agent 在运行时使用以下优先级顺序解析要使用的模型：
+
+1. 每次请求配置中的 `model_name`（或 `model`），如果提供且有效。
+2. 活跃自定义 Agent 配置中的 `model` 字段，如果指定了 Agent。
+3. `config.yaml` 中 `models:` 列表的第一个模型（全局默认值）。
+
+如果请求的模型名称在配置中找不到，系统回退到默认模型并记录警告。
+
+```yaml
+models:
+  - name: my-primary-model
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+
+  - name: my-fast-model
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o-mini
+    api_key: $OPENAI_API_KEY
+```
+
+第一个条目（`my-primary-model`）成为默认值。任何不指定模型或指定未知模型名称的请求都将使用它。
+
+## 思考模式
+
+如果模型支持扩展思考（例如 DeepSeek Reasoner、启用思考的 Doubao、Anthropic Claude 思考模式），Lead Agent 可以在**思考模式**下运行。在此模式下，模型的内部推理步骤在响应流中可见。
+
+思考模式通过每次请求的 `thinking_enabled` 标志控制。如果启用了思考但配置的模型不支持，系统会优雅地回退并记录警告。
+
+## 计划模式
+
+当请求配置中将 `is_plan_mode` 设为 `true` 时，`TodoMiddleware` 被激活。Agent 然后维护一个结构化的任务列表，在处理复杂任务时将条目标记为 `in_progress`、`completed` 或 `pending`。这为用户提供了 Agent 进度的可见性。
+
+计划模式适用于显示增量进度有价值的复杂、多步骤任务。对于简单请求，最好禁用它以避免不必要的开销。
+
+## 自定义 Agent
+
+相同的 Lead Agent 运行时同时为默认 Agent 和你创建的任何自定义 Agent 提供服务。自定义 Agent 的区别仅在于：
+
+- 其**名称**（ASCII slug，从 `display_name` 自动派生）
+- 其**系统提示**或 Agent 特定指令
+- 它有权访问的**技能**
+- 它可以使用的**工具组**
+- 它默认使用的**模型**
+
+自定义 Agent 通过 DeerFlow 应用界面或 `/api/agents` 端点创建。其配置存储在后端目录的 `agents/{name}/config.yaml` 中。
+
+<Callout type="tip">
+  当在线程中选择自定义 Agent 时，Lead Agent 在运行时加载该 Agent 的配置。为特定
+  Agent 切换模型或技能不需要重启服务器。
+</Callout>
+
+<Cards num={2}>
+  <Cards.Card title="中间件" href="/docs/harness/middlewares" />
+  <Cards.Card title="工具" href="/docs/harness/tools" />
+</Cards>

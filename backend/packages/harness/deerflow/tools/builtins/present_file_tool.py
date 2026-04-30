@@ -9,6 +9,7 @@ from langgraph.typing import ContextT
 
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 
 OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 
@@ -65,7 +66,10 @@ def _normalize_presented_filepath(
     virtual_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
 
     if stripped == virtual_prefix or stripped.startswith(virtual_prefix + "/"):
-        actual_path = get_paths().resolve_virtual_path(thread_id, filepath)
+        try:
+            actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=get_effective_user_id())
+        except TypeError:
+            actual_path = get_paths().resolve_virtual_path(thread_id, filepath)
     else:
         actual_path = Path(filepath).expanduser().resolve()
 
