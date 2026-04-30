@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, call
 
 import pytest
 
-from deerflow.runtime.runs.worker import _agent_factory_supports_app_config, _build_runtime_context, _rollback_to_pre_run_checkpoint
+from deerflow.runtime.runs.worker import _agent_factory_supports_app_config, _build_runtime_context, _install_runtime_context, _rollback_to_pre_run_checkpoint
 
 
 class FakeCheckpointer:
@@ -10,6 +10,34 @@ class FakeCheckpointer:
         self.adelete_thread = AsyncMock()
         self.aput = AsyncMock(return_value=put_result)
         self.aput_writes = AsyncMock()
+
+
+def test_build_runtime_context_includes_app_config_when_present():
+    app_config = object()
+
+    context = _build_runtime_context("thread-1", "run-1", None, app_config)
+
+    assert context["thread_id"] == "thread-1"
+    assert context["run_id"] == "run-1"
+    assert context["app_config"] is app_config
+
+
+def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
+    app_config = object()
+    config = {"context": {"thread_id": "caller-thread"}}
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "record-thread",
+            "run_id": "run-1",
+            "app_config": app_config,
+        },
+    )
+
+    assert config["context"]["thread_id"] == "caller-thread"
+    assert config["context"]["run_id"] == "run-1"
+    assert config["context"]["app_config"] is app_config
 
 
 @pytest.mark.anyio

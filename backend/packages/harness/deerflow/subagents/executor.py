@@ -168,6 +168,8 @@ def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
             _isolated_subagent_loop_thread = thread
             _isolated_subagent_loop_started = started_event
 
+        if _isolated_subagent_loop is None:
+            raise RuntimeError("Isolated subagent event loop is not initialized")
         return _isolated_subagent_loop
 
 
@@ -395,6 +397,10 @@ class SubagentExecutor:
                 status=SubagentStatus.RUNNING,
                 started_at=datetime.now(),
             )
+        ai_messages = result.ai_messages
+        if ai_messages is None:
+            ai_messages = []
+            result.ai_messages = ai_messages
 
         try:
             agent = self._create_agent()
@@ -404,10 +410,12 @@ class SubagentExecutor:
             run_config: RunnableConfig = {
                 "recursion_limit": self.config.max_turns,
             }
-            context = {}
+            context: dict[str, Any] = {}
             if self.thread_id:
                 run_config["configurable"] = {"thread_id": self.thread_id}
                 context["thread_id"] = self.thread_id
+            if self.app_config is not None:
+                context["app_config"] = self.app_config
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -454,13 +462,13 @@ class SubagentExecutor:
                         message_id = message_dict.get("id")
                         is_duplicate = False
                         if message_id:
-                            is_duplicate = any(msg.get("id") == message_id for msg in result.ai_messages)
+                            is_duplicate = any(msg.get("id") == message_id for msg in ai_messages)
                         else:
-                            is_duplicate = message_dict in result.ai_messages
+                            is_duplicate = message_dict in ai_messages
 
                         if not is_duplicate:
-                            result.ai_messages.append(message_dict)
-                            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}")
+                            ai_messages.append(message_dict)
+                            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
 

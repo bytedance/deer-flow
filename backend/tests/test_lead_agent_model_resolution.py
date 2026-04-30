@@ -276,6 +276,16 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
     )
     monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "TitleMiddleware",
+        lambda *, app_config: captured.setdefault("title_app_config", app_config) or "title-middleware",
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "MemoryMiddleware",
+        lambda agent_name=None, *, memory_config: captured.setdefault("memory_config", memory_config) or "memory-middleware",
+    )
 
     middlewares = lead_agent_module._build_middlewares(
         {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
@@ -286,17 +296,16 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
     assert captured == {
         "app_config": app_config,
         "lazy_init": True,
+        "title_app_config": app_config,
+        "memory_config": app_config.memory,
     }
     assert middlewares[0] == "base-middleware"
 
 
 def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch):
-    monkeypatch.setattr(
-        lead_agent_module,
-        "get_summarization_config",
-        lambda: SummarizationConfig(enabled=True, model_name="model-masswork"),
-    )
-    monkeypatch.setattr(lead_agent_module, "get_memory_config", lambda: MemoryConfig(enabled=False))
+    app_config = _make_app_config([_make_model("model-masswork", supports_thinking=False)])
+    app_config.summarization = SummarizationConfig(enabled=True, model_name="model-masswork")
+    app_config.memory = MemoryConfig(enabled=False)
 
     from unittest.mock import MagicMock
 
@@ -311,13 +320,31 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
         captured["app_config"] = app_config
         return fake_model
 
+    def _raise_get_app_config():
+        raise AssertionError("ambient get_app_config() must not be used when app_config is explicit")
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", _raise_get_app_config)
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
     monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
 
-    middleware = lead_agent_module._create_summarization_middleware(app_config=_make_app_config([_make_model("model-masswork", supports_thinking=False)]))
+    middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
 
     assert captured["name"] == "model-masswork"
     assert captured["thinking_enabled"] is False
-    assert captured["app_config"] is not None
+    assert captured["app_config"] is app_config
     assert middleware["model"] is fake_model
     fake_model.with_config.assert_called_once_with(tags=["middleware:summarize"])
+
+
+def test_memory_middleware_uses_explicit_memory_config_without_global_read(monkeypatch):
+    from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+    def _raise_get_memory_config():
+        raise AssertionError("ambient get_memory_config() must not be used when memory_config is explicit")
+
+    monkeypatch.setattr(memory_middleware_module, "get_memory_config", _raise_get_memory_config)
+
+    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=False))
+
+    assert middleware.after_agent({"messages": []}, runtime=MagicMock(context={"thread_id": "thread-1"})) is None

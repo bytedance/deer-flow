@@ -9,6 +9,8 @@ Covers:
 - Skills filter passthrough in task_tool config assembly
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from deerflow.config.subagents_config import (
@@ -342,6 +344,32 @@ class TestRegistryCustomAgentLookup:
         assert config.max_turns == 80
         assert config.timeout_seconds == 600
         assert config.model == "inherit"
+
+    def test_custom_agent_found_from_explicit_app_config_without_global_config(self, monkeypatch):
+        from deerflow.subagents.registry import get_subagent_config
+
+        def fail_get_subagents_app_config():
+            raise AssertionError("ambient get_subagents_app_config() must not be used when app_config is explicit")
+
+        monkeypatch.setattr("deerflow.config.subagents_config.get_subagents_app_config", fail_get_subagents_app_config)
+
+        app_config = SimpleNamespace(
+            subagents=SubagentsAppConfig(
+                custom_agents={
+                    "analysis": CustomSubagentConfig(
+                        description="Data analysis specialist",
+                        system_prompt="You are a data analysis subagent.",
+                        skills=["data-analysis"],
+                    )
+                }
+            )
+        )
+
+        config = get_subagent_config("analysis", app_config=app_config)
+
+        assert config is not None
+        assert config.name == "analysis"
+        assert config.skills == ["data-analysis"]
 
     def test_custom_agent_not_found(self):
         from deerflow.subagents.registry import get_subagent_config

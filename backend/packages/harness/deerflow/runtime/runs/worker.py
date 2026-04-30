@@ -21,7 +21,7 @@ import inspect
 import logging
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from langchain_core.messages import HumanMessage
@@ -39,12 +39,19 @@ logger = logging.getLogger(__name__)
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 
 
-def _build_runtime_context(thread_id: str, run_id: str, caller_context: Any | None) -> dict[str, Any]:
+def _build_runtime_context(
+    thread_id: str,
+    run_id: str,
+    caller_context: Any | None,
+    app_config: AppConfig | None = None,
+) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
     Always includes ``thread_id`` and ``run_id``. Additional keys from the caller's
     ``config['context']`` (e.g. ``agent_name`` for the bootstrap flow — issue #2677)
-    are merged in but never override ``thread_id``/``run_id``.
+    are merged in but never override ``thread_id``/``run_id``. The resolved
+    ``AppConfig`` is added by the worker so tools can consume it without ambient
+    global lookups.
 
     langgraph 1.1+ surfaces this as ``runtime.context`` via the parent runtime stored
     under ``config['configurable']['__pregel_runtime']`` — see
@@ -54,6 +61,8 @@ def _build_runtime_context(thread_id: str, run_id: str, caller_context: Any | No
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
             runtime_ctx.setdefault(key, value)
+    if app_config is not None:
+        runtime_ctx["app_config"] = app_config
     return runtime_ctx
 
 
@@ -72,6 +81,18 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
+
+
+def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    existing_context = config.get("context")
+    if isinstance(existing_context, dict):
+        existing_context.setdefault("thread_id", runtime_context["thread_id"])
+        existing_context.setdefault("run_id", runtime_context["run_id"])
+        if "app_config" in runtime_context:
+            existing_context["app_config"] = runtime_context["app_config"]
+        return
+
+    config["context"] = dict(runtime_context)
 
 
 def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:
@@ -191,11 +212,9 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
-        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"))
-        if "context" in config and isinstance(config["context"], dict):
-            config["context"].setdefault("thread_id", thread_id)
-            config["context"].setdefault("run_id", run_id)
-        runtime = Runtime(context=runtime_ctx, store=store)
+        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        _install_runtime_context(config, runtime_ctx)
+        runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
         # Inject RunJournal as a LangChain callback handler.
