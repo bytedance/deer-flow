@@ -73,7 +73,6 @@ def _reset_skill_storage_singleton():
     """Reset the SkillStorage singleton between tests to prevent cross-test contamination."""
     try:
         from deerflow.skills.storage import reset_skill_storage
-
     except ImportError:
         yield
         return

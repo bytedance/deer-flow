@@ -43,8 +43,12 @@ def mock_app_config():
 
 
 @pytest.fixture
-def client(mock_app_config):
+def client(mock_app_config, tmp_path):
     """Create a DeerFlowClient with mocked config loading."""
+    import deerflow.skills.storage as _storage_mod
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    _storage_mod._default_skill_storage = LocalSkillStorage(host_path=str(tmp_path))
     with patch("deerflow.client.get_app_config", return_value=mock_app_config):
         return DeerFlowClient()
 
