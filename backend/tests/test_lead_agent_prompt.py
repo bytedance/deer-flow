@@ -92,7 +92,7 @@ def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatc
         )
 
     state = {"skills": [make_skill("first-skill")]}
-    monkeypatch.setattr(prompt_module, "load_skills", lambda enabled_only=True: list(state["skills"]))
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: list(state["skills"])))
     _set_skills_cache_state()
 
     try:
@@ -145,7 +145,7 @@ def test_clear_cache_does_not_spawn_parallel_refresh_workers(monkeypatch, tmp_pa
 
         return [make_skill(f"skill-{current_call}")]
 
-    monkeypatch.setattr(prompt_module, "load_skills", fake_load_skills)
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: fake_load_skills(enabled_only=enabled_only)))
     _set_skills_cache_state()
 
     try:

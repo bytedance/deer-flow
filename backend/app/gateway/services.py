@@ -98,6 +98,44 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
 _DEFAULT_ASSISTANT_ID = "lead_agent"
 
 
+# Whitelist of run-context keys that the langgraph-compat layer forwards from
+# ``body.context`` into the run config. ``config["context"]`` exists in
+# LangGraph >=0.6, but these values must be written to both ``configurable``
+# (for legacy ``_get_runtime_config`` consumers) and ``context`` because
+# LangGraph >=1.1.9 no longer makes ``ToolRuntime.context`` fall back to
+# ``configurable`` for consumers like ``setup_agent``.
+_CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
+    {
+        "model_name",
+        "mode",
+        "thinking_enabled",
+        "reasoning_effort",
+        "is_plan_mode",
+        "subagent_enabled",
+        "max_concurrent_subagents",
+        "agent_name",
+        "is_bootstrap",
+    }
+)
+
+
+def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None) -> None:
+    """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
+    and ``config['context']`` so they are visible to legacy configurable readers and
+    to LangGraph ``ToolRuntime.context`` consumers (e.g. the ``setup_agent`` tool —
+    see issue #2677)."""
+    if not context:
+        return
+    configurable = config.setdefault("configurable", {})
+    runtime_context = config.setdefault("context", {})
+    for key in _CONTEXT_CONFIGURABLE_KEYS:
+        if key in context:
+            if isinstance(configurable, dict):
+                configurable.setdefault(key, context[key])
+            if isinstance(runtime_context, dict):
+                runtime_context.setdefault(key, context[key])
+
+
 def resolve_agent_factory(assistant_id: str | None):
     """Resolve the agent factory callable from config.
 
@@ -245,27 +283,11 @@ async def start_run(
     graph_input = normalize_input(body.input)
     config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
 
-    # Merge DeerFlow-specific context overrides into configurable.
+    # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
     # The ``context`` field is a custom extension for the langgraph-compat layer
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-    context = getattr(body, "context", None)
-    if context:
-        _CONTEXT_CONFIGURABLE_KEYS = {
-            "model_name",
-            "mode",
-            "thinking_enabled",
-            "reasoning_effort",
-            "is_plan_mode",
-            "subagent_enabled",
-            "max_concurrent_subagents",
-            "agent_name",
-            "is_bootstrap",
-        }
-        configurable = config.setdefault("configurable", {})
-        for key in _CONTEXT_CONFIGURABLE_KEYS:
-            if key in context:
-                configurable.setdefault(key, context[key])
+    merge_run_context_overrides(config, getattr(body, "context", None))
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 

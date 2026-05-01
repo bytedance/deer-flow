@@ -11,6 +11,10 @@ def _default_repo_root() -> Path:
 class SkillsConfig(BaseModel):
     """Configuration for skills system"""
 
+    use: str = Field(
+        default="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        description="Class path of the SkillStorage implementation.",
+    )
     path: str | None = Field(
         default=None,
         description="Path to skills directory. If not specified, defaults to ../skills relative to backend directory",
@@ -35,10 +39,8 @@ class SkillsConfig(BaseModel):
                 path = _default_repo_root() / path
             return path.resolve()
         else:
-            # Default: ../skills relative to backend directory
-            from deerflow.skills.loader import get_skills_root_path
-
-            return get_skills_root_path()
+            # Default: <repo_root>/skills
+            return _default_repo_root() / "skills"
 
     def get_skill_container_path(self, skill_name: str, category: str = "public") -> str:
         """
