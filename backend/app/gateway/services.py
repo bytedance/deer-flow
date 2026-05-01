@@ -99,9 +99,11 @@ _DEFAULT_ASSISTANT_ID = "lead_agent"
 
 
 # Whitelist of run-context keys that the langgraph-compat layer forwards from
-# ``body.context`` into the run config. Both ``configurable`` (for legacy
-# ``_get_runtime_config`` consumers) and ``context`` (for LangGraph >=0.6
-# ``ToolRuntime.context`` consumers like ``setup_agent``) must carry these.
+# ``body.context`` into the run config. ``config["context"]`` exists in
+# LangGraph >=0.6, but these values must be written to both ``configurable``
+# (for legacy ``_get_runtime_config`` consumers) and ``context`` because
+# LangGraph >=1.1.9 no longer makes ``ToolRuntime.context`` fall back to
+# ``configurable`` for consumers like ``setup_agent``.
 _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
     {
         "model_name",

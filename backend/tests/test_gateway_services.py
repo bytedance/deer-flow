@@ -259,9 +259,10 @@ def test_context_merges_into_configurable():
 def test_merge_run_context_overrides_propagates_to_runtime_context():
     """Regression for issue #2677: ``agent_name`` (and other whitelisted keys) from
     ``body.context`` must be propagated into BOTH ``config['configurable']`` and
-    ``config['context']``. Previously only ``configurable`` was populated, so the
-    ``setup_agent`` tool — which reads ``runtime.context`` in LangGraph 0.6+ —
-    saw ``agent_name=None`` and silently wrote SOUL.md to the global base_dir.
+    ``config['context']``. Previously only ``configurable`` was populated, so after
+    the LangGraph 1.1.x upgrade removed the fallback from ``configurable``, the
+    ``setup_agent`` tool read ``runtime.context`` with ``agent_name=None`` and
+    silently wrote SOUL.md to the global base_dir.
     """
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
