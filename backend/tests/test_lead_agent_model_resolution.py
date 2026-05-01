@@ -374,6 +374,33 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     fake_model.with_config.assert_called_once_with(tags=["middleware:summarize"])
 
 
+def test_create_summarization_middleware_threads_resolved_app_config_to_model(monkeypatch):
+    # Regression: when the caller omits app_config, the middleware must hand the
+    # resolved AppConfig (from get_app_config()) to create_chat_model so the
+    # model factory does not re-enter ambient lookup with app_config=None.
+    fallback_app_config = _make_app_config([_make_model("fallback-model", supports_thinking=False)])
+    fallback_app_config.summarization = SummarizationConfig(enabled=True, model_name="fallback-model")
+    fallback_app_config.memory = MemoryConfig(enabled=False)
+
+    from unittest.mock import MagicMock
+
+    captured: dict[str, object] = {}
+    fake_model = MagicMock()
+    fake_model.with_config.return_value = fake_model
+
+    def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None, app_config=None):
+        captured["app_config"] = app_config
+        return fake_model
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: fallback_app_config)
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+
+    lead_agent_module._create_summarization_middleware()
+
+    assert captured["app_config"] is fallback_app_config
+
+
 def test_memory_middleware_uses_explicit_memory_config_without_global_read(monkeypatch):
     from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
     from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware

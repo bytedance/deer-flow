@@ -72,9 +72,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     # as middleware rather than lead_agent (SummarizationMiddleware is a
     # LangChain built-in, so we tag the model at creation time).
     if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=app_config)
+        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=resolved_app_config)
     else:
-        model = create_chat_model(thinking_enabled=False, app_config=app_config)
+        model = create_chat_model(thinking_enabled=False, app_config=resolved_app_config)
     model = model.with_config(tags=["middleware:summarize"])
 
     # Prepare kwargs
