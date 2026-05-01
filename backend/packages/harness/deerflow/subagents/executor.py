@@ -230,7 +230,13 @@ class SubagentExecutor:
         self.config = config
         self.app_config = app_config
         self.parent_model = parent_model
-        self.model_name = resolve_subagent_model_name(config, parent_model, app_config=self.app_config)
+        # Resolve eagerly only when it does not require loading config.yaml; otherwise defer
+        # to _create_agent (which already loads app_config) so unit tests can construct
+        # executors without a config file present.
+        if config.model != "inherit" or parent_model is not None or app_config is not None:
+            self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
+        else:
+            self.model_name = None
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.thread_id = thread_id
@@ -249,6 +255,8 @@ class SubagentExecutor:
     def _create_agent(self):
         """Create the agent instance."""
         app_config = self.app_config or get_app_config()
+        if self.model_name is None:
+            self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
         model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
