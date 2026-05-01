@@ -60,11 +60,7 @@ class LoopDetectionConfig(BaseModel):
     )
     tool_freq_overrides: dict[str, ToolFreqOverride] = Field(
         default_factory=dict,
-        description=(
-            "Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. "
-            "Values can be higher or lower than the global defaults. "
-            "Commonly used to raise thresholds for high-frequency tools like bash."
-        ),
+        description=("Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. Values can be higher or lower than the global defaults. Commonly used to raise thresholds for high-frequency tools like bash."),
     )
 
     @model_validator(mode="after")

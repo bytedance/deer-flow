@@ -58,21 +58,15 @@ class TestLoopDetectionConfig:
             LoopDetectionConfig(tool_freq_warn=5, tool_freq_hard_limit=4)
 
     def test_tool_freq_override_valid(self):
-        config = LoopDetectionConfig(
-            tool_freq_overrides={"bash": {"warn": 150, "hard_limit": 300}}
-        )
+        config = LoopDetectionConfig(tool_freq_overrides={"bash": {"warn": 150, "hard_limit": 300}})
         override = config.tool_freq_overrides["bash"]
         assert override.warn == 150
         assert override.hard_limit == 300
 
     def test_tool_freq_override_rejects_zero_warn(self):
         with pytest.raises(ValueError):
-            LoopDetectionConfig(
-                tool_freq_overrides={"bash": {"warn": 0, "hard_limit": 10}}
-            )
+            LoopDetectionConfig(tool_freq_overrides={"bash": {"warn": 0, "hard_limit": 10}})
 
     def test_tool_freq_override_rejects_hard_limit_below_warn(self):
         with pytest.raises(ValueError, match="hard_limit"):
-            LoopDetectionConfig(
-                tool_freq_overrides={"bash": {"warn": 100, "hard_limit": 50}}
-            )
+            LoopDetectionConfig(tool_freq_overrides={"bash": {"warn": 100, "hard_limit": 50}})

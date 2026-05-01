@@ -155,6 +155,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             Default: 30.
         tool_freq_hard_limit: Number of calls to the same tool type before
             forcing a stop. Default: 50.
+        tool_freq_overrides: Per-tool overrides for frequency thresholds,
+            keyed by tool name. Each value is a ``(warn, hard_limit)`` tuple
+            that replaces ``tool_freq_warn`` / ``tool_freq_hard_limit`` for
+            that specific tool. Tools not listed here fall back to the global
+            thresholds. Useful for raising limits on intentionally
+            high-frequency tools (e.g. ``bash`` in batch pipelines) without
+            weakening protection on all other tools. Default: ``None``
+            (no overrides).
     """
 
     def __init__(
