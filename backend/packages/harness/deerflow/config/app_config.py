@@ -17,6 +17,7 @@ from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.run_events_config import RunEventsConfig
+from deerflow.config.runtime_paths import existing_project_file
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skills_config import SkillsConfig
@@ -46,8 +47,8 @@ class CircuitBreakerConfig(BaseModel):
     recovery_timeout_sec: int = Field(default=60, description="Time in seconds before attempting to recover the circuit")
 
 
-def _default_config_candidates() -> tuple[Path, ...]:
-    """Return deterministic config.yaml locations without relying on cwd."""
+def _legacy_config_candidates() -> tuple[Path, ...]:
+    """Return source-tree config.yaml locations for monorepo compatibility."""
     backend_dir = Path(__file__).resolve().parents[4]
     repo_root = backend_dir.parent
     return (backend_dir / "config.yaml", repo_root / "config.yaml")
@@ -110,7 +111,8 @@ class AppConfig(BaseModel):
         Priority:
         1. If provided `config_path` argument, use it.
         2. If provided `DEER_FLOW_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, search deterministic backend/repository-root defaults from `_default_config_candidates()`.
+        3. Otherwise, search the caller project root.
+        4. Finally, search legacy backend/repository-root defaults for monorepo compatibility.
         """
         if config_path:
             path = Path(config_path)
@@ -123,10 +125,14 @@ class AppConfig(BaseModel):
                 raise FileNotFoundError(f"Config file specified by environment variable `DEER_FLOW_CONFIG_PATH` not found at {path}")
             return path
         else:
-            for path in _default_config_candidates():
+            project_config = existing_project_file(("config.yaml",))
+            if project_config is not None:
+                return project_config
+
+            for path in _legacy_config_candidates():
                 if path.exists():
                     return path
-            raise FileNotFoundError("`config.yaml` file not found at the default backend or repository root locations")
+            raise FileNotFoundError("`config.yaml` file not found in the project root or legacy backend/repository root locations")
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> Self:

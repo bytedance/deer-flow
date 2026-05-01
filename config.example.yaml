@@ -2,8 +2,11 @@
 #
 # Guidelines:
 # - Copy this file to `config.yaml` and customize it for your environment
-# - The default path of this configuration file is `config.yaml` in the current working directory.
-#   However you can change it using the `DEER_FLOW_CONFIG_PATH` environment variable.
+# - The default path of this configuration file is `config.yaml` in the project root.
+#   You can set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or use
+#   `DEER_FLOW_CONFIG_PATH` to point at a specific config file.
+# - Runtime state defaults to `.deer-flow` under the project root. Override it
+#   with `DEER_FLOW_HOME` when you need a different writable data directory.
 # - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 
@@ -501,6 +504,11 @@ tool_search:
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
 uploads:
+  # Application-level upload limits enforced by the gateway and exposed to the
+  # frontend before file selection.
+  max_files: 10
+  max_file_size: 52428800    # 50 MiB
+  max_total_size: 104857600  # 100 MiB
   # Automatic Office/PDF conversion runs on the backend host before sandbox
   # isolation applies. Keep this disabled unless uploads come from a fully
   # trusted source and you intentionally accept host-side parser risk.
@@ -673,7 +681,8 @@ sandbox:
 
 skills:
   # Path to skills directory on the host (relative to project root or absolute)
-  # Default: ../skills (relative to backend directory)
+  # Default: skills under the project root
+  # Override with DEER_FLOW_SKILLS_PATH when this field is omitted.
   # Uncomment to customize:
   # path: /absolute/path/to/custom/skills
 
