@@ -118,26 +118,25 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
             logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
 
 
-async def _write_upload_file_streaming(
+async def _read_upload_file_with_limits(
     file: UploadFile,
-    file_path: os.PathLike[str] | str,
     *,
     display_filename: str,
     max_single_file_size: int,
     max_total_size: int,
     total_size: int,
-) -> tuple[int, int]:
+) -> tuple[bytes, int, int]:
     file_size = 0
-    with open(file_path, "wb") as output:
-        while chunk := await file.read(UPLOAD_CHUNK_SIZE):
-            file_size += len(chunk)
-            total_size += len(chunk)
-            if file_size > max_single_file_size:
-                raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
-            if total_size > max_total_size:
-                raise HTTPException(status_code=413, detail="Total upload size too large")
-            output.write(chunk)
-    return file_size, total_size
+    chunks = []
+    while chunk := await file.read(UPLOAD_CHUNK_SIZE):
+        file_size += len(chunk)
+        total_size += len(chunk)
+        if file_size > max_single_file_size:
+            raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
+        if total_size > max_total_size:
+            raise HTTPException(status_code=413, detail="Total upload size too large")
+        chunks.append(chunk)
+    return b"".join(chunks), file_size, total_size
 
 
 def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
@@ -202,13 +201,13 @@ async def upload_files(
             continue
 
         try:
-            content = await file.read()
-            file_size = len(content)
-            total_size += file_size
-            if file_size > limits.max_file_size:
-                raise HTTPException(status_code=413, detail=f"File too large: {safe_filename}")
-            if total_size > limits.max_total_size:
-                raise HTTPException(status_code=413, detail="Total upload size too large")
+            content, file_size, total_size = await _read_upload_file_with_limits(
+                file,
+                display_filename=safe_filename,
+                max_single_file_size=limits.max_file_size,
+                max_total_size=limits.max_total_size,
+                total_size=total_size,
+            )
             file_path = write_upload_file_no_symlink(uploads_dir, safe_filename, content)
             written_paths.append(file_path)
 
