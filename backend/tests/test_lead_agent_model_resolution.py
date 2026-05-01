@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,6 +32,44 @@ def _make_model(name: str, *, supports_thinking: bool) -> ModelConfig:
         supports_thinking=supports_thinking,
         supports_vision=False,
     )
+
+
+def test_make_lead_agent_signature_matches_langgraph_server_factory_abi():
+    assert list(inspect.signature(lead_agent_module.make_lead_agent).parameters) == ["config"]
+
+
+def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
+    app_config = _make_app_config([_make_model("explicit-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    def _raise_get_app_config():
+        raise AssertionError("ambient get_app_config() must not be used when app_config is explicit")
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", _raise_get_app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None):
+        captured["name"] = name
+        captured["app_config"] = app_config
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module._make_lead_agent(
+        {"configurable": {"model_name": "explicit-model"}},
+        app_config=app_config,
+    )
+
+    assert captured == {
+        "name": "explicit-model",
+        "app_config": app_config,
+    }
+    assert result["model"] is not None
 
 
 def test_resolve_model_name_falls_back_to_default(monkeypatch, caplog):

@@ -314,13 +314,18 @@ def _build_middlewares(
     return middlewares
 
 
-def make_lead_agent(config: RunnableConfig, app_config: AppConfig | None = None):
+def make_lead_agent(config: RunnableConfig):
+    """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
+    return _make_lead_agent(config, app_config=get_app_config())
+
+
+def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent
 
     cfg = _get_runtime_config(config)
-    resolved_app_config = app_config or get_app_config()
+    resolved_app_config = app_config
 
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
