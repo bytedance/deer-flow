@@ -72,6 +72,44 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
     assert result["model"] is not None
 
 
+def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_read(monkeypatch):
+    app_config = _make_app_config([_make_model("context-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    def _raise_get_app_config():
+        raise AssertionError("ambient get_app_config() must not be used when runtime context already carries app_config")
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", _raise_get_app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None):
+        captured["name"] = name
+        captured["app_config"] = app_config
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module.make_lead_agent(
+        {
+            "context": {
+                "model_name": "context-model",
+                "app_config": app_config,
+            }
+        }
+    )
+
+    assert captured == {
+        "name": "context-model",
+        "app_config": app_config,
+    }
+    assert result["model"] is not None
+
+
 def test_resolve_model_name_falls_back_to_default(monkeypatch, caplog):
     app_config = _make_app_config(
         [

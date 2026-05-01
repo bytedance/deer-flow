@@ -310,7 +310,9 @@ def _build_middlewares(
 
 def make_lead_agent(config: RunnableConfig):
     """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
-    return _make_lead_agent(config, app_config=get_app_config())
+    runtime_config = _get_runtime_config(config)
+    runtime_app_config = runtime_config.get("app_config")
+    return _make_lead_agent(config, app_config=runtime_app_config or get_app_config())
 
 
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
