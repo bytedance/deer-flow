@@ -20,9 +20,10 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
+from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
-from deerflow.subagents.config import SubagentConfig
+from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -213,21 +214,6 @@ def _filter_tools(
     return filtered
 
 
-def _get_model_name(config: SubagentConfig, parent_model: str | None) -> str | None:
-    """Resolve the model name for a subagent.
-
-    Args:
-        config: Subagent configuration.
-        parent_model: The parent agent's model name.
-
-    Returns:
-        Model name to use, or None to use default.
-    """
-    if config.model == "inherit":
-        return parent_model
-    return config.model
-
-
 class SubagentExecutor:
     """Executor for running subagents."""
 
@@ -247,9 +233,9 @@ class SubagentExecutor:
         Args:
             config: Subagent configuration.
             tools: List of all available tools (will be filtered).
-            app_config: Resolved AppConfig; threaded into middleware factories
-                at agent-build time. When None, ``_create_agent`` falls back to
-                ``get_app_config()`` (matches the lead-agent factory's pattern).
+            app_config: Resolved AppConfig. When None, ``_create_agent`` falls
+                back to ``get_app_config()`` (matches the lead-agent factory's
+                pattern).
             parent_model: The parent agent's model name for inheritance.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
@@ -259,6 +245,13 @@ class SubagentExecutor:
         self.config = config
         self.app_config = app_config
         self.parent_model = parent_model
+        # Resolve eagerly only when it does not require loading config.yaml; otherwise defer
+        # to _create_agent (which already loads app_config) so unit tests can construct
+        # executors without a config file present.
+        if config.model != "inherit" or parent_model is not None or app_config is not None:
+            self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
+        else:
+            self.model_name = None
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.thread_id = thread_id
@@ -276,17 +269,15 @@ class SubagentExecutor:
 
     def _create_agent(self):
         """Create the agent instance."""
-        # Mirror lead-agent factory pattern: prefer explicit app_config,
-        # fall back to ambient lookup at agent-build time.
-        from deerflow.config import get_app_config
-
-        resolved_app_config = self.app_config or get_app_config()
-        model_name = _get_model_name(self.config, self.parent_model)
-        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=resolved_app_config)
+        app_config = self.app_config or get_app_config()
+        if self.model_name is None:
+            self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
+        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
-        middlewares = build_subagent_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
+        # Reuse shared middleware composition with lead agent.
+        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True)
 
         return create_agent(
             model=model,

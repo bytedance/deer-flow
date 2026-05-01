@@ -11,9 +11,16 @@ from langgraph.config import get_stream_writer
 from langgraph.typing import ContextT
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.config import get_app_config
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result, request_cancel_background_task
+from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.executor import (
+    SubagentStatus,
+    cleanup_background_task,
+    get_background_task_result,
+    request_cancel_background_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,14 +136,19 @@ async def task_tool(
 
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
+    app_config = None
+    if config.model == "inherit" and parent_model is None:
+        app_config = get_app_config()
+    effective_model = resolve_subagent_model_name(config, parent_model, app_config=app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    tools = get_available_tools(model_name=parent_model, groups=parent_tool_groups, subagent_enabled=False)
+    tools = get_available_tools(model_name=effective_model, groups=parent_tool_groups, subagent_enabled=False)
 
     # Create executor
     executor = SubagentExecutor(
         config=config,
         tools=tools,
+        app_config=app_config,
         parent_model=parent_model,
         sandbox_state=sandbox_state,
         thread_data=thread_data,

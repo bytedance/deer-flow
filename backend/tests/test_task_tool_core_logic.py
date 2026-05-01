@@ -223,6 +223,56 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
     get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False)
 
 
+def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
+    """Subagent model overrides should drive model-gated tool loading."""
+    config = SubagentConfig(
+        name="general-purpose",
+        description="General helper",
+        system_prompt="Base system prompt",
+        model="vision-subagent-model",
+        max_turns=50,
+        timeout_seconds=10,
+    )
+    runtime = _make_runtime()
+    runtime.config["metadata"]["model_name"] = "parent-text-model"
+    events = []
+    get_available_tools = MagicMock(return_value=[])
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="inspect image",
+        prompt="inspect the uploaded image",
+        subagent_type="general-purpose",
+        tool_call_id="tc-issue-2543",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    get_available_tools.assert_called_once_with(
+        model_name="vision-subagent-model",
+        groups=None,
+        subagent_enabled=False,
+    )
+
+
 def test_task_tool_inherits_parent_skill_allowlist_for_default_subagent(monkeypatch):
     config = _make_subagent_config()
     runtime = _make_runtime()
@@ -371,6 +421,7 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+    monkeypatch.setattr(task_tool_module, "get_app_config", lambda: SimpleNamespace(models=[SimpleNamespace(name="default-model")]))
 
     output = _run_task_tool(
         runtime=None,
@@ -381,8 +432,8 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
     )
 
     assert output == "Task Succeeded. Result: ok"
-    # runtime is None → metadata is empty dict → groups=None
-    get_available_tools.assert_called_once_with(model_name=None, groups=None, subagent_enabled=False)
+    # runtime is None -> metadata is empty dict -> groups=None, model falls back to app default.
+    get_available_tools.assert_called_once_with(model_name="default-model", groups=None, subagent_enabled=False)
 
     config = _make_subagent_config()
     events = []
