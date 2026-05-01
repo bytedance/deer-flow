@@ -5,8 +5,10 @@ import atexit
 import logging
 import threading
 import uuid
+from collections.abc import Callable, Coroutine
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -166,6 +168,19 @@ def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
             _isolated_subagent_loop_started = started_event
 
         return _isolated_subagent_loop
+
+
+def _submit_to_isolated_loop_in_context(
+    context: Context,
+    coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
+) -> Future[SubagentResult]:
+    """Submit a coroutine to the isolated loop while preserving ContextVar state."""
+    return context.run(
+        lambda: asyncio.run_coroutine_threadsafe(
+            coro_factory(),
+            _get_isolated_subagent_loop(),
+        )
+    )
 
 
 def _filter_tools(
@@ -549,10 +564,11 @@ class SubagentExecutor:
         from being tied to a short-lived loop that gets closed per execution.
         """
         future: Future[SubagentResult] | None = None
+        parent_context = copy_context()
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._aexecute(task, result_holder),
-                _get_isolated_subagent_loop(),
+            future = _submit_to_isolated_loop_in_context(
+                parent_context,
+                lambda: self._aexecute(task, result_holder),
             )
             return future.result(timeout=self.config.timeout_seconds)
         except FuturesTimeoutError:
@@ -646,6 +662,8 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_tasks[task_id] = result
 
+        parent_context = copy_context()
+
         # Submit to scheduler pool
         def run_task():
             with _background_tasks_lock:
@@ -656,9 +674,9 @@ class SubagentExecutor:
             try:
                 # Submit execution directly to the persistent isolated loop so the
                 # background path does not create a temporary loop via execute().
-                execution_future = asyncio.run_coroutine_threadsafe(
-                    self._aexecute(task, result_holder),
-                    _get_isolated_subagent_loop(),
+                execution_future = _submit_to_isolated_loop_in_context(
+                    parent_context,
+                    lambda: self._aexecute(task, result_holder),
                 )
                 try:
                     # Wait for execution with timeout

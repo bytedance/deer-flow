@@ -17,7 +17,7 @@ import asyncio
 import sys
 import threading
 from datetime import datetime
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -526,12 +526,19 @@ class TestSyncExecutionPath:
     @pytest.mark.anyio
     async def test_execute_in_running_event_loop_calls_isolated_loop_directly(self, classes, base_config, mock_agent, msg):
         """Test that execute() calls the isolated-loop helper directly in a running loop."""
+        from deerflow.runtime.user_context import (
+            get_effective_user_id,
+            reset_current_user,
+            set_current_user,
+        )
+
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 
         caller_thread = threading.current_thread().name
         isolated_helper_threads = []
         execution_threads = []
+        effective_user_ids = []
         final_state = {
             "messages": [
                 msg.human("Task"),
@@ -541,6 +548,7 @@ class TestSyncExecutionPath:
 
         async def mock_astream(*args, **kwargs):
             execution_threads.append(threading.current_thread().name)
+            effective_user_ids.append(get_effective_user_id())
             yield final_state
 
         mock_agent.astream = mock_astream
@@ -557,14 +565,19 @@ class TestSyncExecutionPath:
             isolated_helper_threads.append(threading.current_thread().name)
             return original_isolated_execute(task, result_holder)
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
-            with patch.object(executor, "_execute_in_isolated_loop", side_effect=tracked_isolated_execute) as isolated:
-                result = executor.execute("Task")
+        token = set_current_user(SimpleNamespace(id="alice"))
+        try:
+            with patch.object(executor, "_create_agent", return_value=mock_agent):
+                with patch.object(executor, "_execute_in_isolated_loop", side_effect=tracked_isolated_execute) as isolated:
+                    result = executor.execute("Task")
+        finally:
+            reset_current_user(token)
 
         assert isolated.call_count == 1
         assert isolated_helper_threads == [caller_thread]
         assert execution_threads
         assert execution_threads == ["subagent-persistent-loop"]
+        assert effective_user_ids == ["alice"]
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "Async loop result"
 
@@ -1112,6 +1125,53 @@ class TestCooperativeCancellation:
         assert result is not None
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "done: Task"
+        assert result.error is None
+
+    def test_execute_async_propagates_user_context_to_isolated_loop(self, executor_module, classes, base_config):
+        """Regression: background subagent execution must keep request user context."""
+        import concurrent.futures
+
+        from deerflow.runtime.user_context import (
+            get_effective_user_id,
+            reset_current_user,
+            set_current_user,
+        )
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        async def fake_aexecute(task, result_holder=None):
+            result = result_holder
+            result.status = SubagentStatus.COMPLETED
+            result.result = get_effective_user_id()
+            result.completed_at = datetime.now()
+            return result
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
+        scheduler = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        token = set_current_user(SimpleNamespace(id="alice"))
+        try:
+            with (
+                patch.object(executor_module, "_scheduler_pool", scheduler),
+                patch.object(executor, "_aexecute", side_effect=fake_aexecute),
+                patch.object(executor, "execute", side_effect=AssertionError("execute() should not be called by execute_async")),
+            ):
+                task_id = executor.execute_async("Task")
+                executor_module._scheduler_pool.shutdown(wait=True)
+        finally:
+            reset_current_user(token)
+            scheduler.shutdown(wait=False, cancel_futures=True)
+
+        result = executor_module._background_tasks.get(task_id)
+        assert result is not None
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "alice"
         assert result.error is None
 
     def test_timeout_does_not_overwrite_cancelled(self, executor_module, classes, base_config, msg):
