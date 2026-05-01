@@ -55,8 +55,14 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
     if app_config is not None:
         return _make_storage(app_config.skills, **kwargs)
 
+    # If the singleton was manually injected (e.g. in tests) without a config
+    # identity (_default_skill_storage_config is None), skip get_app_config()
+    # entirely to avoid requiring a config.yaml on disk.
+    if _default_skill_storage is not None and _default_skill_storage_config is None:
+        return _default_skill_storage
+
     app_config_now = get_app_config()
-    if _default_skill_storage is None or (_default_skill_storage_config is not None and _default_skill_storage_config is not app_config_now):
+    if _default_skill_storage is None or _default_skill_storage_config is not app_config_now:
         _default_skill_storage = _make_storage(app_config_now.skills, **kwargs)
         _default_skill_storage_config = app_config_now
     return _default_skill_storage
