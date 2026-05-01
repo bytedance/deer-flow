@@ -258,6 +258,7 @@ class TestAgentConstruction:
         }
         assert captured["middlewares"] == {
             "app_config": app_config,
+            "model_name": "parent-model",
             "lazy_init": True,
         }
         assert captured["agent"]["model"] is model
