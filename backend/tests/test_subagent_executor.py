@@ -255,6 +255,7 @@ class TestAgentConstruction:
             "name": "parent-model",
             "thinking_enabled": False,
             "app_config": app_config,
+            "attach_tracing": False,
         }
         assert captured["middlewares"] == {
             "app_config": app_config,

@@ -91,12 +91,41 @@ class TestTitleMiddlewareCoreLogic:
         title = result["title"]
 
         assert title == "短标题"
-        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False)
+        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False, attach_tracing=False)
         model.ainvoke.assert_awaited_once()
         assert model.ainvoke.await_args.kwargs["config"] == {
             "run_name": "title_agent",
             "tags": ["middleware:title"],
         }
+
+    def test_generate_title_opts_out_of_model_level_tracing(self, monkeypatch):
+        """The title model must not double-attach tracing.
+
+        ``_get_runnable_config()`` already inherits the parent graph's
+        callbacks (e.g. Langfuse). Building the model with the default
+        ``attach_tracing=True`` would attach the same handler at the model
+        level too, producing duplicate spans for one LLM call.
+        """
+        _set_test_title_config(model_name="title-model", max_chars=20)
+        middleware = TitleMiddleware()
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="标题"))
+        create_chat_model_mock = MagicMock(return_value=model)
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_chat_model_mock)
+
+        state = {
+            "messages": [
+                HumanMessage(content="问题"),
+                AIMessage(content="回答"),
+            ]
+        }
+        asyncio.run(middleware._agenerate_title_result(state))
+
+        create_chat_model_mock.assert_called_once_with(
+            name="title-model",
+            thinking_enabled=False,
+            attach_tracing=False,
+        )
 
     def test_generate_title_normalizes_structured_message_content(self, monkeypatch):
         _set_test_title_config(max_chars=20)

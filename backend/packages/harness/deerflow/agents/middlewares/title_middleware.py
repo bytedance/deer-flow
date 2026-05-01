@@ -139,10 +139,13 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         prompt, user_msg = self._build_title_prompt(state)
 
         try:
+            # attach_tracing=False because _get_runnable_config() inherits the
+            # parent graph's callbacks; attaching at the model level too would
+            # create duplicate Langfuse spans for the same LLM call.
             if config.model_name:
-                model = create_chat_model(name=config.model_name, thinking_enabled=False)
+                model = create_chat_model(name=config.model_name, thinking_enabled=False, attach_tracing=False)
             else:
-                model = create_chat_model(thinking_enabled=False)
+                model = create_chat_model(thinking_enabled=False, attach_tracing=False)
             response = await model.ainvoke(prompt, config=self._get_runnable_config())
             title = self._parse_title(response.content)
             if title:

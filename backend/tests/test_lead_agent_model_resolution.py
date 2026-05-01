@@ -52,9 +52,10 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
 
     captured: dict[str, object] = {}
 
-    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None):
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
         captured["name"] = name
         captured["app_config"] = app_config
+        captured["attach_tracing"] = attach_tracing
         return object()
 
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
@@ -68,6 +69,7 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
     assert captured == {
         "name": "explicit-model",
         "app_config": app_config,
+        "attach_tracing": False,
     }
     assert result["model"] is not None
 
@@ -127,7 +129,7 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
 
     captured: dict[str, object] = {}
 
-    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None):
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
         captured["name"] = name
         captured["thinking_enabled"] = thinking_enabled
         captured["reasoning_effort"] = reasoning_effort
@@ -171,11 +173,12 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
 
     captured: dict[str, object] = {}
 
-    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None):
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
         captured["name"] = name
         captured["thinking_enabled"] = thinking_enabled
         captured["reasoning_effort"] = reasoning_effort
         captured["app_config"] = app_config
+        captured["attach_tracing"] = attach_tracing
         return object()
 
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
@@ -199,6 +202,7 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
         "thinking_enabled": False,
         "reasoning_effort": "high",
         "app_config": app_config,
+        "attach_tracing": False,
     }
     get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, app_config=app_config)
     assert result["model"] is not None
@@ -304,7 +308,7 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     fake_model = MagicMock()
     fake_model.with_config.return_value = fake_model
 
-    def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None, app_config=None):
+    def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
         captured["name"] = name
         captured["thinking_enabled"] = thinking_enabled
         captured["reasoning_effort"] = reasoning_effort
