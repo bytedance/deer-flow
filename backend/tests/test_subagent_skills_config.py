@@ -378,24 +378,20 @@ class TestRegistryCustomAgentLookup:
         assert get_subagent_config("nonexistent") is None
 
     def test_get_available_subagent_names_falls_back_when_subagents_app_config_lacks_sandbox(self, monkeypatch):
-        # Regression: SubagentsAppConfig has no .sandbox attribute. Forwarding it
-        # to is_host_bash_allowed would silently disable bash. Must fall back to
-        # ambient lookup instead.
         from deerflow.subagents import registry as registry_module
         from deerflow.subagents.registry import get_available_subagent_names
 
-        captured: dict[str, object] = {}
+        captured: dict[str, tuple] = {}
 
         def fake_is_host_bash_allowed(*args, **kwargs):
-            captured["called_with"] = args[0] if args else "no-arg"
+            captured["args"] = args
             return True
 
         monkeypatch.setattr(registry_module, "is_host_bash_allowed", fake_is_host_bash_allowed)
 
-        subagents_only = SubagentsAppConfig()
-        get_available_subagent_names(app_config=subagents_only)
+        get_available_subagent_names(app_config=SubagentsAppConfig())
 
-        assert captured["called_with"] == "no-arg"
+        assert captured["args"] == ()
 
     def test_builtin_takes_priority_over_custom(self):
         """If a custom agent has the same name as a builtin, builtin wins."""

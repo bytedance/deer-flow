@@ -375,9 +375,6 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
 
 
 def test_create_summarization_middleware_threads_resolved_app_config_to_model(monkeypatch):
-    # Regression: when the caller omits app_config, the middleware must hand the
-    # resolved AppConfig (from get_app_config()) to create_chat_model so the
-    # model factory does not re-enter ambient lookup with app_config=None.
     fallback_app_config = _make_app_config([_make_model("fallback-model", supports_thinking=False)])
     fallback_app_config.summarization = SummarizationConfig(enabled=True, model_name="fallback-model")
     fallback_app_config.memory = MemoryConfig(enabled=False)
