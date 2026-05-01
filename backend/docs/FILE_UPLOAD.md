@@ -22,6 +22,8 @@ POST /api/threads/{thread_id}/uploads
 **请求体：** `multipart/form-data`
 - `files`: 一个或多个文件
 
+网关会在应用层限制上传规模，默认最多 10 个文件、单文件 50 MiB、单次请求总计 100 MiB。可通过 `config.yaml` 的 `uploads.max_files`、`uploads.max_file_size`、`uploads.max_total_size` 调整；前端会读取同一组限制并在选择文件时提示，超过限制时后端返回 `413 Payload Too Large`。
+
 **响应：**
 ```json
 {
@@ -48,7 +50,23 @@ POST /api/threads/{thread_id}/uploads
 - `virtual_path`: Agent 在沙箱中使用的虚拟路径
 - `artifact_url`: 前端通过 HTTP 访问文件的 URL
 
-### 2. 列出已上传文件
+### 2. 查询上传限制
+```
+GET /api/threads/{thread_id}/uploads/limits
+```
+
+返回网关当前生效的上传限制，供前端在用户选择文件前提示和拦截。
+
+**响应：**
+```json
+{
+  "max_files": 10,
+  "max_file_size": 52428800,
+  "max_total_size": 104857600
+}
+```
+
+### 3. 列出已上传文件
 ```
 GET /api/threads/{thread_id}/uploads/list
 ```
@@ -71,7 +89,7 @@ GET /api/threads/{thread_id}/uploads/list
 }
 ```
 
-### 3. 删除文件
+### 4. 删除文件
 ```
 DELETE /api/threads/{thread_id}/uploads/{filename}
 ```
