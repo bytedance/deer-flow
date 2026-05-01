@@ -186,21 +186,24 @@ class SkillStorage(ABC):
 
         Origin: ``deerflow.skills.manager.get_custom_skill_dir``.
         """
-        return self.get_skills_root_path() / SkillCategory.CUSTOM.value / name
+        normalized_name = self.validate_skill_name(name)
+        return self.get_skills_root_path() / SkillCategory.CUSTOM.value / normalized_name
 
     def get_custom_skill_file(self, name: str) -> Path:
         """Path to ``custom/<name>/SKILL.md``.
 
         Origin: ``deerflow.skills.manager.get_custom_skill_file``.
         """
-        return self.get_custom_skill_dir(name) / SKILL_MD_FILE
+        normalized_name = self.validate_skill_name(name)
+        return self.get_custom_skill_dir(normalized_name) / SKILL_MD_FILE
 
     def get_skill_history_file(self, name: str) -> Path:
         """Path to ``custom/.history/<name>.jsonl``. Does not create parents.
 
         Origin: ``deerflow.skills.manager.get_skill_history_file``.
         """
-        return self.get_skills_root_path() / SkillCategory.CUSTOM.value / ".history" / f"{name}.jsonl"
+        normalized_name = self.validate_skill_name(name)
+        return self.get_skills_root_path() / SkillCategory.CUSTOM.value / ".history" / f"{normalized_name}.jsonl"
 
     # ------------------------------------------------------------------
     # Final template-method flows

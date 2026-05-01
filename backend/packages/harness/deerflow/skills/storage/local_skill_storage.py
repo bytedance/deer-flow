@@ -60,7 +60,8 @@ class LocalSkillStorage(SkillStorage):
         return self.get_custom_skill_file(name).exists()
 
     def public_skill_exists(self, name: str) -> bool:
-        return (self._host_root / SkillCategory.PUBLIC.value / name / SKILL_MD_FILE).exists()
+        normalized_name = self.validate_skill_name(name)
+        return (self._host_root / SkillCategory.PUBLIC.value / normalized_name / SKILL_MD_FILE).exists()
 
     def _iter_skill_files(self) -> Iterable[tuple[SkillCategory, Path, Path]]:
         if not self._host_root.exists():

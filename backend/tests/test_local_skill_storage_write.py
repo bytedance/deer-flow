@@ -139,3 +139,24 @@ def test_allows_symlink_within_skill_dir(tmp_path, storage, skill_dir):
     # resolve() writes through to the real target file
     assert real_file.read_text() == "updated"
     assert (skill_dir / "alias.md").read_text() == "updated"
+
+
+# ---------------------------------------------------------------------------
+# Invalid skill-name traversal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,method_name",
+    [
+        ("../../escaped", "get_custom_skill_dir"),
+        ("../../escaped", "get_custom_skill_file"),
+        ("../../escaped", "get_skill_history_file"),
+        ("../../escaped", "custom_skill_exists"),
+        ("../../escaped", "public_skill_exists"),
+    ],
+)
+def test_rejects_invalid_skill_name_in_path_helpers(storage, name, method_name):
+    method = getattr(storage, method_name)
+    with pytest.raises(ValueError, match="hyphen-case"):
+        method(name)
