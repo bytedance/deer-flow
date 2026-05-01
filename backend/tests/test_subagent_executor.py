@@ -286,9 +286,7 @@ class TestAgentConstruction:
 
         def fake_get_or_new_skill_storage(*, app_config=None):
             captured["app_config"] = app_config
-            return SimpleNamespace(
-                load_skills=lambda *, enabled_only: [SimpleNamespace(name="demo-skill", skill_file=skill_file)]
-            )
+            return SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="demo-skill", skill_file=skill_file)])
 
         monkeypatch.setattr("deerflow.skills.storage.get_or_new_skill_storage", fake_get_or_new_skill_storage)
 
