@@ -313,6 +313,10 @@ def _build_middlewares(
                 max_tracked_threads=loop_detection_config.max_tracked_threads,
                 tool_freq_warn=loop_detection_config.tool_freq_warn,
                 tool_freq_hard_limit=loop_detection_config.tool_freq_hard_limit,
+                tool_freq_overrides={
+                    name: (o.warn, o.hard_limit)
+                    for name, o in loop_detection_config.tool_freq_overrides.items()
+                },
             )
         )
 

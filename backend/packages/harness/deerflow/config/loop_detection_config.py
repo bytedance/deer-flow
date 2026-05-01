@@ -3,6 +3,24 @@
 from pydantic import BaseModel, Field, model_validator
 
 
+class ToolFreqOverride(BaseModel):
+    """Per-tool frequency threshold override.
+
+    Can be higher or lower than the global defaults. Commonly used to raise
+    thresholds for high-frequency tools like bash in batch workflows (e.g.
+    RNA-seq pipelines) without weakening protection on every other tool.
+    """
+
+    warn: int = Field(ge=1)
+    hard_limit: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "ToolFreqOverride":
+        if self.hard_limit < self.warn:
+            raise ValueError("hard_limit must be >= warn")
+        return self
+
+
 class LoopDetectionConfig(BaseModel):
     """Configuration for repetitive tool-call loop detection."""
 
@@ -39,6 +57,14 @@ class LoopDetectionConfig(BaseModel):
         default=50,
         ge=1,
         description="Number of calls to the same tool type before forcing a stop",
+    )
+    tool_freq_overrides: dict[str, ToolFreqOverride] = Field(
+        default_factory=dict,
+        description=(
+            "Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. "
+            "Values can be higher or lower than the global defaults. "
+            "Commonly used to raise thresholds for high-frequency tools like bash."
+        ),
     )
 
     @model_validator(mode="after")
