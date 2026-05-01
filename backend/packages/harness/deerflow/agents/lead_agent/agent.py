@@ -19,8 +19,6 @@ from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddlewar
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.memory_config import get_memory_config
-from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -52,7 +50,8 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
 
 def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
-    config = get_summarization_config()
+    resolved_app_config = app_config or get_app_config()
+    config = resolved_app_config.summarization
 
     if not config.enabled:
         return None
@@ -73,9 +72,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     # as middleware rather than lead_agent (SummarizationMiddleware is a
     # LangChain built-in, so we tag the model at creation time).
     if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=app_config)
+        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=resolved_app_config)
     else:
-        model = create_chat_model(thinking_enabled=False, app_config=app_config)
+        model = create_chat_model(thinking_enabled=False, app_config=resolved_app_config)
     model = model.with_config(tags=["middleware:summarize"])
 
     # Prepare kwargs
@@ -92,18 +91,13 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
         kwargs["summary_prompt"] = config.summary_prompt
 
     hooks: list[BeforeSummarizationHook] = []
-    if get_memory_config().enabled:
+    if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
 
     # The logic below relies on two assumptions holding true: this factory is
     # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
     # config is not expected to change after startup.
-    try:
-        resolved_app_config = app_config or get_app_config()
-        skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
-    except Exception:
-        logger.exception("Failed to resolve skills container path; falling back to default")
-        skills_container_path = "/mnt/skills"
+    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
 
     return DeerFlowSummarizationMiddleware(
         **kwargs,
@@ -279,10 +273,10 @@ def _build_middlewares(
         middlewares.append(TokenUsageMiddleware())
 
     # Add TitleMiddleware
-    middlewares.append(TitleMiddleware())
+    middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
     # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name))
+    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
@@ -316,7 +310,9 @@ def _build_middlewares(
 
 def make_lead_agent(config: RunnableConfig):
     """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
-    return _make_lead_agent(config, app_config=get_app_config())
+    runtime_config = _get_runtime_config(config)
+    runtime_app_config = runtime_config.get("app_config")
+    return _make_lead_agent(config, app_config=runtime_app_config or get_app_config())
 
 
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):

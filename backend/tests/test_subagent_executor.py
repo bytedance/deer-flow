@@ -204,7 +204,7 @@ class TestAgentConstruction:
 
         SubagentExecutor = classes["SubagentExecutor"]
 
-        app_config = object()
+        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
         model = object()
         middlewares = [object()]
         agent = object()
@@ -265,6 +265,43 @@ class TestAgentConstruction:
         assert captured["agent"]["middleware"] is middlewares
         assert captured["agent"]["tools"] == []
         assert captured["agent"]["system_prompt"] == base_config.system_prompt
+
+    @pytest.mark.anyio
+    async def test_load_skill_messages_uses_explicit_app_config_for_skill_storage(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """Explicit app_config must be threaded into subagent skill storage lookup."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
+        skill_dir = tmp_path / "demo-skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("Use demo skill", encoding="utf-8")
+        captured: dict[str, object] = {}
+
+        def fake_get_or_new_skill_storage(*, app_config=None):
+            captured["app_config"] = app_config
+            return SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="demo-skill", skill_file=skill_file)])
+
+        monkeypatch.setattr("deerflow.skills.storage.get_or_new_skill_storage", fake_get_or_new_skill_storage)
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            thread_id="test-thread",
+        )
+
+        messages = await executor._load_skill_messages()
+
+        assert captured["app_config"] is app_config
+        assert len(messages) == 1
+        assert "Use demo skill" in messages[0].content
 
 
 # -----------------------------------------------------------------------------

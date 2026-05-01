@@ -106,7 +106,11 @@ def test_get_skills_prompt_section_uses_explicit_config_for_enabled_skills(monke
         skill_evolution=SimpleNamespace(enabled=False),
     )
 
+    def fail_get_app_config():
+        raise AssertionError("ambient get_app_config() must not be used when app_config is explicit")
+
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: [_make_skill("global-skill")])
+    monkeypatch.setattr("deerflow.config.get_app_config", fail_get_app_config)
     monkeypatch.setattr(
         "deerflow.agents.lead_agent.prompt.get_or_new_skill_storage",
         lambda app_config=None, **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: [_make_skill("explicit-skill")] if app_config is explicit_config else []),
