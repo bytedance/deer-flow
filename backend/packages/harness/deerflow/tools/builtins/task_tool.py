@@ -136,7 +136,9 @@ async def task_tool(
 
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
-    app_config = get_app_config()
+    app_config = None
+    if config.model == "inherit" and parent_model is None:
+        app_config = get_app_config()
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
