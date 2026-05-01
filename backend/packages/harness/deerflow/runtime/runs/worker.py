@@ -39,6 +39,24 @@ logger = logging.getLogger(__name__)
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 
 
+def _build_runtime_context(thread_id: str, run_id: str, caller_context: Any | None) -> dict[str, Any]:
+    """Build the dict that becomes ``ToolRuntime.context`` for the run.
+
+    Always includes ``thread_id`` and ``run_id``. Additional keys from the caller's
+    ``config['context']`` (e.g. ``agent_name`` for the bootstrap flow — issue #2677)
+    are merged in but never override ``thread_id``/``run_id``.
+
+    langgraph 1.1+ surfaces this as ``runtime.context`` via the parent runtime stored
+    under ``config['configurable']['__pregel_runtime']`` — see
+    ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
+    """
+    runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+    if isinstance(caller_context, dict):
+        for key, value in caller_context.items():
+            runtime_ctx.setdefault(key, value)
+    return runtime_ctx
+
+
 @dataclass(frozen=True)
 class RunContext:
     """Infrastructure dependencies for a single agent run.
@@ -169,15 +187,15 @@ async def run_agent(
         from langchain_core.runnables import RunnableConfig
         from langgraph.runtime import Runtime
 
-        # Inject runtime context so middlewares can access thread_id
-        # (langgraph-cli does this automatically; we must do it manually)
-        runtime = Runtime(context={"thread_id": thread_id, "run_id": run_id}, store=store)
-        # If the caller already set a ``context`` key (LangGraph >= 0.6.0
-        # prefers it over ``configurable`` for thread-level data), make
-        # sure ``thread_id`` is available there too.
+        # Inject runtime context so middlewares and tools (via ToolRuntime.context) can
+        # access thread-level data. langgraph-cli does this automatically; we must do it
+        # manually here because we drive the graph through ``agent.astream(config=...)``
+        # without passing the official ``context=`` parameter.
+        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"))
         if "context" in config and isinstance(config["context"], dict):
             config["context"].setdefault("thread_id", thread_id)
             config["context"].setdefault("run_id", run_id)
+        runtime = Runtime(context=runtime_ctx, store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
         # Inject RunJournal as a LangChain callback handler.
