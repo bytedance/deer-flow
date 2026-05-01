@@ -300,10 +300,10 @@ class SubagentExecutor:
             return []
 
         try:
-            from deerflow.skills.loader import load_skills
+            from deerflow.skills.storage import get_or_new_skill_storage
 
             # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
-            all_skills = await asyncio.to_thread(load_skills, enabled_only=True)
+            all_skills = await asyncio.to_thread(get_or_new_skill_storage().load_skills, enabled_only=True)
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
         except Exception:
             logger.warning(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}", exc_info=True)

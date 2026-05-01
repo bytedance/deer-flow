@@ -1,8 +1,10 @@
 """Tests for recursive skills loading."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
-from deerflow.skills.loader import get_skills_root_path, load_skills
+from deerflow.config.skills_config import SkillsConfig
+from deerflow.skills.storage import get_or_new_skill_storage
 
 
 def _write_skill(skill_dir: Path, name: str, description: str) -> None:
@@ -14,7 +16,8 @@ def _write_skill(skill_dir: Path, name: str, description: str) -> None:
 
 def test_get_skills_root_path_points_to_project_root_skills():
     """get_skills_root_path() should point to deer-flow/skills (sibling of backend/), not backend/packages/skills."""
-    path = get_skills_root_path()
+    app_config = SimpleNamespace(skills=SkillsConfig())
+    path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
     assert path.name == "skills", f"Expected 'skills', got '{path.name}'"
     assert (path.parent / "backend").is_dir(), f"Expected skills path's parent to be project root containing 'backend/', but got {path}"
 
@@ -27,7 +30,7 @@ def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: 
     _write_skill(skills_root / "public" / "parent" / "child-skill", "child-skill", "Child skill")
     _write_skill(skills_root / "custom" / "team" / "helper", "team-helper", "Team helper")
 
-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
     by_name = {skill.name: skill for skill in skills}
 
     assert {"root-skill", "child-skill", "team-helper"} <= set(by_name)
@@ -57,7 +60,7 @@ def test_load_skills_skips_hidden_directories(tmp_path: Path):
         "Hidden skill",
     )
 
-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
     names = {skill.name for skill in skills}
 
     assert "ok-skill" in names
@@ -69,7 +72,7 @@ def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
     _write_skill(skills_root / "public" / "shared-skill", "shared-skill", "Public version")
     _write_skill(skills_root / "custom" / "shared-skill", "shared-skill", "Custom version")
 
-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
     shared = next(skill for skill in skills if skill.name == "shared-skill")
 
     assert shared.category == "custom"

@@ -10,13 +10,10 @@ import logging
 import posixpath
 import shutil
 import stat
-import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from deerflow.skills.loader import get_skills_root_path
 from deerflow.skills.security_scanner import scan_skill_content
-from deerflow.skills.validation import _validate_skill_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -195,80 +192,6 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
         await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=_is_script_support_file(rel_path))
 
 
-async def ainstall_skill_from_archive(
-    zip_path: str | Path,
-    *,
-    skills_root: Path | None = None,
-) -> dict:
-    """Install a skill from a .skill archive (ZIP).
-
-    Args:
-        zip_path: Path to the .skill file.
-        skills_root: Override the skills root directory. If None, uses
-            the default from config.
-
-    Returns:
-        Dict with success, skill_name, message.
-
-    Raises:
-        FileNotFoundError: If the file does not exist.
-        ValueError: If the file is invalid (wrong extension, bad ZIP,
-            invalid frontmatter, duplicate name).
-    """
-    logger.info("Installing skill from %s", zip_path)
-    path = Path(zip_path)
-    if not path.is_file():
-        if not path.exists():
-            raise FileNotFoundError(f"Skill file not found: {zip_path}")
-        raise ValueError(f"Path is not a file: {zip_path}")
-    if path.suffix != ".skill":
-        raise ValueError("File must have .skill extension")
-
-    if skills_root is None:
-        skills_root = get_skills_root_path()
-    custom_dir = skills_root / "custom"
-    custom_dir.mkdir(parents=True, exist_ok=True)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-
-        try:
-            zf = zipfile.ZipFile(path, "r")
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Skill file not found: {zip_path}") from None
-        except (zipfile.BadZipFile, IsADirectoryError):
-            raise ValueError("File is not a valid ZIP archive") from None
-
-        with zf:
-            safe_extract_skill_archive(zf, tmp_path)
-
-        skill_dir = resolve_skill_dir_from_archive(tmp_path)
-
-        is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
-        if not is_valid:
-            raise ValueError(f"Invalid skill: {message}")
-        if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
-            raise ValueError(f"Invalid skill name: {skill_name}")
-
-        target = custom_dir / skill_name
-        if target.exists():
-            raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
-
-        await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
-
-        with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
-            staging_target = Path(staging_root) / skill_name
-            shutil.copytree(skill_dir, staging_target)
-            _move_staged_skill_into_reserved_target(staging_target, target)
-        logger.info("Skill %r installed to %s", skill_name, target)
-
-    return {
-        "success": True,
-        "skill_name": skill_name,
-        "message": f"Skill '{skill_name}' installed successfully",
-    }
-
-
 def _run_async_install(coro):
     try:
         loop = asyncio.get_running_loop()
@@ -279,12 +202,3 @@ def _run_async_install(coro):
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             return executor.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
-
-
-def install_skill_from_archive(
-    zip_path: str | Path,
-    *,
-    skills_root: Path | None = None,
-) -> dict:
-    """Install a skill from a .skill archive (ZIP)."""
-    return _run_async_install(ainstall_skill_from_archive(zip_path, skills_root=skills_root))

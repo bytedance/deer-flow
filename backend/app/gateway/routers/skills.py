@@ -1,7 +1,5 @@
-import errno
 import json
 import logging
-import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,21 +10,11 @@ from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
-from deerflow.skills import Skill, load_skills
-from deerflow.skills.installer import SkillAlreadyExistsError, ainstall_skill_from_archive
-from deerflow.skills.manager import (
-    append_history,
-    atomic_write,
-    custom_skill_exists,
-    ensure_custom_skill_is_editable,
-    get_custom_skill_dir,
-    get_custom_skill_file,
-    get_skill_history_file,
-    read_custom_skill_content,
-    read_history,
-    validate_skill_markdown_content,
-)
+from deerflow.skills import Skill
+from deerflow.skills.installer import SkillAlreadyExistsError
 from deerflow.skills.security_scanner import scan_skill_content
+from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +27,7 @@ class SkillResponse(BaseModel):
     name: str = Field(..., description="Name of the skill")
     description: str = Field(..., description="Description of what the skill does")
     license: str | None = Field(None, description="License information")
-    category: str = Field(..., description="Category of the skill (public or custom)")
+    category: SkillCategory = Field(..., description="Category of the skill (public or custom)")
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
@@ -105,7 +93,7 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
 )
 async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResponse:
     try:
-        skills = load_skills(enabled_only=False, app_config=config)
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
@@ -118,10 +106,10 @@ async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResp
     summary="Install Skill",
     description="Install a skill from a .skill file (ZIP archive) located in the thread's user-data directory.",
 )
-async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
+async def install_skill(request: SkillInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
     try:
         skill_file_path = resolve_thread_virtual_path(request.thread_id, request.path)
-        result = await ainstall_skill_from_archive(skill_file_path)
+        result = await get_or_new_skill_storage(app_config=config).ainstall_skill_from_archive(skill_file_path)
         await refresh_skills_system_prompt_cache_async()
         return SkillInstallResponse(**result)
     except FileNotFoundError as e:
@@ -140,7 +128,7 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
 @router.get("/skills/custom", response_model=SkillsListResponse, summary="List Custom Skills")
 async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsListResponse:
     try:
-        skills = [skill for skill in load_skills(enabled_only=False, app_config=config) if skill.category == "custom"]
+        skills = [skill for skill in get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
@@ -151,11 +139,11 @@ async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsL
 async def get_custom_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        skills = load_skills(enabled_only=False, app_config=config)
-        skill = next((s for s in skills if s.name == skill_name and s.category == "custom"), None)
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
+        skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=read_custom_skill_content(skill_name, app_config=config))
+        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=get_or_new_skill_storage(app_config=config).read_custom_skill(skill_name))
     except HTTPException:
         raise
     except Exception as e:
@@ -167,26 +155,25 @@ async def get_custom_skill(skill_name: str, config: AppConfig = Depends(get_conf
 async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        ensure_custom_skill_is_editable(skill_name, app_config=config)
-        validate_skill_markdown_content(skill_name, request.content)
-        scan = await scan_skill_content(request.content, executable=False, location=f"{skill_name}/SKILL.md", app_config=config)
+        storage = get_or_new_skill_storage(app_config=config)
+        storage.ensure_custom_skill_is_editable(skill_name)
+        storage.validate_skill_markdown_content(skill_name, request.content)
+        scan = await scan_skill_content(request.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        skill_file = get_custom_skill_dir(skill_name, app_config=config) / "SKILL.md"
-        prev_content = skill_file.read_text(encoding="utf-8")
-        atomic_write(skill_file, request.content)
-        append_history(
+        prev_content = storage.read_custom_skill(skill_name)
+        storage.write_custom_skill(skill_name, SKILL_MD_FILE, request.content)
+        storage.append_history(
             skill_name,
             {
                 "action": "human_edit",
                 "author": "human",
                 "thread_id": None,
-                "file_path": "SKILL.md",
+                "file_path": SKILL_MD_FILE,
                 "prev_content": prev_content,
                 "new_content": request.content,
                 "scanner": {"decision": scan.decision, "reason": scan.reason},
             },
-            app_config=config,
         )
         await refresh_skills_system_prompt_cache_async()
         return await get_custom_skill(skill_name, config)
@@ -205,28 +192,19 @@ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest
 async def delete_custom_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> dict[str, bool]:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        ensure_custom_skill_is_editable(skill_name, app_config=config)
-        skill_dir = get_custom_skill_dir(skill_name, app_config=config)
-        prev_content = read_custom_skill_content(skill_name, app_config=config)
-        try:
-            append_history(
-                skill_name,
-                {
-                    "action": "human_delete",
-                    "author": "human",
-                    "thread_id": None,
-                    "file_path": "SKILL.md",
-                    "prev_content": prev_content,
-                    "new_content": None,
-                    "scanner": {"decision": "allow", "reason": "Deletion requested."},
-                },
-                app_config=config,
-            )
-        except OSError as e:
-            if not isinstance(e, PermissionError) and e.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
-                raise
-            logger.warning("Skipping delete history write for custom skill %s due to readonly/permission failure; continuing with skill directory removal: %s", skill_name, e)
-        shutil.rmtree(skill_dir)
+        storage = get_or_new_skill_storage(app_config=config)
+        storage.delete_custom_skill(
+            skill_name,
+            history_meta={
+                "action": "human_delete",
+                "author": "human",
+                "thread_id": None,
+                "file_path": SKILL_MD_FILE,
+                "prev_content": None,
+                "new_content": None,
+                "scanner": {"decision": "allow", "reason": "Deletion requested."},
+            },
+        )
         await refresh_skills_system_prompt_cache_async()
         return {"success": True}
     except FileNotFoundError as e:
@@ -242,9 +220,10 @@ async def delete_custom_skill(skill_name: str, config: AppConfig = Depends(get_c
 async def get_custom_skill_history(skill_name: str, config: AppConfig = Depends(get_config)) -> CustomSkillHistoryResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        if not custom_skill_exists(skill_name, app_config=config) and not get_skill_history_file(skill_name, app_config=config).exists():
+        storage = get_or_new_skill_storage(app_config=config)
+        if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillHistoryResponse(history=read_history(skill_name, app_config=config))
+        return CustomSkillHistoryResponse(history=storage.read_history(skill_name))
     except HTTPException:
         raise
     except Exception as e:
@@ -255,34 +234,35 @@ async def get_custom_skill_history(skill_name: str, config: AppConfig = Depends(
 @router.post("/skills/custom/{skill_name}/rollback", response_model=CustomSkillContentResponse, summary="Rollback Custom Skill")
 async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     try:
-        if not custom_skill_exists(skill_name, app_config=config) and not get_skill_history_file(skill_name, app_config=config).exists():
+        storage = get_or_new_skill_storage(app_config=config)
+        if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        history = read_history(skill_name, app_config=config)
+        history = storage.read_history(skill_name)
         if not history:
             raise HTTPException(status_code=400, detail=f"Custom skill '{skill_name}' has no history")
         record = history[request.history_index]
         target_content = record.get("prev_content")
         if target_content is None:
             raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
-        validate_skill_markdown_content(skill_name, target_content)
-        scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/SKILL.md", app_config=config)
-        skill_file = get_custom_skill_file(skill_name, app_config=config)
+        storage.validate_skill_markdown_content(skill_name, target_content)
+        scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
+        skill_file = storage.get_custom_skill_file(skill_name)
         current_content = skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
         history_entry = {
             "action": "rollback",
             "author": "human",
             "thread_id": None,
-            "file_path": "SKILL.md",
+            "file_path": SKILL_MD_FILE,
             "prev_content": current_content,
             "new_content": target_content,
             "rollback_from_ts": record.get("ts"),
             "scanner": {"decision": scan.decision, "reason": scan.reason},
         }
         if scan.decision == "block":
-            append_history(skill_name, history_entry, app_config=config)
+            storage.append_history(skill_name, history_entry)
             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
-        atomic_write(skill_file, target_content)
-        append_history(skill_name, history_entry, app_config=config)
+        storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
+        storage.append_history(skill_name, history_entry)
         await refresh_skills_system_prompt_cache_async()
         return await get_custom_skill(skill_name, config)
     except HTTPException:
@@ -307,7 +287,7 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest, 
 async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        skills = load_skills(enabled_only=False, app_config=config)
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -330,7 +310,7 @@ async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) ->
 async def update_skill(skill_name: str, request: SkillUpdateRequest, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        skills = load_skills(enabled_only=False, app_config=config)
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -356,7 +336,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
         reload_extensions_config()
         await refresh_skills_system_prompt_cache_async()
 
-        skills = load_skills(enabled_only=False, app_config=config)
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
         updated_skill = next((s for s in skills if s.name == skill_name), None)
 
         if updated_skill is None:

@@ -69,6 +69,21 @@ def provisioner_module():
 
 
 @pytest.fixture(autouse=True)
+def _reset_skill_storage_singleton():
+    """Reset the SkillStorage singleton between tests to prevent cross-test contamination."""
+    try:
+        from deerflow.skills.storage import reset_skill_storage
+    except ImportError:
+        yield
+        return
+    reset_skill_storage()
+    try:
+        yield
+    finally:
+        reset_skill_storage()
+
+
+@pytest.fixture(autouse=True)
 def _auto_user_context(request):
     """Inject a default ``test-user-autouse`` into the contextvar.
 
