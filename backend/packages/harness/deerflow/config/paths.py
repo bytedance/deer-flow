@@ -3,6 +3,8 @@ import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
+from deerflow.config.runtime_paths import runtime_home
+
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
@@ -11,9 +13,8 @@ _SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
 def _default_local_base_dir() -> Path:
-    """Return the repo-local DeerFlow state directory without relying on cwd."""
-    backend_dir = Path(__file__).resolve().parents[4]
-    return backend_dir / ".deer-flow"
+    """Return the caller project's writable DeerFlow state directory."""
+    return runtime_home()
 
 
 def _validate_thread_id(thread_id: str) -> str:
@@ -81,7 +82,7 @@ class Paths:
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
         2. DEER_FLOW_HOME environment variable
-        3. Repo-local fallback derived from this module path: `{backend_dir}/.deer-flow`
+        3. Caller project fallback: `{project_root}/.deer-flow`
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:

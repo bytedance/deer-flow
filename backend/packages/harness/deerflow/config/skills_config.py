@@ -1,11 +1,9 @@
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-
-def _default_repo_root() -> Path:
-    """Resolve the repo root without relying on the current working directory."""
-    return Path(__file__).resolve().parents[5]
+from deerflow.config.runtime_paths import project_root, resolve_path
 
 
 class SkillsConfig(BaseModel):
@@ -17,7 +15,7 @@ class SkillsConfig(BaseModel):
     )
     path: str | None = Field(
         default=None,
-        description="Path to skills directory. If not specified, defaults to ../skills relative to backend directory",
+        description="Path to skills directory. If not specified, defaults to skills under the caller project root.",
     )
     container_path: str = Field(
         default="/mnt/skills",
@@ -32,15 +30,11 @@ class SkillsConfig(BaseModel):
             Path to the skills directory
         """
         if self.path:
-            # Use configured path (can be absolute or relative)
-            path = Path(self.path)
-            if not path.is_absolute():
-                # If relative, resolve from the repo root for deterministic behavior.
-                path = _default_repo_root() / path
-            return path.resolve()
-        else:
-            # Default: <repo_root>/skills
-            return _default_repo_root() / "skills"
+            # Use configured path (can be absolute or relative to project root)
+            return resolve_path(self.path)
+        if env_path := os.getenv("DEER_FLOW_SKILLS_PATH"):
+            return resolve_path(env_path)
+        return project_root() / "skills"
 
     def get_skill_container_path(self, skill_name: str, category: str = "public") -> str:
         """

@@ -14,12 +14,25 @@ def _write_skill(skill_dir: Path, name: str, description: str) -> None:
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
 
-def test_get_skills_root_path_points_to_project_root_skills():
-    """get_skills_root_path() should point to deer-flow/skills (sibling of backend/), not backend/packages/skills."""
+def test_get_skills_root_path_points_to_current_project_skills(tmp_path: Path, monkeypatch):
+    """get_skills_root_path() should point to the caller project skills directory."""
+    monkeypatch.delenv("DEER_FLOW_SKILLS_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+
     app_config = SimpleNamespace(skills=SkillsConfig())
     path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
-    assert path.name == "skills", f"Expected 'skills', got '{path.name}'"
-    assert (path.parent / "backend").is_dir(), f"Expected skills path's parent to be project root containing 'backend/', but got {path}"
+    assert path == tmp_path / "skills"
+
+
+def test_get_skills_root_path_honors_env_override(tmp_path: Path, monkeypatch):
+    """DEER_FLOW_SKILLS_PATH should override the caller project skills directory."""
+    skills_root = tmp_path / "team-skills"
+    monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", str(skills_root))
+
+    app_config = SimpleNamespace(skills=SkillsConfig())
+    path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
+    assert path == skills_root
 
 
 def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: Path):

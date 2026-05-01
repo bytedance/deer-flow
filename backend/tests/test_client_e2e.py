@@ -17,6 +17,7 @@ import json
 import os
 import uuid
 import zipfile
+from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
@@ -94,12 +95,18 @@ def e2e_env(tmp_path, monkeypatch):
     """Isolated filesystem environment for E2E tests.
 
     - DEER_FLOW_HOME → tmp_path (all thread data lands in a temp dir)
+    - DEER_FLOW_PROJECT_ROOT → repository root (shared skills/config assets
+      still resolve correctly when tests run from backend/)
     - Singletons reset so they pick up the new env
     - Title/memory/summarization disabled to avoid extra LLM calls
     - AppConfig built programmatically (avoids config.yaml param-name issues)
     """
     # 1. Filesystem isolation
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "DEER_FLOW_PROJECT_ROOT",
+        str(Path(__file__).resolve().parents[2]),
+    )
     monkeypatch.setattr("deerflow.config.paths._paths", None)
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider._default_sandbox_provider", None)
 
