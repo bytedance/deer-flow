@@ -6,8 +6,9 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus
 
@@ -15,10 +16,6 @@ if TYPE_CHECKING:
     from deerflow.runtime.runs.store.base import RunStore
 
 logger = logging.getLogger(__name__)
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 @dataclass
