@@ -185,8 +185,10 @@ export function MessageGroup({
       >
         {debugStep.secondaryLabels.length > 0 && (
           <ChainOfThoughtSearchResults>
-            {debugStep.secondaryLabels.map((label) => (
-              <ChainOfThoughtSearchResult key={`${debugStep.id}-${label}`}>
+            {debugStep.secondaryLabels.map((label, index) => (
+              <ChainOfThoughtSearchResult
+                key={`${debugStep.id}-${index}-${label}`}
+              >
                 {label}
               </ChainOfThoughtSearchResult>
             ))}

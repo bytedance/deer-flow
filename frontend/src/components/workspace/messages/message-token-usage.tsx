@@ -122,9 +122,9 @@ export function MessageTokenUsageDebugList({
               </div>
               {step.secondaryLabels.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
-                  {step.secondaryLabels.map((label) => (
+                  {step.secondaryLabels.map((label, index) => (
                     <Badge
-                      key={`${step.id}-${label}`}
+                      key={`${step.id}-${index}-${label}`}
                       className="px-1.5 py-0 text-[10px] font-normal"
                       variant="secondary"
                     >

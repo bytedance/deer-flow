@@ -586,7 +586,7 @@ class DeerFlowClient:
         # in both the final ``messages`` chunk and the values snapshot —
         # count it only on whichever arrives first.
         counted_usage_ids: set[str] = set()
-        sent_additional_kwargs_ids: set[str] = set()
+        sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
@@ -615,6 +615,20 @@ class DeerFlowClient:
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
             }
+
+        def _unsent_additional_kwargs(msg_id: str | None, additional_kwargs: dict[str, Any] | None) -> dict[str, Any] | None:
+            if not additional_kwargs:
+                return None
+            if not msg_id:
+                return additional_kwargs
+
+            sent = sent_additional_kwargs_by_id.setdefault(msg_id, {})
+            delta = {key: value for key, value in additional_kwargs.items() if sent.get(key) != value}
+            if not delta:
+                return None
+
+            sent.update(delta)
+            return delta
 
         for item in self._agent.stream(
             state,
@@ -650,21 +664,24 @@ class DeerFlowClient:
                     if text:
                         if msg_id:
                             streamed_ids.add(msg_id)
-                        yield self._ai_text_event(msg_id, text, counted_usage, additional_kwargs)
-                        sent_additional_kwargs = bool(additional_kwargs)
+                        additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_text_event(
+                            msg_id,
+                            text,
+                            counted_usage,
+                            additional_kwargs_delta,
+                        )
+                        sent_additional_kwargs = bool(additional_kwargs_delta)
 
                     if msg_chunk.tool_calls:
                         if msg_id:
                             streamed_ids.add(msg_id)
+                        additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
                         yield self._ai_tool_calls_event(
                             msg_id,
                             msg_chunk.tool_calls,
-                            None if sent_additional_kwargs else additional_kwargs,
+                            additional_kwargs_delta,
                         )
-                        sent_additional_kwargs = sent_additional_kwargs or bool(additional_kwargs)
-
-                    if msg_id and sent_additional_kwargs:
-                        sent_additional_kwargs_ids.add(msg_id)
 
                 elif isinstance(msg_chunk, ToolMessage):
                     if msg_id:
@@ -688,13 +705,13 @@ class DeerFlowClient:
                     if isinstance(msg, AIMessage):
                         _account_usage(msg_id, getattr(msg, "usage_metadata", None))
                         additional_kwargs = self._serialize_additional_kwargs(msg)
-                        if additional_kwargs and msg_id not in sent_additional_kwargs_ids:
+                        additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        if additional_kwargs_delta:
                             # Metadata-only follow-up: ``messages-tuple`` has no
                             # dedicated attribution event, so clients should
                             # merge this empty-content AI event by message id
                             # and ignore it for text rendering.
-                            yield self._ai_text_event(msg_id, "", None, additional_kwargs)
-                            sent_additional_kwargs_ids.add(msg_id)
+                            yield self._ai_text_event(msg_id, "", None, additional_kwargs_delta)
                     continue
 
                 if isinstance(msg, AIMessage):
@@ -703,25 +720,29 @@ class DeerFlowClient:
                     sent_additional_kwargs = False
 
                     if msg.tool_calls:
-                        yield self._ai_tool_calls_event(msg_id, msg.tool_calls, additional_kwargs)
-                        sent_additional_kwargs = bool(additional_kwargs)
+                        additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_tool_calls_event(
+                            msg_id,
+                            msg.tool_calls,
+                            additional_kwargs_delta,
+                        )
+                        sent_additional_kwargs = bool(additional_kwargs_delta)
 
                     text = self._extract_text(msg.content)
                     if text:
+                        additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
                         yield self._ai_text_event(
                             msg_id,
                             text,
                             counted_usage,
-                            None if sent_additional_kwargs else additional_kwargs,
+                            additional_kwargs_delta,
                         )
-                        sent_additional_kwargs = sent_additional_kwargs or bool(additional_kwargs)
-                    elif additional_kwargs and msg_id and msg_id not in sent_additional_kwargs_ids:
+                    elif msg_id:
+                        additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        if not additional_kwargs_delta:
+                            continue
                         # See the metadata-only follow-up convention above.
-                        yield self._ai_text_event(msg_id, "", None, additional_kwargs)
-                        sent_additional_kwargs = True
-
-                    if msg_id and sent_additional_kwargs:
-                        sent_additional_kwargs_ids.add(msg_id)
+                        yield self._ai_text_event(msg_id, "", None, additional_kwargs_delta)
 
                 elif isinstance(msg, ToolMessage):
                     yield self._tool_message_event(msg)
