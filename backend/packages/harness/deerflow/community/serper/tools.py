@@ -47,10 +47,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
     if not api_key:
         if not _api_key_warned:
             _api_key_warned = True
-            logger.warning(
-                "Serper API key is not set. Set SERPER_API_KEY in your environment "
-                "or provide api_key in config.yaml. Sign up at https://serper.dev"
-            )
+            logger.warning("Serper API key is not set. Set SERPER_API_KEY in your environment or provide api_key in config.yaml. Sign up at https://serper.dev")
         return json.dumps(
             {"error": "SERPER_API_KEY is not configured", "query": query},
             ensure_ascii=False,
