@@ -8,9 +8,11 @@
 #   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
 #
 # Key environment variables (set via environment/.env or scripts/deploy.sh):
-#   DEER_FLOW_HOME                   — runtime data dir, default $REPO_ROOT/backend/.deer-flow
+#   DEER_FLOW_PROJECT_ROOT           — project root for relative runtime paths
+#   DEER_FLOW_HOME                   — runtime data dir, default .deer-flow under $DEER_FLOW_PROJECT_ROOT (or cwd)
 #   DEER_FLOW_CONFIG_PATH            — path to config.yaml
 #   DEER_FLOW_EXTENSIONS_CONFIG_PATH — path to extensions_config.json
+#   DEER_FLOW_SKILLS_PATH            — skills dir, default $DEER_FLOW_PROJECT_ROOT/skills
 #   DEER_FLOW_DOCKER_SOCKET          — Docker socket path, default /var/run/docker.sock
 #   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
@@ -93,6 +95,7 @@ services:
     working_dir: /app
     environment:
       - CI=true
+      - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json

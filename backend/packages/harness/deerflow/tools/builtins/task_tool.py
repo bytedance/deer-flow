@@ -4,18 +4,37 @@ import asyncio
 import logging
 import uuid
 from dataclasses import replace
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langgraph.config import get_stream_writer
 from langgraph.typing import ContextT
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.config import get_app_config
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result, request_cancel_background_task
+from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.executor import (
+    SubagentStatus,
+    cleanup_background_task,
+    get_background_task_result,
+    request_cancel_background_task,
+)
+
+if TYPE_CHECKING:
+    from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict):
+        app_config = context.get("app_config")
+        if app_config is not None:
+            return cast("AppConfig", app_config)
+    return None
 
 
 def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
@@ -74,15 +93,18 @@ async def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
         max_turns: Optional maximum number of agent turns. Defaults to subagent's configured max.
     """
-    available_subagent_names = get_available_subagent_names()
+    runtime_app_config = _get_runtime_app_config(runtime)
+    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type)
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
     if config is None:
         available = ", ".join(available_subagent_names)
         return f"Error: Unknown subagent type '{subagent_type}'. Available: {available}"
-    if subagent_type == "bash" and not is_host_bash_allowed():
-        return f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}"
+    if subagent_type == "bash":
+        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        if not host_bash_allowed:
+            return f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}"
 
     # Build config overrides
     overrides: dict = {}
@@ -129,20 +151,34 @@ async def task_tool(
 
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
+    resolved_app_config = runtime_app_config
+    if config.model == "inherit" and parent_model is None and resolved_app_config is None:
+        resolved_app_config = get_app_config()
+    effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    tools = get_available_tools(model_name=parent_model, groups=parent_tool_groups, subagent_enabled=False)
+    available_tools_kwargs = {
+        "model_name": effective_model,
+        "groups": parent_tool_groups,
+        "subagent_enabled": False,
+    }
+    if resolved_app_config is not None:
+        available_tools_kwargs["app_config"] = resolved_app_config
+    tools = get_available_tools(**available_tools_kwargs)
 
     # Create executor
-    executor = SubagentExecutor(
-        config=config,
-        tools=tools,
-        parent_model=parent_model,
-        sandbox_state=sandbox_state,
-        thread_data=thread_data,
-        thread_id=thread_id,
-        trace_id=trace_id,
-    )
+    executor_kwargs = {
+        "config": config,
+        "tools": tools,
+        "parent_model": parent_model,
+        "sandbox_state": sandbox_state,
+        "thread_data": thread_data,
+        "thread_id": thread_id,
+        "trace_id": trace_id,
+    }
+    if resolved_app_config is not None:
+        executor_kwargs["app_config"] = resolved_app_config
+    executor = SubagentExecutor(**executor_kwargs)
 
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability
@@ -177,11 +213,12 @@ async def task_tool(
                 last_status = result.status
 
             # Check for new AI messages and send task_running events
-            current_message_count = len(result.ai_messages)
+            ai_messages = result.ai_messages or []
+            current_message_count = len(ai_messages)
             if current_message_count > last_message_count:
                 # Send task_running event for each new message
                 for i in range(last_message_count, current_message_count):
-                    message = result.ai_messages[i]
+                    message = ai_messages[i]
                     writer(
                         {
                             "type": "task_running",

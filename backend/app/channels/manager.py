@@ -38,6 +38,7 @@ STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
+    "dingtalk": {"supports_streaming": False},
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
@@ -47,6 +48,13 @@ CHANNEL_CAPABILITIES = {
 }
 
 InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
+
+_METADATA_DROP_KEYS = frozenset({"raw_message", "ref_msg"})
+
+
+def _slim_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of *meta* with known-large keys removed."""
+    return {k: v for k, v in meta.items() if k not in _METADATA_DROP_KEYS}
 
 
 INBOUND_FILE_READERS: dict[str, InboundFileReader] = {}
@@ -412,7 +420,13 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
     if not msg.files:
         return []
 
-    from deerflow.uploads.manager import claim_unique_filename, ensure_uploads_dir, normalize_filename
+    from deerflow.uploads.manager import (
+        UnsafeUploadPathError,
+        claim_unique_filename,
+        ensure_uploads_dir,
+        normalize_filename,
+        write_upload_file_no_symlink,
+    )
 
     uploads_dir = ensure_uploads_dir(thread_id)
     seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
@@ -463,7 +477,10 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
 
             dest = uploads_dir / safe_name
             try:
-                dest.write_bytes(data)
+                dest = write_upload_file_no_symlink(uploads_dir, safe_name, data)
+            except UnsafeUploadPathError:
+                logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
+                continue
             except Exception:
                 logger.exception("[Manager] failed to write inbound file: %s", dest)
                 continue
@@ -543,6 +560,13 @@ class ChannelManager:
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
+        from .service import get_channel_service
+
+        service = get_channel_service()
+        if service:
+            channel = service.get_channel(channel_name)
+            if channel is not None:
+                return channel.supports_streaming
         return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
 
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -772,6 +796,7 @@ class ChannelManager:
             artifacts=artifacts,
             attachments=attachments,
             thread_ts=msg.thread_ts,
+            metadata=_slim_metadata(msg.metadata),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
@@ -833,6 +858,7 @@ class ChannelManager:
                         text=latest_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
+                        metadata=_slim_metadata(msg.metadata),
                     )
                 )
                 last_published_text = latest_text
@@ -877,6 +903,7 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
+                    metadata=_slim_metadata(msg.metadata),
                 )
             )
 
@@ -935,6 +962,7 @@ class ChannelManager:
             thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=reply,
             thread_ts=msg.thread_ts,
+            metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
 
@@ -968,5 +996,6 @@ class ChannelManager:
             thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
+            metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
