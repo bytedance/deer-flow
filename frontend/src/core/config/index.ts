@@ -19,6 +19,10 @@ export function getBackendBaseURL() {
 }
 
 export function getLangGraphBaseURL(isMock?: boolean) {
+  console.log(
+    "env.NEXT_PUBLIC_LANGGRAPH_BASE_URL",
+    env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,
+  );
   if (env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
     return new URL(
       env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,

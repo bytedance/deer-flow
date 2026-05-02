@@ -2,8 +2,11 @@
 #
 # Guidelines:
 # - Copy this file to `config.yaml` and customize it for your environment
-# - The default path of this configuration file is `config.yaml` in the current working directory.
-#   However you can change it using the `DEER_FLOW_CONFIG_PATH` environment variable.
+# - The default path of this configuration file is `config.yaml` in the project root.
+#   You can set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or use
+#   `DEER_FLOW_CONFIG_PATH` to point at a specific config file.
+# - Runtime state defaults to `.deer-flow` under the project root. Override it
+#   with `DEER_FLOW_HOME` when you need a different writable data directory.
 # - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 
@@ -501,6 +504,11 @@ tool_search:
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
 uploads:
+  # Application-level upload limits enforced by the gateway and exposed to the
+  # frontend before file selection.
+  max_files: 10
+  max_file_size: 52428800    # 50 MiB
+  max_total_size: 104857600  # 100 MiB
   # Automatic Office/PDF conversion runs on the backend host before sandbox
   # isolation applies. Keep this disabled unless uploads come from a fully
   # trusted source and you intentionally accept host-side parser risk.
@@ -673,7 +681,8 @@ sandbox:
 
 skills:
   # Path to skills directory on the host (relative to project root or absolute)
-  # Default: ../skills (relative to backend directory)
+  # Default: skills under the project root
+  # Override with DEER_FLOW_SKILLS_PATH when this field is omitted.
   # Uncomment to customize:
   # path: /absolute/path/to/custom/skills
 
@@ -788,41 +797,82 @@ agents_api:
 # ============================================================================
 # Allow the agent to autonomously create and improve skills in skills/custom/.
 skill_evolution:
-  enabled: false                # Set to true to allow agent-managed writes under skills/custom
-  moderation_model_name: null  # Model for LLM-based security scanning (null = use default model)
+  enabled: false # Set to true to allow agent-managed writes under skills/custom
+  moderation_model_name: null # Model for LLM-based security scanning (null = use default model)
 
 # ============================================================================
-# Checkpointer Configuration
+# Checkpointer Configuration (DEPRECATED — use `database` instead)
 # ============================================================================
-# Configure state persistence for the embedded DeerFlowClient.
-# The LangGraph Server manages its own state persistence separately
-# via the server infrastructure (this setting does not affect it).
+# Legacy standalone checkpointer config. Kept for backward compatibility.
+# Prefer the unified `database` section below, which drives BOTH the
+# LangGraph checkpointer AND DeerFlow application data (runs, feedback,
+# events) from a single backend setting.
 #
-# When configured, DeerFlowClient will automatically use this checkpointer,
-# enabling multi-turn conversations to persist across process restarts.
+# If both `checkpointer` and `database` are present, `checkpointer`
+# takes precedence for LangGraph state persistence only.
 #
-# Supported types:
-#   memory   - In-process only. State is lost when the process exits. (default)
-#   sqlite   - File-based SQLite persistence. Survives restarts.
-#              Requires: uv add langgraph-checkpoint-sqlite
-#   postgres - PostgreSQL persistence. Suitable for multi-process deployments.
-#              Requires: uv add langgraph-checkpoint-postgres psycopg[binary] psycopg-pool
-#
-# Examples:
-#
-# In-memory (default when omitted — no persistence):
 # checkpointer:
-#   type: memory
+#   type: sqlite
+#   connection_string: checkpoints.db
 #
-# SQLite (file-based, single-process):
-checkpointer:
-  type: sqlite
-  connection_string: checkpoints.db
-#
-# PostgreSQL (multi-process, production):
 # checkpointer:
 #   type: postgres
 #   connection_string: postgresql://user:password@localhost:5432/deerflow
+
+# ============================================================================
+# Database
+# ============================================================================
+# Unified storage backend for LangGraph checkpointer and DeerFlow
+# application data (runs, threads metadata, feedback, etc.).
+#
+# backend: memory  -- No persistence, data lost on restart
+# backend: sqlite  -- Single-node deployment, files in sqlite_dir
+# backend: postgres -- Production multi-node deployment
+#
+# If this section is omitted or empty in config.yaml, DeerFlow uses:
+#   backend: sqlite
+#   sqlite_dir: .deer-flow/data
+#
+# SQLite mode uses a single deerflow.db file with WAL journal mode
+# for both checkpointer and application data.
+#
+# Postgres mode: put your connection URL in .env as DATABASE_URL,
+# then reference it here with $DATABASE_URL.
+# Install the driver first:
+#   Local:  uv sync --extra postgres
+#   Docker: UV_EXTRAS=postgres docker compose build
+#
+# NOTE: When both `checkpointer` and `database` are configured,
+# `checkpointer` takes precedence for LangGraph state persistence.
+# If you use `database`, you can remove the `checkpointer` section.
+# database:
+#   backend: sqlite
+#   sqlite_dir: .deer-flow/data
+#
+# database:
+#   backend: postgres
+#   postgres_url: $DATABASE_URL
+database:
+  backend: sqlite
+  sqlite_dir: .deer-flow/data
+
+# ============================================================================
+# Run Events Configuration
+# ============================================================================
+# Storage backend for run events (messages + execution traces).
+#
+# backend: memory  -- No persistence, data lost on restart (default)
+# backend: db      -- SQL database via ORM, full query capability (production)
+# backend: jsonl   -- Append-only JSONL files (lightweight single-node persistence)
+#
+# run_events:
+#   backend: memory
+#   max_trace_content: 10240    # Truncation threshold for trace content (db backend, bytes)
+#   track_token_usage: true     # Accumulate token counts to RunRow
+run_events:
+  backend: memory
+  max_trace_content: 10240
+  track_token_usage: true
 
 # ============================================================================
 # IM Channels Configuration
@@ -831,18 +881,18 @@ checkpointer:
 # All channels use outbound connections (WebSocket or polling) — no public IP required.
 
 # channels:
-#   # LangGraph Server URL for thread/message management (default: http://localhost:2024)
+#   # LangGraph-compatible Gateway API base URL for thread/message management (default: http://localhost:8001/api)
 #   # For Docker deployments, use the Docker service name instead of localhost:
-#   #   langgraph_url: http://langgraph:2024
+#   #   langgraph_url: http://gateway:8001/api
 #   #   gateway_url: http://gateway:8001
-#   langgraph_url: http://localhost:2024
+#   langgraph_url: http://localhost:8001/api
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
 #   #
 #   # Docker Compose note:
 #   # If channels run inside the gateway container, use container DNS names instead
 #   # of localhost, for example:
-#   # langgraph_url: http://langgraph:2024
+#   # langgraph_url: http://gateway:8001/api
 #   # gateway_url: http://gateway:8001
 #   # You can also set DEER_FLOW_CHANNELS_LANGGRAPH_URL / DEER_FLOW_CHANNELS_GATEWAY_URL.
 #
@@ -923,6 +973,13 @@ checkpointer:
 #     enabled: false
 #     bot_id: $WECOM_BOT_ID
 #     bot_secret: $WECOM_BOT_SECRET
+#
+#   dingtalk:
+#     enabled: false
+#     client_id: $DINGTALK_CLIENT_ID
+#     client_secret: $DINGTALK_CLIENT_SECRET
+#     allowed_users: []               # empty = allow all
+#     card_template_id: ""            # Optional: AI Card template ID for streaming updates
 
 # ============================================================================
 # Guardrails Configuration

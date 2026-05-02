@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -63,3 +63,28 @@ def test_coerce_iso_rejects_bool() -> None:
     # ``bool`` is a subclass of ``int`` — must not be treated as epoch 0/1.
     assert coerce_iso(True) == "True"
     assert coerce_iso(False) == "False"
+
+
+def test_coerce_iso_handles_tz_aware_datetime() -> None:
+    # str(datetime) would emit a space separator; coerce_iso must use ``T``.
+    dt = datetime(2026, 4, 27, 1, 13, 30, 411327, tzinfo=UTC)
+    out = coerce_iso(dt)
+    assert out == "2026-04-27T01:13:30.411327+00:00"
+    assert "T" in out and " " not in out
+
+
+def test_coerce_iso_handles_tz_naive_datetime_as_utc() -> None:
+    dt = datetime(2026, 4, 27, 1, 13, 30, 411327)
+    out = coerce_iso(dt)
+    assert out == "2026-04-27T01:13:30.411327+00:00"
+    parsed = datetime.fromisoformat(out)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+
+
+def test_coerce_iso_normalises_non_utc_datetime_to_utc() -> None:
+    # +08:00 wall-clock 09:13 == UTC 01:13.
+    plus_eight = timezone(timedelta(hours=8))
+    dt = datetime(2026, 4, 27, 9, 13, 30, 411327, tzinfo=plus_eight)
+    out = coerce_iso(dt)
+    assert out == "2026-04-27T01:13:30.411327+00:00"

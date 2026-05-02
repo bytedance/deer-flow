@@ -57,6 +57,7 @@ def test_get_thread_mounts_includes_acp_workspace(tmp_path, monkeypatch):
     """_get_thread_mounts must include /mnt/acp-workspace (read-only) for docker sandbox."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
 
     mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-3")
 
@@ -95,6 +96,7 @@ def test_get_thread_mounts_preserves_windows_host_path_style(tmp_path, monkeypat
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setenv("DEER_FLOW_HOST_BASE_DIR", r"C:\Users\demo\deer-flow\backend\.deer-flow")
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
 
     mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-10")
 
