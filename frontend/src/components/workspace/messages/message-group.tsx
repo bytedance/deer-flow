@@ -374,10 +374,25 @@ function ToolCall({
   } else if (name === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
-    if (!description) {
-      return t.toolCalls.executeCommand;
-    }
     const command: string | undefined = (args as { command: string })?.command;
+    if (!description) {
+      return (
+        <ChainOfThoughtStep
+          key={id}
+          label={t.toolCalls.executeCommand}
+          icon={SquareTerminalIcon}
+        >
+          {command && (
+            <CodeBlock
+              className="mx-0 cursor-pointer border-none px-0"
+              showLineNumbers={false}
+              language="bash"
+              code={command}
+            />
+          )}
+        </ChainOfThoughtStep>
+      );
+    }
     return (
       <ChainOfThoughtStep
         key={id}
@@ -455,16 +470,48 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         steps.push(step);
       }
-      for (const tool_call of message.tool_calls ?? []) {
+      const toolCalls = Array.isArray(message.tool_calls)
+        ? message.tool_calls
+        : [];
+      for (const tool_call of toolCalls) {
+        if (!tool_call || typeof tool_call !== "object") {
+          continue;
+        }
+        if (typeof tool_call.name !== "string") {
+          continue;
+        }
         if (tool_call.name === "task") {
           continue;
         }
+        const normalizeToolCallArgs = (
+          value: unknown,
+        ): Record<string, unknown> => {
+          if (
+            value &&
+            typeof value === "object" &&
+            !Array.isArray(value)
+          ) {
+            return value as Record<string, unknown>;
+          }
+          return {};
+        };
+        const rawArgs = tool_call.args;
+        const parsedArgs: Record<string, unknown> =
+          typeof rawArgs === "string"
+            ? (() => {
+                try {
+                  return normalizeToolCallArgs(JSON.parse(rawArgs));
+                } catch {
+                  return {};
+                }
+              })()
+            : normalizeToolCallArgs(rawArgs);
         const step: CoTToolCallStep = {
           id: tool_call.id,
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
-          args: tool_call.args,
+          args: parsedArgs,
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
