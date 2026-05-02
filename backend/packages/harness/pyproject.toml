@@ -33,11 +33,14 @@ dependencies = [
     "langchain-google-genai>=4.2.1",
     "langgraph-checkpoint-sqlite>=3.0.3",
     "langgraph-sdk>=0.1.51",
+    "langchain-text-splitters>=0.3.0",
 ]
 
 [project.optional-dependencies]
 ollama = ["langchain-ollama>=0.3.0"]
 pymupdf = ["pymupdf4llm>=0.0.17"]
+rag = ["chromadb>=0.5.0"]
+pgvector = ["psycopg[binary]>=3.2.0", "sqlalchemy>=2.0.0", "pgvector>=0.3.0"]
 
 [build-system]
 requires = ["hatchling"]

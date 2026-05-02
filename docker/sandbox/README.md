@@ -17,7 +17,7 @@ From the repository root:
 docker build \
   -f docker/sandbox/Dockerfile \
   -t deer-flow-sandbox-features-tool:latest \
-  .
+  docker/sandbox
 ```
 
 If you need a custom Python package mirror:
@@ -27,7 +27,7 @@ docker build \
   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
   -f docker/sandbox/Dockerfile \
   -t deer-flow-sandbox-features-tool:latest \
-  .
+  docker/sandbox
 ```
 
 ## Use

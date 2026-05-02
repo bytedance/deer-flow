@@ -210,7 +210,7 @@ build_custom_sandbox_image() {
     docker build \
         -f "$DOCKER_DIR/sandbox/Dockerfile" \
         -t "$sandbox_image" \
-        "$REPO_ROOT"
+        "$DOCKER_DIR/sandbox"
 }
 
 ensure_sandbox_image_ready() {

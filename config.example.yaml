@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 7
+config_version: 8
 
 # ============================================================================
 # Logging
@@ -336,6 +336,7 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  - name: rag
 
 # ============================================================================
 # Tools Configuration
@@ -459,6 +460,11 @@ tools:
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
+
+  # RAG knowledge base search tool
+  # - name: search_knowledge_base
+  #   group: rag
+  #   use: deerflow.rag.tools:search_knowledge_base_tool
 
 # ============================================================================
 # Tool Search Configuration (Deferred Tool Loading)
@@ -740,6 +746,35 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+
+# ============================================================================
+# RAG Configuration (Embedding + Vector Store)
+# ============================================================================
+# Retrieval-Augmented Generation pipeline for semantic document search.
+# When enabled, documents can be ingested into a vector store and retrieved
+# via the search_knowledge_base tool or auto-injected via middleware.
+#
+# Dependencies:
+#   chroma backend:  uv add chromadb
+#   pgvector backend: uv add psycopg[binary] sqlalchemy pgvector
+#   text splitting:  langchain-text-splitters (installed by default)
+rag:
+  enabled: false
+  embedding_model: openai:text-embedding-3-small  # provider:model format
+  embedding_api_key: $OPENAI_API_KEY              # $ENV_VAR or literal value
+  vector_store_backend: chroma                    # 'chroma' or 'pgvector'
+  # chroma_persist_dir: ""                        # Empty = auto-resolve to tenant base dir
+  # pgvector_connection_string: ""                # PostgreSQL connection string for pgvector
+  chunk_size: 1000                                # Target chunk size in characters
+  chunk_overlap: 200                              # Overlap between consecutive chunks
+  chunk_strategy: recursive                       # 'recursive', 'markdown', or 'semantic'
+  retrieval_top_k: 5                              # Chunks to retrieve per query
+  score_threshold: 0.0                            # Minimum similarity threshold (0 = disabled)
+  reranker_enabled: false                         # Cross-encoder reranking
+  injection_enabled: true                         # Auto-inject chunks via middleware
+  tool_enabled: true                              # Register search_knowledge_base tool
+  max_injection_chunks: 3                         # Max chunks to inject via middleware
+  max_injection_tokens: 2000                      # Max tokens for chunk injection
 
 # ============================================================================
 # Custom Agent Management API

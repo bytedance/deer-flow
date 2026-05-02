@@ -65,7 +65,7 @@ services:
   # LANGGRAPH_UPSTREAM and LANGGRAPH_REWRITE control gateway vs standard
   # routing (processed by envsubst at container start).
   nginx:
-    image: nginx:alpine
+    image: nginx:latest
     container_name: deer-flow-nginx
     ports:
       - "2026:2026"

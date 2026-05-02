@@ -122,7 +122,7 @@ build_custom_sandbox_image() {
     docker build \
         -f "$DOCKER_DIR/sandbox/Dockerfile" \
         -t "$sandbox_image" \
-        "$PROJECT_ROOT"
+        "$DOCKER_DIR/sandbox"
 }
 
 ensure_sandbox_image_ready() {
@@ -210,7 +210,7 @@ init() {
 start() {
     local sandbox_mode
     local services
-    local gateway_mode=false
+    local gateway_mode=true
 
     # Check for --gateway flag
     for arg in "$@"; do
