@@ -21,13 +21,40 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_openai.chat_models.base import _create_usage_metadata_responses
 
 from deerflow.models.credential_loader import CodexCliCredential, load_codex_cli_credential
 
 logger = logging.getLogger(__name__)
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+
+def _build_usage_metadata(oai_usage: dict) -> dict:
+    """Convert Codex/Responses API usage dict to LangChain usage_metadata format.
+
+    Maps OpenAI Responses API token usage fields to the dict structure that
+    LangChain AIMessage.usage_metadata expects. This avoids depending on
+    langchain_openai private helpers like ``_create_usage_metadata_responses``.
+    """
+    input_tokens = oai_usage.get("input_tokens", 0)
+    output_tokens = oai_usage.get("output_tokens", 0)
+    total_tokens = oai_usage.get("total_tokens", input_tokens + output_tokens)
+    metadata: dict = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+    input_details = oai_usage.get("input_tokens_details") or {}
+    output_details = oai_usage.get("output_tokens_details") or {}
+    cache_read = input_details.get("cached_tokens")
+    if cache_read is not None:
+        metadata["input_token_details"] = {"cache_read": cache_read}
+    reasoning = output_details.get("reasoning_tokens")
+    if reasoning is not None:
+        metadata["output_token_details"] = {"reasoning": reasoning}
+    return metadata
+
+
 MAX_RETRIES = 3
 
 
@@ -347,7 +374,7 @@ class CodexChatModel(BaseChatModel):
                 )
 
         usage = response.get("usage", {})
-        usage_metadata = _create_usage_metadata_responses(usage) if usage else None
+        usage_metadata = _build_usage_metadata(usage) if usage else None
         additional_kwargs = {}
         if reasoning_content:
             additional_kwargs["reasoning_content"] = reasoning_content
