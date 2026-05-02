@@ -9,7 +9,9 @@ export const TENANT_ID_PATTERN = /^[A-Za-z0-9-]+$/;
 
 export function validateTenantId(id: string): string {
   if (!TENANT_ID_PATTERN.test(id) || id.length === 0) {
-    return DEFAULT_TENANT_ID;
+    throw new Error(
+      `Invalid tenant ID "${id}": must contain only letters, digits, and hyphens.`,
+    );
   }
   return id;
 }

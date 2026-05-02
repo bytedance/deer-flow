@@ -275,6 +275,8 @@ def set_gateway_store(store: BaseStore | None) -> None:
     _gateway_store = store
     if store is not None:
         _store_factory = lambda: _gateway_store
+    else:
+        _store_factory = None
 
 
 def set_memory_storage(storage: MemoryStorage) -> None:

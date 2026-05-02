@@ -23,14 +23,17 @@ function resolveFromURL(): string | null {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get(TENANT_SEARCH_PARAM);
   if (!raw) return null;
-  const cleaned = validateTenantId(raw);
-  // Persist URL-sourced tenant to localStorage so it survives navigation
   try {
-    localStorage.setItem(TENANT_STORAGE_KEY, cleaned);
+    const cleaned = validateTenantId(raw);
+    try {
+      localStorage.setItem(TENANT_STORAGE_KEY, cleaned);
+    } catch {
+      // localStorage unavailable
+    }
+    return cleaned;
   } catch {
-    // localStorage unavailable
+    return null;
   }
-  return cleaned;
 }
 
 function resolveFromStorage(): string | null {
@@ -41,7 +44,7 @@ function resolveFromStorage(): string | null {
       return validateTenantId(stored);
     }
   } catch {
-    // localStorage unavailable
+    // localStorage unavailable or invalid stored value
   }
   return null;
 }
