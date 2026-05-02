@@ -39,6 +39,7 @@ from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
+from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id, reset_tenant_id, set_current_tenant_id, validate_tenant_id
 from deerflow.models import create_chat_model
 from deerflow.skills.installer import install_skill_from_archive
 from deerflow.uploads.manager import (
@@ -122,6 +123,7 @@ class DeerFlowClient:
         agent_name: str | None = None,
         available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
+        tenant_id: str = _DEFAULT_TENANT_ID,
     ):
         """Initialize the client.
 
@@ -139,6 +141,8 @@ class DeerFlowClient:
             agent_name: Name of the agent to use.
             available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
+            tenant_id: Tenant ID for multi-tenant isolation. Defaults to ``"default"``
+                (backward-compatible single-tenant behaviour).
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -146,6 +150,9 @@ class DeerFlowClient:
 
         if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
+
+        validate_tenant_id(tenant_id)
+        self._tenant_id = tenant_id
 
         self._checkpointer = checkpointer
         self._model_name = model_name
@@ -200,6 +207,7 @@ class DeerFlowClient:
             "thinking_enabled": overrides.get("thinking_enabled", self._thinking_enabled),
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
             "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
+            "tenant_id": self._tenant_id,
         }
         return RunnableConfig(
             configurable=configurable,
@@ -215,6 +223,7 @@ class DeerFlowClient:
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
             self._agent_name,
+            self._tenant_id,
             frozenset(self._available_skills) if self._available_skills is not None else None,
         )
 
@@ -547,6 +556,19 @@ class DeerFlowClient:
         if thread_id is None:
             thread_id = str(uuid.uuid4())
 
+        token = set_current_tenant_id(self._tenant_id)
+        try:
+            yield from self._stream_impl(message, thread_id, **kwargs)
+        finally:
+            reset_tenant_id(token)
+
+    def _stream_impl(
+        self,
+        message: str,
+        thread_id: str,
+        **kwargs,
+    ) -> Generator[StreamEvent, None, None]:
+        """Internal streaming implementation — tenant context already set."""
         config = self._get_runnable_config(thread_id, **kwargs)
         self._ensure_agent(config)
 

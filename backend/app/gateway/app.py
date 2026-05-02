@@ -23,6 +23,7 @@ from app.gateway.routers import (
     uploads,
 )
 from deerflow.config.app_config import get_app_config
+from deerflow.config.tenant import reset_tenant_id, set_current_tenant_id, validate_tenant_id
 
 # Configure logging
 logging.basicConfig(
@@ -178,6 +179,27 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     )
 
     # CORS is handled by nginx - no need for FastAPI middleware
+
+    @app.middleware("http")
+    async def tenant_middleware(request, call_next):
+        """Extract and set the tenant ID from the X-DeerFlow-Tenant header.
+
+        When the header is absent, the tenant defaults to ``"default"``
+        (backward-compatible single-tenant behaviour).
+        """
+        from fastapi import HTTPException
+
+        tenant_id = request.headers.get("X-DeerFlow-Tenant", "default")
+        try:
+            validate_tenant_id(tenant_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        token = set_current_tenant_id(tenant_id)
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            reset_tenant_id(token)
 
     # Include routers
     # Models API is mounted at /api/models

@@ -26,6 +26,7 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
             yield
     """
     from deerflow.agents.checkpointer.async_provider import make_checkpointer
+    from deerflow.agents.memory.storage import set_gateway_store, set_memory_storage
     from deerflow.runtime import make_store, make_stream_bridge
 
     async with AsyncExitStack() as stack:
@@ -33,7 +34,13 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer())
         app.state.store = await stack.enter_async_context(make_store())
         app.state.run_manager = RunManager()
+
+        # Wire the Store into memory storage so memory data shares the same
+        # persistence backend and tenant isolation as threads.
+        set_gateway_store(app.state.store)
         yield
+        set_gateway_store(None)
+        set_memory_storage(None)
 
 
 # ---------------------------------------------------------------------------

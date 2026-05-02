@@ -3,6 +3,8 @@ import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
+from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id
+
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
@@ -54,26 +56,39 @@ class Paths:
     """
     Centralized path configuration for DeerFlow application data.
 
-    Directory layout (host side):
+    Directory layout (host side, tenant-aware):
+
+    Default tenant (``"default"`` — backward-compatible single-tenant layout)::
+
         {base_dir}/
         ├── memory.json
-        ├── USER.md          <-- global user profile (injected into all agents)
+        ├── USER.md
         ├── agents/
         │   └── {agent_name}/
         │       ├── config.yaml
-        │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
+        │       ├── SOUL.md
         │       └── memory.json
         └── threads/
             └── {thread_id}/
-                └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
-                    ├── workspace/     <-- /mnt/user-data/workspace/
-                    ├── uploads/       <-- /mnt/user-data/uploads/
-                    └── outputs/       <-- /mnt/user-data/outputs/
+                └── user-data/
+                    ├── workspace/
+                    ├── uploads/
+                    └── outputs/
+
+    Named tenants (``tenant_id != "default"``)::
+
+        {base_dir}/
+        └── tenants/
+            └── {tenant_id}/
+                ├── memory.json
+                ├── USER.md
+                ├── agents/{agent_name}/...
+                └── threads/{thread_id}/...
 
     BaseDir resolution (in priority order):
-        1. Constructor argument `base_dir`
-        2. DEER_FLOW_HOME environment variable
-        3. Repo-local fallback derived from this module path: `{backend_dir}/.deer-flow`
+        1. Constructor argument ``base_dir``
+        2. ``DEER_FLOW_HOME`` environment variable
+        3. Repo-local fallback derived from this module path: ``{backend_dir}/.deer-flow``
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
@@ -112,19 +127,32 @@ class Paths:
         return _default_local_base_dir()
 
     @property
+    def tenant_base_dir(self) -> Path:
+        """Root directory for the current tenant's data.
+
+        When the tenant is ``"default"``, returns :attr:`base_dir` unchanged
+        (backward-compatible single-tenant layout).  For any other tenant,
+        returns ``{base_dir}/tenants/{tenant_id}/``.
+        """
+        tid = get_current_tenant_id()
+        if tid == _DEFAULT_TENANT_ID:
+            return self.base_dir
+        return self.base_dir / "tenants" / tid
+
+    @property
     def memory_file(self) -> Path:
-        """Path to the persisted memory file: `{base_dir}/memory.json`."""
-        return self.base_dir / "memory.json"
+        """Path to the persisted memory file: ``{tenant_base_dir}/memory.json``."""
+        return self.tenant_base_dir / "memory.json"
 
     @property
     def user_md_file(self) -> Path:
-        """Path to the global user profile file: `{base_dir}/USER.md`."""
-        return self.base_dir / "USER.md"
+        """Path to the global user profile file: ``{tenant_base_dir}/USER.md``."""
+        return self.tenant_base_dir / "USER.md"
 
     @property
     def agents_dir(self) -> Path:
-        """Root directory for all custom agents: `{base_dir}/agents/`."""
-        return self.base_dir / "agents"
+        """Root directory for all custom agents: ``{tenant_base_dir}/agents/``."""
+        return self.tenant_base_dir / "agents"
 
     def agent_dir(self, name: str) -> Path:
         """Directory for a specific agent: `{base_dir}/agents/{name}/`."""
@@ -136,16 +164,16 @@ class Paths:
 
     def thread_dir(self, thread_id: str) -> Path:
         """
-        Host path for a thread's data: `{base_dir}/threads/{thread_id}/`
+        Host path for a thread's data: ``{tenant_base_dir}/threads/{thread_id}/``
 
-        This directory contains a `user-data/` subdirectory that is mounted
-        as `/mnt/user-data/` inside the sandbox.
+        This directory contains a ``user-data/`` subdirectory that is mounted
+        as ``/mnt/user-data/`` inside the sandbox.
 
         Raises:
-            ValueError: If `thread_id` contains unsafe characters (path separators
-                        or `..`) that could cause directory traversal.
+            ValueError: If ``thread_id`` contains unsafe characters (path separators
+                        or ``..``) that could cause directory traversal.
         """
-        return self.base_dir / "threads" / _validate_thread_id(thread_id)
+        return self.tenant_base_dir / "threads" / _validate_thread_id(thread_id)
 
     def sandbox_work_dir(self, thread_id: str) -> Path:
         """
@@ -192,7 +220,10 @@ class Paths:
 
     def host_thread_dir(self, thread_id: str) -> str:
         """Host path for a thread directory, preserving Windows path syntax."""
-        return _join_host_path(self._host_base_dir_str(), "threads", _validate_thread_id(thread_id))
+        tid = get_current_tenant_id()
+        if tid == _DEFAULT_TENANT_ID:
+            return _join_host_path(self._host_base_dir_str(), "threads", _validate_thread_id(thread_id))
+        return _join_host_path(self._host_base_dir_str(), "tenants", tid, "threads", _validate_thread_id(thread_id))
 
     def host_sandbox_user_data_dir(self, thread_id: str) -> str:
         """Host path for a thread's user-data root."""

@@ -30,6 +30,7 @@ from deerflow.runtime import (
     UnsupportedStrategyError,
     run_agent,
 )
+from deerflow.config.tenant import get_current_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,12 @@ def build_run_config(
             if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
                 raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
             config["configurable"]["agent_name"] = normalized
+
+    # Inject the current tenant ID so downstream code (paths, memory, etc.)
+    # resolves tenant-scoped resources without reading the ContextVar directly.
+    if "configurable" in config:
+        config["configurable"].setdefault("tenant_id", get_current_tenant_id())
+
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config
@@ -300,6 +307,7 @@ async def start_run(
             "max_concurrent_subagents",
             "agent_name",
             "is_bootstrap",
+            "tenant_id",
         }
         configurable = config.setdefault("configurable", {})
         for key in _CONTEXT_CONFIGURABLE_KEYS:

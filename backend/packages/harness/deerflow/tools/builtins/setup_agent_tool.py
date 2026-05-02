@@ -27,7 +27,10 @@ def setup_agent(
         skills: Optional list of skill names this agent should use. None means use all enabled skills, empty list means no skills.
     """
 
-    agent_name: str | None = runtime.context.get("agent_name") if runtime.context else None
+    agent_name: str | None = None
+    if runtime.config:
+        cfg = runtime.config.get("configurable", {})
+        agent_name = cfg.get("agent_name") if isinstance(cfg, dict) else None
     agent_dir = None
     is_new_dir = False
 

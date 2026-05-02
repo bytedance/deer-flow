@@ -1,15 +1,16 @@
+import { fetchGateway } from "@/core/api";
 import { getBackendBaseURL } from "@/core/config";
 
 import type { Skill } from "./type";
 
 export async function loadSkills() {
-  const skills = await fetch(`${getBackendBaseURL()}/api/skills`);
+  const skills = await fetchGateway(`${getBackendBaseURL()}/api/skills`);
   const json = await skills.json();
   return json.skills as Skill[];
 }
 
 export async function enableSkill(skillName: string, enabled: boolean) {
-  const response = await fetch(
+  const response = await fetchGateway(
     `${getBackendBaseURL()}/api/skills/${skillName}`,
     {
       method: "PUT",
@@ -38,7 +39,7 @@ export interface InstallSkillResponse {
 export async function installSkill(
   request: InstallSkillRequest,
 ): Promise<InstallSkillResponse> {
-  const response = await fetch(`${getBackendBaseURL()}/api/skills/install`, {
+  const response = await fetchGateway(`${getBackendBaseURL()}/api/skills/install`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

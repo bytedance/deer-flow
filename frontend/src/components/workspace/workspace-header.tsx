@@ -12,6 +12,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useI18n } from "@/core/i18n/hooks";
+import { useTenant } from "@/core/tenant";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,8 @@ export function WorkspaceHeader({ className }: { className?: string }) {
   const { t } = useI18n();
   const { state } = useSidebar();
   const pathname = usePathname();
+  const [tenantId] = useTenant();
+  const isNonDefaultTenant = tenantId !== "default";
   return (
     <>
       <div
@@ -44,6 +47,11 @@ export function WorkspaceHeader({ className }: { className?: string }) {
               <div className="text-primary ml-2 cursor-default font-serif">
                 DeerFlow
               </div>
+            )}
+            {isNonDefaultTenant && (
+              <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                {tenantId}
+              </span>
             )}
             <SidebarTrigger />
           </div>

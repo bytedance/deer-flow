@@ -37,6 +37,26 @@ _executor_mock.get_background_task_result = MagicMock()
 sys.modules["deerflow.subagents.executor"] = _executor_mock
 
 
+@pytest.fixture(autouse=True)
+def _reset_tenant_context():
+    """Reset the tenant ContextVar to 'default' before every test.
+
+    Prevents tenant ID leakage between tests when a previous test (or the
+    DeerFlowClient.stream() method) calls set_current_tenant_id() without
+    a corresponding reset.
+    """
+    import deerflow.config.tenant as tenant_mod
+
+    # Bypass set_current_tenant_id() to force-reset without validation —
+    # necessary because a prior test may have left the ContextVar pointing
+    # at a now-invalid value.
+    token = tenant_mod._current_tenant_id.set(tenant_mod._DEFAULT_TENANT_ID)
+    try:
+        yield
+    finally:
+        tenant_mod._current_tenant_id.reset(token)
+
+
 @pytest.fixture()
 def provisioner_module():
     """Load docker/provisioner/app.py as an importable test module.

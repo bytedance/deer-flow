@@ -22,14 +22,18 @@ from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_checkpointer, get_store
 from deerflow.config.paths import Paths, get_paths
+from deerflow.config.tenant import get_current_tenant_id
 from deerflow.runtime import serialize_channel_values
 
 # ---------------------------------------------------------------------------
 # Store namespace
 # ---------------------------------------------------------------------------
 
-THREADS_NS: tuple[str, ...] = ("threads",)
-"""Namespace used by the Store for thread metadata records."""
+
+def _threads_ns() -> tuple[str, ...]:
+    """Return the Store namespace scoped to the current tenant."""
+    return ("threads", get_current_tenant_id())
+
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
@@ -147,13 +151,13 @@ def _delete_thread_data(thread_id: str, paths: Paths | None = None) -> ThreadDel
 
 async def _store_get(store, thread_id: str) -> dict | None:
     """Fetch a thread record from the Store; returns ``None`` if absent."""
-    item = await store.aget(THREADS_NS, thread_id)
+    item = await store.aget(_threads_ns(), thread_id)
     return item.value if item is not None else None
 
 
 async def _store_put(store, record: dict) -> None:
     """Write a thread record to the Store."""
-    await store.aput(THREADS_NS, record["thread_id"], record)
+    await store.aput(_threads_ns(), record["thread_id"], record)
 
 
 async def _store_upsert(store, thread_id: str, *, metadata: dict | None = None, values: dict | None = None) -> None:
@@ -228,7 +232,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     store = get_store(request)
     if store is not None:
         try:
-            await store.adelete(THREADS_NS, thread_id)
+            await store.adelete(_threads_ns(), thread_id)
         except Exception:
             logger.debug("Could not delete store record for thread %s (not critical)", thread_id)
 
@@ -341,7 +345,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
 
     if store is not None:
         try:
-            items = await store.asearch(THREADS_NS, limit=10_000)
+            items = await store.asearch(_threads_ns(), limit=10_000)
         except Exception:
             logger.warning("Store search failed — falling back to checkpointer only", exc_info=True)
             items = []
@@ -361,7 +365,9 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     # Phase 2: Checkpointer supplement
     # Discovers threads not yet in the Store (e.g. created by LangGraph
     # Server) and lazily migrates them so future searches skip this phase.
+    # Only includes threads belonging to the current tenant.
     # -----------------------------------------------------------------------
+    current_tenant = get_current_tenant_id()
     try:
         async for checkpoint_tuple in checkpointer.alist(None):
             cfg = getattr(checkpoint_tuple, "config", {})
@@ -374,6 +380,9 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
                 continue
 
             ckpt_meta = getattr(checkpoint_tuple, "metadata", {}) or {}
+            # Only include threads belonging to the current tenant
+            if ckpt_meta.get("tenant_id", "default") != current_tenant:
+                continue
             # Strip LangGraph internal keys from the user-visible metadata dict
             user_meta = {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")}
 

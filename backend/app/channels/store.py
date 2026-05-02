@@ -37,7 +37,7 @@ class ChannelStore:
         if path is None:
             from deerflow.config.paths import get_paths
 
-            path = Path(get_paths().base_dir) / "channels" / "store.json"
+            path = get_paths().tenant_base_dir / "channels" / "store.json"
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._data: dict[str, dict[str, Any]] = self._load()

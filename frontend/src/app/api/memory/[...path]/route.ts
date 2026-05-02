@@ -13,6 +13,12 @@ async function proxyRequest(request: NextRequest, pathname: string) {
   headers.delete("connection");
   headers.delete("content-length");
 
+  // Forward tenant header from client to backend
+  const tenantHeader = request.headers.get("X-DeerFlow-Tenant");
+  if (tenantHeader) {
+    headers.set("X-DeerFlow-Tenant", tenantHeader);
+  }
+
   const hasBody = !["GET", "HEAD"].includes(request.method);
   const response = await fetch(buildBackendUrl(pathname), {
     method: request.method,
