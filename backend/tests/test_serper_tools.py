@@ -233,9 +233,7 @@ class TestWebSearchTool:
         mock_error_response.text = "Forbidden"
 
         with patch("deerflow.community.serper.tools.httpx.Client") as mock_client_cls:
-            mock_client_cls.return_value.__enter__.return_value.post.side_effect = httpx.HTTPStatusError(
-                "403", request=MagicMock(), response=mock_error_response
-            )
+            mock_client_cls.return_value.__enter__.return_value.post.side_effect = httpx.HTTPStatusError("403", request=MagicMock(), response=mock_error_response)
 
             from deerflow.community.serper.tools import web_search_tool
 
