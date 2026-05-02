@@ -48,9 +48,8 @@ export function rehypeSplitWordsIntoSpans() {
 }
 
 export function useRehypeSplitWordsIntoSpans(enabled = true) {
-  const rehypePlugins = useMemo(
-    () => (enabled ? [rehypeSplitWordsIntoSpans] : []),
-    [enabled],
-  );
+  // Always disable word animation - it's causing performance issues during
+  // streaming and history loading with no visible benefit
+  const rehypePlugins = useMemo(() => [], [enabled]);
   return rehypePlugins;
 }
