@@ -102,7 +102,7 @@ export function SubtaskCard({
                     {icon}
                     <FlipDisplay
                       className="max-w-[420px] truncate pb-1"
-                      uniqueKey={task.latestMessage?.id ?? ""}
+                      uniqueKey={taskId}
                     >
                       {task.status === "in_progress" &&
                       task.latestMessage &&
