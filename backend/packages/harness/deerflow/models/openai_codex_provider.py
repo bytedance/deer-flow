@@ -21,6 +21,7 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_openai.chat_models.base import _create_usage_metadata_responses
 
 from deerflow.models.credential_loader import CodexCliCredential, load_codex_cli_credential
 
@@ -346,6 +347,7 @@ class CodexChatModel(BaseChatModel):
                 )
 
         usage = response.get("usage", {})
+        usage_metadata = _create_usage_metadata_responses(usage) if usage else None
         additional_kwargs = {}
         if reasoning_content:
             additional_kwargs["reasoning_content"] = reasoning_content
@@ -355,6 +357,7 @@ class CodexChatModel(BaseChatModel):
             tool_calls=tool_calls if tool_calls else [],
             invalid_tool_calls=invalid_tool_calls,
             additional_kwargs=additional_kwargs,
+            usage_metadata=usage_metadata,
             response_metadata={
                 "model": response.get("model", self.model),
                 "usage": usage,
