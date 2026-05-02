@@ -1,7 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
 import type { Translations } from "@/core/i18n/locales/types";
-import type { Todo } from "@/core/todos";
 
 import { getUsageMetadata, type TokenUsage } from "./usage";
 import { hasContent } from "./utils";
@@ -66,11 +65,10 @@ interface TokenUsageAttribution {
   actions?: TokenUsageAttributionAction[];
 }
 
-// Keep the write_todos diffing semantics aligned with
+// Precise write_todos labels come from the backend attribution payload.
+// The frontend fallback intentionally stays generic so we do not duplicate
 // backend/packages/harness/deerflow/agents/middlewares/token_usage_middleware.py
-//::_build_todo_actions. The frontend fallback path intentionally mirrors the
-// backend attribution labels so malformed or missing metadata degrades
-// predictably instead of changing step labels.
+//::_build_todo_actions and risk the two diffing algorithms drifting apart.
 
 export function getTokenUsageViewPreset(
   preferences: TokenUsagePreferences,
@@ -108,7 +106,6 @@ export function buildTokenDebugSteps(
   t: Translations,
 ): TokenDebugStep[] {
   const steps: TokenDebugStep[] = [];
-  let previousTodos: Todo[] = [];
 
   for (const [index, message] of messages.entries()) {
     if (message.type !== "ai") {
@@ -116,7 +113,6 @@ export function buildTokenDebugSteps(
     }
 
     const usage = getUsageMetadata(message);
-    const todosBeforeStep = previousTodos;
     const attribution = getTokenUsageAttribution(message);
     const actionLabels: string[] = [];
 
@@ -146,23 +142,15 @@ export function buildTokenDebugSteps(
           usage,
           sharedAttribution,
         });
-        previousTodos = advanceTodosFromMessage(message, todosBeforeStep);
         continue;
       }
     }
-
-    let currentTodos = todosBeforeStep;
 
     for (const toolCall of message.tool_calls ?? []) {
       const toolArgs = (toolCall.args ?? {}) as Record<string, unknown>;
 
       if (toolCall.name === "write_todos") {
-        const nextTodos = normalizeTodos(toolArgs.todos);
-        const todoLabels = buildTodoDiffLabels(currentTodos, nextTodos, t);
-        currentTodos = nextTodos;
-        actionLabels.push(
-          ...(todoLabels.length > 0 ? todoLabels : [t.toolCalls.writeTodos]),
-        );
+        actionLabels.push(t.toolCalls.writeTodos);
         continue;
       }
 
@@ -194,8 +182,6 @@ export function buildTokenDebugSteps(
       usage,
       sharedAttribution: actionLabels.length > 1,
     });
-
-    previousTodos = currentTodos;
   }
 
   return steps;
@@ -277,28 +263,6 @@ function describeAttributionAction(
   }
 }
 
-function advanceTodosFromMessage(
-  message: Message,
-  previousTodos: Todo[],
-): Todo[] {
-  if (message.type !== "ai") {
-    return previousTodos;
-  }
-
-  let nextTodos = previousTodos;
-
-  for (const toolCall of message.tool_calls ?? []) {
-    if (toolCall.name !== "write_todos") {
-      continue;
-    }
-
-    const toolArgs = (toolCall.args ?? {}) as Record<string, unknown>;
-    nextTodos = normalizeTodos(toolArgs.todos);
-  }
-
-  return nextTodos;
-}
-
 function describeToolCall(
   toolCall: {
     name: string;
@@ -338,127 +302,6 @@ function describeToolCall(
   }
 
   return t.toolCalls.useTool(toolCall.name);
-}
-
-function normalizeTodos(value: unknown): Todo[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value
-    .filter((todo): todo is Todo => typeof todo === "object" && todo !== null)
-    .map((todo) => ({
-      content:
-        typeof todo.content === "string" && todo.content.trim().length > 0
-          ? todo.content.trim()
-          : undefined,
-      status:
-        todo.status === "pending" ||
-        todo.status === "in_progress" ||
-        todo.status === "completed"
-          ? todo.status
-          : undefined,
-    }));
-}
-
-function buildTodoDiffLabels(
-  previousTodos: Todo[],
-  nextTodos: Todo[],
-  t: Translations,
-): string[] {
-  const previousByContent = new Map<
-    string,
-    Array<{ index: number; todo: Todo }>
-  >();
-  const matchedPreviousIndices = new Set<number>();
-
-  for (const [index, todo] of previousTodos.entries()) {
-    if (!todo.content) {
-      continue;
-    }
-
-    const existing = previousByContent.get(todo.content) ?? [];
-    existing.push({ index, todo });
-    previousByContent.set(todo.content, existing);
-  }
-
-  const labels: string[] = [];
-
-  for (const [index, todo] of nextTodos.entries()) {
-    if (!todo.content) {
-      continue;
-    }
-
-    let previousTodo: Todo | undefined;
-
-    const contentMatches = previousByContent.get(todo.content);
-    while (
-      contentMatches?.[0] &&
-      matchedPreviousIndices.has(contentMatches[0].index)
-    ) {
-      contentMatches.shift();
-    }
-
-    if (contentMatches?.[0]) {
-      previousTodo = contentMatches[0].todo;
-      matchedPreviousIndices.add(contentMatches[0].index);
-      contentMatches.shift();
-    } else if (
-      index < previousTodos.length &&
-      !matchedPreviousIndices.has(index)
-    ) {
-      previousTodo = previousTodos[index];
-      matchedPreviousIndices.add(index);
-    }
-
-    if (!previousTodo) {
-      labels.push(labelNewTodo(todo, t));
-      continue;
-    }
-
-    if (
-      previousTodo.content === todo.content &&
-      previousTodo.status === todo.status
-    ) {
-      continue;
-    }
-
-    if (previousTodo.content && previousTodo.content !== todo.content) {
-      labels.push(t.tokenUsage.updateTodo(todo.content));
-    } else if (todo.status === "completed") {
-      labels.push(t.tokenUsage.completeTodo(todo.content));
-    } else if (todo.status === "in_progress") {
-      labels.push(t.tokenUsage.startTodo(todo.content));
-    } else {
-      labels.push(t.tokenUsage.updateTodo(todo.content));
-    }
-  }
-
-  for (const [index, todo] of previousTodos.entries()) {
-    if (matchedPreviousIndices.has(index) || !todo.content) {
-      continue;
-    }
-
-    labels.push(t.tokenUsage.removeTodo(todo.content));
-  }
-
-  return labels;
-}
-
-function labelNewTodo(todo: Todo, t: Translations) {
-  if (!todo.content) {
-    return t.toolCalls.writeTodos;
-  }
-
-  if (todo.status === "completed") {
-    return t.tokenUsage.completeTodo(todo.content);
-  }
-
-  if (todo.status === "in_progress") {
-    return t.tokenUsage.startTodo(todo.content);
-  }
-
-  return t.tokenUsage.updateTodo(todo.content);
 }
 
 function normalizeTokenUsageAttribution(

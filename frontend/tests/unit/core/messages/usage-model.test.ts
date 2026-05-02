@@ -57,7 +57,7 @@ test("derives the active preset from persisted preferences", () => {
   ).toBe("debug");
 });
 
-test("builds todo-aware debug step labels across the full thread", () => {
+test("uses generic todo labels when backend attribution is absent", () => {
   const messages = [
     {
       id: "ai-1",
@@ -111,12 +111,12 @@ test("builds todo-aware debug step labels across the full thread", () => {
   expect(buildTokenDebugSteps(messages, enUS)).toEqual([
     expect.objectContaining({
       messageId: "ai-1",
-      label: "Start To-do: Draft the plan",
+      label: "Update to-do list",
       sharedAttribution: false,
     }),
     expect.objectContaining({
       messageId: "ai-2",
-      label: "Complete To-do: Draft the plan",
+      label: "Update to-do list",
       sharedAttribution: false,
     }),
     expect.objectContaining({
@@ -167,7 +167,7 @@ test("marks multi-action AI steps as shared attribution", () => {
       sharedAttribution: true,
       secondaryLabels: [
         'Search for "LangGraph stream mode"',
-        "Start To-do: Inspect stream mode handling",
+        "Update to-do list",
       ],
     }),
   ]);
@@ -336,7 +336,7 @@ test("ignores unknown top-level attribution fields", () => {
   ]);
 });
 
-test("labels removal-only todo updates even when backend attribution has no actions", () => {
+test("falls back to generic todo labels when backend attribution has no actions", () => {
   const messages = [
     {
       id: "ai-1",
@@ -385,11 +385,11 @@ test("labels removal-only todo updates even when backend attribution has no acti
   expect(buildTokenDebugSteps(messages, enUS)).toEqual([
     expect.objectContaining({
       messageId: "ai-1",
-      label: "Start To-do: Clean up stale tasks",
+      label: "Update to-do list",
     }),
     expect.objectContaining({
       messageId: "ai-2",
-      label: "Remove To-do: Clean up stale tasks",
+      label: "Update to-do list",
       sharedAttribution: false,
     }),
   ]);

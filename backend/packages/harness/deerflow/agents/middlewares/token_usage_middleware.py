@@ -70,10 +70,9 @@ def _todo_action_kind(previous: Todo | None, current: Todo) -> str:
 
 
 def _build_todo_actions(previous_todos: list[Todo], next_todos: list[Todo]) -> list[dict[str, Any]]:
-    # Keep this diffing behavior aligned with
-    # frontend/src/core/messages/usage-model.ts::buildTodoDiffLabels so the
-    # frontend fallback path produces the same labels when attribution metadata
-    # is missing or malformed.
+    # This is the single source of truth for precise write_todos token
+    # attribution. The frontend intentionally falls back to a generic
+    # "Update to-do list" label when this metadata is missing or malformed.
     previous_by_content: dict[str, list[tuple[int, Todo]]] = defaultdict(list)
     matched_previous_indices: set[int] = set()
 

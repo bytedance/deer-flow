@@ -689,6 +689,10 @@ class DeerFlowClient:
                         _account_usage(msg_id, getattr(msg, "usage_metadata", None))
                         additional_kwargs = self._serialize_additional_kwargs(msg)
                         if additional_kwargs and msg_id not in sent_additional_kwargs_ids:
+                            # Metadata-only follow-up: ``messages-tuple`` has no
+                            # dedicated attribution event, so clients should
+                            # merge this empty-content AI event by message id
+                            # and ignore it for text rendering.
                             yield self._ai_text_event(msg_id, "", None, additional_kwargs)
                             sent_additional_kwargs_ids.add(msg_id)
                     continue
@@ -712,6 +716,7 @@ class DeerFlowClient:
                         )
                         sent_additional_kwargs = sent_additional_kwargs or bool(additional_kwargs)
                     elif additional_kwargs and msg_id and msg_id not in sent_additional_kwargs_ids:
+                        # See the metadata-only follow-up convention above.
                         yield self._ai_text_event(msg_id, "", None, additional_kwargs)
                         sent_additional_kwargs = True
 
