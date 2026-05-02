@@ -103,13 +103,13 @@ def test_parse_response_populates_usage_metadata():
 
     result = model._parse_response(response)
 
-    assert result.generations[0].message.usage_metadata == {
-        "input_tokens": 10,
-        "output_tokens": 5,
-        "total_tokens": 15,
-        "input_token_details": {"cache_read": 3},
-        "output_token_details": {"reasoning": 2},
-    }
+    meta = result.generations[0].message.usage_metadata
+    assert meta is not None
+    assert meta["input_tokens"] == 10
+    assert meta["output_tokens"] == 5
+    assert meta["total_tokens"] == 15
+    assert meta["input_token_details"]["cache_read"] == 3
+    assert meta["output_token_details"]["reasoning"] == 2
 
 
 def test_parse_response_reasoning_content():

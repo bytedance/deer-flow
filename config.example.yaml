@@ -373,6 +373,16 @@ tools:
     use: deerflow.community.ddg_search.tools:web_search_tool
     max_results: 5
 
+  # Web search tool (uses Serper - Google Search API, requires SERPER_API_KEY)
+  # Serper provides real-time Google Search results. Sign up at https://serper.dev
+  # Note: set SERPER_API_KEY in your environment before starting the app, or
+  # uncomment and fill in api_key below (the $VAR syntax is resolved at startup).
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.serper.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $SERPER_API_KEY  # Optional if SERPER_API_KEY env var is set
+
   # Web search tool (requires Tavily API key)
   # - name: web_search
   #   group: web
