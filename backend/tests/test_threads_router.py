@@ -366,3 +366,68 @@ def test_memory_thread_meta_store_writes_iso_on_create() -> None:
     record = asyncio.run(_scenario())
     assert _ISO_TIMESTAMP_RE.match(record["created_at"]), record
     assert _ISO_TIMESTAMP_RE.match(record["updated_at"]), record
+
+
+def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
+    """Checkpoints written by older Gateway versions stored
+    ``created_at`` as a unix-second float in their metadata. The
+    ``/state`` endpoint must surface that value as ISO so the frontend's
+    ``new Date(...)`` parser does not break — same root cause as the
+    thread-record bug fixed in #2594, but on the checkpoint side.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "legacy-state"
+
+    async def _seed() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}, "created_at": 1777252410.411327},
+            {},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/state")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
+    assert _ISO_TIMESTAMP_RE.match(body["checkpoint"]["ts"]), body["checkpoint"]
+
+
+def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None:
+    """``/history`` walks ``checkpointer.alist`` and emits one entry per
+    checkpoint. Each entry's ``created_at`` must come out as ISO even if
+    older checkpoints stored a unix-second float in their metadata.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "legacy-history"
+
+    async def _seed() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}, "created_at": 1777252410.411327},
+            {},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    entries = response.json()
+    assert entries, "expected at least one history entry"
+    for entry in entries:
+        assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry

@@ -450,10 +450,10 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
         values=values,
         next=next_tasks,
         metadata=metadata,
-        checkpoint={"id": checkpoint_id, "ts": str(metadata.get("created_at", ""))},
+        checkpoint={"id": checkpoint_id, "ts": coerce_iso(metadata.get("created_at", ""))},
         checkpoint_id=checkpoint_id,
         parent_checkpoint_id=parent_checkpoint_id,
-        created_at=str(metadata.get("created_at", "")),
+        created_at=coerce_iso(metadata.get("created_at", "")),
         tasks=tasks,
     )
 
@@ -544,7 +544,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         next=[],
         metadata=metadata,
         checkpoint_id=new_checkpoint_id,
-        created_at=str(metadata.get("created_at", "")),
+        created_at=coerce_iso(metadata.get("created_at", "")),
     )
 
 
@@ -611,7 +611,7 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
                     parent_checkpoint_id=parent_id,
                     metadata=user_meta,
                     values=values,
-                    created_at=str(metadata.get("created_at", "")),
+                    created_at=coerce_iso(metadata.get("created_at", "")),
                     next=next_tasks,
                 )
             )
