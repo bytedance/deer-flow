@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useState } from "react";
+import { createContext, useCallback, useContext, useRef, useState } from "react";
 
 import type { Subtask } from "./types";
 
@@ -40,14 +40,41 @@ export function useSubtask(id: string) {
 
 export function useUpdateSubtask() {
   const { tasks, setTasks } = useSubtaskContext();
+  const pendingRef = useRef<Partial<Subtask> & { id: string } | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushPending = useCallback(() => {
+    if (!pendingRef.current) return;
+    const task = pendingRef.current;
+    pendingRef.current = null;
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+    const existing = tasks[task.id];
+    const merged = { ...existing, ...task } as Subtask;
+    // Only re-render if values actually changed
+    if (existing?.latestMessage !== merged.latestMessage || existing?.status !== merged.status) {
+      const newTasks = { ...tasks, [task.id]: merged };
+      setTasks(newTasks);
+    }
+  }, [tasks, setTasks]);
+
   const updateSubtask = useCallback(
     (task: Partial<Subtask> & { id: string }) => {
-      tasks[task.id] = { ...tasks[task.id], ...task } as Subtask;
-      if (task.latestMessage) {
-        setTasks({ ...tasks });
+      // Always update the pending ref (last write wins)
+      pendingRef.current = { ...pendingRef.current, ...task } as Partial<Subtask> & { id: string };
+
+      // Clear any existing flush timer
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
       }
+
+      // Use 50ms debounce to batch rapid updates
+      timeoutRef.current = setTimeout(flushPending, 50);
     },
-    [tasks, setTasks],
+    [flushPending],
   );
+
   return updateSubtask;
 }
