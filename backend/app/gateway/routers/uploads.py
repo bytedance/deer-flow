@@ -5,7 +5,7 @@ import os
 import stat
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
@@ -22,9 +22,9 @@ from deerflow.uploads.manager import (
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
+    open_upload_file_no_symlink,
     upload_artifact_url,
     upload_virtual_path,
-    write_upload_file_no_symlink,
 )
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
@@ -44,6 +44,7 @@ class UploadResponse(BaseModel):
     success: bool
     files: list[dict[str, str]]
     message: str
+    skipped_files: list[str] = Field(default_factory=list)
 
 
 class UploadLimits(BaseModel):
@@ -118,25 +119,36 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
             logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
 
 
-async def _read_upload_file_with_limits(
+async def _write_upload_file_with_limits(
     file: UploadFile,
     *,
+    uploads_dir: os.PathLike[str] | str,
     display_filename: str,
     max_single_file_size: int,
     max_total_size: int,
     total_size: int,
-) -> tuple[bytes, int, int]:
+) -> tuple[os.PathLike[str] | str, int, int]:
     file_size = 0
-    chunks = []
-    while chunk := await file.read(UPLOAD_CHUNK_SIZE):
-        file_size += len(chunk)
-        total_size += len(chunk)
-        if file_size > max_single_file_size:
-            raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
-        if total_size > max_total_size:
-            raise HTTPException(status_code=413, detail="Total upload size too large")
-        chunks.append(chunk)
-    return b"".join(chunks), file_size, total_size
+    file_path, fh = open_upload_file_no_symlink(uploads_dir, display_filename)
+    try:
+        while chunk := await file.read(UPLOAD_CHUNK_SIZE):
+            file_size += len(chunk)
+            total_size += len(chunk)
+            if file_size > max_single_file_size:
+                raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
+            if total_size > max_total_size:
+                raise HTTPException(status_code=413, detail="Total upload size too large")
+            fh.write(chunk)
+    except Exception:
+        fh.close()
+        try:
+            os.unlink(file_path)
+        except FileNotFoundError:
+            pass
+        raise
+    else:
+        fh.close()
+    return file_path, file_size, total_size
 
 
 def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
@@ -178,6 +190,7 @@ async def upload_files(
     uploaded_files = []
     written_paths = []
     sandbox_sync_targets = []
+    skipped_files = []
     total_size = 0
 
     sandbox_provider = get_sandbox_provider()
@@ -201,14 +214,14 @@ async def upload_files(
             continue
 
         try:
-            content, file_size, total_size = await _read_upload_file_with_limits(
+            file_path, file_size, total_size = await _write_upload_file_with_limits(
                 file,
+                uploads_dir=uploads_dir,
                 display_filename=safe_filename,
                 max_single_file_size=limits.max_file_size,
                 max_total_size=limits.max_total_size,
                 total_size=total_size,
             )
-            file_path = write_upload_file_no_symlink(uploads_dir, safe_filename, content)
             written_paths.append(file_path)
 
             virtual_path = upload_virtual_path(safe_filename)
@@ -248,6 +261,7 @@ async def upload_files(
             raise e
         except UnsafeUploadPathError as e:
             logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
+            skipped_files.append(safe_filename)
             continue
         except Exception as e:
             logger.error(f"Failed to upload {file.filename}: {e}")
@@ -259,10 +273,15 @@ async def upload_files(
             _make_file_sandbox_writable(file_path)
             sandbox.update_file(virtual_path, file_path.read_bytes())
 
+    message = f"Successfully uploaded {len(uploaded_files)} file(s)"
+    if skipped_files:
+        message += f"; skipped {len(skipped_files)} unsafe file(s)"
+
     return UploadResponse(
-        success=True,
+        success=not skipped_files,
         files=uploaded_files,
-        message=f"Successfully uploaded {len(uploaded_files)} file(s)",
+        message=message,
+        skipped_files=skipped_files,
     )
 
 

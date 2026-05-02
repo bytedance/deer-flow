@@ -115,8 +115,8 @@ def validate_path_traversal(path: Path, base: Path) -> None:
         raise PathTraversalError("Path traversal detected") from None
 
 
-def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
-    """Write upload bytes without following a pre-existing destination symlink.
+def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, object]:
+    """Open an upload destination for safe streaming writes.
 
     Upload directories may be mounted into local sandboxes. A sandbox process can
     therefore leave a symlink at a future upload filename. Normal ``Path.write_bytes``
@@ -157,12 +157,19 @@ def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> 
         if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
             raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
         os.ftruncate(fd, 0)
-        with os.fdopen(fd, "wb") as fh:
-            fd = -1
-            fh.write(data)
+        fh = os.fdopen(fd, "wb")
+        fd = -1
     finally:
         if fd >= 0:
             os.close(fd)
+    return dest, fh
+
+
+def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
+    """Write upload bytes without following a pre-existing destination symlink."""
+    dest, fh = open_upload_file_no_symlink(base_dir, filename)
+    with fh:
+        fh.write(data)
     return dest
 
 

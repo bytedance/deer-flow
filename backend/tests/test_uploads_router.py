@@ -447,8 +447,10 @@ def test_upload_files_rejects_preexisting_symlink_destination(tmp_path):
         file = UploadFile(filename="victim.txt", file=BytesIO(b"attacker upload"))
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
 
-    assert result.success is True
+    assert result.success is False
     assert result.files == []
+    assert result.skipped_files == ["victim.txt"]
+    assert "skipped 1 unsafe file" in result.message
     assert outside_file.read_text(encoding="utf-8") == "protected"
     assert (thread_uploads_dir / "victim.txt").is_symlink()
 
@@ -470,8 +472,9 @@ def test_upload_files_rejects_dangling_symlink_destination(tmp_path):
         file = UploadFile(filename="victim.txt", file=BytesIO(b"attacker upload"))
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
 
-    assert result.success is True
+    assert result.success is False
     assert result.files == []
+    assert result.skipped_files == ["victim.txt"]
     assert not missing_target.exists()
     assert (thread_uploads_dir / "victim.txt").is_symlink()
 
@@ -494,8 +497,9 @@ def test_upload_files_rejects_hardlinked_destination_without_truncating(tmp_path
         file = UploadFile(filename="victim.txt", file=BytesIO(b"attacker upload"))
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
 
-    assert result.success is True
+    assert result.success is False
     assert result.files == []
+    assert result.skipped_files == ["victim.txt"]
     assert outside_file.read_text(encoding="utf-8") == "protected"
     assert (thread_uploads_dir / "victim.txt").read_text(encoding="utf-8") == "protected"
 
