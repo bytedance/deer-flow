@@ -1,6 +1,6 @@
 """Tests for TokenUsageMiddleware attribution annotations."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage
 
