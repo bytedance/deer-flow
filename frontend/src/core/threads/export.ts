@@ -19,7 +19,7 @@ function formatMessageContent(message: Message): string {
 
 function formatToolCalls(message: Message): string {
   if (message.type !== "ai" || !hasToolCalls(message)) return "";
-  const calls = message.tool_calls ?? [];
+  const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
   return calls.map((call) => `- **Tool:** \`${call.name}\``).join("\n");
 }
 
@@ -96,7 +96,9 @@ export function formatThreadAsJSON(
       type: msg.type,
       id: msg.id,
       content: typeof msg.content === "string" ? msg.content : msg.content,
-      ...(msg.type === "ai" && msg.tool_calls?.length
+      ...(msg.type === "ai" &&
+      Array.isArray(msg.tool_calls) &&
+      msg.tool_calls.length
         ? { tool_calls: msg.tool_calls }
         : {}),
     })),

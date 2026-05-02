@@ -275,14 +275,17 @@ export function hasReasoning(message: Message) {
 
 export function hasToolCalls(message: Message) {
   return (
-    message.type === "ai" && message.tool_calls && message.tool_calls.length > 0
+    message.type === "ai" &&
+    Array.isArray(message.tool_calls) &&
+    message.tool_calls.length > 0
   );
 }
 
 export function hasPresentFiles(message: Message) {
   return (
     message.type === "ai" &&
-    message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
+    Array.isArray(message.tool_calls) &&
+    message.tool_calls.some((toolCall) => toolCall.name === "present_files")
   );
 }
 
@@ -295,19 +298,34 @@ export function extractPresentFilesFromMessage(message: Message) {
     return [];
   }
   const files: string[] = [];
-  for (const toolCall of message.tool_calls ?? []) {
+  for (const toolCall of Array.isArray(message.tool_calls)
+    ? message.tool_calls
+    : []) {
+    const args =
+      typeof toolCall.args === "string"
+        ? (() => {
+            try {
+              return JSON.parse(toolCall.args) as Record<string, unknown>;
+            } catch {
+              return {};
+            }
+          })()
+        : (toolCall.args ?? {});
     if (
       toolCall.name === "present_files" &&
-      Array.isArray(toolCall.args.filepaths)
+      Array.isArray((args as Record<string, unknown>).filepaths)
     ) {
-      files.push(...(toolCall.args.filepaths as string[]));
+      files.push(...((args as Record<string, unknown>).filepaths as string[]));
     }
   }
   return files;
 }
 
 export function hasSubagent(message: AIMessage) {
-  for (const toolCall of message.tool_calls ?? []) {
+  if (!Array.isArray(message.tool_calls)) {
+    return false;
+  }
+  for (const toolCall of message.tool_calls) {
     if (toolCall.name === "task") {
       return true;
     }
