@@ -1,0 +1,179 @@
+---
+title: 运维与排障
+description: 本页面涵盖运行 DeerFlow 应用的操作信息：日志记录、常见问题和维护任务。
+---
+
+import { Callout, Cards } from "nextra/components";
+
+# 运维与排障
+
+本页面涵盖运行 DeerFlow 应用的操作信息：日志记录、常见问题和维护任务。
+
+## 日志
+
+DeerFlow 应用在 `logs/` 目录中写入每个服务的日志：
+
+| 文件                 | 内容                                   |
+| -------------------- | -------------------------------------- |
+| `logs/langgraph.log` | Agent 运行时、工具调用、LangGraph 错误 |
+| `logs/gateway.log`   | API 请求/响应、Gateway 错误            |
+| `logs/frontend.log`  | Next.js 服务器日志                     |
+| `logs/nginx.log`     | 代理访问和错误日志                     |
+
+**实时追踪日志**：
+
+```bash
+tail -f logs/langgraph.log   # 查看 Agent 活动
+tail -f logs/gateway.log     # 查看 API 请求
+```
+
+**调整日志级别**：
+
+```yaml
+# config.yaml
+log_level: debug # debug | info | warning | error
+```
+
+## 健康检查
+
+DeerFlow 暴露健康检查端点：
+
+```bash
+# Gateway 健康状态
+curl http://localhost:8001/health
+
+# LangGraph 健康状态
+curl http://localhost:2024/ok
+
+# 通过 nginx 完整代理链验证
+curl http://localhost:2026/api/models
+```
+
+## 配置升级
+
+当 `config.yaml` schema 更新时（由 `config_version` 字段标识），运行：
+
+```bash
+make config-upgrade
+```
+
+这将 `config.example.yaml` 中的新字段合并到你现有的 `config.yaml` 中，而不覆盖你的自定义内容。
+
+## 常见问题
+
+### 模型配置错误
+
+**症状**：Agent 在响应第一条消息时报错，日志中有 API 认证错误。
+
+**诊断**：
+
+```bash
+# 检查 LangGraph 日志中的模型错误
+grep -i "error\|apikey\|unauthorized" logs/langgraph.log | tail -20
+```
+
+**解决**：
+
+1. 验证 `config.yaml` 中 API key 字段名称正确（例如 `$OPENAI_API_KEY`）。
+2. 确认对应的环境变量已设置（`echo $OPENAI_API_KEY`）。
+3. 检查 `base_url`（如有）是否与提供商的实际端点匹配。
+
+---
+
+### 沙箱权限问题
+
+**症状**：工具报"文件未找到"或权限错误，即使 Agent 声称已创建文件。
+
+**诊断**：
+
+```bash
+# 检查线程用户数据目录是否存在且可写
+ls -la backend/.deer-flow/threads/
+```
+
+**解决**：
+
+1. 确保 `backend/.deer-flow/` 对运行 DeerFlow 的进程可写。
+2. 在 Docker 部署中，验证卷挂载路径正确（`DEER_FLOW_ROOT` 设置为绝对路径）。
+3. 如果使用基于容器的沙箱，确认 Docker 已运行并且容器镜像已拉取。
+
+---
+
+### 前端构建失败
+
+**症状**：`make install` 或前端构建步骤失败，提示 `BETTER_AUTH_SECRET` 错误。
+
+**解决**：
+
+```bash
+# 选项 1：设置环境变量（推荐）
+export BETTER_AUTH_SECRET=your-secret-here-at-least-32-chars
+cd frontend && pnpm build
+
+# 选项 2：跳过构建时验证（仅限开发）
+SKIP_ENV_VALIDATION=1 pnpm build
+```
+
+---
+
+### MCP 服务器连接失败
+
+**症状**：MCP 工具未出现，`logs/langgraph.log` 中有超时错误。
+
+**诊断**：
+
+```bash
+# 检查 MCP 相关错误
+grep -i "mcp\|timeout" logs/langgraph.log | tail -20
+```
+
+**解决**：
+
+1. 验证 `extensions_config.json` 中 MCP 服务器的 `command` 和 `args` 在服务器外部正常工作（手动运行命令）。
+2. 确认 MCP 服务器的依赖（如 `npx`、`uvx`）已安装并在 PATH 中。
+3. 检查 MCP 服务器是否需要网络访问或特定环境变量。
+
+---
+
+### K8s Provisioner 连接失败
+
+**症状**：沙箱工具请求挂起，日志中有连接拒绝错误。
+
+**解决**：
+
+1. 验证 `config.yaml` 中 `provisioner_url` 正确且 Provisioner Pod 运行正常。
+2. 检查 `K8S_NAMESPACE` 和 RBAC 配置是否允许 Provisioner 创建 Pod。
+3. 验证 `SANDBOX_IMAGE` 可以从 K8s 节点拉取。
+
+## 数据备份
+
+DeerFlow 将持久化数据存储在：
+
+- **线程数据**：`backend/.deer-flow/threads/` — 每个线程的上传文件、输出和工作区文件
+- **检查点**：取决于检查点器配置（SQLite：`backend/.deer-flow/checkpoints.db`，Redis：外部存储）
+- **记忆**：`backend/.deer-flow/memory.json`（以及 `agents/*/memory.json`）
+- **自定义 Agent 配置**：`backend/agents/*/config.yaml`
+
+对于生产部署，定期备份这些目录。Docker 部署中，确保这些目录绑定挂载到持久卷，而不是容器内部。
+
+## 停止和重启服务
+
+```bash
+# 停止所有本地服务
+make stop
+
+# 重启（停止后重新启动）
+make stop && make dev
+```
+
+在 Docker 中：
+
+```bash
+docker compose -f docker/docker-compose-dev.yaml down
+docker compose -f docker/docker-compose-dev.yaml up
+```
+
+<Cards num={2}>
+  <Cards.Card title="部署指南" href="/docs/application/deployment-guide" />
+  <Cards.Card title="配置" href="/docs/application/configuration" />
+</Cards>

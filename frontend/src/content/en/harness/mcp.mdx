@@ -1,0 +1,116 @@
+---
+title: MCP Integration
+description: The **Model Context Protocol (MCP)** is an open standard for connecting language models to external tools and data sources. DeerFlow's MCP integration allows you to extend the agent with any tool server that implements the MCP protocol — without modifying the harness itself.
+---
+
+import { Callout, Cards, Steps } from "nextra/components";
+
+# MCP Integration
+
+<Callout type="info" emoji="🔌">
+  Model Context Protocol (MCP) lets DeerFlow connect to any external tool
+  server. Once connected, MCP tools are available to the Lead Agent exactly like
+  built-in tools.
+</Callout>
+
+The **Model Context Protocol (MCP)** is an open standard for connecting language models to external tools and data sources. DeerFlow's MCP integration allows you to extend the agent with any tool server that implements the MCP protocol — without modifying the harness itself.
+
+## Configuration
+
+MCP servers are configured in `extensions_config.json`, a file separate from `config.yaml`. This separation allows MCP and skill configurations to be managed independently and updated at runtime through the Gateway API.
+
+The default location is the project root (same directory as `config.yaml`). The path is determined by `ExtensionsConfig.resolve_config_path()`.
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"],
+      "enabled": true
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+      "enabled": true
+    },
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"],
+      "enabled": false
+    }
+  }
+}
+```
+
+Each server entry supports:
+
+- `command`: the executable to run (e.g., `npx`, `uvx`, `python`)
+- `args`: command arguments as an array
+- `enabled`: whether the server is active (can be toggled without removing the entry)
+- `env`: optional environment variables injected into the server process
+
+## How tools are loaded
+
+<Steps>
+
+### Startup initialization
+
+When the DeerFlow server starts, `initialize_mcp_tools()` is called. This connects to all enabled MCP servers, retrieves their tool schemas, and caches the results.
+
+### Lazy initialization fallback
+
+If the server starts before MCP tools are initialized (e.g., in LangGraph Studio), `get_cached_mcp_tools()` performs lazy initialization on the first tool call.
+
+### Cache invalidation
+
+The MCP tools cache tracks the modification time (`mtime`) of `extensions_config.json`. When the file changes — for example, when a server is enabled or disabled through the Gateway API — the cache is marked stale and tools are reloaded on the next request.
+
+This means MCP server changes take effect without restarting the DeerFlow server.
+
+### Tool availability
+
+Once loaded, MCP tools appear in the Lead Agent's tool list alongside built-in and community tools. The agent selects and calls them using the same mechanism as any other tool.
+
+</Steps>
+
+## Tool search integration
+
+When many MCP servers expose a large number of tools, loading all of them into the agent's context at once can increase token usage and reduce tool selection accuracy.
+
+Enable **tool search** to load MCP tools on demand instead:
+
+```yaml
+# config.yaml
+tool_search:
+  enabled: true
+```
+
+With tool search enabled, MCP tools are listed by name in the system prompt but not included in the full tool schema. The agent discovers them using the `tool_search` built-in tool and loads only the ones it needs for a given task.
+
+## OAuth support
+
+Some MCP servers require OAuth authentication. DeerFlow's `mcp/oauth.py` handles the OAuth flow for servers that declare OAuth requirements in their capability headers.
+
+When an OAuth-protected MCP server is connected, DeerFlow will:
+
+1. Detect the OAuth requirement from the server's capability headers
+2. Build the appropriate authorization headers using `get_initial_oauth_headers()`
+3. Wrap tool calls with an OAuth interceptor via `build_oauth_tool_interceptor()`
+
+The OAuth flow is transparent to the Lead Agent — it simply calls the tool, and DeerFlow handles the authentication.
+
+## Managing MCP servers
+
+MCP servers can be managed in several ways:
+
+- **Through the DeerFlow App UI**: the extensions panel shows connected MCP servers and lets you enable/disable them.
+- **Through the Gateway API**: `POST /api/extensions/mcp/{name}/enable` and `/disable`.
+- **By editing `extensions_config.json` directly**: useful for scripted or programmatic configuration.
+
+Changes are picked up automatically due to the file mtime-based cache invalidation.
+
+<Cards num={2}>
+  <Cards.Card title="Tools" href="/docs/harness/tools" />
+  <Cards.Card title="Configuration" href="/docs/harness/configuration" />
+</Cards>

@@ -101,8 +101,8 @@ export default function NewAgentPage() {
 
   const threadId = useMemo(() => uuid(), []);
 
-  const [thread, sendMessage] = useThreadStream({
-    threadId: step === "chat" ? threadId : undefined,
+  const { thread, sendMessage } = useThreadStream({
+    threadId: undefined,
     context: {
       mode: "flash",
       is_bootstrap: true,
@@ -282,9 +282,11 @@ export default function NewAgentPage() {
           <DropdownMenuContent align="end">
             <DropdownMenuItem
               onSelect={() => void handleSaveAgent()}
-              disabled={
-                !!agent || thread.isLoading || setupAgentStatus !== "idle"
-              }
+              disabled={[
+                Boolean(agent),
+                thread.isLoading,
+                setupAgentStatus !== "idle",
+              ].some(Boolean)}
             >
               <SaveIcon className="h-4 w-4" />
               {setupAgentStatus === "requested"

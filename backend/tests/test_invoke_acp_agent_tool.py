@@ -152,8 +152,10 @@ def test_get_work_dir_uses_base_dir_when_no_thread_id(monkeypatch, tmp_path):
 def test_get_work_dir_uses_per_thread_path_when_thread_id_given(monkeypatch, tmp_path):
     """P1.1: _get_work_dir(thread_id) uses {base_dir}/threads/{thread_id}/acp-workspace/."""
     from deerflow.config import paths as paths_module
+    from deerflow.runtime import user_context as uc_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(uc_module, "get_effective_user_id", lambda: None)
     result = _get_work_dir("thread-abc-123")
     expected = tmp_path / "threads" / "thread-abc-123" / "acp-workspace"
     assert result == str(expected)
@@ -310,8 +312,10 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
 async def test_invoke_acp_agent_uses_per_thread_workspace_when_thread_id_in_config(monkeypatch, tmp_path):
     """P1.1: When thread_id is in the RunnableConfig, ACP agent uses per-thread workspace."""
     from deerflow.config import paths as paths_module
+    from deerflow.runtime import user_context as uc_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(uc_module, "get_effective_user_id", lambda: None)
 
     monkeypatch.setattr(
         "deerflow.config.extensions_config.ExtensionsConfig.from_file",
@@ -693,3 +697,33 @@ def test_get_available_tools_includes_invoke_acp_agent_when_agents_configured(mo
     assert "invoke_acp_agent" in [tool.name for tool in tools]
 
     load_acp_config_from_dict({})
+
+
+def test_get_available_tools_uses_explicit_app_config_for_acp_agents(monkeypatch):
+    explicit_agents = {"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")}
+    explicit_config = SimpleNamespace(
+        tools=[],
+        models=[],
+        tool_search=SimpleNamespace(enabled=False),
+        skill_evolution=SimpleNamespace(enabled=False),
+        get_model_config=lambda name: None,
+        acp_agents=explicit_agents,
+    )
+    sentinel_tool = SimpleNamespace(name="invoke_acp_agent")
+    captured: dict[str, object] = {}
+
+    def fail_get_acp_agents():
+        raise AssertionError("ambient get_acp_agents() must not be used when app_config is explicit")
+
+    def fake_build_invoke_acp_agent_tool(agents):
+        captured["agents"] = agents
+        return sentinel_tool
+
+    monkeypatch.setattr("deerflow.tools.tools.is_host_bash_allowed", lambda config=None: True)
+    monkeypatch.setattr("deerflow.config.acp_config.get_acp_agents", fail_get_acp_agents)
+    monkeypatch.setattr("deerflow.tools.builtins.invoke_acp_agent_tool.build_invoke_acp_agent_tool", fake_build_invoke_acp_agent_tool)
+
+    tools = get_available_tools(include_mcp=False, subagent_enabled=False, app_config=explicit_config)
+
+    assert captured["agents"] is explicit_agents
+    assert "invoke_acp_agent" in [tool.name for tool in tools]

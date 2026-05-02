@@ -243,6 +243,7 @@ DeerFlowはメッセージングアプリからのタスク受信をサポート
 | Telegram | Bot API（ロングポーリング） | 簡単 |
 | Slack | Socket Mode | 中程度 |
 | Feishu / Lark | WebSocket | 中程度 |
+| DingTalk | Stream Push（WebSocket） | 中程度 |
 
 **`config.yaml`での設定：**
 
@@ -294,6 +295,13 @@ channels:
           context:
             thinking_enabled: true
             subagent_enabled: true
+
+  dingtalk:
+    enabled: true
+    client_id: $DINGTALK_CLIENT_ID             # DingTalk Open PlatformのClientId
+    client_secret: $DINGTALK_CLIENT_SECRET     # DingTalk Open PlatformのClientSecret
+    allowed_users: []                          # 空 = 全員許可
+    card_template_id: ""                       # オプション：ストリーミングタイプライター効果用のAIカードテンプレートID
 ```
 
 対応するAPIキーを`.env`ファイルに設定します：
@@ -309,6 +317,10 @@ SLACK_APP_TOKEN=xapp-...
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
+
+# DingTalk
+DINGTALK_CLIENT_ID=your_client_id
+DINGTALK_CLIENT_SECRET=your_client_secret
 ```
 
 **Telegramのセットアップ**
@@ -330,6 +342,13 @@ FEISHU_APP_SECRET=your_app_secret
 2. 権限を追加：`im:message`、`im:message.p2p_msg:readonly`、`im:resource`。
 3. **イベント**で`im.message.receive_v1`を購読し、**ロングコネクション**モードを選択。
 4. App IDとApp Secretをコピー。`.env`に`FEISHU_APP_ID`と`FEISHU_APP_SECRET`を設定し、`config.yaml`でチャネルを有効にします。
+
+**DingTalkのセットアップ**
+
+1. [DingTalk Open Platform](https://open.dingtalk.com/)でアプリを作成し、**ロボット**機能を有効化します。
+2. ロボット設定ページでメッセージ受信モードを**Streamモード**に設定します。
+3. `Client ID`と`Client Secret`をコピー。`.env`に`DINGTALK_CLIENT_ID`と`DINGTALK_CLIENT_SECRET`を設定し、`config.yaml`でチャネルを有効にします。
+4. *（オプション）* ストリーミングAIカード返信（タイプライター効果）を有効にするには、[DingTalkカードプラットフォーム](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card)で**AIカード**テンプレートを作成し、`config.yaml`の`card_template_id`にテンプレートIDを設定します。`Card.Streaming.Write` および `Card.Instance.Write` 権限の申請も必要です。
 
 **コマンド**
 

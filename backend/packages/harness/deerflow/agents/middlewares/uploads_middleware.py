@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.config.paths import Paths, get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_conversion import extract_outline
 
 logger = logging.getLogger(__name__)
@@ -221,7 +222,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 thread_id = get_config().get("configurable", {}).get("thread_id")
             except RuntimeError:
                 pass  # get_config() raises outside a runnable context (e.g. unit tests)
-        uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
+        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id()) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
@@ -282,6 +283,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         updated_message = HumanMessage(
             content=updated_content,
             id=last_message.id,
+            name=last_message.name,
             additional_kwargs=last_message.additional_kwargs,
         )
 
