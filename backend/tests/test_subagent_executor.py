@@ -1323,7 +1323,11 @@ class TestCooperativeCancellation:
         async def mock_astream(*args, **kwargs):
             yield {"messages": [msg.human("Task"), msg.ai("late completion", "msg-late")]}
             first_chunk_seen.set()
-            finish_stream.wait(timeout=5)
+            deadline = asyncio.get_running_loop().time() + 5
+            while not finish_stream.is_set():
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(0.001)
 
         mock_agent = MagicMock()
         mock_agent.astream = mock_astream
