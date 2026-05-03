@@ -24,11 +24,11 @@ import {
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
-import {
-  extractReasoningContentFromMessage,
-  findToolCallResult,
-} from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import {
+  convertToToolCallSteps,
+  partitionStepsForDisplay,
+} from "@/core/tools/utils";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -55,18 +55,15 @@ export function MessageGroup({
   const [showLastThinking, setShowLastThinking] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
-  const steps = useMemo(() => convertToSteps(messages), [messages]);
-  const lastToolCallStep = useMemo(() => {
-    const filteredSteps = steps.filter((step) => step.type === "toolCall");
-    return filteredSteps[filteredSteps.length - 1];
-  }, [steps]);
-  const aboveLastToolCallSteps = useMemo(() => {
-    if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
-      return steps.slice(0, index);
-    }
-    return [];
-  }, [lastToolCallStep, steps]);
+  const steps = useMemo(() => convertToToolCallSteps(messages), [messages]);
+  const {
+    aboveSteps: aboveLastToolCallSteps,
+    activeSteps: activeToolCallSteps,
+  } = useMemo(() => partitionStepsForDisplay(steps), [steps]);
+  const lastToolCallStep = useMemo(
+    () => activeToolCallSteps[activeToolCallSteps.length - 1],
+    [activeToolCallSteps],
+  );
   const lastReasoningStep = useMemo(() => {
     if (lastToolCallStep) {
       const index = steps.indexOf(lastToolCallStep);
@@ -127,16 +124,19 @@ export function MessageGroup({
                 <ToolCall key={step.id} {...step} isLoading={isLoading} />
               ),
             )}
-          {lastToolCallStep && (
-            <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              <ToolCall
-                key={lastToolCallStep.id}
-                {...lastToolCallStep}
-                isLast={true}
-                isLoading={isLoading}
-              />
-            </FlipDisplay>
-          )}
+          {activeToolCallSteps.map((step, index) => {
+            const isLast = index === activeToolCallSteps.length - 1;
+            return (
+              <FlipDisplay key={step.id} uniqueKey={step.id ?? ""}>
+                <ToolCall
+                  key={step.id}
+                  {...step}
+                  isLast={isLast}
+                  isLoading={isLoading}
+                />
+              </FlipDisplay>
+            );
+          })}
         </ChainOfThoughtContent>
       )}
       {lastReasoningStep && (
@@ -421,66 +421,4 @@ function ToolCall({
       ></ChainOfThoughtStep>
     );
   }
-}
-
-interface GenericCoTStep<T extends string = string> {
-  id?: string;
-  messageId?: string;
-  type: T;
-}
-
-interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
-  reasoning: string | null;
-}
-
-interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
-  name: string;
-  args: Record<string, unknown>;
-  result?: string;
-}
-
-type CoTStep = CoTReasoningStep | CoTToolCallStep;
-
-function convertToSteps(messages: Message[]): CoTStep[] {
-  const steps: CoTStep[] = [];
-  for (const message of messages) {
-    if (message.type === "ai") {
-      const reasoning = extractReasoningContentFromMessage(message);
-      if (reasoning) {
-        const step: CoTReasoningStep = {
-          id: message.id,
-          messageId: message.id,
-          type: "reasoning",
-          reasoning,
-        };
-        steps.push(step);
-      }
-      for (const tool_call of message.tool_calls ?? []) {
-        if (tool_call.name === "task") {
-          continue;
-        }
-        const step: CoTToolCallStep = {
-          id: tool_call.id,
-          messageId: message.id,
-          type: "toolCall",
-          name: tool_call.name,
-          args: tool_call.args,
-        };
-        const toolCallId = tool_call.id;
-        if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
-          if (toolCallResult) {
-            try {
-              const json = JSON.parse(toolCallResult);
-              step.result = json;
-            } catch {
-              step.result = toolCallResult;
-            }
-          }
-        }
-        steps.push(step);
-      }
-    }
-  }
-  return steps;
 }
