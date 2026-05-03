@@ -22,10 +22,7 @@ class SkillsConfig(BaseModel):
     )
     path: str | None = Field(
         default=None,
-        description=(
-            "Path to skills directory. If not specified, defaults to `skills` under the caller "
-            "project root, falling back to the legacy repo-root location for monorepo compatibility."
-        ),
+        description=("Path to skills directory. If not specified, defaults to `skills` under the caller project root, falling back to the legacy repo-root location for monorepo compatibility."),
     )
     container_path: str = Field(
         default="/mnt/skills",
