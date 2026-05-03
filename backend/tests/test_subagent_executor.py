@@ -1338,15 +1338,15 @@ class TestCooperativeCancellation:
             thread_id="test-thread",
             trace_id="test-trace",
         )
-        original_execute = executor.execute
+        original_aexecute = executor._aexecute
 
-        def tracked_execute(task, result_holder=None):
+        async def tracked_aexecute(task, result_holder=None):
             try:
-                return original_execute(task, result_holder)
+                return await original_aexecute(task, result_holder)
             finally:
                 execution_done.set()
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent), patch.object(executor, "execute", tracked_execute):
+        with patch.object(executor, "_create_agent", return_value=mock_agent), patch.object(executor, "_aexecute", tracked_aexecute):
             task_id = executor.execute_async("Task")
             assert first_chunk_seen.wait(timeout=3), "stream did not yield initial chunk"
 
