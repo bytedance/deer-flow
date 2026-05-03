@@ -1312,6 +1312,19 @@ class TestCooperativeCancellation:
 
 class TestSkillPreload:
     @pytest.mark.anyio
+    async def test_build_initial_state_keeps_only_task_human_message(self, classes, base_config):
+        """Initial state should not inject skill content as extra system messages."""
+        from langchain_core.messages import HumanMessage
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        state = await executor._build_initial_state("Do the task")
+
+        assert [type(message) for message in state["messages"]] == [HumanMessage]
+        assert [message.content for message in state["messages"]] == ["Do the task"]
+
+    @pytest.mark.anyio
     async def test_preloaded_skills_are_sent_in_the_leading_system_message(self, classes, base_config, monkeypatch):
         """Preloaded skills must reach the model without creating later SystemMessages."""
         from langchain_core.language_models.fake_chat_models import FakeListChatModel

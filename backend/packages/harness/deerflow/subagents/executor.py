@@ -285,7 +285,7 @@ class SubagentExecutor:
             model=model,
             tools=self.tools,
             middleware=middlewares,
-            system_prompt=system_prompt or self.config.system_prompt,
+            system_prompt=self.config.system_prompt if system_prompt is None else system_prompt,
             state_schema=ThreadState,
         )
 
