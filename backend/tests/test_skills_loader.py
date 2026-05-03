@@ -19,6 +19,7 @@ def test_get_skills_root_path_points_to_current_project_skills(tmp_path: Path, m
     monkeypatch.delenv("DEER_FLOW_SKILLS_PATH", raising=False)
     monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
+    (tmp_path / "skills").mkdir()
 
     app_config = SimpleNamespace(skills=SkillsConfig())
     path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
