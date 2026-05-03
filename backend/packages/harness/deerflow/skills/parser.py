@@ -4,24 +4,24 @@ from pathlib import Path
 
 import yaml
 
-from .types import Skill
+from .types import SKILL_MD_FILE, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
 
 
-def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None = None) -> Skill | None:
+def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
     """Parse a SKILL.md file and extract metadata.
 
     Args:
         skill_file: Path to the SKILL.md file.
-        category: Category of the skill ('public' or 'custom').
+        category: Category of the skill.
         relative_path: Relative path from the category root to the skill
             directory.  Defaults to the skill directory name when omitted.
 
     Returns:
         Skill object if parsing succeeds, None otherwise.
     """
-    if not skill_file.exists() or skill_file.name != "SKILL.md":
+    if not skill_file.exists() or skill_file.name != SKILL_MD_FILE:
         return None
 
     try:

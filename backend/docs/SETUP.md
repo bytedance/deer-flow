@@ -23,6 +23,9 @@ DeerFlow uses a YAML configuration file that should be placed in the **project r
    # Option A: Set environment variables (recommended)
    export OPENAI_API_KEY="your-key-here"
 
+   # Optional: pin the project root when running from another directory
+   export DEER_FLOW_PROJECT_ROOT="/path/to/deer-flow"
+
    # Option B: Edit config.yaml directly
    vim config.yaml  # or your preferred editor
    ```
@@ -35,17 +38,20 @@ DeerFlow uses a YAML configuration file that should be placed in the **project r
 
 ## Important Notes
 
-- **Location**: `config.yaml` should be in `deer-flow/` (project root), not `deer-flow/backend/`
+- **Location**: `config.yaml` should be in `deer-flow/` (project root)
 - **Git**: `config.yaml` is automatically ignored by git (contains secrets)
-- **Priority**: If both `backend/config.yaml` and `../config.yaml` exist, backend version takes precedence
+- **Runtime root**: Set `DEER_FLOW_PROJECT_ROOT` if DeerFlow may start from outside the project root
+- **Runtime data**: State defaults to `.deer-flow` under the project root; set `DEER_FLOW_HOME` to move it
+- **Skills**: Skills default to `skills/` under the project root; set `DEER_FLOW_SKILLS_PATH` or `skills.path` to move them
 
 ## Configuration File Locations
 
 The backend searches for `config.yaml` in this order:
 
-1. `DEER_FLOW_CONFIG_PATH` environment variable (if set)
-2. `backend/config.yaml` (current directory when running from backend/)
-3. `deer-flow/config.yaml` (parent directory - **recommended location**)
+1. Explicit `config_path` argument from code
+2. `DEER_FLOW_CONFIG_PATH` environment variable (if set)
+3. `config.yaml` under `DEER_FLOW_PROJECT_ROOT`, or the current working directory when `DEER_FLOW_PROJECT_ROOT` is unset
+4. Legacy backend/repository-root locations for monorepo compatibility
 
 **Recommended**: Place `config.yaml` in project root (`deer-flow/config.yaml`).
 
@@ -77,8 +83,8 @@ python -c "from deerflow.config.app_config import AppConfig; print(AppConfig.res
 
 If it can't find the config:
 1. Ensure you've copied `config.example.yaml` to `config.yaml`
-2. Verify you're in the correct directory
-3. Check the file exists: `ls -la ../config.yaml`
+2. Verify you're in the project root, or set `DEER_FLOW_PROJECT_ROOT`
+3. Check the file exists: `ls -la config.yaml`
 
 ### Permission denied
 

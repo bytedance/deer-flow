@@ -1,3 +1,124 @@
+---
+title: Memory
+description: Memory is a runtime feature of the DeerFlow Harness. It is not a simple conversation log — it is a structured store of facts and context summaries that persist across separate sessions and inform the agent's behavior in future conversations.
+---
+
+import { Callout, Cards } from "nextra/components";
+
 # Memory
 
-TBD
+<Callout type="info" emoji="💾">
+  Memory lets DeerFlow carry useful information across sessions. The agent
+  remembers user preferences, project context, and recurring facts so it can
+  give better responses without starting from zero every time.
+</Callout>
+
+Memory is a runtime feature of the DeerFlow Harness. It is not a simple conversation log — it is a structured store of facts and context summaries that persist across separate sessions and inform the agent's behavior in future conversations.
+
+## What memory stores
+
+The memory store holds several categories of information:
+
+- **Work context**: summaries of ongoing projects, goals, and recurring topics the user works on.
+- **Personal context**: preferences, communication style, and other user-specific details the agent has learned.
+- **Top of mind**: the most recent focus areas and active tasks.
+- **History**: recent months' context, earlier background, and long-term facts.
+- **Facts**: discrete, specific facts the agent has extracted from conversations (e.g., preferred tools, team names, project constraints).
+
+Each category is updated over time as the agent learns from ongoing conversations.
+
+## How it works
+
+Memory is managed by `MemoryMiddleware`, which runs on every Lead Agent turn:
+
+1. **Injection**: at the start of each conversation, the agent's current memory is injected into the system prompt at a controlled token budget (`max_injection_tokens`).
+2. **Learning**: after a conversation, a background job extracts new facts and updates the relevant memory categories. Updates are debounced by `debounce_seconds` to batch rapid changes.
+3. **Per-agent memory**: when a custom agent is active, its memory is stored separately from the global memory. This keeps different agents' knowledge isolated.
+
+## Configuration
+
+```yaml
+memory:
+  enabled: true
+
+  # Storage path for the global memory file.
+  # Default: {base_dir}/memory.json  (resolves to backend/.deer-flow/memory.json)
+  # Absolute paths are used as-is.
+  # Relative paths are resolved against base_dir (not the backend working directory).
+  storage_path: memory.json
+
+  # Storage class (default: file-based JSON storage)
+  storage_class: deerflow.agents.memory.storage.FileMemoryStorage
+
+  # Seconds to wait before processing queued memory updates (debounce)
+  debounce_seconds: 30
+
+  # Model for memory update extraction (null = use default model)
+  model_name: null
+
+  # Maximum number of facts to store
+  max_facts: 100
+
+  # Minimum confidence score required to store a fact (0.0–1.0)
+  fact_confidence_threshold: 0.7
+
+  # Whether to inject memory into the system prompt
+  injection_enabled: true
+
+  # Maximum tokens to use for memory injection into system prompt
+  max_injection_tokens: 2000
+```
+
+## Global vs per-agent memory
+
+DeerFlow supports two levels of memory:
+
+- **Global memory**: stored at `{base_dir}/memory.json`. Used when no specific agent is active or when the agent has no per-agent memory file.
+- **Per-agent memory**: stored at `{base_dir}/agents/{agent_name}/memory.json`. Used when a custom agent is active, keeping that agent's learned knowledge separate.
+
+The `MemoryMiddleware` automatically selects the correct memory file based on the active `agent_name` in the request configuration.
+
+Agent names used for memory storage are validated against `AGENT_NAME_PATTERN` to ensure filesystem safety.
+
+## Storage location
+
+By default, memory files are stored under the backend base directory:
+
+- Base directory: `backend/.deer-flow/`
+- Global memory: `backend/.deer-flow/memory.json`
+- Per-agent memory: `backend/.deer-flow/agents/{agent_name}/memory.json`
+
+You can change the storage path with the `storage_path` field. Relative paths are resolved against the base directory. Use an absolute path to store memory in a custom location.
+
+## Custom storage backend
+
+The `storage_class` field allows you to replace the default file-based storage with a custom implementation. Any class that extends `MemoryStorage` and implements `load()`, `reload()`, and `save()` methods can be used:
+
+```yaml
+memory:
+  storage_class: mypackage.storage.RedisMemoryStorage
+```
+
+If the configured class cannot be loaded, the system falls back to the default `FileMemoryStorage` and logs an error.
+
+## Disabling memory
+
+To disable memory entirely:
+
+```yaml
+memory:
+  enabled: false
+```
+
+To keep memory storage but prevent injection into the system prompt:
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: false
+```
+
+<Cards num={2}>
+  <Cards.Card title="Configuration" href="/docs/harness/configuration" />
+  <Cards.Card title="Middlewares" href="/docs/harness/middlewares" />
+</Cards>

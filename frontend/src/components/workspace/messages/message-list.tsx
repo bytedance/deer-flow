@@ -1,9 +1,12 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
+import { ChevronUpIcon, Loader2Icon } from "lucide-react";
+import { useCallback, useEffect, useRef } from "react";
 
 import {
   Conversation,
   ConversationContent,
 } from "@/components/ai-elements/conversation";
+import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -34,23 +37,137 @@ import { SubtaskCard } from "./subtask-card";
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 160;
 export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
 
+const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
+
+function LoadMoreHistoryIndicator({
+  isLoading,
+  hasMore,
+  loadMore,
+}: {
+  isLoading?: boolean;
+  hasMore?: boolean;
+  loadMore?: () => void;
+}) {
+  const { t } = useI18n();
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastLoadRef = useRef(0);
+
+  const throttledLoadMore = useCallback(() => {
+    if (!hasMore || isLoading) {
+      return;
+    }
+
+    const now = Date.now();
+    const remaining =
+      LOAD_MORE_HISTORY_THROTTLE_MS - (now - lastLoadRef.current);
+
+    if (remaining <= 0) {
+      lastLoadRef.current = now;
+      loadMore?.();
+      return;
+    }
+
+    if (timeoutRef.current) {
+      return;
+    }
+
+    timeoutRef.current = setTimeout(() => {
+      timeoutRef.current = null;
+      if (!hasMore || isLoading) {
+        return;
+      }
+      lastLoadRef.current = Date.now();
+      loadMore?.();
+    }, remaining);
+  }, [hasMore, isLoading, loadMore]);
+
+  useEffect(() => {
+    const element = sentinelRef.current;
+    if (!element || !hasMore) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          throttledLoadMore();
+        }
+      },
+      {
+        rootMargin: "120px 0px 0px 0px",
+      },
+    );
+
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [hasMore, throttledLoadMore]);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
+  }, []);
+
+  if (!hasMore && !isLoading) {
+    return null;
+  }
+
+  return (
+    <div ref={sentinelRef} className="flex w-full justify-center">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="text-muted-foreground hover:text-foreground rounded-full px-3"
+        disabled={(isLoading ?? false) || !hasMore}
+        onClick={throttledLoadMore}
+      >
+        {isLoading ? (
+          <>
+            <Loader2Icon className="mr-2 size-4 animate-spin" />
+            {t.common.loading}
+          </>
+        ) : (
+          <>
+            <ChevronUpIcon className="mr-2 size-4" />
+            {t.common.loadMore}
+          </>
+        )}
+      </Button>
+    </div>
+  );
+}
+
 export function MessageList({
   className,
   threadId,
   thread,
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
   tokenUsageEnabled = false,
+  hasMoreHistory,
+  loadMoreHistory,
+  isHistoryLoading,
 }: {
   className?: string;
   threadId: string;
   thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
   tokenUsageEnabled?: boolean;
+  hasMoreHistory?: boolean;
+  loadMoreHistory?: () => void;
+  isHistoryLoading?: boolean;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
+
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
@@ -58,16 +175,21 @@ export function MessageList({
     <Conversation
       className={cn("flex size-full flex-col justify-center", className)}
     >
-      <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-12">
+      <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8">
+        <LoadMoreHistoryIndicator
+          isLoading={isHistoryLoading}
+          hasMore={hasMoreHistory}
+          loadMore={loadMoreHistory}
+        />
         {groupMessages(messages, (group) => {
           if (group.type === "human" || group.type === "assistant") {
             return group.messages.map((msg) => {
               return (
                 <MessageListItem
                   key={`${group.id}/${msg.id}`}
+                  threadId={threadId}
                   message={msg}
                   isLoading={thread.isLoading}
-                  threadId={threadId}
                   tokenUsageEnabled={tokenUsageEnabled}
                 />
               );
@@ -183,7 +305,7 @@ export function MessageList({
               results.push(
                 <div
                   key="subtask-count"
-                  className="text-muted-foreground pt-2 text-sm font-normal"
+                  className="text-muted-foreground font-norma pt-2 text-sm"
                 >
                   {t.subtasks.executing(tasks.size)}
                 </div>,

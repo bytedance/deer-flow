@@ -1,0 +1,213 @@
+---
+title: 工具
+description: Lead Agent 是一个工具调用 Agent。工具是它与世界交互的方式：搜索网络、读写文件、运行命令、委派任务以及向用户呈现输出。
+---
+
+import { Callout, Cards, Tabs } from "nextra/components";
+
+# 工具
+
+<Callout type="info" emoji="🔧">
+  工具是 Lead Agent 可以采取的行动。DeerFlow 提供内置工具、社区集成、MCP
+  工具和技能工具——全部通过 <code>config.yaml</code> 控制。
+</Callout>
+
+Lead Agent 是一个工具调用 Agent。工具是它与世界交互的方式：搜索网络、读写文件、运行命令、委派任务以及向用户呈现输出。
+
+DeerFlow 将工具分为四类：
+
+1. **内置工具** — 核心运行时能力，始终对 Agent 可用
+2. **社区工具** — 与外部搜索、抓取和图像服务的集成
+3. **MCP 工具** — 由外部 Model Context Protocol 服务器提供的工具
+4. **技能工具** — 与特定技能包捆绑的工具
+
+## 内置工具
+
+内置工具是 Harness 的一部分，无需配置即可使用。
+
+### task
+
+将子任务委派给子 Agent。当任务对单个推理线程来说太宽泛，或并行工作有利时，Lead Agent 使用此工具。
+
+```
+task(agent="general-purpose", task="...", context="...")
+```
+
+参见[子 Agent](/docs/harness/subagents)页面了解子 Agent 的配置方式。
+
+---
+
+### present_files
+
+将输出文件作为产出物呈现给用户。Agent 在生成文件（报告、图表、代码等）后调用此工具，将其显示在对话中。
+
+---
+
+### view_image
+
+读取图像文件并将其内容注入到模型的上下文中进行视觉分析。仅当活跃模型具有 `supports_vision: true` 时可用。
+
+---
+
+### clarification
+
+在继续之前向用户提问。当模型认为没有足够信息来行动时，由 `ClarificationMiddleware` 触发。
+
+---
+
+### setup_agent
+
+动态配置当前 Agent 会话。在设置新自定义 Agent 的引导流程中使用。
+
+---
+
+### invoke_acp_agent
+
+使用 [Agent Connect Protocol (ACP)](https://agentconnectprotocol.org/) 调用外部 Agent。需要在 `config.yaml` 中配置 `acp_agents:`。参见[子 Agent](/docs/harness/subagents)页面了解 ACP 配置。
+
+---
+
+### tool_search
+
+按名称或描述搜索工具，并按需将其加载到 Agent 上下文中。仅当 `config.yaml` 中 `tool_search.enabled: true` 时激活。当 MCP 或其他工具集暴露大量工具且你希望减少上下文使用时很有用。
+
+## 沙箱文件工具
+
+以下工具与沙箱文件系统交互，需要配置并激活沙箱。
+
+| 工具          | 描述                                                       |
+| ------------- | ---------------------------------------------------------- |
+| `ls`          | 列出目录中的文件                                           |
+| `read_file`   | 读取文件内容                                               |
+| `glob`        | 查找匹配模式的文件                                         |
+| `grep`        | 搜索文件内容                                               |
+| `write_file`  | 向文件写入内容                                             |
+| `str_replace` | 替换文件中的字符串                                         |
+| `bash`        | 执行 Shell 命令（需要 `allow_host_bash: true` 或容器沙箱） |
+
+在 `config.yaml` 的 `tools:` 下配置：
+
+```yaml
+tools:
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:glob_tool
+  - use: deerflow.sandbox.tools:grep_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:str_replace_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+## 社区工具
+
+社区工具将 Agent 连接到外部服务。在 `config.yaml` 的 `tools:` 下使用 `use:` 字段指定实现来配置。
+
+### 网络搜索
+
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Exa", "Firecrawl"]}>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+```
+无需 API Key。默认配置，适合开发和通用用途。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.tavily.tools:web_search_tool
+    api_key: $TAVILY_API_KEY
+```
+高质量搜索，带结构化结果。需要 [Tavily](https://tavily.com) API Key。
+
+安装：`cd backend && uv add 'deerflow-harness[tavily]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.exa.tools:web_search_tool
+    api_key: $EXA_API_KEY
+```
+带神经检索的语义搜索。需要 [Exa](https://exa.ai) API Key。
+
+安装：`cd backend && uv add 'deerflow-harness[exa]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.firecrawl.tools:web_search_tool
+    api_key: $FIRECRAWL_API_KEY
+```
+Firecrawl 驱动的搜索和爬取。需要 [Firecrawl](https://firecrawl.dev) API Key。
+  </Tabs.Tab>
+</Tabs>
+
+### 网页内容抓取
+
+<Tabs items={["Jina AI（默认）", "Exa"]}>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+    api_key: $JINA_API_KEY # 可选；匿名使用有速率限制
+```
+将网页转换为干净的 Markdown。无 API Key 也可使用，但有更严格的速率限制。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.exa.tools:web_fetch_tool
+    api_key: $EXA_API_KEY
+```
+  </Tabs.Tab>
+</Tabs>
+
+### 图像搜索
+
+```yaml
+tools:
+  - use: deerflow.community.image_search.tools:image_search_tool
+```
+
+## 工具组
+
+工具组允许你将工具组织为命名集合，并限制自定义 Agent 可以访问哪些组：
+
+```yaml
+tool_groups:
+  - name: research
+    tools:
+      - web_search
+      - web_fetch
+      - image_search
+  - name: coding
+    tools:
+      - bash
+      - read_file
+      - write_file
+      - str_replace
+      - glob
+      - grep
+```
+
+自定义 Agent 然后可以在其配置中按名称引用组，将其工具访问限制为仅相关集合。
+
+## 工具搜索（延迟加载）
+
+当有许多工具时（特别是来自多个 MCP 服务器），预先加载所有工具会增加上下文使用量并可能混淆模型。工具搜索功能解决了这个问题：
+
+```yaml
+tool_search:
+  enabled: true
+```
+
+启用后，工具不会直接列在模型上下文中。相反，它们在运行时通过 `tool_search` 内置工具按需发现，Agent 按名称或描述搜索，匹配的工具按需加载到上下文中。
+
+当 MCP 服务器暴露数十个工具时特别有用。
+
+<Cards num={2}>
+  <Cards.Card title="MCP 集成" href="/docs/harness/mcp" />
+  <Cards.Card title="技能" href="/docs/harness/skills" />
+</Cards>

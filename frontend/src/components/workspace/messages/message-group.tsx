@@ -451,7 +451,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           id: message.id,
           messageId: message.id,
           type: "reasoning",
-          reasoning: extractReasoningContentFromMessage(message),
+          reasoning,
         };
         steps.push(step);
       }

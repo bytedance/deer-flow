@@ -11,6 +11,8 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.config.app_config import AppConfig
+
 logger = logging.getLogger(__name__)
 
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
@@ -67,6 +69,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
 def _build_runtime_middlewares(
     *,
+    app_config: AppConfig,
     include_uploads: bool,
     include_dangling_tool_call_patch: bool,
     lazy_init: bool = True,
@@ -91,12 +94,10 @@ def _build_runtime_middlewares(
 
         middlewares.append(DanglingToolCallMiddleware())
 
-    middlewares.append(LLMErrorHandlingMiddleware())
+    middlewares.append(LLMErrorHandlingMiddleware(app_config=app_config))
 
     # Guardrail middleware (if configured)
-    from deerflow.config.guardrails_config import get_guardrails_config
-
-    guardrails_config = get_guardrails_config()
+    guardrails_config = app_config.guardrails
     if guardrails_config.enabled and guardrails_config.provider:
         import inspect
 
@@ -125,19 +126,42 @@ def _build_runtime_middlewares(
     return middlewares
 
 
-def build_lead_runtime_middlewares(*, lazy_init: bool = True) -> list[AgentMiddleware]:
+def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
+        app_config=app_config,
         include_uploads=True,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
     )
 
 
-def build_subagent_runtime_middlewares(*, lazy_init: bool = True) -> list[AgentMiddleware]:
+def build_subagent_runtime_middlewares(
+    *,
+    app_config: AppConfig | None = None,
+    model_name: str | None = None,
+    lazy_init: bool = True,
+) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
-    return _build_runtime_middlewares(
+    if app_config is None:
+        from deerflow.config import get_app_config
+
+        app_config = get_app_config()
+
+    middlewares = _build_runtime_middlewares(
+        app_config=app_config,
         include_uploads=False,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
     )
+
+    if model_name is None and app_config.models:
+        model_name = app_config.models[0].name
+
+    model_config = app_config.get_model_config(model_name) if model_name else None
+    if model_config is not None and model_config.supports_vision:
+        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+
+        middlewares.append(ViewImageMiddleware())
+
+    return middlewares
