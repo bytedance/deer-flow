@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -97,3 +98,43 @@ async def test_join_endpoints_return_404_after_completed_run_cleanup(monkeypatch
     with pytest.raises(HTTPException, match="not found") as stream_exc:
         await stream_existing_run(record.thread_id, record.run_id, request)
     assert stream_exc.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_run_completion_cleanup_logs_background_failures(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    bridge = MemoryStreamBridge()
+    manager = RunManager()
+    record = await manager.create("thread-1")
+
+    scheduled_tasks: list[asyncio.Task] = []
+    original_create_task = asyncio.create_task
+
+    async def failing_manager_cleanup(run_id: str, *, delay: float = 0) -> None:
+        raise RuntimeError(f"boom for {run_id}")
+
+    def capture_task(coro):
+        task = original_create_task(coro)
+        scheduled_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(manager, "cleanup", failing_manager_cleanup)
+    monkeypatch.setattr(worker.asyncio, "create_task", capture_task)
+    monkeypatch.setattr(worker, "_TERMINAL_RUN_RETENTION_SECONDS", 0)
+    logger_name = worker.logger.name
+
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        await worker.run_agent(
+            bridge,
+            manager,
+            record,
+            checkpointer=_FakeCheckpointer(),
+            agent_factory=lambda config: _FakeAgent(),
+            graph_input={"messages": []},
+            config={"configurable": {"thread_id": record.thread_id}},
+            stream_modes=["values"],
+        )
+
+        assert scheduled_tasks
+        await asyncio.gather(*scheduled_tasks)
+
+    assert any(log_record.levelno == logging.ERROR and f"Run {record.run_id} deferred cleanup failed" in log_record.message for log_record in caplog.records)

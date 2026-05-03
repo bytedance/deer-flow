@@ -239,7 +239,7 @@ async def run_agent(
     finally:
         await bridge.publish_end(run_id)
         asyncio.create_task(
-            _cleanup_completed_run(
+            _cleanup_completed_run_with_logging(
                 run_id,
                 bridge=bridge,
                 run_manager=run_manager,
@@ -276,6 +276,25 @@ async def _cleanup_completed_run(
         await asyncio.sleep(delay)
     await run_manager.cleanup(run_id, delay=0)
     await bridge.cleanup(run_id, delay=0)
+
+
+async def _cleanup_completed_run_with_logging(
+    run_id: str,
+    *,
+    bridge: StreamBridge,
+    run_manager: RunManager,
+    delay: float,
+) -> None:
+    """Run deferred cleanup without letting background task failures go silent."""
+    try:
+        await _cleanup_completed_run(
+            run_id,
+            bridge=bridge,
+            run_manager=run_manager,
+            delay=delay,
+        )
+    except Exception:
+        logger.exception("Run %s deferred cleanup failed", run_id)
 
 
 async def _rollback_to_pre_run_checkpoint(
