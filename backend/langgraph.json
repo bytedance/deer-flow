@@ -8,7 +8,10 @@
   "graphs": {
     "lead_agent": "deerflow.agents:make_lead_agent"
   },
+  "auth": {
+    "path": "./app/gateway/langgraph_auth.py:auth"
+  },
   "checkpointer": {
-    "path": "./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer"
+    "path": "./packages/harness/deerflow/runtime/checkpointer/async_provider.py:make_checkpointer"
   }
 }

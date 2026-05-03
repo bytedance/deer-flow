@@ -133,6 +133,58 @@ class TestListDirSerialization:
         assert lock_was_held == [True], "list_dir must hold the lock during exec_command"
 
 
+class TestNoChangeTimeout:
+    """Verify that no_change_timeout is forwarded to every exec_command call."""
+
+    def test_execute_command_passes_no_change_timeout(self, sandbox):
+        """execute_command should pass no_change_timeout to exec_command."""
+        calls = []
+
+        def mock_exec(command, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(data=SimpleNamespace(output="ok"))
+
+        sandbox._client.shell.exec_command = mock_exec
+
+        sandbox.execute_command("echo hello")
+
+        assert len(calls) == 1
+        assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+
+    def test_retry_passes_no_change_timeout(self, sandbox):
+        """The ErrorObservation retry path should also pass no_change_timeout."""
+        calls = []
+
+        def mock_exec(command, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return SimpleNamespace(data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'"))
+            return SimpleNamespace(data=SimpleNamespace(output="ok"))
+
+        sandbox._client.shell.exec_command = mock_exec
+
+        sandbox.execute_command("echo hello")
+
+        assert len(calls) == 2
+        assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+        assert calls[1].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+
+    def test_list_dir_passes_no_change_timeout(self, sandbox):
+        """list_dir should pass no_change_timeout to exec_command."""
+        calls = []
+
+        def mock_exec(command, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(data=SimpleNamespace(output="/a\n/b"))
+
+        sandbox._client.shell.exec_command = mock_exec
+
+        sandbox.list_dir("/test")
+
+        assert len(calls) == 1
+        assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+
+
 class TestConcurrentFileWrites:
     """Verify file write paths do not lose concurrent updates."""
 
