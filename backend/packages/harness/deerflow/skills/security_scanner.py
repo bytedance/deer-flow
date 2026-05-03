@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.skills.types import SKILL_MD_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def _extract_json_object(raw: str) -> dict | None:
         return None
 
 
-async def scan_skill_content(content: str, *, executable: bool = False, location: str = "SKILL.md", app_config: AppConfig | None = None) -> ScanResult:
+async def scan_skill_content(content: str, *, executable: bool = False, location: str = SKILL_MD_FILE, app_config: AppConfig | None = None) -> ScanResult:
     """Screen skill content before it is written to disk."""
     rubric = (
         "You are a security reviewer for AI agent skills. "
