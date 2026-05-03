@@ -158,7 +158,7 @@ Skip simple one-off tasks.
 """
 
 
-def _build_available_subagents_description(available_names: list[str], bash_available: bool) -> str:
+def _build_available_subagents_description(available_names: list[str], bash_available: bool, *, app_config: AppConfig | None = None) -> str:
     """Dynamically build subagent type descriptions from registry.
 
     Mirrors Codex's pattern where agent_type_description is dynamically generated
@@ -180,7 +180,7 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
         if name in builtin_descriptions:
             lines.append(f"- **{name}**: {builtin_descriptions[name]}")
         else:
-            config = get_subagent_config(name)
+            config = get_subagent_config(name, app_config=app_config)
             if config is not None:
                 desc = config.description.split("\n")[0].strip()  # First line only for brevity
                 lines.append(f"- **{name}**: {desc}")
@@ -188,7 +188,7 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
     return "\n".join(lines)
 
 
-def _build_subagent_section(max_concurrent: int) -> str:
+def _build_subagent_section(max_concurrent: int, *, app_config: AppConfig | None = None) -> str:
     """Build the subagent system prompt section with dynamic concurrency limit.
 
     Args:
@@ -198,12 +198,12 @@ def _build_subagent_section(max_concurrent: int) -> str:
         Formatted subagent section string.
     """
     n = max_concurrent
-    available_names = get_available_subagent_names()
+    available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
     bash_available = "bash" in available_names
 
     # Dynamically build subagent type descriptions from registry (aligned with Codex's
     # agent_type_description pattern where all registered roles are listed in the tool spec).
-    available_subagents = _build_available_subagents_description(available_names, bash_available)
+    available_subagents = _build_available_subagents_description(available_names, bash_available, app_config=app_config)
     direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
     direct_execution_example = (
         '# User asks: "Run the tests"\n# Thinking: Cannot decompose into parallel sub-tasks\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
@@ -530,21 +530,28 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None) -> str:
+def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
+        app_config: Explicit application config. When provided, memory options
+            are read from this value instead of the global config singleton.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
     try:
         from deerflow.agents.memory import format_memory_for_injection, get_memory_data
-        from deerflow.config.memory_config import get_memory_config
         from deerflow.runtime.user_context import get_effective_user_id
 
-        config = get_memory_config()
+        if app_config is None:
+            from deerflow.config.memory_config import get_memory_config
+
+            config = get_memory_config()
+        else:
+            config = app_config.memory
+
         if not config.enabled or not config.injection_enabled:
             return ""
 
@@ -558,8 +565,8 @@ def _get_memory_context(agent_name: str | None = None) -> str:
 {memory_content}
 </memory>
 """
-    except Exception as e:
-        logger.error("Failed to load memory context: %s", e)
+    except Exception:
+        logger.exception("Failed to load memory context")
         return ""
 
 
@@ -599,15 +606,20 @@ def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_c
     """Generate the skills prompt section with available skills list."""
     skills = _get_enabled_skills_for_config(app_config)
 
-    try:
-        from deerflow.config import get_app_config
+    if app_config is None:
+        try:
+            from deerflow.config import get_app_config
 
-        config = app_config or get_app_config()
+            config = get_app_config()
+            container_base_path = config.skills.container_path
+            skill_evolution_enabled = config.skill_evolution.enabled
+        except Exception:
+            container_base_path = "/mnt/skills"
+            skill_evolution_enabled = False
+    else:
+        config = app_config
         container_base_path = config.skills.container_path
         skill_evolution_enabled = config.skill_evolution.enabled
-    except Exception:
-        container_base_path = "/mnt/skills"
-        skill_evolution_enabled = False
 
     if not skills and not skill_evolution_enabled:
         return ""
@@ -640,13 +652,17 @@ def get_deferred_tools_prompt_section(*, app_config: AppConfig | None = None) ->
     """
     from deerflow.tools.builtins.tool_search import get_deferred_registry
 
-    try:
-        from deerflow.config import get_app_config
+    if app_config is None:
+        try:
+            from deerflow.config import get_app_config
 
-        config = app_config or get_app_config()
-        if not config.tool_search.enabled:
+            config = get_app_config()
+        except Exception:
             return ""
-    except Exception:
+    else:
+        config = app_config
+
+    if not config.tool_search.enabled:
         return ""
 
     registry = get_deferred_registry()
@@ -657,15 +673,19 @@ def get_deferred_tools_prompt_section(*, app_config: AppConfig | None = None) ->
     return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
 
 
-def _build_acp_section() -> str:
+def _build_acp_section(*, app_config: AppConfig | None = None) -> str:
     """Build the ACP agent prompt section, only if ACP agents are configured."""
-    try:
-        from deerflow.config.acp_config import get_acp_agents
+    if app_config is None:
+        try:
+            from deerflow.config.acp_config import get_acp_agents
 
-        agents = get_acp_agents()
-        if not agents:
+            agents = get_acp_agents()
+        except Exception:
             return ""
-    except Exception:
+    else:
+        agents = getattr(app_config, "acp_agents", {}) or {}
+
+    if not agents:
         return ""
 
     return (
@@ -679,14 +699,18 @@ def _build_acp_section() -> str:
 
 def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     """Build a prompt section for explicitly configured sandbox mounts."""
-    try:
-        from deerflow.config import get_app_config
+    if app_config is None:
+        try:
+            from deerflow.config import get_app_config
 
-        config = app_config or get_app_config()
-        mounts = config.sandbox.mounts or []
-    except Exception:
-        logger.exception("Failed to load configured sandbox mounts for the lead-agent prompt")
-        return ""
+            config = get_app_config()
+        except Exception:
+            logger.exception("Failed to load configured sandbox mounts for the lead-agent prompt")
+            return ""
+    else:
+        config = app_config
+
+    mounts = config.sandbox.mounts or []
 
     if not mounts:
         return ""
@@ -709,11 +733,11 @@ def apply_prompt_template(
     app_config: AppConfig | None = None,
 ) -> str:
     # Get memory context
-    memory_context = _get_memory_context(agent_name)
+    memory_context = _get_memory_context(agent_name, app_config=app_config)
 
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
-    subagent_section = _build_subagent_section(n) if subagent_enabled else ""
+    subagent_section = _build_subagent_section(n, app_config=app_config) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled
     subagent_reminder = (
@@ -740,7 +764,7 @@ def apply_prompt_template(
     deferred_tools_section = get_deferred_tools_prompt_section(app_config=app_config)
 
     # Build ACP agent section only if ACP agents are configured
-    acp_section = _build_acp_section()
+    acp_section = _build_acp_section(app_config=app_config)
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
     acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
 

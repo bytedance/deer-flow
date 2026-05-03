@@ -136,11 +136,32 @@ def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = T
     )
 
 
-def build_subagent_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
+def build_subagent_runtime_middlewares(
+    *,
+    app_config: AppConfig | None = None,
+    model_name: str | None = None,
+    lazy_init: bool = True,
+) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
-    return _build_runtime_middlewares(
+    if app_config is None:
+        from deerflow.config import get_app_config
+
+        app_config = get_app_config()
+
+    middlewares = _build_runtime_middlewares(
         app_config=app_config,
         include_uploads=False,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
     )
+
+    if model_name is None and app_config.models:
+        model_name = app_config.models[0].name
+
+    model_config = app_config.get_model_config(model_name) if model_name else None
+    if model_config is not None and model_config.supports_vision:
+        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+
+        middlewares.append(ViewImageMiddleware())
+
+    return middlewares
