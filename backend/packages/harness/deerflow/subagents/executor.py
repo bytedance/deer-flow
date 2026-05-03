@@ -13,7 +13,7 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
@@ -166,7 +166,7 @@ class SubagentExecutor:
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
-    def _create_agent(self):
+    def _create_agent(self, system_prompt: str | None = None):
         """Create the agent instance."""
         model_name = _get_model_name(self.config, self.parent_model)
         model = create_chat_model(name=model_name, thinking_enabled=False)
@@ -180,27 +180,24 @@ class SubagentExecutor:
             model=model,
             tools=self.tools,
             middleware=middlewares,
-            system_prompt=self.config.system_prompt,
+            system_prompt=system_prompt or self.config.system_prompt,
             state_schema=ThreadState,
         )
 
-    async def _load_skill_messages(self) -> list[SystemMessage]:
-        """Load skill content as conversation items based on config.skills.
+    async def _load_skill_prompt(self) -> str:
+        """Load skill content into a single prompt block based on config.skills.
 
-        Aligned with Codex's pattern: each subagent loads its own skills
-        per-session and injects them as conversation items (developer messages),
-        not as system prompt text. The config.skills whitelist controls which
-        skills are loaded:
+        The config.skills whitelist controls which skills are loaded:
         - None: load all enabled skills
         - []: no skills
         - ["skill-a", "skill-b"]: only these skills
 
         Returns:
-            List of SystemMessages containing skill content.
+            System-prompt text containing preloaded skill content.
         """
         if self.config.skills is not None and len(self.config.skills) == 0:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading")
-            return []
+            return ""
 
         try:
             from deerflow.skills.loader import load_skills
@@ -210,11 +207,11 @@ class SubagentExecutor:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
         except Exception:
             logger.warning(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}", exc_info=True)
-            return []
+            return ""
 
         if not all_skills:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found")
-            return []
+            return ""
 
         # Filter by config.skills whitelist
         if self.config.skills is not None:
@@ -224,21 +221,34 @@ class SubagentExecutor:
             skills = all_skills
 
         if not skills:
-            return []
+            return ""
 
-        # Read each skill's SKILL.md content and create conversation items
-        messages = []
+        # Read each skill's SKILL.md content and merge it into the single
+        # system prompt. Do not add SystemMessages to state: OpenAI-compatible
+        # providers require system messages to appear only at the beginning.
+        skill_blocks = []
         for skill in skills:
             try:
                 content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
                 content = content.strip()
                 if content:
-                    messages.append(SystemMessage(content=f'<skill name="{skill.name}">\n{content}\n</skill>'))
+                    skill_blocks.append(f'<skill name="{skill.name}">\n{content}\n</skill>')
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
             except Exception:
                 logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)
 
-        return messages
+        if not skill_blocks:
+            return ""
+
+        joined_skill_blocks = "\n\n".join(skill_blocks)
+        return f"<skills>\nThe following skills are preloaded. Follow them when relevant.\n\n{joined_skill_blocks}\n</skills>"
+
+    def _build_system_prompt(self, skill_prompt: str) -> str:
+        """Build the per-run subagent system prompt."""
+        if not skill_prompt:
+            return self.config.system_prompt
+        base_prompt = self.config.system_prompt.rstrip()
+        return f"{base_prompt}\n\n{skill_prompt}" if base_prompt else skill_prompt
 
     async def _build_initial_state(self, task: str) -> dict[str, Any]:
         """Build the initial state for agent execution.
@@ -249,14 +259,7 @@ class SubagentExecutor:
         Returns:
             Initial state dictionary.
         """
-        # Load skills as conversation items (Codex pattern)
-        skill_messages = await self._load_skill_messages()
-
-        messages: list = []
-        # Skill content injected as developer/system messages before the task
-        messages.extend(skill_messages)
-        # Then the actual task
-        messages.append(HumanMessage(content=task))
+        messages = [HumanMessage(content=task)]
 
         state: dict[str, Any] = {
             "messages": messages,
@@ -294,7 +297,8 @@ class SubagentExecutor:
             )
 
         try:
-            agent = self._create_agent()
+            skill_prompt = await self._load_skill_prompt()
+            agent = self._create_agent(system_prompt=self._build_system_prompt(skill_prompt))
             state = await self._build_initial_state(task)
 
             # Build config with thread_id for sandbox access and recursion limit

@@ -17,6 +17,7 @@ import asyncio
 import sys
 import threading
 from datetime import datetime
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1040,3 +1041,59 @@ class TestCooperativeCancellation:
         executor_module.cleanup_background_task(task_id)
 
         assert task_id not in executor_module._background_tasks
+
+
+# -----------------------------------------------------------------------------
+# Skill Preload Tests
+# -----------------------------------------------------------------------------
+
+
+class TestSkillPreload:
+    @pytest.mark.anyio
+    async def test_preloaded_skills_are_sent_in_the_leading_system_message(self, classes, base_config, monkeypatch):
+        """Preloaded skills must reach the model without creating later SystemMessages."""
+        from langchain_core.language_models.fake_chat_models import FakeListChatModel
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured_messages = []
+
+        class CapturingChatModel(FakeListChatModel):
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                captured_messages.append(messages)
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(content="done"))])
+
+        skill = SimpleNamespace(
+            name="demo-skill",
+            description="Demo workflow",
+            skill_file=SimpleNamespace(read_text=MagicMock(return_value="Demo skill instructions")),
+        )
+        config = classes["SubagentConfig"](
+            name=base_config.name,
+            description=base_config.description,
+            system_prompt=base_config.system_prompt,
+            skills=["demo-skill"],
+            max_turns=base_config.max_turns,
+            timeout_seconds=base_config.timeout_seconds,
+        )
+        executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
+
+        middleware_module = ModuleType("deerflow.agents.middlewares.tool_error_handling_middleware")
+        middleware_module.build_subagent_runtime_middlewares = lambda *, lazy_init=True: []
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_error_handling_middleware", middleware_module)
+        monkeypatch.setattr("deerflow.subagents.executor.ThreadState", None)
+        monkeypatch.setattr("deerflow.subagents.executor.create_chat_model", lambda **kwargs: CapturingChatModel(responses=["done"]))
+
+        with patch("deerflow.skills.loader.load_skills", return_value=[skill]):
+            result = await executor._aexecute("Do the task")
+
+        assert result.result == "done"
+        assert captured_messages
+        messages = captured_messages[0]
+        system_indexes = [index for index, message in enumerate(messages) if isinstance(message, SystemMessage)]
+        assert system_indexes == [0]
+        assert base_config.system_prompt in messages[0].content
+        assert '<skill name="demo-skill">' in messages[0].content
+        assert "Demo skill instructions" in messages[0].content
+        assert [message.content for message in messages if isinstance(message, HumanMessage)] == ["Do the task"]

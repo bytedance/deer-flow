@@ -165,8 +165,8 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert captured["executor_kwargs"]["thread_id"] == "thread-1"
     assert captured["executor_kwargs"]["parent_model"] == "ark-model"
     assert captured["executor_kwargs"]["config"].max_turns == 7
-    # Skills are no longer appended to system_prompt; they are loaded per-session
-    # by SubagentExecutor and injected as conversation items (Codex pattern).
+    # Skills are loaded per-session by SubagentExecutor and merged into the
+    # runtime system prompt, not appended to the stored config here.
     assert captured["executor_kwargs"]["config"].system_prompt == "Base system prompt"
 
     get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False)
