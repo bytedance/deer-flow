@@ -1,3 +1,155 @@
+---
+title: Sandbox
+description: The sandbox gives the Lead Agent a controlled environment where it can read files, write outputs, run shell commands, and produce artifacts. Without a sandbox, the agent can only generate text. With a sandbox, it can write and execute code, process data files, generate charts, and build deliverables.
+---
+
+import { Callout, Cards, Tabs } from "nextra/components";
+
 # Sandbox
 
-TBD
+<Callout type="info" emoji="📦">
+  The sandbox is the isolated workspace where the agent does file and
+  command-based work. It is what makes DeerFlow capable of real action, not just
+  conversation.
+</Callout>
+
+The sandbox gives the Lead Agent a controlled environment where it can read files, write outputs, run shell commands, and produce artifacts. Without a sandbox, the agent can only generate text. With a sandbox, it can write and execute code, process data files, generate charts, and build deliverables.
+
+## Sandbox modes
+
+DeerFlow supports three sandbox modes. Choose the one that fits your deployment:
+
+### LocalSandbox (default)
+
+Commands run directly on the host machine's filesystem. There is no container isolation.
+
+- **Best for**: trusted, single-user local development workflows.
+- **Risk**: the agent has access to the host filesystem. Use `allow_host_bash: false` (default) to prevent arbitrary command execution.
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false # default; set to true only for fully trusted workflows
+```
+
+### Container-based AIO Sandbox
+
+Commands run in an isolated container (Docker on Linux/Windows, or Apple Container on macOS). Each sandbox session gets a fresh container environment.
+
+- **Best for**: multi-user environments, production deployments, or any case where you want execution isolation.
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+
+  # Optional: container image (default shown below)
+  image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+
+  # Optional: max concurrent containers (default: 3, LRU eviction when exceeded)
+  replicas: 3
+
+  # Optional: container name prefix (default: deer-flow-sandbox)
+  container_prefix: deer-flow-sandbox
+
+  # Optional: idle timeout in seconds (default: 600)
+  idle_timeout: 600
+
+  # Optional: custom mounts
+  mounts:
+    - host_path: /path/on/host
+      container_path: /home/user/shared
+      read_only: false
+
+  # Optional: environment variables injected into the container
+  environment:
+    API_KEY: $MY_API_KEY
+```
+
+Install: `cd backend && uv add 'deerflow-harness[aio-sandbox]'`
+
+### Provisioner-managed Sandbox (Kubernetes)
+
+Each sandbox gets a dedicated Pod in a Kubernetes cluster, managed by the provisioner service. This provides the strongest isolation and is recommended for production environments with multiple concurrent users.
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+```
+
+The provisioner service is included in `docker/docker-compose-dev.yaml` and manages the Pod and Service lifecycle for each sandbox ID.
+
+## Path mappings
+
+The sandbox uses path mappings to bridge the host filesystem and the container's virtual filesystem. Two key mappings are always configured:
+
+| Host path                                   | Container path                               | Access     |
+| ------------------------------------------- | -------------------------------------------- | ---------- |
+| `skills/` (from `skills.path`)              | `/mnt/skills` (from `skills.container_path`) | Read-only  |
+| `.deer-flow/threads/{thread_id}/user-data/` | `/mnt/user-data/`                            | Read-write |
+
+The skills directory is always mounted read-only. Threads write their working data (uploads, outputs, intermediate files) to `/mnt/user-data/`.
+
+### Custom mounts
+
+You can add additional mounts for the local sandbox using the `mounts:` configuration:
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  mounts:
+    - host_path: /home/user/my-project
+      container_path: /mnt/my-project
+      read_only: true
+```
+
+<Callout type="warning">
+  Custom mount `container_path` values must not conflict with reserved prefixes:
+  `/mnt/skills`, `/mnt/acp-workspace`, or `/mnt/user-data`.
+</Callout>
+
+## Output truncation
+
+The sandbox tools limit output size to keep the agent's context manageable. These limits are configurable:
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+  # bash uses middle-truncation (head + tail)
+  bash_output_max_chars: 20000
+
+  # read_file uses head-truncation
+  read_file_output_max_chars: 50000
+
+  # ls uses head-truncation
+  ls_output_max_chars: 20000
+```
+
+Set to `0` to disable truncation.
+
+## Security
+
+### LocalSandbox
+
+The `LocalSandbox` runs commands directly on the host. By default, the `bash` tool is **disabled** to prevent arbitrary host command execution. Enable it only for fully trusted, single-user workflows:
+
+```yaml
+sandbox:
+  allow_host_bash: true # Dangerous: grants the agent shell access to your machine
+```
+
+Even without `bash`, the agent can still read and write files through the dedicated file tools.
+
+### Container sandbox
+
+Container-based sandboxes provide filesystem and process isolation. The agent cannot see or modify the host filesystem except through explicit mounts. The provisioner-managed mode adds a further layer: each thread gets its own isolated Pod.
+
+### Audit middleware
+
+`SandboxAuditMiddleware` runs on every agent turn and records all sandbox operations. This provides an audit trail of what files were accessed and what commands were run during a session.
+
+<Cards num={2}>
+  <Cards.Card title="Tools" href="/docs/harness/tools" />
+  <Cards.Card title="Subagents" href="/docs/harness/subagents" />
+</Cards>

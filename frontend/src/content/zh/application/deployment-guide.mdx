@@ -1,0 +1,212 @@
+---
+title: 部署指南
+description: 本指南涵盖 DeerFlow 应用所有支持的部署方式：本地开发、Docker Compose 以及使用 Kubernetes 管理沙箱的生产环境。
+---
+
+import { Callout, Cards, Steps, Tabs } from "nextra/components";
+
+# 部署指南
+
+本指南涵盖 DeerFlow 应用所有支持的部署方式：本地开发、Docker Compose 以及使用 Kubernetes 管理沙箱的生产环境。
+
+## 本地开发部署
+
+本地工作流是运行 DeerFlow 最快的方式，所有服务作为原生进程在你的机器上运行。
+
+<Tabs items={["启动", "停止", "日志"]}>
+  <Tabs.Tab>
+```bash
+make dev
+```
+
+启动的服务：
+
+| 服务        | 端口 | 描述                    |
+| ----------- | ---- | ----------------------- |
+| LangGraph   | 2024 | DeerFlow Harness 运行时 |
+| Gateway API | 8001 | FastAPI 后端            |
+| 前端        | 3000 | Next.js 界面            |
+| nginx       | 2026 | 统一反向代理            |
+
+访问地址：**http://localhost:2026**
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```bash
+make stop
+```
+
+停止所有四个服务。即使某个服务没有运行也可以安全执行。
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```
+logs/langgraph.log   # Agent 运行时日志
+logs/gateway.log     # API Gateway 日志
+logs/frontend.log    # Next.js 开发服务器日志
+logs/nginx.log       # nginx 访问/错误日志
+```
+
+实时追踪日志：
+
+```bash
+tail -f logs/langgraph.log
+```
+
+  </Tabs.Tab>
+</Tabs>
+
+## Docker Compose 部署
+
+Docker Compose 在容器中运行所有服务。适用于更接近生产的本地设置或团队环境。
+
+### 前置条件
+
+- Docker（macOS 上的 Docker Desktop 或 OrbStack）
+- 在仓库根目录中已配置的 `config.yaml`
+
+### 开发 Compose
+
+```bash
+# 设置 deer-flow 仓库根目录的绝对路径
+export DEER_FLOW_ROOT=/path/to/deer-flow
+
+docker compose -f docker/docker-compose-dev.yaml up --build
+```
+
+访问地址：**http://localhost:2026**
+
+### 环境变量
+
+在仓库根目录创建 `.env` 文件用于存放密钥和运行时配置：
+
+```bash
+# .env
+OPENAI_API_KEY=sk-...
+DEER_FLOW_ROOT=/absolute/path/to/deer-flow
+BETTER_AUTH_SECRET=your-secret-here-min-32-chars
+```
+
+`docker-compose*.yaml` 文件包含 `env_file: ../.env` 指令，会自动加载该文件。
+
+<Callout type="warning">
+  在部署前始终将 <code>BETTER_AUTH_SECRET</code>{" "}
+  设置为强随机字符串。没有它，前端构建会使用一个公开已知的默认值。
+</Callout>
+
+### 数据持久化
+
+线程数据存储在 `backend/.deer-flow/threads/`。在 Docker 部署中，此目录被绑定挂载到 langgraph 容器中。
+
+为避免容器重建时数据丢失：
+
+1. 将 `DEER_FLOW_ROOT` 设置为仓库根目录的绝对路径。
+2. 验证 `threads/` 和 `skills/` 目录挂载正确。
+
+对于生产环境，使用命名卷或持久化卷声明（PVC）代替主机绑定挂载。
+
+## 生产部署注意事项
+
+### 沙箱模式选择
+
+| 沙箱                                   | 使用场景                   |
+| -------------------------------------- | -------------------------- |
+| `LocalSandboxProvider`                 | 单用户、受信任的本地工作流 |
+| `AioSandboxProvider`（Docker）         | 多用户、中等隔离需求       |
+| `AioSandboxProvider` + K8s Provisioner | 生产环境、强隔离、多用户   |
+
+对于有多个并发用户的任何部署，使用基于容器的沙箱，防止用户之间的执行环境相互干扰。
+
+### K8s Provisioner 配置
+
+<Steps>
+
+#### 配置 Provisioner
+
+在你的 `.env` 或 compose 覆盖文件中设置必需的环境变量：
+
+```bash
+K8S_NAMESPACE=deer-flow
+SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+DEER_FLOW_ROOT=/absolute/path/to/deer-flow
+```
+
+#### 配置沙箱提供者
+
+```yaml
+# config.yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+```
+
+#### 配置数据持久化
+
+对于生产环境，使用 PVC 代替 hostPath 卷：
+
+```bash
+# 在 .env 或 compose 环境中
+USERDATA_PVC_NAME=deer-flow-userdata-pvc
+SKILLS_PVC_NAME=deer-flow-skills-pvc
+```
+
+当设置 `USERDATA_PVC_NAME` 时，Provisioner 自动使用子路径（`threads/{thread_id}/user-data`），每个线程在 PVC 中获得自己的目录。
+
+</Steps>
+
+### nginx 配置
+
+nginx 路由所有流量，控制路由的关键环境变量：
+
+| 变量                 | 默认值           | 描述                          |
+| -------------------- | ---------------- | ----------------------------- |
+| `LANGGRAPH_UPSTREAM` | `langgraph:2024` | LangGraph 服务地址            |
+| `LANGGRAPH_REWRITE`  | `/`              | LangGraph 路由的 URL 重写前缀 |
+
+这些在 Docker Compose 环境中设置，并在容器启动时由 `envsubst` 处理。
+
+### 认证配置
+
+DeerFlow 应用使用 [Better Auth](https://www.better-auth.com/) 进行会话管理。在生产环境中：
+
+1. 将 `BETTER_AUTH_SECRET` 设置为强随机字符串（最少 32 个字符）。
+2. 将 `BETTER_AUTH_URL` 设置为你的公开 URL（例如 `https://your-domain.com`）。
+
+```bash
+# 生成密钥
+openssl rand -base64 32
+```
+
+### 资源建议
+
+| 服务                      | 最低配置         | 推荐配置         |
+| ------------------------- | ---------------- | ---------------- |
+| LangGraph（Agent 运行时） | 2 vCPU、4 GB RAM | 4 vCPU、8 GB RAM |
+| Gateway                   | 0.5 vCPU、512 MB | 1 vCPU、1 GB     |
+| 前端                      | 0.5 vCPU、512 MB | 1 vCPU、1 GB     |
+| 沙箱容器（每会话）        | 1 vCPU、1 GB     | 2 vCPU、2 GB     |
+
+## 部署后验证
+
+启动后验证部署：
+
+```bash
+# 检查 Gateway 健康状态
+curl http://localhost:8001/health
+
+# 检查 LangGraph 健康状态
+curl http://localhost:2024/ok
+
+# 通过 nginx 列出配置的模型（验证完整代理链）
+curl http://localhost:2026/api/models
+```
+
+正常工作的部署会从每个端点返回 `200` 响应。`/api/models` 调用会返回你 `config.yaml` 中的模型列表。
+
+<Cards num={2}>
+  <Cards.Card title="配置" href="/docs/application/configuration" />
+  <Cards.Card
+    title="运维与排障"
+    href="/docs/application/operations-and-troubleshooting"
+  />
+</Cards>
