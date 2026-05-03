@@ -49,11 +49,11 @@ class SkillsConfig(BaseModel):
             return resolve_path(env_path)
 
         project_default = project_root() / "skills"
-        if project_default.exists():
+        if project_default.is_dir():
             return project_default
 
         for candidate in _legacy_skills_candidates():
-            if candidate.exists():
+            if candidate.is_dir():
                 return candidate
 
         return project_default
