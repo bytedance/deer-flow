@@ -267,7 +267,7 @@ class TestAgentConstruction:
         assert captured["agent"]["system_prompt"] == base_config.system_prompt
 
     @pytest.mark.anyio
-    async def test_load_skill_messages_uses_explicit_app_config_for_skill_storage(
+    async def test_load_skill_prompt_uses_explicit_app_config_for_skill_storage(
         self,
         classes,
         base_config,
@@ -297,11 +297,11 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        messages = await executor._load_skill_messages()
+        skill_prompt = await executor._load_skill_prompt()
 
         assert captured["app_config"] is app_config
-        assert len(messages) == 1
-        assert "Use demo skill" in messages[0].content
+        assert '<skill name="demo-skill">' in skill_prompt
+        assert "Use demo skill" in skill_prompt
 
 
 # -----------------------------------------------------------------------------
@@ -1342,12 +1342,17 @@ class TestSkillPreload:
         executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
 
         middleware_module = ModuleType("deerflow.agents.middlewares.tool_error_handling_middleware")
-        middleware_module.build_subagent_runtime_middlewares = lambda *, lazy_init=True: []
+        middleware_module.build_subagent_runtime_middlewares = lambda **kwargs: []
         monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_error_handling_middleware", middleware_module)
         monkeypatch.setattr("deerflow.subagents.executor.ThreadState", None)
         monkeypatch.setattr("deerflow.subagents.executor.create_chat_model", lambda **kwargs: CapturingChatModel(responses=["done"]))
 
-        with patch("deerflow.skills.loader.load_skills", return_value=[skill]):
+        def fake_get_or_new_skill_storage(*, app_config=None):
+            return SimpleNamespace(load_skills=lambda *, enabled_only: [skill])
+
+        monkeypatch.setattr("deerflow.skills.storage.get_or_new_skill_storage", fake_get_or_new_skill_storage)
+
+        with patch.object(skill.skill_file, "read_text", return_value="Demo skill instructions"):
             result = await executor._aexecute("Do the task")
 
         assert result.result == "done"
