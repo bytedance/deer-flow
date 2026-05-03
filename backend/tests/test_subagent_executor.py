@@ -264,7 +264,7 @@ class TestAgentConstruction:
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
         assert captured["agent"]["tools"] == []
-        assert captured["agent"]["system_prompt"] == base_config.system_prompt
+        assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
 
     @pytest.mark.anyio
     async def test_load_skill_messages_uses_explicit_app_config_for_skill_storage(
@@ -302,6 +302,121 @@ class TestAgentConstruction:
         assert captured["app_config"] is app_config
         assert len(messages) == 1
         assert "Use demo skill" in messages[0].content
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_consolidates_system_prompt_and_skills(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """_build_initial_state merges system_prompt and skills into one SystemMessage."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("Skill instructions here", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "deerflow.skills.storage.get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file)]),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        state = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        # Should have exactly 2 messages: one combined SystemMessage + one HumanMessage
+        assert len(messages) == 2
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        assert isinstance(messages[0], SystemMessage)
+        assert isinstance(messages[1], HumanMessage)
+        # SystemMessage should contain both the system_prompt and skill content
+        assert base_config.system_prompt in messages[0].content
+        assert "Skill instructions here" in messages[0].content
+        # HumanMessage should be the task
+        assert messages[1].content == "Do the task"
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_no_skills_only_system_prompt(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """_build_initial_state works when there are no skills."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            "deerflow.skills.storage.get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        state = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        assert len(messages) == 2
+        assert isinstance(messages[0], SystemMessage)
+        assert base_config.system_prompt in messages[0].content
+        assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_no_system_prompt_with_skills(
+        self,
+        classes,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """_build_initial_state works when there is no system_prompt but there are skills."""
+        SubagentConfig = classes["SubagentConfig"]
+
+        config = SubagentConfig(
+            name="test-agent",
+            description="Test agent",
+            system_prompt=None,
+            max_turns=10,
+            timeout_seconds=60,
+        )
+
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("Skill content", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "deerflow.skills.storage.get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file)]),
+        )
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
+
+        state = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        assert len(messages) == 2
+        assert isinstance(messages[0], SystemMessage)
+        assert "Skill content" in messages[0].content
+        assert isinstance(messages[1], HumanMessage)
 
 
 # -----------------------------------------------------------------------------
