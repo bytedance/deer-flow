@@ -42,7 +42,6 @@ function MCPServerList({
       {entries.map(([name, config]) => (
         <SettingsRow
           key={name}
-          align="start"
           label={name}
           description={config.description}
           control={

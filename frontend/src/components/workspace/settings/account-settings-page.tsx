@@ -170,11 +170,11 @@ export function AccountSettingsPage() {
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="Session">
+      <SettingsSection title={t.settings.account.sessionTitle}>
         <SettingsCard>
           <SettingsRow
             label={t.settings.account.signOut}
-            description="Sign out of this device. You can sign back in any time."
+            description={t.settings.account.signOutDescription}
             control={
               <Button
                 variant="destructive"

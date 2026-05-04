@@ -48,7 +48,7 @@ export function SettingsCard({
   return (
     <div
       className={cn(
-        "bg-card divide-border divide-y rounded-lg border",
+        "bg-background divide-border divide-y rounded-lg border",
         className,
       )}
     >

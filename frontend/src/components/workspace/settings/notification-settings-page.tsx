@@ -47,7 +47,6 @@ export function NotificationSettingsPage() {
         <SettingsRow
           label={t.settings.notification.title}
           description={t.settings.notification.description}
-          align="start"
           control={
             <Switch
               disabled={permission !== "granted"}

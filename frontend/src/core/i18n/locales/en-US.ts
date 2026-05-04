@@ -494,7 +494,10 @@ export const enUS: Translations = {
       networkError: "Network error. Please try again.",
       updating: "Updating...",
       updatePassword: "Update Password",
+      sessionTitle: "Session",
       signOut: "Sign Out",
+      signOutDescription:
+        "Sign out of this device. You can sign back in any time.",
     },
     acknowledge: {
       emptyTitle: "Acknowledgements",

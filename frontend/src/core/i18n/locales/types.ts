@@ -410,7 +410,9 @@ export interface Translations {
       networkError: string;
       updating: string;
       updatePassword: string;
+      sessionTitle: string;
       signOut: string;
+      signOutDescription: string;
     };
     acknowledge: {
       emptyTitle: string;

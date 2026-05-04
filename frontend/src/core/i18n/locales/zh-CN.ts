@@ -474,7 +474,9 @@ export const zhCN: Translations = {
       networkError: "网络错误，请重试。",
       updating: "更新中...",
       updatePassword: "修改密码",
+      sessionTitle: "会话",
       signOut: "退出登录",
+      signOutDescription: "退出当前设备的登录，你可以随时重新登录。",
     },
     acknowledge: {
       emptyTitle: "致谢",

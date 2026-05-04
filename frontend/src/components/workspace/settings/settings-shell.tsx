@@ -72,11 +72,11 @@ export function SettingsShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
         <div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
           {/* Page header */}
           <header className="mb-8 space-y-1.5">
-            <h1 className="text-3xl font-semibold tracking-tight">
+            <h1 className="text-base font-semibold tracking-tight">
               {t.settings.title}
             </h1>
             <p className="text-muted-foreground text-sm">
