@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   BookOpenTextIcon,
   ChevronUp,
+  CoinsIcon,
   FolderOpenIcon,
   GlobeIcon,
   LightbulbIcon,
@@ -24,6 +25,8 @@ import {
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import { formatTokenCount } from "@/core/messages/usage";
+import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
   extractReasoningContentFromMessage,
   findToolCallResult,
@@ -44,11 +47,15 @@ export function MessageGroup({
   messages,
   isLoading = false,
   threadId,
+  tokenDebugSteps = [],
+  showTokenDebugSummaries = false,
 }: {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
   threadId?: string;
+  tokenDebugSteps?: TokenDebugStep[];
+  showTokenDebugSummaries?: boolean;
 }) {
   const { t } = useI18n();
   const [showAbove, setShowAbove] = useState(
@@ -58,6 +65,28 @@ export function MessageGroup({
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
   const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const debugStepByMessageId = useMemo(
+    () =>
+      new Map(
+        tokenDebugSteps.map(
+          (step) => [step.messageId || step.id, step] as const,
+        ),
+      ),
+    [tokenDebugSteps],
+  );
+  const toolCallCountByMessageId = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    for (const step of steps) {
+      if (step.type !== "toolCall" || !step.messageId) {
+        continue;
+      }
+
+      counts.set(step.messageId, (counts.get(step.messageId) ?? 0) + 1);
+    }
+
+    return counts;
+  }, [steps]);
   const lastToolCallStep = useMemo(() => {
     const filteredSteps = steps.filter((step) => step.type === "toolCall");
     return filteredSteps[filteredSteps.length - 1];
@@ -79,6 +108,125 @@ export function MessageGroup({
     }
   }, [lastToolCallStep, steps]);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
+    const firstIndices = new Map<string, number>();
+
+    if (!showTokenDebugSummaries) {
+      return firstIndices;
+    }
+
+    for (const [index, step] of steps.entries()) {
+      const messageId = step.messageId;
+      if (!messageId || firstIndices.has(messageId)) {
+        continue;
+      }
+
+      const debugStep = debugStepByMessageId.get(messageId);
+      if (!debugStep) {
+        continue;
+      }
+
+      const toolCallCount = toolCallCountByMessageId.get(messageId) ?? 0;
+      if (!debugStep.sharedAttribution && toolCallCount > 0) {
+        continue;
+      }
+      if (
+        !debugStep.sharedAttribution &&
+        toolCallCount === 0 &&
+        debugStep.label === t.common.thinking &&
+        debugStep.secondaryLabels.length === 0
+      ) {
+        continue;
+      }
+
+      firstIndices.set(messageId, index);
+    }
+
+    return firstIndices;
+  }, [
+    debugStepByMessageId,
+    showTokenDebugSummaries,
+    steps,
+    t.common.thinking,
+    toolCallCountByMessageId,
+  ]);
+
+  const renderDebugSummary = (
+    messageId: string | undefined,
+    stepIndex: number,
+  ) => {
+    if (!showTokenDebugSummaries || !messageId) {
+      return null;
+    }
+
+    const debugStep = debugStepByMessageId.get(messageId);
+    if (!debugStep) {
+      return null;
+    }
+    if (
+      firstEligibleDebugSummaryStepIndexByMessageId.get(messageId) !== stepIndex
+    ) {
+      return null;
+    }
+
+    return (
+      <ChainOfThoughtStep
+        key={`token-debug-${messageId}`}
+        icon={CoinsIcon}
+        label={
+          <DebugStepLabel
+            label={debugStep.label}
+            token={formatDebugToken(debugStep, t)}
+          />
+        }
+        description={
+          debugStep.sharedAttribution
+            ? t.tokenUsage.sharedAttribution
+            : undefined
+        }
+      >
+        {debugStep.secondaryLabels.length > 0 && (
+          <ChainOfThoughtSearchResults>
+            {debugStep.secondaryLabels.map((label, index) => (
+              <ChainOfThoughtSearchResult
+                key={`${debugStep.id}-${index}-${label}`}
+              >
+                {label}
+              </ChainOfThoughtSearchResult>
+            ))}
+          </ChainOfThoughtSearchResults>
+        )}
+      </ChainOfThoughtStep>
+    );
+  };
+
+  const renderToolCall = (
+    step: CoTToolCallStep,
+    options?: { isLast?: boolean },
+  ) => {
+    const debugStep =
+      showTokenDebugSummaries && step.messageId
+        ? debugStepByMessageId.get(step.messageId)
+        : undefined;
+
+    return (
+      <ToolCall
+        key={step.id}
+        {...step}
+        isLast={options?.isLast}
+        isLoading={isLoading}
+        tokenDebugStep={
+          debugStep && !debugStep.sharedAttribution ? debugStep : undefined
+        }
+      />
+    );
+  };
+
+  const lastReasoningDebugStep =
+    showTokenDebugSummaries && lastReasoningStep?.messageId
+      ? debugStepByMessageId.get(lastReasoningStep.messageId)
+      : undefined;
+
   return (
     <ChainOfThought
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
@@ -113,37 +261,47 @@ export function MessageGroup({
       {lastToolCallStep && (
         <ChainOfThoughtContent className="px-4 pb-2">
           {showAbove &&
-            aboveLastToolCallSteps.map((step) =>
-              step.type === "reasoning" ? (
-                <ChainOfThoughtStep
-                  key={step.id}
-                  label={
-                    <MarkdownContent
-                      content={step.reasoning ?? ""}
-                      isLoading={isLoading}
-                      rehypePlugins={rehypePlugins}
-                      threadId={threadId}
-                    />
-                  }
-                ></ChainOfThoughtStep>
-              ) : (
-                <ToolCall key={step.id} {...step} isLoading={isLoading} />
-              ),
-            )}
+            aboveLastToolCallSteps.flatMap((step) => {
+              const stepIndex = steps.indexOf(step);
+              if (step.type === "reasoning") {
+                return [
+                  renderDebugSummary(step.messageId, stepIndex),
+                  <ChainOfThoughtStep
+                    key={step.id}
+                    label={
+                      <MarkdownContent
+                        content={step.reasoning ?? ""}
+                        isLoading={isLoading}
+                        rehypePlugins={rehypePlugins}
+                        threadId={threadId}
+                      />
+                    }
+                  ></ChainOfThoughtStep>,
+                ];
+              }
+
+              return [
+                renderDebugSummary(step.messageId, stepIndex),
+                renderToolCall(step),
+              ];
+            })}
+          {renderDebugSummary(
+            lastToolCallStep.messageId,
+            steps.indexOf(lastToolCallStep),
+          )}
           {lastToolCallStep && (
             <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              <ToolCall
-                key={lastToolCallStep.id}
-                {...lastToolCallStep}
-                isLast={true}
-                isLoading={isLoading}
-              />
+              {renderToolCall(lastToolCallStep, { isLast: true })}
             </FlipDisplay>
           )}
         </ChainOfThoughtContent>
       )}
       {lastReasoningStep && (
         <>
+          {renderDebugSummary(
+            lastReasoningStep.messageId,
+            steps.indexOf(lastReasoningStep),
+          )}
           <Button
             key={lastReasoningStep.id}
             className="w-full items-start justify-start text-left"
@@ -153,7 +311,22 @@ export function MessageGroup({
             <div className="flex w-full items-center justify-between">
               <ChainOfThoughtStep
                 className="font-normal"
-                label={t.common.thinking}
+                label={
+                  <DebugStepLabel
+                    label={t.common.thinking}
+                    token={shouldInlineThinkingToken({
+                      debugStep: lastReasoningDebugStep,
+                      toolCallCount: lastReasoningStep.messageId
+                        ? (toolCallCountByMessageId.get(
+                            lastReasoningStep.messageId,
+                          ) ?? 0)
+                        : 0,
+                      enabled: showTokenDebugSummaries,
+                      thinkingLabel: t.common.thinking,
+                      t,
+                    })}
+                  />
+                }
                 icon={LightbulbIcon}
               ></ChainOfThoughtStep>
               <div>
@@ -187,6 +360,60 @@ export function MessageGroup({
   );
 }
 
+function formatDebugToken(
+  debugStep: TokenDebugStep,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return debugStep.usage
+    ? `${formatTokenCount(debugStep.usage.totalTokens)} ${t.tokenUsage.label}`
+    : t.tokenUsage.unavailableShort;
+}
+
+function shouldInlineThinkingToken({
+  debugStep,
+  toolCallCount,
+  enabled,
+  thinkingLabel,
+  t,
+}: {
+  debugStep?: TokenDebugStep;
+  toolCallCount: number;
+  enabled: boolean;
+  thinkingLabel: string;
+  t: ReturnType<typeof useI18n>["t"];
+}) {
+  if (
+    !enabled ||
+    !debugStep ||
+    debugStep.sharedAttribution ||
+    toolCallCount > 0 ||
+    debugStep.label !== thinkingLabel
+  ) {
+    return null;
+  }
+
+  return formatDebugToken(debugStep, t);
+}
+
+function DebugStepLabel({
+  label,
+  token,
+}: {
+  label: React.ReactNode;
+  token?: string | null;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0 flex-1">{label}</div>
+      {token ? (
+        <div className="text-muted-foreground shrink-0 font-mono text-[11px]">
+          {token}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ToolCall({
   id,
   messageId,
@@ -195,6 +422,7 @@ function ToolCall({
   result,
   isLast = false,
   isLoading = false,
+  tokenDebugStep,
 }: {
   id?: string;
   messageId?: string;
@@ -203,10 +431,20 @@ function ToolCall({
   result?: string | Record<string, unknown>;
   isLast?: boolean;
   isLoading?: boolean;
+  tokenDebugStep?: TokenDebugStep;
 }) {
   const { t } = useI18n();
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
+  const tokenLabel = tokenDebugStep
+    ? formatDebugToken(tokenDebugStep, t)
+    : null;
+  const resolveLabel = (fallback: React.ReactNode) =>
+    tokenDebugStep ? (
+      <DebugStepLabel label={tokenDebugStep.label} token={tokenLabel} />
+    ) : (
+      fallback
+    );
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -214,7 +452,11 @@ function ToolCall({
       label = t.toolCalls.searchOnWebFor(args.query);
     }
     return (
-      <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(label)}
+        icon={SearchIcon}
+      >
         {Array.isArray(result) && (
           <ChainOfThoughtSearchResults>
             {result.map((item) => (
@@ -244,7 +486,11 @@ function ToolCall({
       }
     )?.results;
     return (
-      <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(label)}
+        icon={SearchIcon}
+      >
         {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
@@ -284,7 +530,7 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={t.toolCalls.viewWebPage}
+        label={resolveLabel(t.toolCalls.viewWebPage)}
         icon={GlobeIcon}
       >
         <ChainOfThoughtSearchResult>
@@ -309,7 +555,11 @@ function ToolCall({
     }
     const path: string | undefined = (args as { path: string })?.path;
     return (
-      <ChainOfThoughtStep key={id} label={description} icon={FolderOpenIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(description)}
+        icon={FolderOpenIcon}
+      >
         {path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
             {path}
@@ -325,7 +575,11 @@ function ToolCall({
     }
     const { path } = args as { path: string; content: string };
     return (
-      <ChainOfThoughtStep key={id} label={description} icon={BookOpenTextIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(description)}
+        icon={BookOpenTextIcon}
+      >
         {path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
             {path}
@@ -357,7 +611,7 @@ function ToolCall({
       <ChainOfThoughtStep
         key={id}
         className="cursor-pointer"
-        label={description}
+        label={resolveLabel(description)}
         icon={NotebookPenIcon}
         onClick={() => {
           select(
@@ -379,13 +633,19 @@ function ToolCall({
     const description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
-      return t.toolCalls.executeCommand;
+      return (
+        <ChainOfThoughtStep
+          key={id}
+          label={resolveLabel(t.toolCalls.executeCommand)}
+          icon={SquareTerminalIcon}
+        />
+      );
     }
     const command: string | undefined = (args as { command: string })?.command;
     return (
       <ChainOfThoughtStep
         key={id}
-        label={description}
+        label={resolveLabel(description)}
         icon={SquareTerminalIcon}
       >
         {command && (
@@ -402,7 +662,7 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={t.toolCalls.needYourHelp}
+        label={resolveLabel(t.toolCalls.needYourHelp)}
         icon={MessageCircleQuestionMarkIcon}
       ></ChainOfThoughtStep>
     );
@@ -410,7 +670,7 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={t.toolCalls.writeTodos}
+        label={resolveLabel(t.toolCalls.writeTodos)}
         icon={ListTodoIcon}
       ></ChainOfThoughtStep>
     );
@@ -420,7 +680,7 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={description ?? t.toolCalls.useTool(name)}
+        label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
       ></ChainOfThoughtStep>
     );
@@ -455,7 +715,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           id: message.id,
           messageId: message.id,
           type: "reasoning",
-          reasoning: extractReasoningContentFromMessage(message),
+          reasoning,
         };
         steps.push(step);
       }
