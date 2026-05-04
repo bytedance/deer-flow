@@ -589,6 +589,17 @@ class ChannelManager:
             user_layer.get("config"),
         )
 
+        configurable = run_config.get("configurable")
+        if isinstance(configurable, Mapping):
+            configurable = dict(configurable)
+        else:
+            configurable = {}
+        run_config["configurable"] = configurable
+        # Pin channel-triggered runs to the root graph namespace so follow-up
+        # turns continue from the same conversation checkpoint.
+        configurable["checkpoint_ns"] = ""
+        configurable["thread_id"] = thread_id
+
         run_context = _merge_dicts(
             DEFAULT_RUN_CONTEXT,
             self._default_session.get("context"),
