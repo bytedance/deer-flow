@@ -630,11 +630,7 @@ class TestAsyncExecutionPath:
 
         monkeypatch.setattr(
             "deerflow.skills.storage.get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(
-                load_skills=lambda *, enabled_only: [
-                    SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md")
-                ]
-            ),
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md")]),
         )
 
         captured_states: list[dict] = []
@@ -660,13 +656,9 @@ class TestAsyncExecutionPath:
         initial_messages = captured_states[0]["messages"]
 
         system_messages = [m for m in initial_messages if isinstance(m, SystemMessage)]
-        assert len(system_messages) <= 1, (
-            f"Expected at most 1 SystemMessage but got {len(system_messages)}: {system_messages}"
-        )
+        assert len(system_messages) <= 1, f"Expected at most 1 SystemMessage but got {len(system_messages)}: {system_messages}"
         if system_messages:
-            assert initial_messages[0] is system_messages[0], (
-                "SystemMessage must be the first message in the conversation"
-            )
+            assert initial_messages[0] is system_messages[0], "SystemMessage must be the first message in the conversation"
             # The consolidated SystemMessage must carry both the system_prompt
             # and all skill content — nothing should be split across two messages.
             assert base_config.system_prompt in system_messages[0].content
