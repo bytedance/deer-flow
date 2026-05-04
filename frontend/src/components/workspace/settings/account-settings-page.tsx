@@ -8,11 +8,13 @@ import { Input } from "@/components/ui/input";
 import { fetch, getCsrfHeaders } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
+import { useI18n } from "@/core/i18n/hooks";
 
 import { SettingsSection } from "./settings-section";
 
 export function AccountSettingsPage() {
   const { user, logout } = useAuth();
+  const { t } = useI18n();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -26,11 +28,11 @@ export function AccountSettingsPage() {
     setMessage("");
 
     if (newPassword !== confirmPassword) {
-      setError("New passwords do not match");
+      setError(t.settings.account.passwordMismatch);
       return;
     }
     if (newPassword.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError(t.settings.account.passwordTooShort);
       return;
     }
 
@@ -55,12 +57,12 @@ export function AccountSettingsPage() {
         return;
       }
 
-      setMessage("Password changed successfully");
+      setMessage(t.settings.account.passwordChangedSuccess);
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
     } catch {
-      setError("Network error. Please try again.");
+      setError(t.settings.account.networkError);
     } finally {
       setLoading(false);
     }
@@ -68,12 +70,16 @@ export function AccountSettingsPage() {
 
   return (
     <div className="space-y-8">
-      <SettingsSection title="Profile">
+      <SettingsSection title={t.settings.account.profileTitle}>
         <div className="space-y-2">
           <div className="grid grid-cols-[max-content_max-content] items-center gap-4">
-            <span className="text-muted-foreground text-sm">Email</span>
+            <span className="text-muted-foreground text-sm">
+              {t.settings.account.email}
+            </span>
             <span className="text-sm font-medium">{user?.email ?? "—"}</span>
-            <span className="text-muted-foreground text-sm">Role</span>
+            <span className="text-muted-foreground text-sm">
+              {t.settings.account.role}
+            </span>
             <span className="text-sm font-medium capitalize">
               {user?.system_role ?? "—"}
             </span>
@@ -82,20 +88,20 @@ export function AccountSettingsPage() {
       </SettingsSection>
 
       <SettingsSection
-        title="Change Password"
-        description="Update your account password."
+        title={t.settings.account.changePasswordTitle}
+        description={t.settings.account.changePasswordDescription}
       >
         <form onSubmit={handleChangePassword} className="max-w-sm space-y-3">
           <Input
             type="password"
-            placeholder="Current password"
+            placeholder={t.settings.account.currentPassword}
             value={currentPassword}
             onChange={(e) => setCurrentPassword(e.target.value)}
             required
           />
           <Input
             type="password"
-            placeholder="New password"
+            placeholder={t.settings.account.newPassword}
             value={newPassword}
             onChange={(e) => setNewPassword(e.target.value)}
             required
@@ -103,7 +109,7 @@ export function AccountSettingsPage() {
           />
           <Input
             type="password"
-            placeholder="Confirm new password"
+            placeholder={t.settings.account.confirmNewPassword}
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
             required
@@ -112,7 +118,9 @@ export function AccountSettingsPage() {
           {error && <p className="text-sm text-red-500">{error}</p>}
           {message && <p className="text-sm text-green-500">{message}</p>}
           <Button type="submit" variant="outline" size="sm" disabled={loading}>
-            {loading ? "Updating..." : "Update Password"}
+            {loading
+              ? t.settings.account.updating
+              : t.settings.account.updatePassword}
           </Button>
         </form>
       </SettingsSection>
@@ -125,7 +133,7 @@ export function AccountSettingsPage() {
           className="gap-2"
         >
           <LogOutIcon className="size-4" />
-          Sign Out
+          {t.settings.account.signOut}
         </Button>
       </SettingsSection>
     </div>

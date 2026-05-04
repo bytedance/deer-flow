@@ -394,6 +394,23 @@ export interface Translations {
       notSupported: string;
       disableNotification: string;
     };
+    account: {
+      profileTitle: string;
+      email: string;
+      role: string;
+      changePasswordTitle: string;
+      changePasswordDescription: string;
+      currentPassword: string;
+      newPassword: string;
+      confirmNewPassword: string;
+      passwordMismatch: string;
+      passwordTooShort: string;
+      passwordChangedSuccess: string;
+      networkError: string;
+      updating: string;
+      updatePassword: string;
+      signOut: string;
+    };
     acknowledge: {
       emptyTitle: string;
       emptyDescription: string;
