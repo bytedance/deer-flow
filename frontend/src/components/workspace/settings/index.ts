@@ -1,1 +1,1 @@
-export { SettingsDialog } from "./settings-dialog";
+export { SettingsShell } from "./settings-shell";

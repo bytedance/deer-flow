@@ -9,7 +9,7 @@ import { fetch, getCsrfHeaders } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
 
-import { SettingsSection } from "./settings-section";
+import { SettingsCard, SettingsRow, SettingsSection } from "./settings-section";
 
 export function AccountSettingsPage() {
   const { user, logout } = useAuth();
@@ -66,67 +66,124 @@ export function AccountSettingsPage() {
     }
   };
 
+  const initial = (
+    user?.email?.[0] ??
+    user?.system_role?.[0] ??
+    "?"
+  ).toUpperCase();
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-10">
       <SettingsSection title="Profile">
-        <div className="space-y-2">
-          <div className="grid grid-cols-[max-content_max-content] items-center gap-4">
-            <span className="text-muted-foreground text-sm">Email</span>
-            <span className="text-sm font-medium">{user?.email ?? "—"}</span>
-            <span className="text-muted-foreground text-sm">Role</span>
-            <span className="text-sm font-medium capitalize">
-              {user?.system_role ?? "—"}
-            </span>
+        <SettingsCard>
+          <div className="flex items-center gap-4 px-5 py-4">
+            <div className="bg-primary text-primary-foreground flex size-12 shrink-0 items-center justify-center rounded-full text-base font-semibold">
+              {initial}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold">
+                {user?.email ?? "—"}
+              </div>
+              <div className="text-muted-foreground mt-0.5 text-xs capitalize">
+                {user?.system_role ?? "—"}
+              </div>
+            </div>
           </div>
-        </div>
+        </SettingsCard>
       </SettingsSection>
 
       <SettingsSection
         title="Change Password"
-        description="Update your account password."
+        description="Update your account password. Use at least 8 characters."
       >
-        <form onSubmit={handleChangePassword} className="max-w-sm space-y-3">
-          <Input
-            type="password"
-            placeholder="Current password"
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            required
-          />
-          <Input
-            type="password"
-            placeholder="New password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            required
-            minLength={8}
-          />
-          <Input
-            type="password"
-            placeholder="Confirm new password"
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            required
-            minLength={8}
-          />
-          {error && <p className="text-sm text-red-500">{error}</p>}
-          {message && <p className="text-sm text-green-500">{message}</p>}
-          <Button type="submit" variant="outline" size="sm" disabled={loading}>
-            {loading ? "Updating..." : "Update Password"}
-          </Button>
-        </form>
+        <SettingsCard>
+          <form onSubmit={handleChangePassword}>
+            <SettingsRow
+              size="compact"
+              label="Current password"
+              control={
+                <Input
+                  type="password"
+                  placeholder="••••••••"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  required
+                  className="w-[260px]"
+                />
+              }
+            />
+            <SettingsRow
+              size="compact"
+              label="New password"
+              control={
+                <Input
+                  type="password"
+                  placeholder="At least 8 characters"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  required
+                  minLength={8}
+                  className="w-[260px]"
+                />
+              }
+            />
+            <SettingsRow
+              size="compact"
+              label="Confirm new password"
+              control={
+                <Input
+                  type="password"
+                  placeholder="Re-enter new password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  required
+                  minLength={8}
+                  className="w-[260px]"
+                />
+              }
+            />
+            {(error || message) && (
+              <div className="px-5 py-2">
+                {error && <p className="text-sm text-red-500">{error}</p>}
+                {message && (
+                  <p className="text-sm text-emerald-600 dark:text-emerald-400">
+                    {message}
+                  </p>
+                )}
+              </div>
+            )}
+            <div className="flex justify-end px-5 py-3">
+              <Button
+                type="submit"
+                variant="default"
+                size="sm"
+                disabled={loading}
+              >
+                {loading ? "Updating..." : "Update password"}
+              </Button>
+            </div>
+          </form>
+        </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="" description="">
-        <Button
-          variant="destructive"
-          size="sm"
-          onClick={logout}
-          className="gap-2"
-        >
-          <LogOutIcon className="size-4" />
-          Sign Out
-        </Button>
+      <SettingsSection title="Session">
+        <SettingsCard>
+          <SettingsRow
+            label="Sign out"
+            description="Sign out of this device. You can sign back in any time."
+            control={
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={logout}
+                className="gap-2"
+              >
+                <LogOutIcon className="size-4" />
+                Sign Out
+              </Button>
+            }
+          />
+        </SettingsCard>
       </SettingsSection>
     </div>
   );

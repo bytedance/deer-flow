@@ -9,6 +9,7 @@ import {
   Settings2Icon,
   SettingsIcon,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import {
@@ -28,7 +29,6 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 
 import { GithubIcon } from "./github-icon";
-import { SettingsDialog } from "./settings";
 
 function NavMenuButtonContent({
   isSidebarOpen,
@@ -51,10 +51,7 @@ function NavMenuButtonContent({
 }
 
 export function WorkspaceNavMenu() {
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsDefaultSection, setSettingsDefaultSection] = useState<
-    "appearance" | "memory" | "tools" | "skills" | "notification" | "about"
-  >("appearance");
+  const router = useRouter();
   const [mounted, setMounted] = useState(false);
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
@@ -65,11 +62,6 @@ export function WorkspaceNavMenu() {
 
   return (
     <>
-      <SettingsDialog
-        open={settingsOpen}
-        onOpenChange={setSettingsOpen}
-        defaultSection={settingsDefaultSection}
-      />
       <SidebarMenu className="w-full">
         <SidebarMenuItem>
           {mounted ? (
@@ -90,8 +82,7 @@ export function WorkspaceNavMenu() {
                 <DropdownMenuGroup>
                   <DropdownMenuItem
                     onClick={() => {
-                      setSettingsDefaultSection("appearance");
-                      setSettingsOpen(true);
+                      router.push("/workspace/settings/general");
                     }}
                   >
                     <Settings2Icon />
@@ -139,8 +130,7 @@ export function WorkspaceNavMenu() {
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={() => {
-                    setSettingsDefaultSection("about");
-                    setSettingsOpen(true);
+                    router.push("/workspace/settings/about");
                   }}
                 >
                   <InfoIcon />

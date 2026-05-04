@@ -255,6 +255,7 @@ export interface Translations {
     title: string;
     description: string;
     sections: {
+      general: string;
       account: string;
       appearance: string;
       memory: string;
