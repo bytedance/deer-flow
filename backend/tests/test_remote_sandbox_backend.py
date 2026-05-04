@@ -8,9 +8,16 @@ from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
 
 
 class _StubResponse:
-    def __init__(self, *, status_code: int = 200, payload: dict | None = None):
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        payload: object | None = None,
+        json_exc: Exception | None = None,
+    ):
         self.status_code = status_code
-        self._payload = payload or {}
+        self._payload = {} if payload is None else payload
+        self._json_exc = json_exc
         self.ok = 200 <= status_code < 400
         self.text = ""
 
@@ -18,19 +25,22 @@ class _StubResponse:
         if self.status_code >= 400:
             raise requests.HTTPError(f"HTTP {self.status_code}")
 
-    def json(self) -> dict:
+    def json(self) -> object:
+        if self._json_exc is not None:
+            raise self._json_exc
         return self._payload
 
 
 def test_list_running_delegates_to_provisioner_list(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    sandbox_info = SandboxInfo(sandbox_id="test-id", sandbox_url="http://localhost:8080")
 
     def mock_list():
-        return ["ok"]
+        return [sandbox_info]
 
     monkeypatch.setattr(backend, "_provisioner_list", mock_list)
 
-    assert backend.list_running() == ["ok"]
+    assert backend.list_running() == [sandbox_info]
 
 
 def test_provisioner_list_returns_sandbox_infos_and_filters_invalid_entries(monkeypatch):
@@ -66,6 +76,62 @@ def test_provisioner_list_returns_empty_on_request_exception(monkeypatch):
     monkeypatch.setattr(requests, "get", mock_get)
 
     assert backend._provisioner_list() == []
+
+
+def test_provisioner_list_returns_empty_on_invalid_json(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_get(url: str, timeout: int):
+        return _StubResponse(json_exc=ValueError("invalid json"))
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    assert backend._provisioner_list() == []
+
+
+def test_provisioner_list_returns_empty_when_payload_is_not_dict(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_get(url: str, timeout: int):
+        return _StubResponse(payload=[{"sandbox_id": "abc", "sandbox_url": "http://k3s:31001"}])
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    assert backend._provisioner_list() == []
+
+
+def test_provisioner_list_returns_empty_when_sandboxes_is_not_list(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_get(url: str, timeout: int):
+        return _StubResponse(payload={"sandboxes": {"sandbox_id": "abc"}})
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    assert backend._provisioner_list() == []
+
+
+def test_provisioner_list_skips_non_dict_sandbox_entries(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_get(url: str, timeout: int):
+        return _StubResponse(
+            payload={
+                "sandboxes": [
+                    {"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"},
+                    "bad-entry",
+                    123,
+                    None,
+                ]
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    infos = backend._provisioner_list()
+    assert len(infos) == 1
+    assert infos[0].sandbox_id == "abc123"
+    assert infos[0].sandbox_url == "http://k3s:31001"
 
 
 def test_create_delegates_to_provisioner_create(monkeypatch):

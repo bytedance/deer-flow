@@ -104,11 +104,29 @@ class RemoteSandboxBackend(SandboxBackend):
             resp = requests.get(f"{self._provisioner_url}/api/sandboxes", timeout=10)
             resp.raise_for_status()
             data = resp.json()
+            if not isinstance(data, dict):
+                logger.warning("Provisioner list_running returned non-dict payload: %r", type(data))
+                return []
+
             sandboxes = data.get("sandboxes", [])
-            infos = [SandboxInfo(sandbox_id=s["sandbox_id"], sandbox_url=s["sandbox_url"]) for s in sandboxes if s.get("sandbox_id") and s.get("sandbox_url")]
+            if not isinstance(sandboxes, list):
+                logger.warning("Provisioner list_running returned non-list sandboxes: %r", type(sandboxes))
+                return []
+
+            infos: list[SandboxInfo] = []
+            for sandbox in sandboxes:
+                if not isinstance(sandbox, dict):
+                    logger.warning("Provisioner list_running entry is not a dict: %r", type(sandbox))
+                    continue
+
+                sandbox_id = sandbox.get("sandbox_id")
+                sandbox_url = sandbox.get("sandbox_url")
+                if isinstance(sandbox_id, str) and sandbox_id and isinstance(sandbox_url, str) and sandbox_url:
+                    infos.append(SandboxInfo(sandbox_id=sandbox_id, sandbox_url=sandbox_url))
+
             logger.info("Provisioner list_running: %d sandbox(es) found", len(infos))
             return infos
-        except requests.RequestException as exc:
+        except (requests.RequestException, ValueError, TypeError) as exc:
             logger.warning("Provisioner list_running failed: %s", exc)
             return []
 
