@@ -2,12 +2,12 @@
 
 ## 概述
 
-DeerFlow 后端提供了完整的文件上传功能，支持多文件上传，并自动将 Office 文档和 PDF 转换为 Markdown 格式。
+DeerFlow 后端提供了完整的文件上传功能，支持多文件上传，并可选地将 Office 文档和 PDF 转换为 Markdown 格式。
 
 ## 功能特性
 
 - ✅ 支持多文件同时上传
-- ✅ 自动转换文档为 Markdown（PDF、PPT、Excel、Word）
+- ✅ 可选地转换文档为 Markdown（PDF、PPT、Excel、Word）
 - ✅ 文件存储在线程隔离的目录中
 - ✅ Agent 自动感知已上传的文件
 - ✅ 支持文件列表查询和删除
@@ -21,6 +21,8 @@ POST /api/threads/{thread_id}/uploads
 
 **请求体：** `multipart/form-data`
 - `files`: 一个或多个文件
+
+网关会在应用层限制上传规模，默认最多 10 个文件、单文件 50 MiB、单次请求总计 100 MiB。可通过 `config.yaml` 的 `uploads.max_files`、`uploads.max_file_size`、`uploads.max_total_size` 调整；前端会读取同一组限制并在选择文件时提示，超过限制时后端返回 `413 Payload Too Large`。
 
 **响应：**
 ```json
@@ -48,7 +50,23 @@ POST /api/threads/{thread_id}/uploads
 - `virtual_path`: Agent 在沙箱中使用的虚拟路径
 - `artifact_url`: 前端通过 HTTP 访问文件的 URL
 
-### 2. 列出已上传文件
+### 2. 查询上传限制
+```
+GET /api/threads/{thread_id}/uploads/limits
+```
+
+返回网关当前生效的上传限制，供前端在用户选择文件前提示和拦截。
+
+**响应：**
+```json
+{
+  "max_files": 10,
+  "max_file_size": 52428800,
+  "max_total_size": 104857600
+}
+```
+
+### 3. 列出已上传文件
 ```
 GET /api/threads/{thread_id}/uploads/list
 ```
@@ -71,7 +89,7 @@ GET /api/threads/{thread_id}/uploads/list
 }
 ```
 
-### 3. 删除文件
+### 4. 删除文件
 ```
 DELETE /api/threads/{thread_id}/uploads/{filename}
 ```
@@ -86,13 +104,15 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 
 ## 支持的文档格式
 
-以下格式会自动转换为 Markdown：
+以下格式在显式启用 `uploads.auto_convert_documents: true` 时会自动转换为 Markdown：
 - PDF (`.pdf`)
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
 转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名。
+
+默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
 ## Agent 集成
 
@@ -207,6 +227,7 @@ backend/.deer-flow/threads/
 - 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
 - 线程隔离：每个线程的上传文件相互隔离，无法跨线程访问
+- 自动文档转换默认关闭；如需启用，需在 `config.yaml` 中显式设置 `uploads.auto_convert_documents: true`
 
 ## 技术实现
 

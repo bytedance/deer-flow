@@ -22,6 +22,9 @@ from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
+_URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+_URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
+_DOTDOT_PATH_SEGMENT_PATTERN = re.compile(r"(?:^|[/\\=])\.\.(?:$|[/\\])")
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -37,6 +40,42 @@ _DEFAULT_GLOB_MAX_RESULTS = 200
 _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
+_LOCAL_BASH_CWD_COMMANDS = {"cd", "pushd"}
+_LOCAL_BASH_COMMAND_WRAPPERS = {"command", "builtin"}
+_LOCAL_BASH_COMMAND_PREFIX_KEYWORDS = {"!", "{", "case", "do", "elif", "else", "for", "if", "select", "then", "time", "until", "while"}
+_LOCAL_BASH_COMMAND_END_KEYWORDS = {"}", "done", "esac", "fi"}
+_LOCAL_BASH_ROOT_PATH_COMMANDS = {
+    "awk",
+    "cat",
+    "cp",
+    "du",
+    "find",
+    "grep",
+    "head",
+    "less",
+    "ln",
+    "ls",
+    "more",
+    "mv",
+    "rm",
+    "sed",
+    "tail",
+    "tar",
+}
+_SHELL_COMMAND_SEPARATORS = {";", "&&", "||", "|", "|&", "&", "(", ")"}
+_SHELL_REDIRECTION_OPERATORS = {
+    "<",
+    ">",
+    "<<",
+    ">>",
+    "<<<",
+    "<>",
+    ">&",
+    "<&",
+    "&>",
+    "&>>",
+    ">|",
+}
 
 
 def _get_skills_container_path() -> str:
@@ -200,8 +239,9 @@ def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
     if thread_id is not None:
         try:
             from deerflow.config.paths import get_paths
+            from deerflow.runtime.user_context import get_effective_user_id
 
-            host_path = get_paths().acp_workspace_dir(thread_id)
+            host_path = get_paths().acp_workspace_dir(thread_id, user_id=get_effective_user_id())
             if host_path.exists():
                 return str(host_path)
         except Exception:
@@ -548,7 +588,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     This function is a security gate — it checks whether *path* may be
     accessed and raises on violation.  It does **not** resolve the virtual
     path to a host path; callers are responsible for resolution via
-    ``_resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
+    ``resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
 
     Allowed virtual-path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
@@ -635,6 +675,219 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
     return str(resolved)
 
 
+def _is_non_file_url_token(token: str) -> bool:
+    """Return True for URL tokens that should not be interpreted as paths."""
+    values = [token]
+    if "=" in token:
+        values.append(token.split("=", 1)[1])
+
+    for value in values:
+        match = _URL_WITH_SCHEME_PATTERN.match(value)
+        if match and not value.lower().startswith("file://"):
+            return True
+    return False
+
+
+def _non_file_url_spans(command: str) -> list[tuple[int, int]]:
+    spans = []
+    for match in _URL_IN_COMMAND_PATTERN.finditer(command):
+        if not match.group().lower().startswith("file://"):
+            spans.append(match.span())
+    return spans
+
+
+def _is_in_spans(position: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= position < end for start, end in spans)
+
+
+def _has_dotdot_path_segment(token: str) -> bool:
+    if _is_non_file_url_token(token):
+        return False
+    return bool(_DOTDOT_PATH_SEGMENT_PATTERN.search(token))
+
+
+def _split_shell_tokens(command: str) -> list[str]:
+    try:
+        normalized = command.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ; ")
+        lexer = shlex.shlex(normalized, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        # The shell will reject malformed quoting later; keep validation
+        # best-effort instead of turning syntax errors into security messages.
+        return command.split()
+
+
+def _is_shell_command_separator(token: str) -> bool:
+    return token in _SHELL_COMMAND_SEPARATORS
+
+
+def _is_shell_redirection_operator(token: str) -> bool:
+    return token in _SHELL_REDIRECTION_OPERATORS
+
+
+def _is_shell_assignment(token: str) -> bool:
+    name, separator, _ = token.partition("=")
+    if not separator or not name:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
+
+
+def _is_allowed_local_bash_absolute_path(path: str, allowed_paths: list[str], *, allow_system_paths: bool) -> bool:
+    # Check for MCP filesystem server allowed paths
+    if any(path.startswith(allowed_path) or path == allowed_path.rstrip("/") for allowed_path in allowed_paths):
+        _reject_path_traversal(path)
+        return True
+
+    if path == VIRTUAL_PATH_PREFIX or path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        _reject_path_traversal(path)
+        return True
+
+    # Allow skills container path (resolved by tools.py before passing to sandbox)
+    if _is_skills_path(path):
+        _reject_path_traversal(path)
+        return True
+
+    # Allow ACP workspace path (path-traversal check only)
+    if _is_acp_workspace_path(path):
+        _reject_path_traversal(path)
+        return True
+
+    # Allow custom mount container paths
+    if _is_custom_mount_path(path):
+        _reject_path_traversal(path)
+        return True
+
+    if allow_system_paths and any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
+        return True
+
+    return False
+
+
+def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, int]:
+    index = start_index
+    while index < len(tokens):
+        token = tokens[index]
+        if _is_shell_command_separator(token):
+            return None, index
+        if _is_shell_redirection_operator(token):
+            index += 2
+            continue
+        if token == "--":
+            index += 1
+            continue
+        if token in {"-L", "-P", "-e", "-@"}:
+            index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            index += 1
+            continue
+        return token, index + 1
+    return None, index
+
+
+def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str]) -> None:
+    if target is None or target == "-":
+        raise PermissionError(f"Unsafe working directory change in command: {command_name}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    if target.startswith(("$", "`")):
+        raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    if target.startswith("~"):
+        raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    if target.startswith("/"):
+        _reject_path_traversal(target)
+        if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False):
+            raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+
+
+def _looks_like_unsafe_cwd_target(target: str | None) -> bool:
+    if target is None:
+        return False
+    return target == "-" or target.startswith(("$", "`", "~", "/", "..")) or _has_dotdot_path_segment(target)
+
+
+def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], start_index: int) -> None:
+    if command_name not in _LOCAL_BASH_ROOT_PATH_COMMANDS:
+        return
+
+    index = start_index
+    while index < len(tokens):
+        token = tokens[index]
+        if _is_shell_command_separator(token):
+            return
+        if _is_shell_redirection_operator(token):
+            index += 2
+            continue
+        if token == "/" and not _is_non_file_url_token(token):
+            raise PermissionError(f"Unsafe absolute paths in command: /. Use paths under {VIRTUAL_PATH_PREFIX}")
+        index += 1
+
+
+def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) -> None:
+    """Conservatively reject relative path escapes missed by absolute-path scanning."""
+    if re.search(r"\$\([^)]*\b(?:cd|pushd)\b", command):
+        raise PermissionError(f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}")
+
+    tokens = _split_shell_tokens(command)
+
+    for token in tokens:
+        if _is_shell_command_separator(token) or _is_shell_redirection_operator(token):
+            continue
+        if _has_dotdot_path_segment(token):
+            raise PermissionError("Access denied: path traversal detected")
+
+    at_command_start = True
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+
+        if _is_shell_command_separator(token):
+            at_command_start = True
+            index += 1
+            continue
+
+        if _is_shell_redirection_operator(token):
+            index += 1
+            continue
+
+        if at_command_start and _is_shell_assignment(token):
+            index += 1
+            continue
+
+        command_name = token.rsplit("/", 1)[-1]
+        if at_command_start and command_name in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS | _LOCAL_BASH_COMMAND_END_KEYWORDS:
+            index += 1
+            continue
+
+        if not at_command_start:
+            index += 1
+            continue
+
+        at_command_start = False
+        if command_name in _LOCAL_BASH_COMMAND_WRAPPERS and index + 1 < len(tokens):
+            wrapped_name = tokens[index + 1].rsplit("/", 1)[-1]
+            if wrapped_name in _LOCAL_BASH_CWD_COMMANDS:
+                target, next_index = _next_cd_target(tokens, index + 2)
+                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths)
+                index = next_index
+                continue
+            _validate_local_bash_root_path_args(wrapped_name, tokens, index + 2)
+
+        if command_name not in _LOCAL_BASH_CWD_COMMANDS:
+            _validate_local_bash_root_path_args(command_name, tokens, index + 1)
+            index += 1
+            continue
+
+        target, next_index = _next_cd_target(tokens, index + 1)
+        _validate_local_bash_cwd_target(command_name, target, allowed_paths)
+        index = next_index
+
+
+def resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState) -> str:
+    """Resolve a /mnt/user-data virtual path and validate it stays in bounds."""
+    return _resolve_and_validate_user_data_path(path, thread_data)
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
@@ -660,33 +913,14 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
+    _validate_local_bash_shell_tokens(command, allowed_paths)
+    url_spans = _non_file_url_spans(command)
 
-    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
-        # Check for MCP filesystem server allowed paths
-        if any(absolute_path.startswith(path) or absolute_path == path.rstrip("/") for path in allowed_paths):
-            _reject_path_traversal(absolute_path)
+    for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
+        if _is_in_spans(match.start(), url_spans):
             continue
-
-        if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        # Allow skills container path (resolved by tools.py before passing to sandbox)
-        if _is_skills_path(absolute_path):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        # Allow ACP workspace path (path-traversal check only)
-        if _is_acp_workspace_path(absolute_path):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        # Allow custom mount container paths
-        if _is_custom_mount_path(absolute_path):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        if any(absolute_path == prefix.rstrip("/") or absolute_path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
+        absolute_path = match.group()
+        if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
             continue
 
         unsafe_paths.append(absolute_path)
@@ -1047,6 +1281,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
+        thread_data = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
@@ -1061,6 +1296,8 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         if not children:
             return "(empty)"
         output = "\n".join(children)
+        if thread_data is not None:
+            output = mask_local_paths_in_output(output, thread_data)
         try:
             from deerflow.config.app_config import get_app_config
 

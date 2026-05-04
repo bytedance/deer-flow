@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -118,6 +119,16 @@ class AioSandboxProvider(SandboxProvider):
         # Start idle checker if enabled
         if self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT) > 0:
             self._start_idle_checker()
+
+    @property
+    def uses_thread_data_mounts(self) -> bool:
+        """Whether thread workspace/uploads/outputs are visible via mounts.
+
+        Local container backends bind-mount the thread data directories, so files
+        written by the gateway are already visible when the sandbox starts.
+        Remote backends may require explicit file sync.
+        """
+        return isinstance(self._backend, LocalContainerBackend)
 
     # ── Factory methods ──────────────────────────────────────────────────
 
@@ -260,15 +271,16 @@ class AioSandboxProvider(SandboxProvider):
         mounted Docker socket (DooD), the host Docker daemon can resolve the paths.
         """
         paths = get_paths()
-        paths.ensure_thread_dirs(thread_id)
+        user_id = get_effective_user_id()
+        paths.ensure_thread_dirs(thread_id, user_id=user_id)
 
         return [
-            (paths.host_sandbox_work_dir(thread_id), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
-            (paths.host_sandbox_uploads_dir(thread_id), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
-            (paths.host_sandbox_outputs_dir(thread_id), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            (paths.host_sandbox_work_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
+            (paths.host_sandbox_uploads_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
+            (paths.host_sandbox_outputs_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
             # ACP workspace: read-only inside the sandbox (lead agent reads results;
             # the ACP subprocess writes from the host side, not from within the container).
-            (paths.host_acp_workspace_dir(thread_id), "/mnt/acp-workspace", True),
+            (paths.host_acp_workspace_dir(thread_id, user_id=user_id), "/mnt/acp-workspace", True),
         ]
 
     @staticmethod
@@ -480,8 +492,9 @@ class AioSandboxProvider(SandboxProvider):
         across multiple processes, preventing container-name conflicts.
         """
         paths = get_paths()
-        paths.ensure_thread_dirs(thread_id)
-        lock_path = paths.thread_dir(thread_id) / f"{sandbox_id}.lock"
+        user_id = get_effective_user_id()
+        paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        lock_path = paths.thread_dir(thread_id, user_id=user_id) / f"{sandbox_id}.lock"
 
         with open(lock_path, "a", encoding="utf-8") as lock_file:
             locked = False

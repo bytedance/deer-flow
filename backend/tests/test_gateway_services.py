@@ -145,6 +145,21 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
     assert config["configurable"]["agent_name"] == "explicit-agent"
 
 
+def test_build_run_config_context_custom_agent_injects_agent_name():
+    """Custom assistant_id must be forwarded as context['agent_name'] in context mode."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"model_name": "deepseek-v3"}},
+        None,
+        assistant_id="finalis",
+    )
+
+    assert config["context"]["agent_name"] == "finalis"
+    assert "configurable" not in config
+
+
 def test_resolve_agent_factory_returns_make_lead_agent():
     """resolve_agent_factory always returns make_lead_agent regardless of assistant_id."""
     from app.gateway.services import resolve_agent_factory
@@ -241,6 +256,37 @@ def test_context_merges_into_configurable():
     assert "thread_id" not in {k for k in context if k in _CONTEXT_CONFIGURABLE_KEYS}
 
 
+def test_merge_run_context_overrides_propagates_to_runtime_context():
+    """Regression for issue #2677: ``agent_name`` (and other whitelisted keys) from
+    ``body.context`` must be propagated into BOTH ``config['configurable']`` and
+    ``config['context']``. Previously only ``configurable`` was populated, so after
+    the LangGraph 1.1.x upgrade removed the fallback from ``configurable``, the
+    ``setup_agent`` tool read ``runtime.context`` with ``agent_name=None`` and
+    silently wrote SOUL.md to the global base_dir.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"agent_name": "my-agent", "is_bootstrap": True, "thread_id": "ignored"})
+
+    assert config["configurable"]["agent_name"] == "my-agent"
+    assert config["configurable"]["is_bootstrap"] is True
+    assert config["context"]["agent_name"] == "my-agent"
+    assert config["context"]["is_bootstrap"] is True
+    # Non-whitelisted keys are not forwarded.
+    assert "thread_id" not in config["context"]
+
+
+def test_merge_run_context_overrides_noop_for_empty_context():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    before = {k: dict(v) if isinstance(v, dict) else v for k, v in config.items()}
+    merge_run_context_overrides(config, None)
+    merge_run_context_overrides(config, {})
+    assert config == before
+
+
 def test_context_does_not_override_existing_configurable():
     """Values already in config.configurable must NOT be overridden by context."""
     from app.gateway.services import build_run_config
@@ -296,6 +342,36 @@ def test_build_run_config_with_context():
     assert config["context"]["user_id"] == "u-42"
     assert "configurable" not in config
     assert config["recursion_limit"] == 100
+
+
+def test_build_run_config_null_context_becomes_empty_context():
+    """When caller sends context=null, treat it as an empty context object."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"context": None}, None)
+
+    assert config["context"] == {}
+    assert "configurable" not in config
+
+
+def test_build_run_config_rejects_non_mapping_context():
+    """When caller sends a non-object context, raise a clear error instead of a TypeError."""
+    import pytest
+
+    from app.gateway.services import build_run_config
+
+    with pytest.raises(ValueError, match="context"):
+        build_run_config("thread-1", {"context": "bad-context"}, None)
+
+
+def test_build_run_config_null_context_custom_agent_injects_agent_name():
+    """Custom assistant_id can still be injected when context=null starts context mode."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"context": None}, None, assistant_id="finalis")
+
+    assert config["context"] == {"agent_name": "finalis"}
+    assert "configurable" not in config
 
 
 def test_build_run_config_context_plus_configurable_warns(caplog):

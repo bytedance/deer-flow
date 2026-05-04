@@ -11,6 +11,13 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     LLMErrorHandlingMiddleware,
 )
+from deerflow.config.app_config import AppConfig
+from deerflow.config.sandbox_config import SandboxConfig
+
+
+def _make_app_config() -> AppConfig:
+    """Minimal AppConfig for middleware tests; circuit_breaker uses defaults."""
+    return AppConfig(sandbox=SandboxConfig(use="test"))
 
 
 class FakeError(Exception):
@@ -31,7 +38,7 @@ class FakeError(Exception):
 
 
 def _build_middleware(**attrs: int) -> LLMErrorHandlingMiddleware:
-    middleware = LLMErrorHandlingMiddleware()
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_app_config())
     for key, value in attrs.items():
         setattr(middleware, key, value)
     return middleware
@@ -226,9 +233,7 @@ def test_circuit_breaker_trips_and_recovers(monkeypatch: pytest.MonkeyPatch) -> 
     current_time = 1000.0
     monkeypatch.setattr("time.time", lambda: current_time)
 
-    middleware = LLMErrorHandlingMiddleware()
-    middleware.circuit_failure_threshold = 3
-    middleware.circuit_recovery_timeout_sec = 10
+    middleware = _build_middleware(circuit_failure_threshold=3, circuit_recovery_timeout_sec=10)
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_retriable)
 
     request: Any = {"messages": []}
@@ -284,8 +289,7 @@ def test_circuit_breaker_does_not_trip_on_non_retriable_errors(monkeypatch: pyte
     waits: list[float] = []
     monkeypatch.setattr("time.sleep", lambda d: waits.append(d))
 
-    middleware = LLMErrorHandlingMiddleware()
-    middleware.circuit_failure_threshold = 3
+    middleware = _build_middleware(circuit_failure_threshold=3)
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_non_retriable)
 
     request: Any = {"messages": []}
@@ -295,6 +299,82 @@ def test_circuit_breaker_does_not_trip_on_non_retriable_errors(monkeypatch: pyte
 
     assert middleware._circuit_failure_count == 0
     assert middleware._check_circuit() is False
+
+
+# ---------- ReadError / RemoteProtocolError retriable classification ----------
+
+
+class _ReadError(Exception):
+    """Local stand-in for httpx.ReadError — same class name, no httpx dependency."""
+
+
+class _RemoteProtocolError(Exception):
+    """Local stand-in for httpx.RemoteProtocolError — same class name, no httpx dependency."""
+
+
+_ReadError.__name__ = "ReadError"
+_RemoteProtocolError.__name__ = "RemoteProtocolError"
+
+
+def test_classify_error_read_error_is_retriable() -> None:
+    middleware = _build_middleware()
+    exc = _ReadError("Connection dropped mid-stream")
+    exc.__class__.__name__ = "ReadError"
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_classify_error_remote_protocol_error_is_retriable() -> None:
+    middleware = _build_middleware()
+    exc = _RemoteProtocolError("Server closed connection unexpectedly")
+    exc.__class__.__name__ = "RemoteProtocolError"
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_sync_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+    waits: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda d: waits.append(d))
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _ReadError("Connection dropped mid-stream")
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert "temporarily unavailable" in result.content
+    assert attempts == 3  # exhausted all retries
+    assert len(waits) == 2  # slept between attempts 1→2 and 2→3
+
+
+@pytest.mark.anyio
+async def test_async_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+    waits: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        waits.append(d)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _ReadError("Connection dropped mid-stream")
+
+    result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert "temporarily unavailable" in result.content
+    assert attempts == 3  # exhausted all retries
+    assert len(waits) == 2  # slept between attempts 1→2 and 2→3
 
 
 @pytest.mark.anyio
@@ -310,9 +390,7 @@ async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.Monk
     current_time = 1000.0
     monkeypatch.setattr("time.time", lambda: current_time)
 
-    middleware = LLMErrorHandlingMiddleware()
-    middleware.circuit_failure_threshold = 3
-    middleware.circuit_recovery_timeout_sec = 10
+    middleware = _build_middleware(circuit_failure_threshold=3, circuit_recovery_timeout_sec=10)
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_retriable)
 
     async def async_failing_handler(request: Any) -> Any:

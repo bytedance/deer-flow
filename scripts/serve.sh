@@ -313,13 +313,13 @@ run_service "Gateway" \
     8001 30 \
     "http://127.0.0.1:8001/health"
 
-# 3. Frontend
+# 2. Frontend
 run_service "Frontend" \
     "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
     3000 120 \
     "http://127.0.0.1:3000"
 
-# 4. Nginx
+# 3. Nginx
 run_service "Nginx" \
     "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
     2026 10 \
