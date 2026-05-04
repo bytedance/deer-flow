@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 8
+config_version: 10
 
 # ============================================================================
 # Logging
@@ -976,3 +976,108 @@ checkpointer:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# Authentication Configuration
+# ============================================================================
+# API authentication via JWT (username/password) and API Key (programmatic).
+# When enabled=false (default), the gateway falls back to the existing
+# tenant-header extraction behaviour for full backward compatibility.
+#
+# Generate a password hash for admin_password_hash:
+#   cd backend && uv run python -c "import bcrypt; print(bcrypt.hashpw(b'your-password', bcrypt.gensalt()).decode())"
+auth:
+  enabled: false
+  jwt_secret: "$JWT_SECRET"          # Change in production — used to sign tokens
+  jwt_algorithm: "HS256"
+  jwt_expire_minutes: 1440           # 24 hours
+  api_key_enabled: true
+  admin_username: "admin"
+  admin_password_hash: ""            # bcrypt hash of the admin password
+
+# ============================================================================
+# Rate Limiting Configuration
+# ============================================================================
+# Request rate limiting via slowapi. Uses in-memory storage by default;
+# set backend=redis and provide redis_url for distributed deployments.
+rate_limit:
+  enabled: false
+  backend: "memory"                  # "memory" or "redis"
+  redis_url: ""                      # Required when backend="redis"
+  global_per_minute: 1000
+  tenant_per_minute: 100
+  user_per_minute: 60
+  llm_calls_per_minute: 50
+  tokens_per_minute: 100000
+  # Per-endpoint overrides (optional):
+  # endpoints:
+  #   - path: "/api/rag/search"
+  #     limit: "30/minute"
+  #   - path: "/api/rag/ingest"
+  #     limit: "10/minute"
+
+# ============================================================================
+# Content Safety Configuration
+# ============================================================================
+# Input/output content moderation pipeline.
+# When enabled, user messages and AI responses are evaluated by a content safety
+# provider before being passed to the agent or returned to the user.
+#
+# Two built-in providers are available:
+#   deerflow.content_safety.builtin:RegexPIIProvider   — zero-dependency regex PII detection
+#   deerflow.content_safety.builtin:OpenAIModerationProvider — OpenAI Moderation API
+#
+# Custom providers must implement the ContentSafetyProvider protocol
+# (deerflow.content_safety.provider).
+
+# content_safety:
+#   enabled: false
+#
+#   input_guard:
+#     enabled: true
+#     block_on_harmful: true
+#     categories: ["hate", "sexual", "violence", "self-harm", "illegal"]
+#     prompt_injection_detection: true
+#
+#   output_guard:
+#     enabled: true
+#     pii_detection: true
+#     pii_action: "mask"          # "mask", "block", or "pass"
+#     block_on_harmful: false
+#
+#   provider:
+#     use: deerflow.content_safety.builtin:RegexPIIProvider
+#     config:
+#       action: mask               # mask, block, or pass
+#       detect_credit_cards: true
+#       detect_phones: true
+#       detect_emails: true
+#       detect_chinese_ids: true
+
+# ============================================================================
+# Cost Management Configuration
+# ============================================================================
+# Token usage tracking, cost calculation, and budget enforcement.
+# When enabled, every LLM call's token usage is recorded and cost is calculated
+# based on per-model pricing. Budget limits can block or warn when exceeded.
+
+# cost:
+#   enabled: false
+#   storage_backend: json          # "json" (file-based)
+#
+#   model_pricing:
+#     - model: gpt-4
+#       input_per_1k_tokens: 0.03
+#       output_per_1k_tokens: 0.06
+#     - model: gpt-3.5-turbo
+#       input_per_1k_tokens: 0.0015
+#       output_per_1k_tokens: 0.002
+#     - model: claude-3-5-sonnet
+#       input_per_1k_tokens: 0.003
+#       output_per_1k_tokens: 0.015
+#
+#   budget:
+#     default_daily_limit_usd: 50.0
+#     default_monthly_limit_usd: 1000.0
+#     alert_threshold_pct: 0.8     # Alert when 80% of budget is consumed
+#     action_on_exceed: block      # "block" or "warn"

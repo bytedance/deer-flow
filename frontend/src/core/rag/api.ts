@@ -19,7 +19,7 @@ export async function getRagStatus(): Promise<RagStatus> {
 
 export async function searchKnowledgeBase(
   query: string,
-  collection: string = "default",
+  collection = "default",
   topK?: number,
   scoreThreshold?: number,
 ): Promise<SearchResponse> {

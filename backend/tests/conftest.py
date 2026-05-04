@@ -57,6 +57,17 @@ def _reset_tenant_context():
         tenant_mod._current_tenant_id.reset(token)
 
 
+@pytest.fixture(autouse=True)
+def _reset_auth_and_rate_limit_configs():
+    """Reset auth and rate-limit config singletons before every test."""
+    from deerflow.config.auth_config import reset_auth_config
+    from deerflow.config.rate_limit_config import reset_rate_limit_config
+
+    reset_auth_config()
+    reset_rate_limit_config()
+    yield
+
+
 @pytest.fixture()
 def provisioner_module():
     """Load docker/provisioner/app.py as an importable test module.

@@ -5,13 +5,18 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.gateway.auth.middleware import create_auth_middleware
 from app.gateway.config import get_gateway_config
 from app.gateway.deps import langgraph_runtime
+from app.gateway.middleware.rate_limit import create_rate_limit_middleware
 from app.gateway.routers import (
+    admin,
     agents,
     artifacts,
     assistants_compat,
+    auth_router,
     channels,
+    cost,
     mcp,
     memory,
     models,
@@ -24,7 +29,6 @@ from app.gateway.routers import (
     uploads,
 )
 from deerflow.config.app_config import get_app_config
-from deerflow.config.tenant import reset_tenant_id, set_current_tenant_id, validate_tenant_id
 
 # Configure logging
 logging.basicConfig(
@@ -173,6 +177,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
             },
             {
+                "name": "authentication",
+                "description": "Authentication endpoints (login, token refresh, API key management)",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -181,26 +189,11 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # CORS is handled by nginx - no need for FastAPI middleware
 
-    @app.middleware("http")
-    async def tenant_middleware(request, call_next):
-        """Extract and set the tenant ID from the X-DeerFlow-Tenant header.
+    # Authentication middleware (tenant extraction + JWT/API Key validation)
+    app.middleware("http")(create_auth_middleware())
 
-        When the header is absent, the tenant defaults to ``"default"``
-        (backward-compatible single-tenant behaviour).
-        """
-        from fastapi import HTTPException
-
-        tenant_id = request.headers.get("X-DeerFlow-Tenant", "default")
-        try:
-            validate_tenant_id(tenant_id)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        token = set_current_tenant_id(tenant_id)
-        try:
-            response = await call_next(request)
-            return response
-        finally:
-            reset_tenant_id(token)
+    # Rate limiting middleware (no-op when rate_limit.enabled=false)
+    create_rate_limit_middleware(app)
 
     # Include routers
     # Models API is mounted at /api/models
@@ -244,6 +237,15 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # RAG API is mounted at /api/rag
     app.include_router(rag.router)
+
+    # Auth API is mounted at /api/auth
+    app.include_router(auth_router.router)
+
+    # Cost API is mounted at /api/cost
+    app.include_router(cost.router)
+
+    # Admin API is mounted at /api/admin
+    app.include_router(admin.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

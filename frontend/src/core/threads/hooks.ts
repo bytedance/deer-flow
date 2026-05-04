@@ -8,6 +8,7 @@ import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { fetchGateway, getAPIClient } from "../api";
 import { getBackendBaseURL } from "../config";
+import { getCurrentTenantId } from "../tenant";
 import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
@@ -502,6 +503,7 @@ export function useThreadStream({
                       ? "low"
                       : undefined),
               thread_id: threadId,
+              tenant_id: getCurrentTenantId(),
             },
           },
         );

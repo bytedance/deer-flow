@@ -302,6 +302,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             "parents": {},
             **body.metadata,
             "created_at": now,
+            "tenant_id": get_current_tenant_id(),
         }
         await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
     except Exception:
@@ -380,8 +381,12 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
                 continue
 
             ckpt_meta = getattr(checkpoint_tuple, "metadata", {}) or {}
-            # Only include threads belonging to the current tenant
-            if ckpt_meta.get("tenant_id", "default") != current_tenant:
+            # Only filter by tenant_id when it is explicitly set.
+            # Threads created before multi-tenant support (or by LangGraph Server
+            # directly) lack this field and are visible to all tenants until a run
+            # attaches tenant metadata to the checkpoint.
+            ckpt_tenant = ckpt_meta.get("tenant_id")
+            if ckpt_tenant is not None and ckpt_tenant != current_tenant:
                 continue
             # Strip LangGraph internal keys from the user-visible metadata dict
             user_meta = {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")}

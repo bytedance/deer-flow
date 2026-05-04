@@ -10,12 +10,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
+from deerflow.config.auth_config import AuthConfig, load_auth_config_from_dict
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
+from deerflow.config.content_safety_config import ContentSafetyConfig, load_content_safety_config_from_dict
+from deerflow.config.cost_config import CostConfig, load_cost_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.rag_config import RagConfig, load_rag_config_from_dict
+from deerflow.config.rate_limit_config import RateLimitConfig, load_rate_limit_config_from_dict
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skills_config import SkillsConfig
@@ -67,6 +71,10 @@ class AppConfig(BaseModel):
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
+    auth: AuthConfig = Field(default_factory=AuthConfig, description="API authentication configuration")
+    rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig, description="API rate limiting configuration")
+    content_safety: ContentSafetyConfig = Field(default_factory=ContentSafetyConfig, description="Content safety moderation configuration")
+    cost: CostConfig = Field(default_factory=CostConfig, description="Cost management and budget control configuration")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
@@ -148,6 +156,22 @@ class AppConfig(BaseModel):
         # Load guardrails config if present
         if "guardrails" in config_data:
             load_guardrails_config_from_dict(config_data["guardrails"])
+
+        # Load auth config if present
+        if "auth" in config_data:
+            load_auth_config_from_dict(config_data["auth"])
+
+        # Load rate_limit config if present
+        if "rate_limit" in config_data:
+            load_rate_limit_config_from_dict(config_data["rate_limit"])
+
+        # Load content_safety config if present
+        if "content_safety" in config_data:
+            load_content_safety_config_from_dict(config_data["content_safety"])
+
+        # Load cost config if present
+        if "cost" in config_data:
+            load_cost_config_from_dict(config_data["cost"])
 
         # Load circuit_breaker config if present
         if "circuit_breaker" in config_data:

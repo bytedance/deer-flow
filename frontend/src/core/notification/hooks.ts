@@ -70,7 +70,7 @@ export function useNotification(): UseNotificationReturn {
       lastNotificationTime.current = new Date();
 
       if (permission !== "granted") {
-        console.warn("Notification permission not granted");
+        console.debug("Notification permission not granted");
         return;
       }
 

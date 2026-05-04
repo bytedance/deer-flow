@@ -226,6 +226,40 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     """
     middlewares = build_lead_runtime_middlewares(lazy_init=True)
 
+    # Add Content Safety middlewares if enabled
+    from deerflow.config.content_safety_config import get_content_safety_config
+
+    cs_config = get_content_safety_config()
+    if cs_config.enabled and cs_config.provider and cs_config.provider.use:
+        from deerflow.content_safety.input_guard_middleware import InputGuardMiddleware
+        from deerflow.content_safety.log_storage import AuditLogStorage
+        from deerflow.content_safety.output_guard_middleware import OutputGuardMiddleware
+        from deerflow.reflection import resolve_variable
+
+        provider = resolve_variable(cs_config.provider.use)(**cs_config.provider.config)
+        audit_storage = AuditLogStorage()
+
+        if cs_config.input_guard.enabled:
+            injection_provider = None
+            if cs_config.input_guard.prompt_injection_detection:
+                from deerflow.content_safety.prompt_injection import PromptInjectionProvider
+                injection_provider = PromptInjectionProvider()
+
+            middlewares.insert(0, InputGuardMiddleware(
+                provider=provider,
+                block_on_harmful=cs_config.input_guard.block_on_harmful,
+                injection_provider=injection_provider,
+                audit_storage=audit_storage,
+            ))
+
+        if cs_config.output_guard.enabled:
+            middlewares.insert(-1, OutputGuardMiddleware(
+                provider=provider,
+                block_on_harmful=cs_config.output_guard.block_on_harmful,
+                pii_action=cs_config.output_guard.pii_action,
+                audit_storage=audit_storage,
+            ))
+
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
@@ -239,7 +273,16 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 
     # Add TokenUsageMiddleware when token_usage tracking is enabled
     if get_app_config().token_usage.enabled:
-        middlewares.append(TokenUsageMiddleware())
+        cost_config = get_app_config().cost
+        if cost_config.enabled:
+            from deerflow.cost.calculator import CostCalculator
+            from deerflow.cost.storage import UsageStorage
+
+            storage = UsageStorage()
+            calculator = CostCalculator(cost_config.model_pricing)
+            middlewares.append(TokenUsageMiddleware(storage=storage, calculator=calculator))
+        else:
+            middlewares.append(TokenUsageMiddleware())
 
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware())
@@ -290,6 +333,11 @@ def make_lead_agent(config: RunnableConfig):
     from deerflow.tools.builtins import setup_agent
 
     cfg = config.get("configurable", {})
+    # LangGraph >= 0.6.0 passes user-facing config via ``context`` instead of
+    # ``configurable``, and rejects requests that include both. Merge context
+    # into cfg so the rest of the function reads from a single dict.
+    if "context" in config:
+        cfg = {**config["context"], **cfg}
 
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
