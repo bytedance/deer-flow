@@ -84,7 +84,33 @@ class RemoteSandboxBackend(SandboxBackend):
         """
         return self._provisioner_discover(sandbox_id)
 
+    def list_running(self) -> list[SandboxInfo]:
+        """Return all sandboxes currently managed by the provisioner.
+
+        Calls ``GET /api/sandboxes`` so that ``AioSandboxProvider._reconcile_orphans()``
+        can adopt pods that were created by a previous process and were never
+        explicitly destroyed.
+        Without this, a process restart silently orphans all existing k8s Pods —
+        they stay running forever because the idle checker only
+        tracks in-process state.
+        """
+        return self._provisioner_list()
+
     # ── Provisioner API calls ─────────────────────────────────────────────
+
+    def _provisioner_list(self) -> list[SandboxInfo]:
+        """GET /api/sandboxes → list all running sandboxes."""
+        try:
+            resp = requests.get(f"{self._provisioner_url}/api/sandboxes", timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            sandboxes = data.get("sandboxes", [])
+            infos = [SandboxInfo(sandbox_id=s["sandbox_id"], sandbox_url=s["sandbox_url"]) for s in sandboxes if s.get("sandbox_id") and s.get("sandbox_url")]
+            logger.info("Provisioner list_running: %d sandbox(es) found", len(infos))
+            return infos
+        except requests.RequestException as exc:
+            logger.warning("Provisioner list_running failed: %s", exc)
+            return []
 
     def _provisioner_create(self, thread_id: str, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
