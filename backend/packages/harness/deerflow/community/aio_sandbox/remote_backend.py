@@ -126,7 +126,7 @@ class RemoteSandboxBackend(SandboxBackend):
 
             logger.info("Provisioner list_running: %d sandbox(es) found", len(infos))
             return infos
-        except (requests.RequestException, ValueError, TypeError) as exc:
+        except requests.RequestException as exc:
             logger.warning("Provisioner list_running failed: %s", exc)
             return []
 
