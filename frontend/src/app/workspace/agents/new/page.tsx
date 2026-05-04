@@ -33,6 +33,7 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
 import {
   AgentNameCheckError,
+  AgentsApiDisabledError,
   checkAgentName,
   createAgent,
   getAgent,
@@ -154,7 +155,9 @@ export default function NewAgentPage() {
         return;
       }
     } catch (err) {
-      if (
+      if (err instanceof AgentsApiDisabledError) {
+        setNameError(t.agents.nameStepApiDisabledError);
+      } else if (
         err instanceof AgentNameCheckError &&
         err.reason === "backend_unreachable"
       ) {
@@ -175,6 +178,10 @@ export default function NewAgentPage() {
         soul: "",
       });
     } catch (err) {
+      if (err instanceof AgentsApiDisabledError) {
+        setNameError(t.agents.nameStepApiDisabledError);
+        return;
+      }
       setNameError(
         getCreateAgentErrorMessage(
           err,
@@ -197,6 +204,7 @@ export default function NewAgentPage() {
     nameInput,
     sendMessage,
     t.agents.nameStepAlreadyExistsError,
+    t.agents.nameStepApiDisabledError,
     t.agents.nameStepNetworkError,
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
