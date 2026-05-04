@@ -377,9 +377,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # the prototype on `fix/loop-detection-tool-call-pairing`.
             messages = state.get("messages", [])
             last_msg = messages[-1]
-            patched_msg = last_msg.model_copy(
-                update={"content": self._append_text(last_msg.content, warning)}
-            )
+            patched_msg = last_msg.model_copy(update={"content": self._append_text(last_msg.content, warning)})
             return {"messages": [patched_msg]}
 
         return None
