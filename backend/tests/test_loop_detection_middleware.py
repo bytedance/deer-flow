@@ -667,3 +667,87 @@ class TestToolFrequencyDetection:
         msg = result["messages"][0]
         assert isinstance(msg, AIMessage)
         assert _HARD_STOP_MSG in msg.content
+
+
+class TestInitValidation:
+    def test_valid_defaults_accepted(self):
+        mw = LoopDetectionMiddleware()
+        assert mw.warn_threshold == 3
+
+    def test_warn_threshold_zero_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="warn_threshold"):
+            LoopDetectionMiddleware(warn_threshold=0)
+
+    def test_hard_limit_zero_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="hard_limit"):
+            LoopDetectionMiddleware(hard_limit=0)
+
+    def test_hard_limit_below_warn_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="hard_limit.*warn_threshold"):
+            LoopDetectionMiddleware(warn_threshold=5, hard_limit=3)
+
+    def test_window_size_zero_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="window_size"):
+            LoopDetectionMiddleware(window_size=0)
+
+    def test_max_tracked_threads_zero_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="max_tracked_threads"):
+            LoopDetectionMiddleware(max_tracked_threads=0)
+
+    def test_tool_freq_warn_zero_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="tool_freq_warn"):
+            LoopDetectionMiddleware(tool_freq_warn=0)
+
+    def test_tool_freq_hard_limit_zero_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="tool_freq_hard_limit"):
+            LoopDetectionMiddleware(tool_freq_hard_limit=0)
+
+    def test_tool_freq_hard_limit_below_warn_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="tool_freq_hard_limit.*tool_freq_warn"):
+            LoopDetectionMiddleware(tool_freq_warn=20, tool_freq_hard_limit=10)
+
+    def test_override_non_tuple_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="2-tuple"):
+            LoopDetectionMiddleware(tool_freq_overrides={"bash": [10, 20]})  # list, not tuple
+
+    def test_override_wrong_length_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="2-tuple"):
+            LoopDetectionMiddleware(tool_freq_overrides={"bash": (10, 20, 30)})
+
+    def test_override_non_int_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="must be int"):
+            LoopDetectionMiddleware(tool_freq_overrides={"bash": (10.0, 20)})
+
+    def test_override_zero_warn_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match=">= 1"):
+            LoopDetectionMiddleware(tool_freq_overrides={"bash": (0, 20)})
+
+    def test_override_negative_hard_limit_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match=">= 1"):
+            LoopDetectionMiddleware(tool_freq_overrides={"bash": (5, -1)})
+
+    def test_override_hard_limit_below_warn_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="hard_limit.*>=.*warn"):
+            LoopDetectionMiddleware(tool_freq_overrides={"bash": (20, 10)})
+
+    def test_override_valid_accepted(self):
+        mw = LoopDetectionMiddleware(tool_freq_overrides={"bash": (10, 20)})
+        assert mw._tool_freq_overrides["bash"] == (10, 20)
+
+    def test_override_equal_warn_and_hard_accepted(self):
+        mw = LoopDetectionMiddleware(tool_freq_overrides={"bash": (10, 10)})
+        assert mw._tool_freq_overrides["bash"] == (10, 10)

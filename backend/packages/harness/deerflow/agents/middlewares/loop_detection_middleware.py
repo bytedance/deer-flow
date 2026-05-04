@@ -176,6 +176,33 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         tool_freq_overrides: dict[str, tuple[int, int]] | None = None,
     ):
         super().__init__()
+        if warn_threshold < 1:
+            raise ValueError(f"warn_threshold must be >= 1, got {warn_threshold}")
+        if hard_limit < 1:
+            raise ValueError(f"hard_limit must be >= 1, got {hard_limit}")
+        if hard_limit < warn_threshold:
+            raise ValueError(f"hard_limit ({hard_limit}) must be >= warn_threshold ({warn_threshold})")
+        if window_size < 1:
+            raise ValueError(f"window_size must be >= 1, got {window_size}")
+        if max_tracked_threads < 1:
+            raise ValueError(f"max_tracked_threads must be >= 1, got {max_tracked_threads}")
+        if tool_freq_warn < 1:
+            raise ValueError(f"tool_freq_warn must be >= 1, got {tool_freq_warn}")
+        if tool_freq_hard_limit < 1:
+            raise ValueError(f"tool_freq_hard_limit must be >= 1, got {tool_freq_hard_limit}")
+        if tool_freq_hard_limit < tool_freq_warn:
+            raise ValueError(f"tool_freq_hard_limit ({tool_freq_hard_limit}) must be >= tool_freq_warn ({tool_freq_warn})")
+        if tool_freq_overrides:
+            for tool_name, thresholds in tool_freq_overrides.items():
+                if not isinstance(thresholds, tuple) or len(thresholds) != 2:
+                    raise ValueError(f"tool_freq_overrides[{tool_name!r}] must be a 2-tuple (warn, hard_limit), got {thresholds!r}")
+                warn_val, hard_val = thresholds
+                if not isinstance(warn_val, int) or not isinstance(hard_val, int):
+                    raise ValueError(f"tool_freq_overrides[{tool_name!r}] values must be int, got ({type(warn_val).__name__}, {type(hard_val).__name__})")
+                if warn_val < 1 or hard_val < 1:
+                    raise ValueError(f"tool_freq_overrides[{tool_name!r}] values must be >= 1, got ({warn_val}, {hard_val})")
+                if hard_val < warn_val:
+                    raise ValueError(f"tool_freq_overrides[{tool_name!r}]: hard_limit ({hard_val}) must be >= warn ({warn_val})")
         self.warn_threshold = warn_threshold
         self.hard_limit = hard_limit
         self.window_size = window_size
