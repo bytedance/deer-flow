@@ -263,6 +263,8 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`)
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware → interrupts)
    - `view_image` - Read image as base64 (added only if model supports vision)
+   - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
+   - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type, max_turns)
 

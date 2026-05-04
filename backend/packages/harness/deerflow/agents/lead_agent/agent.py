@@ -318,7 +318,7 @@ def make_lead_agent(config: RunnableConfig):
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
-    from deerflow.tools.builtins import setup_agent
+    from deerflow.tools.builtins import setup_agent, update_agent
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
@@ -390,6 +390,9 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             state_schema=ThreadState,
         )
 
+    # Custom agents can update their own SOUL.md / config via update_agent.
+    # The default agent (no agent_name) does not see this tool.
+    extra_tools = [update_agent] if agent_name else []
     # Default lead agent (unchanged behavior)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config),
@@ -398,7 +401,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             groups=agent_config.tool_groups if agent_config else None,
             subagent_enabled=subagent_enabled,
             app_config=resolved_app_config,
-        ),
+        )
+        + extra_tools,
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
