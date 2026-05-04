@@ -603,6 +603,14 @@ sandbox:
 # sandbox:
 #   use: deerflow.community.aio_sandbox:AioSandboxProvider
 #   provisioner_url: http://provisioner:8002
+#
+#   # Optional: Additional hostPath mounts for sandbox Pods.
+#   # host_path must be an absolute path accessible by the Kubernetes node
+#   # and allowed by the provisioner's EXTRA_MOUNT_HOST_PATH_ALLOWLIST env var.
+#   # mounts:
+#   #   - host_path: /path/on/host
+#   #     container_path: /home/user/shared
+#   #     read_only: false
 
 # ============================================================================
 # Subagents Configuration

@@ -1,5 +1,11 @@
 """Regression tests for provisioner PVC volume support."""
 
+import pytest
+
+
+def _allow_extra_mount_host_paths(provisioner_module, *paths: str) -> None:
+    provisioner_module.EXTRA_MOUNT_HOST_PATH_ALLOWLIST = ",".join(paths)
+
 
 # ── _build_volumes ─────────────────────────────────────────────────────
 
@@ -78,6 +84,24 @@ class TestBuildVolumes:
         assert volumes[0].name == "skills"
         assert volumes[1].name == "user-data"
 
+    def test_extra_mounts_are_added_as_hostpath_volumes(self, provisioner_module):
+        """Caller-provided mounts should become extra hostPath volumes."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/shared",
+                container_path="/mnt/shared",
+                read_only=True,
+            )
+        ]
+
+        volumes = provisioner_module._build_volumes("thread-1", extra_mounts)
+
+        extra_volume = volumes[2]
+        assert extra_volume.name == "extra-mount-0"
+        assert extra_volume.host_path.path == "/host/shared"
+        assert extra_volume.host_path.type == "DirectoryOrCreate"
+
 
 # ── _build_volume_mounts ───────────────────────────────────────────────
 
@@ -125,6 +149,101 @@ class TestBuildVolumeMounts:
         """Should always return exactly two mounts."""
         assert len(provisioner_module._build_volume_mounts("t")) == 2
 
+    def test_extra_mounts_are_added_as_volume_mounts(self, provisioner_module):
+        """Caller-provided mounts should become extra container mounts."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/shared",
+                container_path="/mnt/shared/",
+                read_only=True,
+            )
+        ]
+
+        mounts = provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
+        extra_mount = mounts[2]
+        assert extra_mount.name == "extra-mount-0"
+        assert extra_mount.mount_path == "/mnt/shared"
+        assert extra_mount.read_only is True
+
+    def test_rejects_duplicate_extra_mount_targets(self, provisioner_module):
+        """Extra mounts may not collide with each other or built-in mount paths."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/a",
+                container_path="/mnt/shared",
+            ),
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/b",
+                container_path="/mnt/shared/",
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="duplicate"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
+    def test_rejects_relative_extra_mount_host_paths(self, provisioner_module):
+        """Kubernetes hostPath mounts must be absolute host paths."""
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="relative/path",
+                container_path="/mnt/shared",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="host_path must be absolute"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
+    def test_rejects_extra_mount_host_paths_without_allowlist(self, provisioner_module):
+        """Extra hostPath mounts must be explicitly allowed by the operator."""
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/shared",
+                container_path="/mnt/shared",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="ALLOWLIST"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
+    def test_rejects_extra_mount_host_paths_outside_allowlist(self, provisioner_module):
+        """Allowed host paths must be inside an allowlisted base directory."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host/shared")
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/shared2",
+                container_path="/mnt/shared",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="ALLOWLIST"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
+    def test_rejects_reserved_extra_mount_subpaths(self, provisioner_module):
+        """Extra mounts may not shadow provisioner-managed mount trees."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/user-data",
+                container_path="/mnt/user-data/workspace",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="reserved"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/skills",
+                container_path="/mnt/skills/nested",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="reserved"):
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts)
+
 
 # ── _build_pod integration ─────────────────────────────────────────────
 
@@ -156,3 +275,20 @@ class TestBuildPodVolumes:
         # subPath should be set on user-data mount
         userdata_mount = pod.spec.containers[0].volume_mounts[1]
         assert userdata_mount.sub_path == "threads/thread-1/user-data"
+
+    def test_pod_includes_extra_mounts(self, provisioner_module):
+        """Pod spec should wire extra volumes and volume mounts together."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
+        extra_mounts = [
+            provisioner_module.ExtraMountRequest(
+                host_path="/host/shared",
+                container_path="/mnt/shared",
+                read_only=False,
+            )
+        ]
+
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1", extra_mounts)
+
+        assert pod.spec.volumes[2].name == "extra-mount-0"
+        assert pod.spec.containers[0].volume_mounts[2].name == "extra-mount-0"
+        assert pod.spec.containers[0].volume_mounts[2].mount_path == "/mnt/shared"

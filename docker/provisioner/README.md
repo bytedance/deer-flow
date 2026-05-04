@@ -142,6 +142,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
+| `EXTRA_MOUNT_HOST_PATH_ALLOWLIST` | empty (disabled) | Comma-separated host base directories that `extra_mounts.host_path` may use |
 
 ### Important: K8S_API_SERVER Override
 
@@ -214,6 +215,12 @@ curl http://localhost:8002/health
 docker exec deer-flow-provisioner curl -X POST http://localhost:8002/api/sandboxes \
   -H "Content-Type: application/json" \
   -d '{"sandbox_id":"test-001","thread_id":"thread-001"}'
+
+# Create a sandbox with an additional hostPath mount
+# Requires EXTRA_MOUNT_HOST_PATH_ALLOWLIST to include /absolute/host or a parent path.
+docker exec deer-flow-provisioner curl -X POST http://localhost:8002/api/sandboxes \
+  -H "Content-Type: application/json" \
+  -d '{"sandbox_id":"test-002","thread_id":"thread-002","extra_mounts":[{"host_path":"/absolute/host/path","container_path":"/mnt/shared","read_only":true}]}'
 
 # Check sandbox status
 docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes/test-001
@@ -311,7 +318,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 ## Security Considerations
 
-1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods by default. Ensure these paths contain only trusted data. For production, prefer PVC-based volumes (set `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME`) to avoid node-specific data loss risks.
+1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods by default. Ensure these paths contain only trusted data. For production, prefer PVC-based volumes (set `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME`) to avoid node-specific data loss risks. Additional `extra_mounts` hostPath requests are disabled unless `EXTRA_MOUNT_HOST_PATH_ALLOWLIST` is set, and requested paths must be inside one of those allowed directories.
 
 2. **Resource Limits**: Each sandbox Pod has CPU, memory, and storage limits to prevent resource exhaustion.
 
