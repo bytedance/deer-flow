@@ -279,18 +279,15 @@ def _build_middlewares(
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
-    # Resolve app_config once for feature-gated middlewares below
-    app_config = get_app_config()
-
     # Add SkillReviewMiddleware if skill_evolution is enabled (after MemoryMiddleware)
-    skill_evolution_config = getattr(app_config, "skill_evolution", None)
+    skill_evolution_config = getattr(resolved_app_config, "skill_evolution", None)
     skill_evolution_enabled = getattr(skill_evolution_config, "enabled", False)
     logger.debug(
         "SkillReviewMiddleware check: enabled=%s",
         skill_evolution_enabled,
     )
     if skill_evolution_enabled:
-        mw = SkillReviewMiddleware(config=app_config)
+        mw = SkillReviewMiddleware(config=resolved_app_config)
         middlewares.append(mw)
         logger.debug("SkillReviewMiddleware appended to middleware chain (total: %d)", len(middlewares))
 

@@ -1,11 +1,10 @@
 """Tests for SkillReviewMiddleware and SkillReviewer."""
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
-
-import threading
 
 from deerflow.agents.middlewares.skill_review_middleware import SkillReviewMiddleware
 from deerflow.agents.skill_review.reviewer import SkillReviewer
