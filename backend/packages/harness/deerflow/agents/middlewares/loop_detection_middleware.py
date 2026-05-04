@@ -6,10 +6,29 @@ arguments indefinitely until the recursion limit kills the run.
 Detection strategy:
   1. After each model response, hash the tool calls (name + args).
   2. Track recent hashes in a sliding window.
-  3. If the same hash appears >= warn_threshold times, inject a
-     "you are repeating yourself — wrap up" system message (once per hash).
+  3. If the same hash appears >= warn_threshold times, queue a
+     "you are repeating yourself — wrap up" warning. The warning is
+     **injected at the next model call** (in ``wrap_model_call``) as a
+     ``HumanMessage`` appended to the message list, *after* all
+     ToolMessage responses to the previous AIMessage(tool_calls).
   4. If it appears >= hard_limit times, strip all tool_calls from the
      response so the agent is forced to produce a final text answer.
+
+Why the warning is injected at ``wrap_model_call`` instead of
+``after_model``:
+
+  ``after_model`` fires immediately after the model emits an
+  ``AIMessage`` that may carry ``tool_calls``. The tools node has not
+  run yet, so no matching ``ToolMessage`` exists in the history. Any
+  message we add here lands *between* the assistant's tool_calls and
+  their responses. OpenAI/Moonshot reject the next request with
+  ``"tool_call_ids did not have response messages"`` because their
+  validators require the assistant's tool_calls to be followed
+  immediately by tool messages. Anthropic also disallows mid-stream
+  ``SystemMessage``. By deferring the warning to ``wrap_model_call``,
+  every prior ToolMessage is already present in the request's message
+  list and the warning is appended at the end — pairing intact, no
+  ``AIMessage`` semantics are mutated.
 """
 
 from __future__ import annotations
@@ -19,11 +38,14 @@ import json
 import logging
 import threading
 from collections import OrderedDict, defaultdict
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 if TYPE_CHECKING:
@@ -195,6 +217,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self._warned: dict[str, set[str]] = defaultdict(set)
         self._tool_freq: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._tool_freq_warned: dict[str, set[str]] = defaultdict(set)
+        # Per-thread queue of warnings to inject at the next model call.
+        # Populated by ``after_model`` (detection) and drained by
+        # ``wrap_model_call`` (injection); see module docstring.
+        self._pending_warnings: dict[str, list[str]] = defaultdict(list)
 
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
@@ -226,6 +252,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._warned.pop(evicted_id, None)
             self._tool_freq.pop(evicted_id, None)
             self._tool_freq_warned.pop(evicted_id, None)
+            self._pending_warnings.pop(evicted_id, None)
             logger.debug("Evicted loop tracking for thread %s (LRU)", evicted_id)
 
     def _track_and_check(self, state: AgentState, runtime: Runtime) -> tuple[str | None, bool]:
@@ -381,7 +408,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         warning, hard_stop = self._track_and_check(state, runtime)
 
         if hard_stop:
-            # Strip tool_calls from the last AIMessage to force text output
+            # Strip tool_calls from the last AIMessage to force text output.
+            # Once tool_calls are stripped, the AIMessage no longer requires
+            # matching ToolMessage responses, so mutating it in place here
+            # is safe for OpenAI/Moonshot pairing validators.
             messages = state.get("messages", [])
             last_msg = messages[-1]
             content = self._append_text(last_msg.content, warning or _HARD_STOP_MSG)
@@ -389,30 +419,17 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return {"messages": [stripped_msg]}
 
         if warning:
-            # WORKAROUND for v2.0-m1 — see #2724.
-            #
-            # Append the warning to the AIMessage content instead of
-            # injecting a separate HumanMessage. Inserting any non-tool
-            # message between an AIMessage(tool_calls=...) and its
-            # ToolMessage responses breaks OpenAI/Moonshot strict pairing
-            # validation ("tool_call_ids did not have response messages")
-            # because the tools node has not run yet at after_model time.
-            # tool_calls are preserved so the tools node still executes.
-            #
-            # This is a temporary mitigation: mutating an existing
-            # AIMessage to carry framework-authored text leaks loop-warning
-            # text into downstream consumers (MemoryMiddleware fact
-            # extraction, TitleMiddleware, telemetry, model replay) as if
-            # the model said it. The proper fix is to defer warning
-            # injection from after_model to wrap_model_call so every prior
-            # ToolMessage is already in the request — see RFC #2517 (which
-            # lists "loop intervention does not leave invalid
-            # tool-call/tool-message state" as acceptance criteria) and
-            # the prototype on `fix/loop-detection-tool-call-pairing`.
-            messages = state.get("messages", [])
-            last_msg = messages[-1]
-            patched_msg = last_msg.model_copy(update={"content": self._append_text(last_msg.content, warning)})
-            return {"messages": [patched_msg]}
+            # Defer injection to the next model call. We must NOT alter the
+            # AIMessage(tool_calls=...) here (would put framework words in
+            # the model's mouth, polluting downstream consumers like
+            # MemoryMiddleware), nor insert a separate non-tool message
+            # (would break OpenAI/Moonshot tool-call pairing because the
+            # tools node has not produced ToolMessage responses yet). The
+            # warning is delivered via ``wrap_model_call`` below.
+            thread_id = self._get_thread_id(runtime)
+            with self._lock:
+                self._pending_warnings[thread_id].append(warning)
+            return None
 
         return None
 
@@ -424,6 +441,48 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._apply(state, runtime)
 
+    def _drain_pending_warnings(self, runtime: Runtime) -> list[str]:
+        """Pop and return all queued warnings for *runtime*'s thread."""
+        thread_id = self._get_thread_id(runtime)
+        with self._lock:
+            warnings = self._pending_warnings.pop(thread_id, [])
+        return warnings
+
+    def _augment_request(self, request: ModelRequest) -> ModelRequest:
+        """Append queued loop warnings (if any) to the outgoing message list.
+
+        The warning is placed *after* every existing message, including the
+        ToolMessage responses to the previous AIMessage(tool_calls). This
+        keeps ``assistant tool_calls -> tool_messages`` pairing intact for
+        OpenAI/Moonshot, avoids the Anthropic mid-stream SystemMessage
+        restriction (we use HumanMessage), and never mutates an existing
+        AIMessage.
+        """
+        warnings = self._drain_pending_warnings(request.runtime)
+        if not warnings:
+            return request
+        new_messages = [
+            *request.messages,
+            *(HumanMessage(content=w, name="loop_warning") for w in warnings),
+        ]
+        return request.override(messages=new_messages)
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        return handler(self._augment_request(request))
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        return await handler(self._augment_request(request))
+
     def reset(self, thread_id: str | None = None) -> None:
         """Clear tracking state. If thread_id given, clear only that thread."""
         with self._lock:
@@ -432,8 +491,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._warned.pop(thread_id, None)
                 self._tool_freq.pop(thread_id, None)
                 self._tool_freq_warned.pop(thread_id, None)
+                self._pending_warnings.pop(thread_id, None)
             else:
                 self._history.clear()
                 self._warned.clear()
                 self._tool_freq.clear()
                 self._tool_freq_warned.clear()
+                self._pending_warnings.clear()
