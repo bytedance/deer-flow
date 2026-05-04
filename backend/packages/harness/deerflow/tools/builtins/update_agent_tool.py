@@ -5,9 +5,11 @@ Bound to the lead agent only when ``runtime.context['agent_name']`` is set
 this tool, and the bootstrap flow continues to use ``setup_agent`` for the
 initial creation handshake.
 
-The tool writes back to ``{base_dir}/agents/{agent_name}/{config.yaml,SOUL.md}``
-using a temp-file + ``os.replace`` so existing files are never left half-written
-on failure.
+The tool writes back to ``{base_dir}/users/{user_id}/agents/{agent_name}/{config.yaml,SOUL.md}``
+so an agent created by one user is never visible to (or mutable by) another.
+Writes are staged into temp files first; both files are renamed into place only
+after both temp files are successfully written, so a partial failure cannot leave
+config.yaml updated while SOUL.md still holds stale content.
 """
 
 from __future__ import annotations
@@ -24,16 +26,18 @@ from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write *text* to *path* atomically (temp file + replace).
+def _stage_temp(path: Path, text: str) -> Path:
+    """Write ``text`` into a sibling temp file and return its path.
 
-    Keeps the existing file intact if the write fails midway, so a partial
-    update never corrupts the agent's persisted state.
+    The caller is responsible for ``Path.replace``-ing the temp into the target
+    once every staged file is ready, or for unlinking it on failure.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = tempfile.NamedTemporaryFile(
@@ -47,11 +51,20 @@ def _atomic_write_text(path: Path, text: str) -> None:
         fd.write(text)
         fd.flush()
         fd.close()
-        Path(fd.name).replace(path)
+        return Path(fd.name)
     except BaseException:
         fd.close()
         Path(fd.name).unlink(missing_ok=True)
         raise
+
+
+def _cleanup_temps(temps: list[Path]) -> None:
+    """Best-effort removal of staged temp files."""
+    for tmp in temps:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to clean up temp file %s", tmp, exc_info=True)
 
 
 @tool
@@ -104,13 +117,24 @@ def update_agent(
     if not agent_name:
         return _err("update_agent is only available inside a custom agent's chat. There is no agent_name in the current runtime context, so there is nothing to update. If you are inside the bootstrap flow, use setup_agent instead.")
 
+    # Resolve the active user so that updates only affect this user's agent.
+    # ``get_effective_user_id`` returns DEFAULT_USER_ID when no auth context
+    # is set (matching how memory and thread storage behave).
+    user_id = get_effective_user_id()
+
+    # Reject an unknown ``model`` *before* touching the filesystem. Otherwise
+    # ``_resolve_model_name`` silently falls back to the default at runtime
+    # and the user sees confusing repeated warnings on every later turn.
+    if model is not None and get_app_config().get_model_config(model) is None:
+        return _err(f"Unknown model '{model}'. Pass a model name that exists in config.yaml's models section.")
+
     paths = get_paths()
-    agent_dir = paths.agent_dir(agent_name)
+    agent_dir = paths.user_agent_dir(user_id, agent_name)
 
     try:
-        existing_cfg = load_agent_config(agent_name)
+        existing_cfg = load_agent_config(agent_name, user_id=user_id)
     except FileNotFoundError:
-        return _err(f"Agent '{agent_name}' does not exist at {agent_dir}. Use setup_agent to create a new agent first.")
+        return _err(f"Agent '{agent_name}' does not exist for the current user. Use setup_agent to create a new agent first.")
     except ValueError as e:
         return _err(f"Agent '{agent_name}' has an unreadable config: {e}")
 
@@ -119,7 +143,9 @@ def update_agent(
 
     updated_fields: list[str] = []
 
-    config_data: dict[str, Any] = {"name": existing_cfg.name}
+    # Force the on-disk ``name`` to match the directory we are writing into,
+    # even if ``existing_cfg.name`` had drifted (e.g. from manual yaml edits).
+    config_data: dict[str, Any] = {"name": agent_name}
     new_description = description if description is not None else existing_cfg.description
     config_data["description"] = new_description
     if description is not None and description != existing_cfg.description:
@@ -145,23 +171,62 @@ def update_agent(
 
     config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
 
+    # Stage every file we intend to rewrite into a temp sibling. Only after
+    # *all* temp files exist do we rename them into place — so a failure on
+    # SOUL.md cannot leave config.yaml already replaced.
+    pending: list[tuple[Path, Path]] = []
+    staged_temps: list[Path] = []
+
     try:
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
         if config_changed:
             yaml_text = yaml.dump(config_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            _atomic_write_text(agent_dir / "config.yaml", yaml_text)
+            config_target = agent_dir / "config.yaml"
+            config_tmp = _stage_temp(config_target, yaml_text)
+            staged_temps.append(config_tmp)
+            pending.append((config_tmp, config_target))
 
         if soul is not None:
-            _atomic_write_text(agent_dir / "SOUL.md", soul)
+            soul_target = agent_dir / "SOUL.md"
+            soul_tmp = _stage_temp(soul_target, soul)
+            staged_temps.append(soul_tmp)
+            pending.append((soul_tmp, soul_target))
             updated_fields.append("soul")
 
+        # Commit phase. ``Path.replace`` is atomic per file on POSIX/NTFS and
+        # the staging step above means any earlier failure has already been
+        # reported. The remaining failure mode is a crash *between* two
+        # ``replace`` calls, which is reported via the partial-write error
+        # branch below so the caller knows which files are now on disk.
+        committed: list[Path] = []
+        try:
+            for tmp, target in pending:
+                tmp.replace(target)
+                committed.append(target)
+        except Exception as e:
+            _cleanup_temps([t for t, _ in pending if t not in committed])
+            if committed:
+                logger.error(
+                    "[update_agent] Partial write for agent '%s' (user=%s): committed=%s, failed during rename: %s",
+                    agent_name,
+                    user_id,
+                    [p.name for p in committed],
+                    e,
+                    exc_info=True,
+                )
+                return _err(f"Partial update for agent '{agent_name}': {[p.name for p in committed]} were updated, but the rest failed ({e}). Re-run update_agent to retry the remaining fields.")
+            raise
+
     except Exception as e:
-        logger.error("[update_agent] Failed to update agent '%s': %s", agent_name, e, exc_info=True)
+        _cleanup_temps(staged_temps)
+        logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
         return _err(f"Failed to update agent '{agent_name}': {e}")
 
     if not updated_fields:
         return Command(update={"messages": [ToolMessage(content=f"No changes applied to agent '{agent_name}'. The provided values matched the existing config.", tool_call_id=tool_call_id)]})
 
-    logger.info("[update_agent] Updated agent '%s' fields: %s", agent_name, updated_fields)
+    logger.info("[update_agent] Updated agent '%s' (user=%s) fields: %s", agent_name, user_id, updated_fields)
     return Command(
         update={
             "messages": [
