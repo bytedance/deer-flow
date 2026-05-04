@@ -8,11 +8,13 @@ import { Input } from "@/components/ui/input";
 import { fetch, getCsrfHeaders } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
+import { useI18n } from "@/core/i18n/hooks";
 
 import { SettingsCard, SettingsRow, SettingsSection } from "./settings-section";
 
 export function AccountSettingsPage() {
   const { user, logout } = useAuth();
+  const { t } = useI18n();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -26,11 +28,11 @@ export function AccountSettingsPage() {
     setMessage("");
 
     if (newPassword !== confirmPassword) {
-      setError("New passwords do not match");
+      setError(t.settings.account.passwordMismatch);
       return;
     }
     if (newPassword.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError(t.settings.account.passwordTooShort);
       return;
     }
 
@@ -55,12 +57,12 @@ export function AccountSettingsPage() {
         return;
       }
 
-      setMessage("Password changed successfully");
+      setMessage(t.settings.account.passwordChangedSuccess);
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
     } catch {
-      setError("Network error. Please try again.");
+      setError(t.settings.account.networkError);
     } finally {
       setLoading(false);
     }
@@ -74,7 +76,7 @@ export function AccountSettingsPage() {
 
   return (
     <div className="space-y-10">
-      <SettingsSection title="Profile">
+      <SettingsSection title={t.settings.account.profileTitle}>
         <SettingsCard>
           <div className="flex items-center gap-4 px-5 py-4">
             <div className="bg-primary text-primary-foreground flex size-12 shrink-0 items-center justify-center rounded-full text-base font-semibold">
@@ -93,14 +95,14 @@ export function AccountSettingsPage() {
       </SettingsSection>
 
       <SettingsSection
-        title="Change Password"
-        description="Update your account password. Use at least 8 characters."
+        title={t.settings.account.changePasswordTitle}
+        description={t.settings.account.changePasswordDescription}
       >
         <SettingsCard>
           <form onSubmit={handleChangePassword}>
             <SettingsRow
               size="compact"
-              label="Current password"
+              label={t.settings.account.currentPassword}
               control={
                 <Input
                   type="password"
@@ -114,11 +116,11 @@ export function AccountSettingsPage() {
             />
             <SettingsRow
               size="compact"
-              label="New password"
+              label={t.settings.account.newPassword}
               control={
                 <Input
                   type="password"
-                  placeholder="At least 8 characters"
+                  placeholder="••••••••"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   required
@@ -129,11 +131,11 @@ export function AccountSettingsPage() {
             />
             <SettingsRow
               size="compact"
-              label="Confirm new password"
+              label={t.settings.account.confirmNewPassword}
               control={
                 <Input
                   type="password"
-                  placeholder="Re-enter new password"
+                  placeholder="••••••••"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
@@ -159,7 +161,9 @@ export function AccountSettingsPage() {
                 size="sm"
                 disabled={loading}
               >
-                {loading ? "Updating..." : "Update password"}
+                {loading
+                  ? t.settings.account.updating
+                  : t.settings.account.updatePassword}
               </Button>
             </div>
           </form>
@@ -169,7 +173,7 @@ export function AccountSettingsPage() {
       <SettingsSection title="Session">
         <SettingsCard>
           <SettingsRow
-            label="Sign out"
+            label={t.settings.account.signOut}
             description="Sign out of this device. You can sign back in any time."
             control={
               <Button
@@ -179,7 +183,7 @@ export function AccountSettingsPage() {
                 className="gap-2"
               >
                 <LogOutIcon className="size-4" />
-                Sign Out
+                {t.settings.account.signOut}
               </Button>
             }
           />
