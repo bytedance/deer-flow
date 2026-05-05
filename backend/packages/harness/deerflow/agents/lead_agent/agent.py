@@ -22,6 +22,7 @@ from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.summarization_config import get_summarization_config
+from deerflow.config.tenant_storage import TenantStorage
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -347,6 +348,15 @@ def make_lead_agent(config: RunnableConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
+    tenant_id = cfg.get("tenant_id", "default")
+
+    # Enforce tenant exists and is_active — LangGraph Server requests bypass Gateway auth middleware
+    ts = TenantStorage()
+    tc = ts.get(tenant_id)
+    if tc is None:
+        raise PermissionError(f"Tenant {tenant_id!r} does not exist")
+    if not tc.is_active:
+        raise PermissionError(f"Tenant {tenant_id!r} is disabled")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
@@ -388,7 +398,7 @@ def make_lead_agent(config: RunnableConfig):
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
             "tool_groups": agent_config.tool_groups if agent_config else None,
-            "tenant_id": cfg.get("tenant_id", "default"),
+            "tenant_id": tenant_id,
         }
     )
 

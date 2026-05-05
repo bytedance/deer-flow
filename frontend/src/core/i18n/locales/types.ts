@@ -427,5 +427,17 @@ export interface Translations {
     previous: string;
     next: string;
     page: string;
+    dailyQuota: string;
+    monthlyQuota: string;
+    delete: string;
+    save: string;
+    edit: string;
+    confirmDelete: string;
+    confirmDeleteDesc: string;
+    cancel: string;
+    tenantDisabledTitle: string;
+    tenantDisabledDesc: string;
+    tenantNotFoundTitle: string;
+    tenantNotFoundDesc: string;
   };
 }

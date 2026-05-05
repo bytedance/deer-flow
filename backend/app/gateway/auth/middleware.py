@@ -15,6 +15,7 @@ from app.gateway.auth.api_key_handler import verify_and_track_api_key
 from app.gateway.auth.jwt_handler import decode_token
 from deerflow.config.auth_config import get_auth_config
 from deerflow.config.tenant import reset_tenant_id, set_current_tenant_id, validate_tenant_id
+from deerflow.config.tenant_storage import TenantStorage
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +34,33 @@ def _is_whitelisted(path: str) -> bool:
     return path in _AUTH_WHITELIST or path.startswith("/docs") or path.startswith("/redoc")
 
 
+def _is_admin_path(path: str) -> bool:
+    """Check if a request path is an admin API endpoint."""
+    return path.startswith("/api/admin/")
+
+
 def _json_error(status_code: int, detail: str) -> JSONResponse:
     """Return a JSON error response (avoids HTTPException + BaseHTTPMiddleware issues)."""
     return JSONResponse(status_code=status_code, content={"detail": detail})
+
+
+def _check_tenant_active(tenant_id: str, request_path: str) -> JSONResponse | None:
+    """Return a 403 response if the tenant does not exist or is disabled, unless this is an admin path."""
+    if _is_admin_path(request_path):
+        return None
+    ts = TenantStorage()
+    tc = ts.get(tenant_id)
+    if tc is None:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": f"Tenant {tenant_id!r} does not exist", "code": "tenant_not_found"},
+        )
+    if not tc.is_active:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": f"Tenant {tenant_id!r} is disabled", "code": "tenant_disabled"},
+        )
+    return None
 
 
 def create_auth_middleware():
@@ -58,6 +83,9 @@ def create_auth_middleware():
                 validate_tenant_id(tenant_id)
             except ValueError as e:
                 return _json_error(400, str(e))
+            error = _check_tenant_active(tenant_id, request.url.path)
+            if error is not None:
+                return error
             token = set_current_tenant_id(tenant_id)
             try:
                 return await call_next(request)
@@ -70,6 +98,9 @@ def create_auth_middleware():
                 validate_tenant_id(tenant_id)
             except ValueError as e:
                 return _json_error(400, str(e))
+            error = _check_tenant_active(tenant_id, request.url.path)
+            if error is not None:
+                return error
             token = set_current_tenant_id(tenant_id)
             try:
                 return await call_next(request)
@@ -93,6 +124,9 @@ def create_auth_middleware():
                 validate_tenant_id(tenant_id)
             except ValueError as e:
                 return _json_error(400, str(e))
+            error = _check_tenant_active(tenant_id, request.url.path)
+            if error is not None:
+                return error
             ctx_token = set_current_tenant_id(tenant_id)
             request.state.user = {
                 "username": f"apikey:{meta['name']}",
@@ -119,6 +153,10 @@ def create_auth_middleware():
             validate_tenant_id(tenant_id)
         except ValueError as e:
             return _json_error(400, str(e))
+
+        error = _check_tenant_active(tenant_id, request.url.path)
+        if error is not None:
+            return error
 
         ctx_token = set_current_tenant_id(tenant_id)
         request.state.user = {

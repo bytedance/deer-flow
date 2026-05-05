@@ -24,6 +24,7 @@ from app.gateway.routers import (
     runs,
     skills,
     suggestions,
+    tenant_status,
     thread_runs,
     threads,
     uploads,
@@ -246,6 +247,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Admin API is mounted at /api/admin
     app.include_router(admin.router)
+
+    # Tenant status API is mounted at /api/tenant
+    app.include_router(tenant_status.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

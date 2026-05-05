@@ -1,5 +1,6 @@
 """Tests for admin API router."""
 
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -112,11 +113,16 @@ class TestCreateTenant:
         assert response.status_code == 401
 
     def test_creates_tenant(self):
-        response = _make_client().post("/api/admin/tenants", json={"tenant_id": "new-tenant", "name": "New Tenant"})
+        client = _make_client()
+        # Use unique ID to avoid conflicts with persisted state
+        tid = f"test-{uuid.uuid4().hex[:8]}"
+        response = client.post("/api/admin/tenants", json={"tenant_id": tid, "name": "New Tenant"})
         assert response.status_code == 200
         data = response.json()
-        assert data["tenant_id"] == "new-tenant"
+        assert data["tenant_id"] == tid
         assert data["name"] == "New Tenant"
+        # Clean up
+        client.delete(f"/api/admin/tenants/{tid}")
 
     def test_rejects_invalid_tenant_id(self):
         response = _make_client().post("/api/admin/tenants", json={"tenant_id": "invalid id!", "name": "Bad"})
@@ -130,10 +136,16 @@ class TestUpdateTenant:
         assert response.status_code == 401
 
     def test_updates_tenant(self):
-        response = _make_client().put("/api/admin/tenants/t1", json={"name": "Updated Name"})
+        client = _make_client()
+        tid = f"test-{uuid.uuid4().hex[:8]}"
+        # Ensure the tenant exists before updating
+        client.post("/api/admin/tenants", json={"tenant_id": tid, "name": "Original Name"})
+        response = client.put(f"/api/admin/tenants/{tid}", json={"name": "Updated Name"})
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "Updated Name"
+        # Clean up
+        client.delete(f"/api/admin/tenants/{tid}")
 
 
 class TestAdminUsage:

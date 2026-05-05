@@ -58,6 +58,16 @@ export async function updateTenant(tenantId: string, req: UpdateTenantRequest): 
   return parseJSON(res, "Failed to update tenant");
 }
 
+export async function deleteTenant(tenantId: string): Promise<void> {
+  const res = await api(`/api/admin/tenants/${encodeURIComponent(tenantId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `Failed to delete tenant: ${res.statusText}`);
+  }
+}
+
 // ── Usage ──
 
 export async function getAdminUsage(startDate?: string, endDate?: string): Promise<UsageRecord[]> {

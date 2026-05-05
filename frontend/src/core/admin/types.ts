@@ -17,6 +17,8 @@ export interface TenantSummary {
   cost_today: number;
   cost_month: number;
   is_active: boolean;
+  daily_quota_usd: number;
+  monthly_quota_usd: number;
 }
 
 export interface CreateTenantRequest {
@@ -26,6 +28,9 @@ export interface CreateTenantRequest {
 
 export interface UpdateTenantRequest {
   name?: string;
+  is_active?: boolean;
+  daily_quota_usd?: number;
+  monthly_quota_usd?: number;
 }
 
 export interface UsageRecord {
