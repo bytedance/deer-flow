@@ -616,6 +616,37 @@ class TestToolFrequencyDetection:
         assert result is not None
         assert "read_file" in result["messages"][0].content
 
+    def test_override_tool_uses_override_thresholds(self):
+        """A tool in tool_freq_overrides uses its own thresholds, not the global ones."""
+        mw = LoopDetectionMiddleware(
+            tool_freq_warn=5,
+            tool_freq_hard_limit=10,
+            tool_freq_overrides={"bash": (50, 100)},
+        )
+        runtime = _make_runtime()
+
+        # 10 bash calls — would hit global hard_limit=10, but bash override is 100
+        for i in range(10):
+            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
+            assert result is None, f"unexpected trigger on call {i + 1}"
+
+    def test_non_override_tool_falls_back_to_global(self):
+        """A tool NOT in tool_freq_overrides uses the global warn/hard_limit."""
+        mw = LoopDetectionMiddleware(
+            tool_freq_warn=3,
+            tool_freq_hard_limit=6,
+            tool_freq_overrides={"bash": (50, 100)},
+        )
+        runtime = _make_runtime()
+
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+
+        # 3rd read_file call hits global warn=3 (read_file has no override)
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
+        assert result is not None
+        assert "read_file" in result["messages"][0].content
+
     def test_hash_detection_takes_priority(self):
         """Hash-based hard stop fires before frequency check for identical calls."""
         mw = LoopDetectionMiddleware(

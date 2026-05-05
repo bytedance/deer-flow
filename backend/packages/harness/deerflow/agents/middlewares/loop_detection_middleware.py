@@ -155,6 +155,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             Default: 30.
         tool_freq_hard_limit: Number of calls to the same tool type before
             forcing a stop. Default: 50.
+        tool_freq_overrides: Per-tool overrides for frequency thresholds,
+            keyed by tool name. Each value is a ``(warn, hard_limit)`` tuple
+            that replaces ``tool_freq_warn`` / ``tool_freq_hard_limit`` for
+            that specific tool. Tools not listed here fall back to the global
+            thresholds. Useful for raising limits on intentionally
+            high-frequency tools (e.g. ``bash`` in batch pipelines) without
+            weakening protection on all other tools. Default: ``None``
+            (no overrides).
     """
 
     def __init__(
@@ -165,6 +173,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         max_tracked_threads: int = _DEFAULT_MAX_TRACKED_THREADS,
         tool_freq_warn: int = _DEFAULT_TOOL_FREQ_WARN,
         tool_freq_hard_limit: int = _DEFAULT_TOOL_FREQ_HARD_LIMIT,
+        tool_freq_overrides: dict[str, tuple[int, int]] | None = None,
     ):
         super().__init__()
         self.warn_threshold = warn_threshold
@@ -173,6 +182,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.max_tracked_threads = max_tracked_threads
         self.tool_freq_warn = tool_freq_warn
         self.tool_freq_hard_limit = tool_freq_hard_limit
+        self._tool_freq_overrides: dict[str, tuple[int, int]] = tool_freq_overrides or {}
         self._lock = threading.Lock()
         # Per-thread tracking using OrderedDict for LRU eviction
         self._history: OrderedDict[str, list[str]] = OrderedDict()
@@ -280,7 +290,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 freq[name] += 1
                 tc_count = freq[name]
 
-                if tc_count >= self.tool_freq_hard_limit:
+                if name in self._tool_freq_overrides:
+                    eff_warn, eff_hard = self._tool_freq_overrides[name]
+                else:
+                    eff_warn, eff_hard = self.tool_freq_warn, self.tool_freq_hard_limit
+
+                if tc_count >= eff_hard:
                     logger.error(
                         "Tool frequency hard limit reached — forcing stop",
                         extra={
@@ -291,7 +306,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     )
                     return _TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=tc_count), True
 
-                if tc_count >= self.tool_freq_warn:
+                if tc_count >= eff_warn:
                     warned = self._tool_freq_warned[thread_id]
                     if name not in warned:
                         warned.add(name)
