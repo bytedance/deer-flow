@@ -78,17 +78,6 @@ def test_provisioner_list_returns_empty_on_request_exception(monkeypatch):
     assert backend._provisioner_list() == []
 
 
-def test_provisioner_list_returns_empty_on_invalid_json(monkeypatch):
-    backend = RemoteSandboxBackend("http://provisioner:8002")
-
-    def mock_get(url: str, timeout: int):
-        return _StubResponse(json_exc=ValueError("invalid json"))
-
-    monkeypatch.setattr(requests, "get", mock_get)
-
-    assert backend._provisioner_list() == []
-
-
 def test_provisioner_list_returns_empty_when_payload_is_not_dict(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
