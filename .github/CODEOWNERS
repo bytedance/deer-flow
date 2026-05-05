@@ -1,0 +1,8 @@
+# AV-fork ownership: divergence-sensitive paths require review
+# Upstream (bytedance/deer-flow) has no CODEOWNERS; this is AV-only.
+
+# CI/CD workflows (AV-divergence: build-images, upstream-sync)
+/.github/workflows/  @wesly
+
+# Sandbox provisioner (AV-extension)
+/docker/provisioner/  @wesly
