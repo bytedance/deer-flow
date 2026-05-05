@@ -78,6 +78,12 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         For each AIMessage with dangling tool_calls (no corresponding ToolMessage),
         a synthetic ToolMessage is inserted immediately after that AIMessage.
         Returns None if no patches are needed.
+
+        Handles interleaved messages (e.g. HumanMessage from LoopDetectionMiddleware)
+        by removing non-tool messages that sit between the AIMessage and the next
+        ToolMessage, so the inserted placeholder is always directly after the AIMessage.
+        Removed messages are re-appended after the last ToolMessage block to preserve
+        the original message sequence semantics.
         """
         # Collect IDs of all existing ToolMessages
         existing_tool_msg_ids: set[str] = set()

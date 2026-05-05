@@ -82,51 +82,101 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
         start_line, end_line = sorted((start_line, end_line))
         bucket_start = max(start_line, 1)
         bucket_end = max(end_line, 1)
-        bucket_start = (bucket_start - 1) // bucket_size
-        bucket_end = (bucket_end - 1) // bucket_size
-        return f"{path}:{bucket_start}-{bucket_end}"
+            if isinstance(msg, ToolMessage):
+                existing_tool_msg_ids.add(msg.tool_call_id)
 
-    # write_file / str_replace are content-sensitive: same path may be updated
-    # with different payloads during iteration. Using only salient fields (path)
-    # can collapse distinct calls, so we hash full args to reduce false positives.
-    if name in {"write_file", "str_replace"}:
-        if fallback_key is not None:
-            return fallback_key
-        return json.dumps(args, sort_keys=True, default=str)
+        # Build list of (index, tc_id) for each dangling tool call
+        dangling: list[tuple[int, str, str]] = []  # (index_in_messages, tc_id, name)
+        for i, msg in enumerate(messages):
+            if getattr(msg, "type", None) != "ai":
+                continue
+            for tc in self._message_tool_calls(msg):
+                tc_id = tc.get("id")
+                if tc_id and tc_id not in existing_tool_msg_ids:
+                    dangling.append((i, tc_id, tc.get("name", "unknown")))
 
-    salient_fields = ("path", "url", "query", "command", "pattern", "glob", "cmd")
-    stable_args = {field: args[field] for field in salient_fields if args.get(field) is not None}
-    if stable_args:
-        return json.dumps(stable_args, sort_keys=True, default=str)
+        if not dangling:
+            return None
 
-    if fallback_key is not None:
-        return fallback_key
+        # Build patched list:
+        # For each dangling (ai_idx, tc_id, name), insert placeholder ToolMessage
+        # immediately after its AIMessage. Any non-ToolMessage between that AIMessage
+        # and the next ToolMessage boundary is deferred and re-appended after the
+        # last inserted placeholder.
+        patched: list = []
+        patched_ids: set[str] = set()
+        patch_count = 0
+        deferred: list = []
+        next_dangling_idx = 0
+        ai_message_ends: set[int] = {ai_idx for ai_idx, _, _ in dangling}
 
-    return json.dumps(args, sort_keys=True, default=str)
+        for i, msg in enumerate(messages):
+            patched.append(msg)
 
+            if i in ai_message_ends:
+                # This is an AIMessage with dangling tool calls.
+                # Insert placeholder ToolMessages immediately after it.
+                for ai_idx, tc_id, tc_name in dangling:
+                    if ai_idx != i:
+                        continue
+                    if tc_id not in patched_ids:
+                        patched.append(
+                            ToolMessage(
+                                content="[Tool call was interrupted and did not return a result.]",
+                                tool_call_id=tc_id,
+                                name=tc_name,
+                                status="error",
+                            )
+                        )
+                        patched_ids.add(tc_id)
+                        patch_count += 1
 
-def _hash_tool_calls(tool_calls: list[dict]) -> str:
-    """Deterministic hash of a set of tool calls (name + stable key).
+                # Any deferred messages (e.g. HumanMessage from loop_detection)
+                # that were between this AIMessage and its tool results should
+                # now be appended after all inserted ToolMessages.
+                # But we also need to check if the NEXT messages are tool results;
+                # if so, we keep them in place.
+                continue
 
-    This is intended to be order-independent: the same multiset of tool calls
-    should always produce the same hash, regardless of their input order.
-    """
-    # Normalize each tool call to a stable (name, key) structure.
-    normalized: list[str] = []
-    for tc in tool_calls:
-        name = tc.get("name", "")
-        args, fallback_key = _normalize_tool_call_args(tc.get("args", {}))
-        key = _stable_tool_key(name, args, fallback_key)
+            # If we encounter a HumanMessage (or other non-tool, non-AI message)
+            # that comes after an AI message with dangling calls but before the
+            # corresponding ToolMessages, it needs to be deferred.
+            if getattr(msg, "type", None) not in ("ai", "tool"):
+                # Check if this message follows a dangling AIMessage
+                # (i.e. there's a dangling AI message at position i-1 or earlier)
+                for ai_idx, tc_id, _ in dangling:
+                    if ai_idx == i - 1 or (len(deferred) > 0 and ai_idx < i):
+                        # This message is between the dangling AI and its tool results
+                        deferred.append(msg)
+                        # Remove it from patched (it was appended above)
+                        patched.pop()
+                        break
 
-        normalized.append(f"{name}:{key}")
+        # Re-append any deferred messages
+        patched.extend(deferred)
 
-    # Sort so permutations of the same multiset of calls yield the same ordering.
-    normalized.sort()
-    blob = json.dumps(normalized, sort_keys=True, default=str)
-    return hashlib.md5(blob.encode()).hexdigest()[:12]
+        if patch_count > 0:
+            logger.warning(f"Injecting {patch_count} placeholder ToolMessage(s) for dangling tool calls")
 
+        # Final validation: verify no dangling tool calls remain in the patched list
+        final_tool_ids: set[str] = set()
+        for msg in patched:
+            if isinstance(msg, ToolMessage):
+                final_tool_ids.add(msg.tool_call_id)
+        # Check if all injected ToolMessages are immediately after their AIMessages
+        for i, msg in enumerate(patched):
+            if getattr(msg, "type", None) != "ai":
+                continue
+            for tc in self._message_tool_calls(msg):
+                tc_id = tc.get("id")
+                if tc_id and tc_id not in final_tool_ids:
+                    # Still dangling after injection — this should not happen
+                    # but we log it for debugging
+                    logger.warning("Tool call %s still dangling after patching attempt", tc_id)
 
-_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
+        return patched
+
+    @override
 
 _TOOL_FREQ_WARNING_MSG = (
     "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
@@ -356,12 +406,24 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return {"messages": [stripped_msg]}
 
         if warning:
-            # Inject as HumanMessage instead of SystemMessage to avoid
-            # Anthropic's "multiple non-consecutive system messages" error.
-            # Anthropic models require system messages only at the start of
-            # the conversation; injecting one mid-conversation crashes
-            # langchain_anthropic's _format_messages(). HumanMessage works
-            # with all providers. See #1299.
+            # Append warning text directly to the last AIMessage's content
+            # instead of injecting a separate HumanMessage. This preserves
+            # the OpenAI API contract that a tool_call AIMessage must be
+            # immediately followed by its ToolMessage(s).
+            #
+            # Previously we injected a HumanMessage here, but that broke
+            # message ordering because the HumanMessage appeared between
+            # the AIMessage and its tool results, causing "insufficient
+            # tool messages following tool_calls message" 400 errors from
+            # the API (OpenAI and DeepSeek both enforce this rule).
+            messages = state.get("messages", [])
+            if messages:
+                last_msg = messages[-1]
+                if getattr(last_msg, "type", None) == "ai":
+                    new_content = self._append_text(last_msg.content, warning)
+                    updated = last_msg.model_copy(update={"content": new_content})
+                    return {"messages": [updated]}
+            # Fallback: if last message is not AI, inject as before
             return {"messages": [HumanMessage(content=warning, name="loop_warning")]}
 
         return None
