@@ -59,7 +59,7 @@ describe("getGatewayConfig", () => {
     const { getGatewayConfig } = await loadFreshConfig();
     const cfg = getGatewayConfig();
 
-    expect(cfg.internalGatewayUrl).toBe("http://localhost:8001");
+    expect(cfg.internalGatewayUrl).toBe("http://127.0.0.1:8001");
     expect(cfg.trustedOrigins).toEqual(["http://localhost:3000"]);
   });
 
@@ -70,7 +70,7 @@ describe("getGatewayConfig", () => {
 
     expect(() => getGatewayConfig()).not.toThrow();
     const cfg = getGatewayConfig();
-    expect(cfg.internalGatewayUrl).toBe("http://localhost:8001");
+    expect(cfg.internalGatewayUrl).toBe("http://127.0.0.1:8001");
     expect(cfg.trustedOrigins).toEqual(["http://localhost:3000"]);
   });
 
