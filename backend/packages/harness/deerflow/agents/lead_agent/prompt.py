@@ -344,6 +344,7 @@ You are {agent_name}, an open-source super agent.
 </role>
 
 {soul}
+{self_update_section}
 {memory_context}
 
 <thinking_style>
@@ -643,6 +644,26 @@ def get_agent_soul(agent_name: str | None) -> str:
     return ""
 
 
+def _build_self_update_section(agent_name: str | None) -> str:
+    """Prompt block that teaches the custom agent to persist self-updates via update_agent."""
+    if not agent_name:
+        return ""
+    return f"""<self_update>
+You are running as the custom agent **{agent_name}** with a persisted SOUL.md and config.yaml.
+
+When the user asks you to update your own description, personality, behaviour, skill set, tool groups, or default model,
+you MUST persist the change with the `update_agent` tool. Do NOT use `bash`, `write_file`, or any sandbox tool to edit
+SOUL.md or config.yaml — those write into a temporary sandbox/tool workspace and the changes will be lost on the next turn.
+
+Rules:
+- Always pass the FULL replacement text for `soul` (no patch semantics). Start from your current SOUL above and apply the user's edits.
+- Only pass the fields that should change. Omit the others to preserve them.
+- Pass `skills=[]` to disable all skills, or omit `skills` to keep the existing whitelist.
+- After `update_agent` returns successfully, tell the user the change is persisted and will take effect on the next turn.
+</self_update>
+"""
+
+
 def get_deferred_tools_prompt_section(*, app_config: AppConfig | None = None) -> str:
     """Generate <available-deferred-tools> block for the system prompt.
 
@@ -772,6 +793,7 @@ def apply_prompt_template(
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
+        self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
         memory_context=memory_context,
