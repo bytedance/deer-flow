@@ -274,8 +274,9 @@ def _assemble_from_features(
 
     # --- [12] LoopDetection (always) ---
     from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+    from deerflow.config.loop_detection_config import LoopDetectionConfig
 
-    chain.append(LoopDetectionMiddleware())
+    chain.append(LoopDetectionMiddleware.from_config(LoopDetectionConfig()))
 
     # --- [13] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())

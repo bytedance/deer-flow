@@ -12,18 +12,23 @@ Detection strategy:
      response so the agent is forced to produce a final text answer.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
 import threading
 from collections import OrderedDict, defaultdict
 from copy import deepcopy
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
+
+if TYPE_CHECKING:
+    from deerflow.config.loop_detection_config import LoopDetectionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +145,9 @@ _TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times 
 class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     """Detects and breaks repetitive tool call loops.
 
+    Threshold parameters are validated upstream by :class:`LoopDetectionConfig`;
+    construct via :meth:`from_config` to ensure values pass Pydantic validation.
+
     Args:
         warn_threshold: Number of identical tool call sets before injecting
             a warning message. Default: 3.
@@ -176,33 +184,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         tool_freq_overrides: dict[str, tuple[int, int]] | None = None,
     ):
         super().__init__()
-        if warn_threshold < 1:
-            raise ValueError(f"warn_threshold must be >= 1, got {warn_threshold}")
-        if hard_limit < 1:
-            raise ValueError(f"hard_limit must be >= 1, got {hard_limit}")
-        if hard_limit < warn_threshold:
-            raise ValueError(f"hard_limit ({hard_limit}) must be >= warn_threshold ({warn_threshold})")
-        if window_size < 1:
-            raise ValueError(f"window_size must be >= 1, got {window_size}")
-        if max_tracked_threads < 1:
-            raise ValueError(f"max_tracked_threads must be >= 1, got {max_tracked_threads}")
-        if tool_freq_warn < 1:
-            raise ValueError(f"tool_freq_warn must be >= 1, got {tool_freq_warn}")
-        if tool_freq_hard_limit < 1:
-            raise ValueError(f"tool_freq_hard_limit must be >= 1, got {tool_freq_hard_limit}")
-        if tool_freq_hard_limit < tool_freq_warn:
-            raise ValueError(f"tool_freq_hard_limit ({tool_freq_hard_limit}) must be >= tool_freq_warn ({tool_freq_warn})")
-        if tool_freq_overrides:
-            for tool_name, thresholds in tool_freq_overrides.items():
-                if not isinstance(thresholds, tuple) or len(thresholds) != 2:
-                    raise ValueError(f"tool_freq_overrides[{tool_name!r}] must be a 2-tuple (warn, hard_limit), got {thresholds!r}")
-                warn_val, hard_val = thresholds
-                if not isinstance(warn_val, int) or not isinstance(hard_val, int):
-                    raise ValueError(f"tool_freq_overrides[{tool_name!r}] values must be int, got ({type(warn_val).__name__}, {type(hard_val).__name__})")
-                if warn_val < 1 or hard_val < 1:
-                    raise ValueError(f"tool_freq_overrides[{tool_name!r}] values must be >= 1, got ({warn_val}, {hard_val})")
-                if hard_val < warn_val:
-                    raise ValueError(f"tool_freq_overrides[{tool_name!r}]: hard_limit ({hard_val}) must be >= warn ({warn_val})")
         self.warn_threshold = warn_threshold
         self.hard_limit = hard_limit
         self.window_size = window_size
@@ -211,12 +192,23 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.tool_freq_hard_limit = tool_freq_hard_limit
         self._tool_freq_overrides: dict[str, tuple[int, int]] = tool_freq_overrides or {}
         self._lock = threading.Lock()
-        # Per-thread tracking using OrderedDict for LRU eviction
         self._history: OrderedDict[str, list[str]] = OrderedDict()
         self._warned: dict[str, set[str]] = defaultdict(set)
-        # Per-thread, per-tool-type cumulative call counts
         self._tool_freq: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._tool_freq_warned: dict[str, set[str]] = defaultdict(set)
+
+    @classmethod
+    def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
+        """Construct from a Pydantic-validated config, trusting its validation."""
+        return cls(
+            warn_threshold=config.warn_threshold,
+            hard_limit=config.hard_limit,
+            window_size=config.window_size,
+            max_tracked_threads=config.max_tracked_threads,
+            tool_freq_warn=config.tool_freq_warn,
+            tool_freq_hard_limit=config.tool_freq_hard_limit,
+            tool_freq_overrides={name: (o.warn, o.hard_limit) for name, o in config.tool_freq_overrides.items()},
+        )
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""

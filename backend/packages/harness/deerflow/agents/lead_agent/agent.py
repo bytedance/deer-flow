@@ -299,17 +299,7 @@ def _build_middlewares(
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
     loop_detection_config = resolved_app_config.loop_detection
     if loop_detection_config.enabled:
-        middlewares.append(
-            LoopDetectionMiddleware(
-                warn_threshold=loop_detection_config.warn_threshold,
-                hard_limit=loop_detection_config.hard_limit,
-                window_size=loop_detection_config.window_size,
-                max_tracked_threads=loop_detection_config.max_tracked_threads,
-                tool_freq_warn=loop_detection_config.tool_freq_warn,
-                tool_freq_hard_limit=loop_detection_config.tool_freq_hard_limit,
-                tool_freq_overrides={name: (o.warn, o.hard_limit) for name, o in loop_detection_config.tool_freq_overrides.items()},
-            )
-        )
+        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
