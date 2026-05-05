@@ -388,6 +388,21 @@ class TestExtractResponseText:
         }
         assert _extract_response_text(result) == ""
 
+    def test_preserves_visible_text_when_stripping_loop_warning(self):
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "prepare the report"},
+                {
+                    "type": "ai",
+                    "content": "Here is the report.\n\n[LOOP DETECTED] You are repeating the same tool calls.",
+                    "tool_calls": [{"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}, "id": "call_1"}],
+                },
+            ]
+        }
+        assert _extract_response_text(result) == "Here is the report."
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests
