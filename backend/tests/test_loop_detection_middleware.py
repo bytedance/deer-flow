@@ -3,7 +3,7 @@
 import copy
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
@@ -146,13 +146,41 @@ class TestLoopDetection:
         for _ in range(2):
             mw._apply(_make_state(tool_calls=call), runtime)
 
-        # Third identical call triggers warning
+        # Third identical call triggers warning. The warning is appended to
+        # the AIMessage content (tool_calls preserved) — never inserted as a
+        # separate HumanMessage between the AIMessage(tool_calls) and its
+        # ToolMessage responses, which would break OpenAI/Moonshot strict
+        # tool-call pairing validation.
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is not None
         msgs = result["messages"]
         assert len(msgs) == 1
-        assert isinstance(msgs[0], HumanMessage)
+        assert isinstance(msgs[0], AIMessage)
+        assert len(msgs[0].tool_calls) == len(call)
+        assert msgs[0].tool_calls[0]["id"] == call[0]["id"]
         assert "LOOP DETECTED" in msgs[0].content
+
+    def test_warn_does_not_break_tool_call_pairing(self):
+        """Regression: the warn branch must NOT inject a non-tool message
+        after an AIMessage(tool_calls=...). Moonshot/OpenAI reject the next
+        request with 'tool_call_ids did not have response messages' if any
+        non-tool message is wedged between the AIMessage and its ToolMessage
+        responses. See #2029.
+        """
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(2):
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is not None
+        msgs = result["messages"]
+        assert len(msgs) == 1
+        assert isinstance(msgs[0], AIMessage)
+        assert len(msgs[0].tool_calls) == len(call)
+        assert msgs[0].tool_calls[0]["id"] == call[0]["id"]
 
     def test_warn_only_injected_once(self):
         """Warning for the same hash should only be injected once per thread."""
@@ -483,7 +511,11 @@ class TestToolFrequencyDetection:
         result = mw._apply(_make_state(tool_calls=[self._read_call("/file_4.py")]), runtime)
         assert result is not None
         msg = result["messages"][0]
-        assert isinstance(msg, HumanMessage)
+        # Warning is appended to the AIMessage content; tool_calls preserved
+        # so the tools node still runs and Moonshot/OpenAI tool-call pairing
+        # validation does not break.
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls
         assert "read_file" in msg.content
         assert "LOOP DETECTED" in msg.content
 
