@@ -146,6 +146,13 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     return normalized
 
 
+def _strip_loop_warning_text(text: str) -> str:
+    """Remove middleware-authored loop warning lines from display text."""
+    if "[LOOP DETECTED]" not in text:
+        return text
+    return "\n".join(line for line in text.splitlines() if "[LOOP DETECTED]" not in line).strip()
+
+
 def _extract_response_text(result: dict | list) -> str:
     """Extract the last AI message text from a LangGraph runs.wait result.
 
@@ -155,7 +162,7 @@ def _extract_response_text(result: dict | list) -> str:
     Handles special cases:
     - Regular AI text responses
     - Clarification interrupts (``ask_clarification`` tool messages)
-    - AI messages with tool_calls but no text content
+    - Strips loop-detection warnings attached to tool-call AI messages
     """
     if isinstance(result, list):
         messages = result
@@ -185,7 +192,12 @@ def _extract_response_text(result: dict | list) -> str:
         # Regular AI message with text content
         if msg_type == "ai":
             content = msg.get("content", "")
+            has_tool_calls = bool(msg.get("tool_calls"))
             if isinstance(content, str) and content:
+                if has_tool_calls:
+                    content = _strip_loop_warning_text(content)
+                    if not content:
+                        continue
                 return content
             # content can be a list of content blocks
             if isinstance(content, list):
@@ -196,6 +208,8 @@ def _extract_response_text(result: dict | list) -> str:
                     elif isinstance(block, str):
                         parts.append(block)
                 text = "".join(parts)
+                if has_tool_calls:
+                    text = _strip_loop_warning_text(text)
                 if text:
                     return text
     return ""
