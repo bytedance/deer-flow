@@ -109,9 +109,8 @@ async def task_tool(
     # Build config overrides
     overrides: dict = {}
 
-    # Skills are loaded by SubagentExecutor per-session (aligned with Codex's pattern:
-    # each subagent loads its own skills based on config, injected as conversation items).
-    # No longer appended to system_prompt here.
+    # Skills are preloaded by SubagentExecutor per-session and merged into the
+    # subagent system prompt. They are not appended to the task config here.
 
     if max_turns is not None:
         overrides["max_turns"] = max_turns

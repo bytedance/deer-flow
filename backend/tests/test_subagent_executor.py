@@ -267,7 +267,7 @@ class TestAgentConstruction:
         assert captured["agent"]["system_prompt"] == base_config.system_prompt
 
     @pytest.mark.anyio
-    async def test_load_skill_messages_uses_explicit_app_config_for_skill_storage(
+    async def test_load_skill_prompt_uses_explicit_app_config_for_skill_storage(
         self,
         classes,
         base_config,
@@ -297,11 +297,11 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        messages = await executor._load_skill_messages()
+        skill_prompt = await executor._load_skill_prompt()
 
         assert captured["app_config"] is app_config
-        assert len(messages) == 1
-        assert "Use demo skill" in messages[0].content
+        assert '<skill name="demo-skill">' in skill_prompt
+        assert "Use demo skill" in skill_prompt
 
 
 # -----------------------------------------------------------------------------
@@ -1303,3 +1303,77 @@ class TestCooperativeCancellation:
         executor_module.cleanup_background_task(task_id)
 
         assert task_id not in executor_module._background_tasks
+
+
+# -----------------------------------------------------------------------------
+# Skill Preload Tests
+# -----------------------------------------------------------------------------
+
+
+class TestSkillPreload:
+    @pytest.mark.anyio
+    async def test_build_initial_state_keeps_only_task_human_message(self, classes, base_config):
+        """Initial state should not inject skill content as extra system messages."""
+        from langchain_core.messages import HumanMessage
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        state = await executor._build_initial_state("Do the task")
+
+        assert [type(message) for message in state["messages"]] == [HumanMessage]
+        assert [message.content for message in state["messages"]] == ["Do the task"]
+
+    @pytest.mark.anyio
+    async def test_preloaded_skills_are_sent_in_the_leading_system_message(self, classes, base_config, monkeypatch):
+        """Preloaded skills must reach the model without creating later SystemMessages."""
+        from langchain_core.language_models.fake_chat_models import FakeListChatModel
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured_messages = []
+
+        class CapturingChatModel(FakeListChatModel):
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                captured_messages.append(messages)
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(content="done"))])
+
+        skill = SimpleNamespace(
+            name="demo-skill",
+            description="Demo workflow",
+            skill_file=SimpleNamespace(read_text=MagicMock(return_value="Demo skill instructions")),
+        )
+        config = classes["SubagentConfig"](
+            name=base_config.name,
+            description=base_config.description,
+            system_prompt=base_config.system_prompt,
+            skills=["demo-skill"],
+            max_turns=base_config.max_turns,
+            timeout_seconds=base_config.timeout_seconds,
+        )
+        executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
+
+        middleware_module = ModuleType("deerflow.agents.middlewares.tool_error_handling_middleware")
+        middleware_module.build_subagent_runtime_middlewares = lambda **kwargs: []
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_error_handling_middleware", middleware_module)
+        monkeypatch.setattr("deerflow.subagents.executor.ThreadState", None)
+        monkeypatch.setattr("deerflow.subagents.executor.create_chat_model", lambda **kwargs: CapturingChatModel(responses=["done"]))
+
+        def fake_get_or_new_skill_storage(*, app_config=None):
+            return SimpleNamespace(load_skills=lambda *, enabled_only: [skill])
+
+        monkeypatch.setattr("deerflow.skills.storage.get_or_new_skill_storage", fake_get_or_new_skill_storage)
+
+        with patch.object(skill.skill_file, "read_text", return_value="Demo skill instructions"):
+            result = await executor._aexecute("Do the task")
+
+        assert result.result == "done"
+        assert captured_messages
+        messages = captured_messages[0]
+        system_indexes = [index for index, message in enumerate(messages) if isinstance(message, SystemMessage)]
+        assert system_indexes == [0]
+        assert base_config.system_prompt in messages[0].content
+        assert '<skill name="demo-skill">' in messages[0].content
+        assert "Demo skill instructions" in messages[0].content
+        assert [message.content for message in messages if isinstance(message, HumanMessage)] == ["Do the task"]
