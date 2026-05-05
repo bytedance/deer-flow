@@ -136,6 +136,34 @@ class ChannelStore:
             self._save()
             return True
 
+    # -- sent artifacts persistence (for _diff_artifacts) ---------------
+
+    def get_sent_artifacts(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> set[str] | None:
+        """Return the set of artifact paths already sent for a given conversation..
+
+        Keyed by ``channel_name:chat_id[:topic_id]`` so the record survives
+        thread recreation (e.g. after Gateway / DeerFlow restart).
+
+        Returns None if no records exist for this conversation (first run).
+        """
+        key = f"sent_artifacts:{self._key(channel_name, chat_id, topic_id)}"
+        entry = self._data.get(key)
+        if entry and isinstance(entry, dict):
+            raw = entry.get("paths")
+            if isinstance(raw, list):
+                return set(raw)
+        return None
+
+    def set_sent_artifacts(self, channel_name: str, chat_id: str, paths: set[str], topic_id: str | None = None) -> None:
+        """Persist the set of sent artifact paths for a given conversation."""
+        with self._lock:
+            key = f"sent_artifacts:{self._key(channel_name, chat_id, topic_id)}"
+            self._data[key] = {
+                "paths": sorted(paths),
+                "updated_at": __import__("time").time(),
+            }
+            self._save()
+
     def list_entries(self, channel_name: str | None = None) -> list[dict[str, Any]]:
         """List all stored mappings, optionally filtered by channel."""
         results = []
