@@ -1,0 +1,96 @@
+name: Upstream rebase (bytedance/deer-flow)
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"  # Mondays 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Fetch upstream + open rebase PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/bytedance/deer-flow.git || true
+          git fetch upstream main
+
+      - name: Compute drift
+        id: drift
+        run: |
+          AHEAD=$(git rev-list --count upstream/main..HEAD)
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Fork is $AHEAD ahead, $BEHIND behind upstream/main"
+
+      - name: Skip when in sync
+        if: steps.drift.outputs.behind == '0'
+        run: |
+          echo "Already up to date with upstream/main; nothing to do."
+          exit 0
+
+      - name: Create or update sync branch
+        if: steps.drift.outputs.behind != '0'
+        id: branch
+        run: |
+          BRANCH="chore/upstream-sync-$(date -u +%Y%m%d)"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          git checkout -B "$BRANCH" upstream/main
+          # cherry-pick AV-only commits (matrix workflow + provisioner ctx fix etc.)
+          # detected as commits on origin/main not in upstream/main
+          AV_COMMITS=$(git rev-list --reverse upstream/main..origin/main)
+          if [ -n "$AV_COMMITS" ]; then
+            echo "Replaying AV-only commits onto upstream/main:"
+            echo "$AV_COMMITS"
+            for sha in $AV_COMMITS; do
+              git cherry-pick -x "$sha" || {
+                echo "Conflict on $sha -- abort and surface in PR body."
+                git cherry-pick --abort
+                echo "conflict_sha=$sha" >> "$GITHUB_OUTPUT"
+                break
+              }
+            done
+          fi
+          git push origin "$BRANCH" --force-with-lease
+
+      - name: Open pull request
+        if: steps.drift.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ steps.branch.outputs.branch }}"
+          BODY="Automated weekly upstream rebase.
+
+          Behind upstream/main: ${{ steps.drift.outputs.behind }} commits
+          Ahead (AV-only): ${{ steps.drift.outputs.ahead }} commits
+
+          Replays AV-specific commits onto fresh upstream tip.
+          Manual review required: validate build-images workflow + provisioner context still apply, then squash-merge."
+
+          if gh pr list --head "$BRANCH" --json number --jq 'length' | grep -q '^0$'; then
+            gh pr create \
+              --title "chore(upstream): weekly rebase $(date -u +%Y-%m-%d)" \
+              --body "$BODY" \
+              --head "$BRANCH" \
+              --base main
+          else
+            echo "PR already exists for $BRANCH; updating description."
+            PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')
+            gh pr edit "$PR" --body "$BODY"
+          fi
