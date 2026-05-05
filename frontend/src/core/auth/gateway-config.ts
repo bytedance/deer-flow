@@ -14,7 +14,9 @@ export function getGatewayConfig(): GatewayConfig {
 
   const rawUrl = process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL?.trim();
   const internalGatewayUrl =
-    rawUrl?.replace(/\/+$/, "") ?? "http://localhost:8001";
+    rawUrl && rawUrl.length > 0
+      ? rawUrl.replace(/\/+$/, "")
+      : "http://127.0.0.1:8001";
 
   const rawOrigins = process.env.DEER_FLOW_TRUSTED_ORIGINS?.trim();
   const trustedOrigins = rawOrigins
