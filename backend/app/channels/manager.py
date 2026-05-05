@@ -420,7 +420,13 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
     if not msg.files:
         return []
 
-    from deerflow.uploads.manager import claim_unique_filename, ensure_uploads_dir, normalize_filename
+    from deerflow.uploads.manager import (
+        UnsafeUploadPathError,
+        claim_unique_filename,
+        ensure_uploads_dir,
+        normalize_filename,
+        write_upload_file_no_symlink,
+    )
 
     uploads_dir = ensure_uploads_dir(thread_id)
     seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
@@ -471,7 +477,10 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
 
             dest = uploads_dir / safe_name
             try:
-                dest.write_bytes(data)
+                dest = write_upload_file_no_symlink(uploads_dir, safe_name, data)
+            except UnsafeUploadPathError:
+                logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
+                continue
             except Exception:
                 logger.exception("[Manager] failed to write inbound file: %s", dest)
                 continue
@@ -579,6 +588,17 @@ class ChannelManager:
             channel_layer.get("config"),
             user_layer.get("config"),
         )
+
+        configurable = run_config.get("configurable")
+        if isinstance(configurable, Mapping):
+            configurable = dict(configurable)
+        else:
+            configurable = {}
+        run_config["configurable"] = configurable
+        # Pin channel-triggered runs to the root graph namespace so follow-up
+        # turns continue from the same conversation checkpoint.
+        configurable["checkpoint_ns"] = ""
+        configurable["thread_id"] = thread_id
 
         run_context = _merge_dicts(
             DEFAULT_RUN_CONTEXT,
