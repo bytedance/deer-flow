@@ -1,0 +1,95 @@
+name: Build images (gateway + frontend + provisioner)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - backend/**
+      - frontend/**
+      - docker/provisioner/**
+      - .github/workflows/build-images.yml
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Build only this service (gateway|frontend|provisioner|all)"
+        required: false
+        default: "all"
+        type: choice
+        options: [all, gateway, frontend, provisioner]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  matrix:
+    name: Resolve build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.set.outputs.services }}
+    steps:
+      - name: Pick services
+        id: set
+        run: |
+          if [[ "${{ github.event.inputs.service }}" == "" || "${{ github.event.inputs.service }}" == "all" ]]; then
+            echo 'services=["gateway","frontend","provisioner"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "services=[\"${{ github.event.inputs.service }}\"]" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.service }}
+    needs: matrix
+    runs-on: stax-builder
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.matrix.outputs.services) }}
+        include:
+          - service: gateway
+            context: backend
+            dockerfile: Dockerfile
+          - service: frontend
+            context: frontend
+            dockerfile: Dockerfile
+          - service: provisioner
+            context: .
+            dockerfile: docker/provisioner/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Log in to Harbor
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          driver-opts: network=host
+
+      - name: Compute tag
+        id: tag
+        run: echo "sha=sha-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.context }}/${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}
+            ${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:latest
+          cache-from: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache
+          cache-to: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache,mode=max
+
+      - name: Summary
+        run: |
+          echo "### Built deer-flow-${{ matrix.service }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tag: \`${{ steps.tag.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
