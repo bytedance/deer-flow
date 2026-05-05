@@ -174,7 +174,14 @@ After generation:
 The following environment variables must be set:
 - `VOLCENGINE_TTS_APPID`: Volcengine TTS application ID
 - `VOLCENGINE_TTS_ACCESS_TOKEN`: Volcengine TTS access token
+
+Optional environment variables for customization:
 - `VOLCENGINE_TTS_CLUSTER`: Volcengine TTS cluster (optional, defaults to "volcano_tts")
+- `VOLCENGINE_TTS_VOICE_TYPE_MALE`: Voice type for male speaker (optional, defaults to "zh_male_yangguangqingnian_moon_bigtts")
+- `VOLCENGINE_TTS_VOICE_TYPE_FEMALE`: Voice type for female speaker (optional, defaults to "zh_female_sajiaonvyou_moon_bigtts")
+
+> [!TIP]
+> If podcast generation fails due to unavailable voice types, check the [official Volcengine TTS voice type list](https://www.volcengine.com/docs/6561/1257544) and set the appropriate voice types via `VOLCENGINE_TTS_VOICE_TYPE_MALE` and `VOLCENGINE_TTS_VOICE_TYPE_FEMALE` environment variables.
 
 ## Notes
 

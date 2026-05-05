@@ -103,13 +103,13 @@ def _process_line(args: tuple[int, ScriptLine, int]) -> tuple[int, Optional[byte
     """Process a single script line for TTS. Returns (index, audio_bytes)."""
     i, line, total = args
 
-    # Select voice based on speaker gender
+    # Select voice based on speaker gender - use environment variables with defaults
     if line.speaker == "male":
-        voice_type = "zh_male_yangguangqingnian_moon_bigtts"  # Male voice
+        voice_type = os.getenv("VOLCENGINE_TTS_VOICE_TYPE_MALE", "zh_male_yangguangqingnian_moon_bigtts")
     else:
-        voice_type = "zh_female_sajiaonvyou_moon_bigtts"  # Female voice
+        voice_type = os.getenv("VOLCENGINE_TTS_VOICE_TYPE_FEMALE", "zh_female_sajiaonvyou_moon_bigtts")
 
-    logger.info(f"Processing line {i + 1}/{total} ({line.speaker})")
+    logger.info(f"Processing line {i + 1}/{total} ({line.speaker}) using voice type: {voice_type}")
     audio = text_to_speech(line.paragraph, voice_type)
 
     if not audio:

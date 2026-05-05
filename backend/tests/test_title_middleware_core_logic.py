@@ -1,6 +1,7 @@
 """Core behavior tests for TitleMiddleware."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -93,7 +94,38 @@ class TestTitleMiddlewareCoreLogic:
         assert title == "短标题"
         title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False)
         model.ainvoke.assert_awaited_once()
-        assert model.ainvoke.await_args.kwargs["config"] == {"run_name": "title_agent"}
+        assert model.ainvoke.await_args.kwargs["config"] == {
+            "run_name": "title_agent",
+            "tags": ["middleware:title"],
+        }
+
+    def test_generate_title_uses_explicit_app_config_without_global_config(self, monkeypatch):
+        title_config = TitleConfig(enabled=True, model_name="title-model", max_chars=20)
+        app_config = SimpleNamespace(title=title_config)
+        middleware = TitleMiddleware(app_config=app_config)
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="显式标题"))
+
+        def fail_get_title_config():
+            raise AssertionError("ambient get_title_config() must not be used when app_config is explicit")
+
+        monkeypatch.setattr(title_middleware_module, "get_title_config", fail_get_title_config)
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", MagicMock(return_value=model))
+
+        state = {
+            "messages": [
+                HumanMessage(content="请帮我写一个标题"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "显式标题"}
+        title_middleware_module.create_chat_model.assert_called_once_with(
+            name="title-model",
+            thinking_enabled=False,
+            app_config=app_config,
+        )
 
     def test_generate_title_normalizes_structured_message_content(self, monkeypatch):
         _set_test_title_config(max_chars=20)

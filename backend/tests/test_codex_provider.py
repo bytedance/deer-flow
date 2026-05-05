@@ -82,6 +82,36 @@ def test_parse_response_text_content():
     assert result.generations[0].message.content == "Hello world"
 
 
+def test_parse_response_populates_usage_metadata():
+    model = _make_model()
+    response = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello world"}],
+            }
+        ],
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_tokens_details": {"cached_tokens": 3},
+            "output_tokens_details": {"reasoning_tokens": 2},
+        },
+        "model": "gpt-5.4",
+    }
+
+    result = model._parse_response(response)
+
+    meta = result.generations[0].message.usage_metadata
+    assert meta is not None
+    assert meta["input_tokens"] == 10
+    assert meta["output_tokens"] == 5
+    assert meta["total_tokens"] == 15
+    assert meta["input_token_details"]["cache_read"] == 3
+    assert meta["output_token_details"]["reasoning"] == 2
+
+
 def test_parse_response_reasoning_content():
     model = _make_model()
     response = {
