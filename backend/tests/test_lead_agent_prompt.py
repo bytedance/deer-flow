@@ -17,6 +17,18 @@ def _set_skills_cache_state(*, skills=None, active=False, version=0):
         prompt_module._enabled_skills_refresh_event.clear()
 
 
+def test_build_self_update_section_empty_for_default_agent():
+    assert prompt_module._build_self_update_section(None) == ""
+
+
+def test_build_self_update_section_present_for_custom_agent():
+    section = prompt_module._build_self_update_section("my-agent")
+
+    assert "<self_update>" in section
+    assert "my-agent" in section
+    assert "update_agent" in section
+
+
 def test_build_custom_mounts_section_returns_empty_when_no_mounts(monkeypatch):
     config = SimpleNamespace(sandbox=SimpleNamespace(mounts=[]))
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)

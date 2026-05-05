@@ -132,15 +132,20 @@ class Paths:
 
     @property
     def agents_dir(self) -> Path:
-        """Root directory for all custom agents: `{base_dir}/agents/`."""
+        """Legacy root for shared (pre user-isolation) custom agents: `{base_dir}/agents/`.
+
+        New code should use :meth:`user_agents_dir` instead. This property remains
+        only as a read-side fallback for installations that have not yet run the
+        ``migrate_user_isolation.py`` script.
+        """
         return self.base_dir / "agents"
 
     def agent_dir(self, name: str) -> Path:
-        """Directory for a specific agent: `{base_dir}/agents/{name}/`."""
+        """Legacy per-agent directory (no user isolation): `{base_dir}/agents/{name}/`."""
         return self.agents_dir / name.lower()
 
     def agent_memory_file(self, name: str) -> Path:
-        """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
+        """Legacy per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
         return self.agent_dir(name) / "memory.json"
 
     def user_dir(self, user_id: str) -> Path:
@@ -151,9 +156,17 @@ class Paths:
         """Per-user memory file: `{base_dir}/users/{user_id}/memory.json`."""
         return self.user_dir(user_id) / "memory.json"
 
+    def user_agents_dir(self, user_id: str) -> Path:
+        """Per-user root for that user's custom agents: `{base_dir}/users/{user_id}/agents/`."""
+        return self.user_dir(user_id) / "agents"
+
+    def user_agent_dir(self, user_id: str, agent_name: str) -> Path:
+        """Per-user per-agent directory: `{base_dir}/users/{user_id}/agents/{name}/`."""
+        return self.user_agents_dir(user_id) / agent_name.lower()
+
     def user_agent_memory_file(self, user_id: str, agent_name: str) -> Path:
         """Per-user per-agent memory: `{base_dir}/users/{user_id}/agents/{name}/memory.json`."""
-        return self.user_dir(user_id) / "agents" / agent_name.lower() / "memory.json"
+        return self.user_agent_dir(user_id, agent_name) / "memory.json"
 
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
