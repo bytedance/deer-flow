@@ -372,6 +372,22 @@ class TestExtractResponseText:
         # Should return "" (no text in current turn), NOT "Hi there!" from previous turn
         assert _extract_response_text(result) == ""
 
+    def test_does_not_publish_loop_warning_on_tool_calling_ai_message(self):
+        """Loop-detection warning text on a tool-calling AI message is middleware-authored."""
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "search the repo"},
+                {
+                    "type": "ai",
+                    "content": "[LOOP DETECTED] You are repeating the same tool calls.",
+                    "tool_calls": [{"name": "grep", "args": {"pattern": "TODO"}, "id": "call_1"}],
+                },
+            ]
+        }
+        assert _extract_response_text(result) == ""
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests

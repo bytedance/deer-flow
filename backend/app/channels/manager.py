@@ -155,7 +155,7 @@ def _extract_response_text(result: dict | list) -> str:
     Handles special cases:
     - Regular AI text responses
     - Clarification interrupts (``ask_clarification`` tool messages)
-    - AI messages with tool_calls but no text content
+    - Loop-detection warnings attached to tool-call AI messages
     """
     if isinstance(result, list):
         messages = result
@@ -185,6 +185,8 @@ def _extract_response_text(result: dict | list) -> str:
         # Regular AI message with text content
         if msg_type == "ai":
             content = msg.get("content", "")
+            if msg.get("tool_calls") and "[LOOP DETECTED]" in _extract_text_content(content):
+                continue
             if isinstance(content, str) and content:
                 return content
             # content can be a list of content blocks
