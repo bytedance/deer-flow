@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul, resolve_agent_dir
+from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -285,11 +285,13 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    # Resolve the directory the agent currently lives in (per-user first, with
-    # a read-side fallback to the legacy shared layout). Writes always land in
-    # the resolved dir, so an unmigrated legacy agent remains in place until
-    # ``scripts/migrate_user_isolation.py`` moves it.
-    agent_dir = resolve_agent_dir(name, user_id=user_id)
+    paths = get_paths()
+    agent_dir = paths.user_agent_dir(user_id, name)
+    if not agent_dir.exists() and paths.agent_dir(name).exists():
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
+        )
 
     try:
         # Update config if any config fields changed
@@ -418,16 +420,22 @@ async def delete_agent(name: str) -> None:
         name: The agent name.
 
     Raises:
-        HTTPException: 404 if agent not found.
+        HTTPException: 404 if no per-user copy exists; 409 if only a legacy
+            shared copy exists (suggesting the migration script).
     """
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-
-    agent_dir = resolve_agent_dir(name, user_id=user_id)
+    paths = get_paths()
+    agent_dir = paths.user_agent_dir(user_id, name)
 
     if not agent_dir.exists():
+        if paths.agent_dir(name).exists():
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before deleting."),
+            )
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
     try:

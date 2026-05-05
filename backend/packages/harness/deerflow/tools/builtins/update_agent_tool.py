@@ -130,6 +130,8 @@ def update_agent(
 
     paths = get_paths()
     agent_dir = paths.user_agent_dir(user_id, agent_name)
+    if not agent_dir.exists() and paths.agent_dir(agent_name).exists():
+        return _err(f"Agent '{agent_name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating.")
 
     try:
         existing_cfg = load_agent_config(agent_name, user_id=user_id)

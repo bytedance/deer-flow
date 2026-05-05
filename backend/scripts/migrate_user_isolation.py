@@ -1,7 +1,7 @@
 """One-time migration: move legacy thread dirs and memory into per-user layout.
 
 Usage:
-    PYTHONPATH=. python scripts/migrate_user_isolation.py [--dry-run]
+    PYTHONPATH=. python scripts/migrate_user_isolation.py [--dry-run] [--user-id USER_ID]
 
 The script is idempotent — re-running it after a successful migration is a no-op.
 """
@@ -188,6 +188,12 @@ def _build_owner_map_from_db(paths: Paths) -> dict[str, str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Migrate DeerFlow data to per-user layout")
     parser.add_argument("--dry-run", action="store_true", help="Log actions without making changes")
+    parser.add_argument(
+        "--user-id",
+        default="default",
+        metavar="USER_ID",
+        help=("User ID to claim un-owned legacy data (global memory.json and legacy custom agents). Defaults to 'default'. In multi-user installs, set this to the operator account that should inherit those legacy artifacts."),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -195,13 +201,14 @@ def main() -> None:
     paths = get_paths()
     logger.info("Base directory: %s", paths.base_dir)
     logger.info("Dry run: %s", args.dry_run)
+    logger.info("Claiming un-owned legacy data for user_id=%s", args.user_id)
 
     owner_map = _build_owner_map_from_db(paths)
     logger.info("Found %d thread ownership records in DB", len(owner_map))
 
     report = migrate_thread_dirs(paths, owner_map, dry_run=args.dry_run)
-    migrate_memory(paths, user_id="default", dry_run=args.dry_run)
-    agent_report = migrate_agents(paths, user_id="default", dry_run=args.dry_run)
+    migrate_memory(paths, user_id=args.user_id, dry_run=args.dry_run)
+    agent_report = migrate_agents(paths, user_id=args.user_id, dry_run=args.dry_run)
 
     if report:
         logger.info("Thread migration report:")
@@ -224,7 +231,11 @@ def main() -> None:
             logger.warning("  %s", e["thread_id"])
 
     if agent_report:
-        logger.warning("%d legacy agent(s) were assigned to 'default'. If those agents belonged to other users, move them manually under {base_dir}/users/<user_id>/agents/.", len(agent_report))
+        logger.warning(
+            "%d legacy agent(s) were assigned to '%s'. If those agents belonged to other users, move them manually under {base_dir}/users/<user_id>/agents/.",
+            len(agent_report),
+            args.user_id,
+        )
 
 
 if __name__ == "__main__":
