@@ -53,8 +53,8 @@ jobs:
             context: frontend
             dockerfile: Dockerfile
           - service: provisioner
-            context: .
-            dockerfile: docker/provisioner/Dockerfile
+            context: docker/provisioner
+            dockerfile: Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
