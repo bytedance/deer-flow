@@ -997,7 +997,11 @@ class ChannelManager:
 
         try:
             async with httpx.AsyncClient() as http:
-                resp = await http.get(f"{self._gateway_url}{path}", timeout=10)
+                resp = await http.get(
+                    f"{self._gateway_url}{path}",
+                    timeout=10,
+                    headers=create_internal_auth_headers(),
+                )
                 resp.raise_for_status()
                 data = resp.json()
         except Exception:
