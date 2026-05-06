@@ -131,6 +131,8 @@ export interface Translations {
     apiDisabledConfigHint: string;
     apiStatusErrorTitle: string;
     apiStatusErrorDescription: string;
+    listErrorTitle: string;
+    listErrorDescription: string;
     chat: string;
     delete: string;
     deleteConfirm: string;

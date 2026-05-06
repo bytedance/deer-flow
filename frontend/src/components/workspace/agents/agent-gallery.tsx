@@ -34,7 +34,7 @@ export function AgentGallery() {
   };
 
   const isLoading = isStatusLoading || (isAgentsApiEnabled && isAgentsLoading);
-  const loadError = statusError ?? agentsError;
+  const hasAgents = agents.length > 0;
 
   return (
     <div className="flex size-full flex-col">
@@ -58,7 +58,7 @@ export function AgentGallery() {
           <div className="text-muted-foreground flex h-40 items-center justify-center text-sm">
             {t.common.loading}
           </div>
-        ) : loadError ? (
+        ) : statusError ? (
           <Alert className="max-w-2xl">
             <InfoIcon />
             <AlertTitle>{t.agents.apiStatusErrorTitle}</AlertTitle>
@@ -78,7 +78,13 @@ export function AgentGallery() {
               </pre>
             </AlertDescription>
           </Alert>
-        ) : agents.length === 0 ? (
+        ) : agentsError && !hasAgents ? (
+          <Alert className="max-w-2xl">
+            <InfoIcon />
+            <AlertTitle>{t.agents.listErrorTitle}</AlertTitle>
+            <AlertDescription>{t.agents.listErrorDescription}</AlertDescription>
+          </Alert>
+        ) : !hasAgents ? (
           <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
             <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
               <BotIcon className="text-muted-foreground h-7 w-7" />

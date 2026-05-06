@@ -192,6 +192,9 @@ export const enUS: Translations = {
     apiStatusErrorTitle: "Could not load agent settings",
     apiStatusErrorDescription:
       "DeerFlow could not determine whether the custom-agent management API is available.",
+    listErrorTitle: "Could not load agents",
+    listErrorDescription:
+      "DeerFlow could not load the custom-agent list. Please refresh this page in a moment.",
     chat: "Chat",
     delete: "Delete",
     deleteConfirm:

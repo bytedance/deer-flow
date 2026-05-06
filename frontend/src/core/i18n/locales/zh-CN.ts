@@ -184,6 +184,8 @@ export const zhCN: Translations = {
     apiStatusErrorTitle: "无法加载智能体设置",
     apiStatusErrorDescription:
       "DeerFlow 当前无法判断自定义智能体管理 API 是否可用。",
+    listErrorTitle: "无法加载智能体列表",
+    listErrorDescription: "DeerFlow 当前无法加载自定义智能体列表，请稍后刷新页面。",
     chat: "对话",
     delete: "删除",
     deleteConfirm: "确定要删除该智能体吗？此操作不可撤销。",
