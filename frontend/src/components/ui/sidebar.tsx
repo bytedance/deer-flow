@@ -28,7 +28,13 @@ import {
 const SIDEBAR_COOKIE_NAME = "sidebar_state";
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
 const SIDEBAR_WIDTH = "16rem";
-const SIDEBAR_WIDTH_MOBILE = "18rem";
+// On phone-sized viewports the sidebar opens as a Sheet overlay. 18rem
+// (288px) covers ~74% of an iPhone 14's 390px viewport — wide enough to
+// be dominant. ``min()`` caps it at 85% of the viewport so the user
+// always sees at least 15% of the page underneath, which is both a
+// visual breadcrumb that the sheet is dismissable and a touch target
+// for tapping outside to close.
+const SIDEBAR_WIDTH_MOBILE = "min(18rem, 85vw)";
 const SIDEBAR_WIDTH_ICON = "3rem";
 const SIDEBAR_KEYBOARD_SHORTCUT = "b";
 

@@ -953,7 +953,17 @@ export const PromptInputTextarea = ({
 
   return (
     <InputGroupTextarea
-      className={cn("field-sizing-content max-h-48 min-h-16", className)}
+      className={cn(
+        "field-sizing-content max-h-48 min-h-16",
+        // iOS Safari auto-zooms the page when an input with computed
+        // font-size < 16px receives focus — the workaround is to pin
+        // the textarea to 16px on narrow viewports and relax back to
+        // the smaller design size on desktop. This keeps the focus
+        // experience stable without changing how the input looks on
+        // larger screens.
+        "text-base lg:text-sm",
+        className,
+      )}
       name="message"
       onCompositionEnd={() => setIsComposing(false)}
       onCompositionStart={() => setIsComposing(true)}

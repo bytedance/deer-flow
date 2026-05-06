@@ -61,6 +61,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import { useIsNarrow } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
 import {
@@ -153,6 +154,12 @@ export function InputBox({
   const [followups, setFollowups] = useState<string[]>([]);
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
+  // Suggestion chips are anchored to the top of the InputBox on narrow
+  // viewports and overlap the last few lines of the response, making the
+  // text unreadable. Hide them entirely on phone + tablet-portrait —
+  // above the ``lg`` breakpoint the column is wide enough that the chips
+  // no longer intrude on the message area.
+  const isNarrow = useIsNarrow();
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
   const messagesRef = useRef(thread.messages);
@@ -342,6 +349,7 @@ export function InputBox({
   const showFollowups =
     !disabled &&
     !isNewThread &&
+    !isNarrow &&
     !followupsHidden &&
     (followupsLoading || followups.length > 0);
 
@@ -549,12 +557,14 @@ export function InputBox({
                   </div>
                 </PromptInputActionMenuTrigger>
               </ModeHoverGuide>
-              <PromptInputActionMenuContent className="w-80">
+              <PromptInputActionMenuContent className="w-[min(20rem,calc(100vw-1.5rem))]">
                 <DropdownMenuGroup>
                   <DropdownMenuLabel className="text-muted-foreground text-xs">
                     {t.inputBox.mode}
                   </DropdownMenuLabel>
-                  <PromptInputActionMenu>
+                  {/* Items must live directly in DropdownMenuContent; a nested
+                      DropdownMenu root (as upstream 3b91df2 had here) breaks the
+                      Radix context so onSelect never fires on click. */}
                     <PromptInputActionMenuItem
                       className={cn(
                         context.mode === "flash"
@@ -678,7 +688,6 @@ export function InputBox({
                         <div className="ml-auto size-4" />
                       )}
                     </PromptInputActionMenuItem>
-                  </PromptInputActionMenu>
                 </DropdownMenuGroup>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
@@ -697,7 +706,7 @@ export function InputBox({
                       " " + t.inputBox.reasoningEffortHigh}
                   </div>
                 </PromptInputActionMenuTrigger>
-                <PromptInputActionMenuContent className="w-70">
+                <PromptInputActionMenuContent className="w-[min(17.5rem,calc(100vw-1.5rem))]">
                   <DropdownMenuGroup>
                     <DropdownMenuLabel className="text-muted-foreground text-xs">
                       {t.inputBox.reasoningEffort}
