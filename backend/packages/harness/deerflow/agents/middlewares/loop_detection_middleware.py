@@ -22,7 +22,6 @@ from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -356,13 +355,30 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return {"messages": [stripped_msg]}
 
         if warning:
-            # Inject as HumanMessage instead of SystemMessage to avoid
-            # Anthropic's "multiple non-consecutive system messages" error.
-            # Anthropic models require system messages only at the start of
-            # the conversation; injecting one mid-conversation crashes
-            # langchain_anthropic's _format_messages(). HumanMessage works
-            # with all providers. See #1299.
-            return {"messages": [HumanMessage(content=warning)]}
+            # WORKAROUND for v2.0-m1 — see #2724.
+            #
+            # Append the warning to the AIMessage content instead of
+            # injecting a separate HumanMessage. Inserting any non-tool
+            # message between an AIMessage(tool_calls=...) and its
+            # ToolMessage responses breaks OpenAI/Moonshot strict pairing
+            # validation ("tool_call_ids did not have response messages")
+            # because the tools node has not run yet at after_model time.
+            # tool_calls are preserved so the tools node still executes.
+            #
+            # This is a temporary mitigation: mutating an existing
+            # AIMessage to carry framework-authored text leaks loop-warning
+            # text into downstream consumers (MemoryMiddleware fact
+            # extraction, TitleMiddleware, telemetry, model replay) as if
+            # the model said it. The proper fix is to defer warning
+            # injection from after_model to wrap_model_call so every prior
+            # ToolMessage is already in the request — see RFC #2517 (which
+            # lists "loop intervention does not leave invalid
+            # tool-call/tool-message state" as acceptance criteria) and
+            # the prototype on `fix/loop-detection-tool-call-pairing`.
+            messages = state.get("messages", [])
+            last_msg = messages[-1]
+            patched_msg = last_msg.model_copy(update={"content": self._append_text(last_msg.content, warning)})
+            return {"messages": [patched_msg]}
 
         return None
 

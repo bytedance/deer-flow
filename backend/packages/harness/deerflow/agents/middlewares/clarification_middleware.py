@@ -16,6 +16,7 @@ construction time and can be set per-run, just like ``thinking_enabled`` or
 import json
 import logging
 from collections.abc import Callable
+from hashlib import sha256
 from typing import override
 
 from langchain.agents import AgentState
@@ -56,6 +57,16 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
     def __init__(self, *, enabled: bool = True) -> None:
         self.enabled = enabled
+        
+    def _stable_message_id(self, tool_call_id: str, formatted_message: str) -> str:
+        """Build a deterministic message ID so retried clarification calls replace, not append."""
+        if tool_call_id:
+            return f"clarification:{tool_call_id}"
+        digest = sha256(formatted_message.encode("utf-8")).hexdigest()[:16]
+        return f"clarification:{digest}"
+
+    def _is_chinese(self, text: str) -> bool:
+        """Check if text contains Chinese characters.
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -138,6 +149,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         formatted_message = self._format_clarification_message(args)
 
         tool_message = ToolMessage(
+            id=self._stable_message_id(tool_call_id, formatted_message),
             content=formatted_message,
             tool_call_id=tool_call_id,
             name="ask_clarification",

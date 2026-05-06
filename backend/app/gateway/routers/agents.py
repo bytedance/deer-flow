@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -25,6 +26,7 @@ class AgentResponse(BaseModel):
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
+    skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -41,6 +43,7 @@ class AgentCreateRequest(BaseModel):
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
+    skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all enabled, []=none)")
     soul: str = Field(default="", description="SOUL.md content — agent personality and behavioral guardrails")
 
 
@@ -50,6 +53,7 @@ class AgentUpdateRequest(BaseModel):
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
+    skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
 
 
@@ -83,17 +87,18 @@ def _require_agents_api_enabled() -> None:
         )
 
 
-def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False) -> AgentResponse:
+def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False, *, user_id: str | None = None) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
     if include_soul:
-        soul = load_agent_soul(agent_cfg.name) or ""
+        soul = load_agent_soul(agent_cfg.name, user_id=user_id) or ""
 
     return AgentResponse(
         name=agent_cfg.name,
         description=agent_cfg.description,
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
+        skills=agent_cfg.skills,
         soul=soul,
     )
 
@@ -112,9 +117,10 @@ async def list_agents() -> AgentsListResponse:
     """
     _require_agents_api_enabled()
 
+    user_id = get_effective_user_id()
     try:
-        agents = list_custom_agents()
-        return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True) for a in agents])
+        agents = list_custom_agents(user_id=user_id)
+        return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True, user_id=user_id) for a in agents])
     except Exception as e:
         logger.error(f"Failed to list agents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
@@ -140,7 +146,12 @@ async def check_agent_name(name: str) -> dict:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
-    available = not get_paths().agent_dir(normalized).exists()
+    user_id = get_effective_user_id()
+    paths = get_paths()
+    # Treat the name as taken if either the per-user path or the legacy shared
+    # path holds an agent — picking a name that collides with an unmigrated
+    # legacy agent would shadow the legacy entry once migration runs.
+    available = not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
     return {"available": available, "name": normalized}
 
 
@@ -165,10 +176,11 @@ async def get_agent(name: str) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
+    user_id = get_effective_user_id()
 
     try:
-        agent_cfg = load_agent_config(name)
-        return _agent_config_to_response(agent_cfg, include_soul=True)
+        agent_cfg = load_agent_config(name, user_id=user_id)
+        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
@@ -198,10 +210,13 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(request.name)
     normalized_name = _normalize_agent_name(request.name)
+    user_id = get_effective_user_id()
+    paths = get_paths()
 
-    agent_dir = get_paths().agent_dir(normalized_name)
+    agent_dir = paths.user_agent_dir(user_id, normalized_name)
+    legacy_dir = paths.agent_dir(normalized_name)
 
-    if agent_dir.exists():
+    if agent_dir.exists() or legacy_dir.exists():
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
 
     try:
@@ -215,6 +230,8 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
             config_data["model"] = request.model
         if request.tool_groups is not None:
             config_data["tool_groups"] = request.tool_groups
+        if request.skills is not None:
+            config_data["skills"] = request.skills
 
         config_file = agent_dir / "config.yaml"
         with open(config_file, "w", encoding="utf-8") as f:
@@ -226,8 +243,8 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
 
         logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
 
-        agent_cfg = load_agent_config(normalized_name)
-        return _agent_config_to_response(agent_cfg, include_soul=True)
+        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
+        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
 
     except HTTPException:
         raise
@@ -261,30 +278,48 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
+    user_id = get_effective_user_id()
 
     try:
-        agent_cfg = load_agent_config(name)
+        agent_cfg = load_agent_config(name, user_id=user_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    agent_dir = get_paths().agent_dir(name)
+    paths = get_paths()
+    agent_dir = paths.user_agent_dir(user_id, name)
+    if not agent_dir.exists() and paths.agent_dir(name).exists():
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
+        )
 
     try:
         # Update config if any config fields changed
-        config_changed = any(v is not None for v in [request.description, request.model, request.tool_groups])
+        # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
+        # This is critical for skills where None means "inherit all" (not "don't change").
+        fields_set = request.model_fields_set
+        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills"})
 
         if config_changed:
             updated: dict = {
                 "name": agent_cfg.name,
-                "description": request.description if request.description is not None else agent_cfg.description,
+                "description": request.description if "description" in fields_set else agent_cfg.description,
             }
-            new_model = request.model if request.model is not None else agent_cfg.model
+            new_model = request.model if "model" in fields_set else agent_cfg.model
             if new_model is not None:
                 updated["model"] = new_model
 
-            new_tool_groups = request.tool_groups if request.tool_groups is not None else agent_cfg.tool_groups
+            new_tool_groups = request.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
             if new_tool_groups is not None:
                 updated["tool_groups"] = new_tool_groups
+
+            # skills: None = inherit all, [] = no skills, ["a","b"] = whitelist
+            if "skills" in fields_set:
+                new_skills = request.skills
+            else:
+                new_skills = agent_cfg.skills
+            if new_skills is not None:
+                updated["skills"] = new_skills
 
             config_file = agent_dir / "config.yaml"
             with open(config_file, "w", encoding="utf-8") as f:
@@ -297,8 +332,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
         logger.info(f"Updated agent '{name}'")
 
-        refreshed_cfg = load_agent_config(name)
-        return _agent_config_to_response(refreshed_cfg, include_soul=True)
+        refreshed_cfg = load_agent_config(name, user_id=user_id)
+        return _agent_config_to_response(refreshed_cfg, include_soul=True, user_id=user_id)
 
     except HTTPException:
         raise
@@ -385,15 +420,22 @@ async def delete_agent(name: str) -> None:
         name: The agent name.
 
     Raises:
-        HTTPException: 404 if agent not found.
+        HTTPException: 404 if no per-user copy exists; 409 if only a legacy
+            shared copy exists (suggesting the migration script).
     """
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
-
-    agent_dir = get_paths().agent_dir(name)
+    user_id = get_effective_user_id()
+    paths = get_paths()
+    agent_dir = paths.user_agent_dir(user_id, name)
 
     if not agent_dir.exists():
+        if paths.agent_dir(name).exists():
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before deleting."),
+            )
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
     try:

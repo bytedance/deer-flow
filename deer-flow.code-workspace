@@ -5,7 +5,7 @@
     }
   ],
   "settings": {
-    "typescript.tsdk": "frontend/node_modules/typescript/lib",
+    "js/ts.tsdk.path": "frontend/node_modules/typescript/lib",
     "python-envs.pythonProjects": [
       {
         "path": "backend",

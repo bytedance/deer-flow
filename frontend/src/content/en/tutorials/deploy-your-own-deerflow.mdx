@@ -1,3 +1,79 @@
+---
+title: Deploy Your Own DeerFlow
+description: This tutorial guides you through deploying DeerFlow to a production environment using Docker Compose for multi-user access.
+---
+
+import { Callout, Steps } from "nextra/components";
+
 # Deploy Your Own DeerFlow
 
-TBD
+This tutorial guides you through deploying DeerFlow to a production environment using Docker Compose for multi-user access.
+
+## Prerequisites
+
+- Docker and Docker Compose installed
+- A server or VM (Linux recommended)
+- LLM API key
+
+## Steps
+
+<Steps>
+
+### Clone the repository
+
+```bash
+git clone https://github.com/bytedance/deer-flow.git
+cd deer-flow
+```
+
+### Create the configuration file
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Edit `config.yaml` to add your model configuration.
+
+### Create the environment variables file
+
+```bash
+cat > .env << EOF
+OPENAI_API_KEY=sk-your-key-here
+DEER_FLOW_ROOT=$(pwd)
+BETTER_AUTH_SECRET=$(openssl rand -base64 32)
+BETTER_AUTH_URL=https://your-domain.com
+EOF
+```
+
+### Start the services
+
+```bash
+docker compose -f docker/docker-compose-dev.yaml up -d
+```
+
+### Verify the deployment
+
+```bash
+# Check all services are healthy
+curl http://localhost:2026/api/models
+
+# Follow logs
+docker compose -f docker/docker-compose-dev.yaml logs -f
+```
+
+Open `http://your-server:2026` in your browser.
+
+</Steps>
+
+## Production checklist
+
+- Configure HTTPS/TLS for nginx
+- Set `BETTER_AUTH_SECRET` to a strong random string (minimum 32 characters)
+- Configure firewall rules to allow only necessary ports
+- Back up `backend/.deer-flow/` directory regularly
+- Consider using a container-based sandbox (`AioSandboxProvider`) for multi-user isolation
+
+## Next steps
+
+- [Full Deployment Guide](/docs/application/deployment-guide)
+- [Operations and Troubleshooting](/docs/application/operations-and-troubleshooting)

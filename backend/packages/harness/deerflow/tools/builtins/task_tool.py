@@ -4,19 +4,48 @@ import asyncio
 import logging
 import uuid
 from dataclasses import replace
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langgraph.config import get_stream_writer
 from langgraph.typing import ContextT
 
-from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 from deerflow.agents.thread_state import ThreadState
+from deerflow.config import get_app_config
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result, request_cancel_background_task
+from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.executor import (
+    SubagentStatus,
+    cleanup_background_task,
+    get_background_task_result,
+    request_cancel_background_task,
+)
+
+if TYPE_CHECKING:
+    from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict):
+        app_config = context.get("app_config")
+        if app_config is not None:
+            return cast("AppConfig", app_config)
+    return None
+
+
+def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
+    """Return the effective subagent skill allowlist under the parent policy."""
+    if parent is None:
+        return child
+    if child is None:
+        return list(parent)
+
+    parent_set = set(parent)
+    return [skill for skill in child if skill in parent_set]
 
 
 @tool("task", parse_docstring=True)
@@ -35,13 +64,18 @@ async def task_tool(
     - Handle complex multi-step tasks autonomously
     - Execute commands or operations in isolated contexts
 
-    Available subagent types depend on the active sandbox configuration:
+    Built-in subagent types:
     - **general-purpose**: A capable agent for complex, multi-step tasks that require
       both exploration and action. Use when the task requires complex reasoning,
       multiple dependent steps, or would benefit from isolated context.
     - **bash**: Command execution specialist for running bash commands. This is only
       available when host bash is explicitly allowed or when using an isolated shell
       sandbox such as `AioSandboxProvider`.
+
+    Additional custom subagent types may be defined in config.yaml under
+    `subagents.custom_agents`. Each custom type can have its own system prompt,
+    tools, skills, model, and timeout configuration. If an unknown subagent_type
+    is provided, the error message will list all available types.
 
     When to use this tool:
     - Complex tasks requiring multiple steps or tools
@@ -59,28 +93,28 @@ async def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
         max_turns: Optional maximum number of agent turns. Defaults to subagent's configured max.
     """
-    available_subagent_names = get_available_subagent_names()
+    runtime_app_config = _get_runtime_app_config(runtime)
+    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type)
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
     if config is None:
         available = ", ".join(available_subagent_names)
         return f"Error: Unknown subagent type '{subagent_type}'. Available: {available}"
-    if subagent_type == "bash" and not is_host_bash_allowed():
-        return f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}"
+    if subagent_type == "bash":
+        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        if not host_bash_allowed:
+            return f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}"
 
     # Build config overrides
     overrides: dict = {}
 
-    skills_section = get_skills_prompt_section()
-    if skills_section:
-        overrides["system_prompt"] = config.system_prompt + "\n\n" + skills_section
+    # Skills are loaded by SubagentExecutor per-session (aligned with Codex's pattern:
+    # each subagent loads its own skills based on config, injected as conversation items).
+    # No longer appended to system_prompt here.
 
     if max_turns is not None:
         overrides["max_turns"] = max_turns
-
-    if overrides:
-        config = replace(config, **overrides)
 
     # Extract parent context from runtime
     sandbox_state = None
@@ -88,6 +122,7 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
+    metadata: dict = {}
 
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
@@ -103,23 +138,47 @@ async def task_tool(
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
 
+    parent_available_skills = metadata.get("available_skills")
+    if parent_available_skills is not None:
+        overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
+
+    if overrides:
+        config = replace(config, **overrides)
+
     # Get available tools (excluding task tool to prevent nesting)
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
 
+    # Inherit parent agent's tool_groups so subagents respect the same restrictions
+    parent_tool_groups = metadata.get("tool_groups")
+    resolved_app_config = runtime_app_config
+    if config.model == "inherit" and parent_model is None and resolved_app_config is None:
+        resolved_app_config = get_app_config()
+    effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
+
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    tools = get_available_tools(model_name=parent_model, subagent_enabled=False)
+    available_tools_kwargs = {
+        "model_name": effective_model,
+        "groups": parent_tool_groups,
+        "subagent_enabled": False,
+    }
+    if resolved_app_config is not None:
+        available_tools_kwargs["app_config"] = resolved_app_config
+    tools = get_available_tools(**available_tools_kwargs)
 
     # Create executor
-    executor = SubagentExecutor(
-        config=config,
-        tools=tools,
-        parent_model=parent_model,
-        sandbox_state=sandbox_state,
-        thread_data=thread_data,
-        thread_id=thread_id,
-        trace_id=trace_id,
-    )
+    executor_kwargs = {
+        "config": config,
+        "tools": tools,
+        "parent_model": parent_model,
+        "sandbox_state": sandbox_state,
+        "thread_data": thread_data,
+        "thread_id": thread_id,
+        "trace_id": trace_id,
+    }
+    if resolved_app_config is not None:
+        executor_kwargs["app_config"] = resolved_app_config
+    executor = SubagentExecutor(**executor_kwargs)
 
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability
@@ -154,11 +213,12 @@ async def task_tool(
                 last_status = result.status
 
             # Check for new AI messages and send task_running events
-            current_message_count = len(result.ai_messages)
+            ai_messages = result.ai_messages or []
+            current_message_count = len(ai_messages)
             if current_message_count > last_message_count:
                 # Send task_running event for each new message
                 for i in range(last_message_count, current_message_count):
-                    message = result.ai_messages[i]
+                    message = ai_messages[i]
                     writer(
                         {
                             "type": "task_running",

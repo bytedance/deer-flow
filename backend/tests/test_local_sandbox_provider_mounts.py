@@ -1,4 +1,5 @@
 import errno
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -6,6 +7,13 @@ import pytest
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+
+
+def _symlink_to(target, link, *, target_is_directory=False):
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks are not available: {exc}")
 
 
 class TestPathMapping:
@@ -29,7 +37,7 @@ class TestLocalSandboxPathResolution:
             ],
         )
         resolved = sandbox._resolve_path("/mnt/skills")
-        assert resolved == "/home/user/skills"
+        assert resolved == str(Path("/home/user/skills").resolve())
 
     def test_resolve_path_nested_path(self):
         sandbox = LocalSandbox(
@@ -39,7 +47,7 @@ class TestLocalSandboxPathResolution:
             ],
         )
         resolved = sandbox._resolve_path("/mnt/skills/agent/prompt.py")
-        assert resolved == "/home/user/skills/agent/prompt.py"
+        assert resolved == str(Path("/home/user/skills/agent/prompt.py").resolve())
 
     def test_resolve_path_no_mapping(self):
         sandbox = LocalSandbox(
@@ -61,7 +69,7 @@ class TestLocalSandboxPathResolution:
         )
         resolved = sandbox._resolve_path("/mnt/skills/file.py")
         # Should match /mnt/skills first (longer prefix)
-        assert resolved == "/home/user/skills/file.py"
+        assert resolved == str(Path("/home/user/skills/file.py").resolve())
 
     def test_reverse_resolve_path_exact_match(self, tmp_path):
         skills_dir = tmp_path / "skills"
@@ -175,6 +183,157 @@ class TestReadOnlyPath:
         assert exc_info.value.errno == errno.EROFS
 
 
+class TestSymlinkEscapes:
+    def test_read_file_blocks_symlink_escape_from_mount(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(PermissionError) as exc_info:
+            sandbox.read_file("/mnt/data/escape/secret.txt")
+
+        assert exc_info.value.errno == errno.EACCES
+
+    def test_write_file_blocks_symlink_escape_from_mount(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        victim = outside_dir / "victim.txt"
+        victim.write_text("original")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(PermissionError) as exc_info:
+            sandbox.write_file("/mnt/data/escape/victim.txt", "changed")
+
+        assert exc_info.value.errno == errno.EACCES
+        assert victim.read_text() == "original"
+
+    def test_write_file_uses_matched_read_only_mount_for_symlink_target(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        writable_dir = repo_dir / "writable"
+        writable_dir.mkdir()
+        _symlink_to(writable_dir, repo_dir / "link-to-writable", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/repo", local_path=str(repo_dir), read_only=True),
+                PathMapping(container_path="/mnt/repo/writable", local_path=str(writable_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.write_file("/mnt/repo/link-to-writable/file.txt", "bypass")
+
+        assert exc_info.value.errno == errno.EROFS
+        assert not (writable_dir / "file.txt").exists()
+
+    def test_list_dir_does_not_follow_symlink_escape_from_mount(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+        (mount_dir / "visible.txt").write_text("visible")
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        entries = sandbox.list_dir("/mnt/data", max_depth=2)
+
+        assert "/mnt/data/visible.txt" in entries
+        assert all("secret.txt" not in entry for entry in entries)
+        assert all("outside" not in entry for entry in entries)
+
+    def test_list_dir_formats_internal_directory_symlink_like_directory(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        nested_dir = mount_dir / "nested"
+        linked_dir = nested_dir / "linked-dir"
+        linked_dir.mkdir(parents=True)
+        _symlink_to(linked_dir, mount_dir / "dir-link", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        entries = sandbox.list_dir("/mnt/data", max_depth=1)
+
+        assert "/mnt/data/nested/" in entries
+        assert "/mnt/data/nested/linked-dir/" in entries
+        assert "/mnt/data/dir-link" not in entries
+
+    def test_write_file_blocks_symlink_into_nested_read_only_mount(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        protected_dir = repo_dir / "protected"
+        protected_dir.mkdir()
+        _symlink_to(protected_dir, repo_dir / "link-to-protected", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/repo", local_path=str(repo_dir), read_only=False),
+                PathMapping(container_path="/mnt/repo/protected", local_path=str(protected_dir), read_only=True),
+            ],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.write_file("/mnt/repo/link-to-protected/file.txt", "bypass")
+
+        assert exc_info.value.errno == errno.EROFS
+        assert not (protected_dir / "file.txt").exists()
+
+    def test_update_file_blocks_symlink_into_nested_read_only_mount(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        protected_dir = repo_dir / "protected"
+        protected_dir.mkdir()
+        existing = protected_dir / "file.txt"
+        existing.write_bytes(b"original")
+        _symlink_to(protected_dir, repo_dir / "link-to-protected", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/repo", local_path=str(repo_dir), read_only=False),
+                PathMapping(container_path="/mnt/repo/protected", local_path=str(protected_dir), read_only=True),
+            ],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.update_file("/mnt/repo/link-to-protected/file.txt", b"changed")
+
+        assert exc_info.value.errno == errno.EROFS
+        assert existing.read_bytes() == b"original"
+
+
 class TestMultipleMounts:
     def test_multiple_read_write_mounts(self, tmp_path):
         skills_dir = tmp_path / "skills"
@@ -255,7 +414,9 @@ class TestMultipleMounts:
 
         sandbox.execute_command("cat /mnt/data/test.txt")
         # Verify the command received the resolved local path
-        assert str(data_dir) in captured.get("command", "")
+        command = captured.get("command", [])
+        assert isinstance(command, list) and len(command) >= 3
+        assert str(data_dir) in command[2]
 
     def test_reverse_resolve_path_does_not_match_partial_prefix(self, tmp_path):
         foo_dir = tmp_path / "foo"
@@ -308,7 +469,7 @@ class TestLocalSandboxProviderMounts:
             ],
         )
         config = SimpleNamespace(
-            skills=SimpleNamespace(container_path="/custom-skills", get_skills_path=lambda: skills_dir),
+            skills=SimpleNamespace(container_path="/custom-skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
             sandbox=sandbox_config,
         )
 
@@ -330,7 +491,7 @@ class TestLocalSandboxProviderMounts:
             ],
         )
         config = SimpleNamespace(
-            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir),
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
             sandbox=sandbox_config,
         )
 
@@ -354,7 +515,7 @@ class TestLocalSandboxProviderMounts:
             ],
         )
         config = SimpleNamespace(
-            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir),
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
             sandbox=sandbox_config,
         )
 
@@ -470,7 +631,7 @@ class TestLocalSandboxProviderMounts:
             ],
         )
         config = SimpleNamespace(
-            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir),
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
             sandbox=sandbox_config,
         )
 
