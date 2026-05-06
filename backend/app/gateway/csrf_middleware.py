@@ -21,7 +21,7 @@ CSRF_TOKEN_LENGTH = 64  # bytes
 
 def is_secure_request(request: Request) -> bool:
     """Detect whether the original client request was made over HTTPS."""
-    return request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+    return _request_scheme(request) == "https"
 
 
 def generate_csrf_token() -> str:
@@ -127,9 +127,15 @@ def _forwarded_param(request: Request, name: str) -> str | None:
     return None
 
 
+def _request_scheme(request: Request) -> str:
+    """Resolve the original request scheme from trusted proxy headers."""
+    scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto")) or request.url.scheme
+    return scheme.lower()
+
+
 def _request_origin(request: Request) -> str | None:
     """Build the origin for the URL the browser is targeting."""
-    scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto")) or request.url.scheme
+    scheme = _request_scheme(request)
     host = _forwarded_param(request, "host") or _first_header_value(request.headers.get("x-forwarded-host")) or request.headers.get("host") or request.url.netloc
 
     forwarded_port = _first_header_value(request.headers.get("x-forwarded-port"))

@@ -123,6 +123,7 @@ def test_auth_post_allows_rfc_forwarded_same_origin():
 
     assert response.status_code == 200
     assert response.cookies.get("csrf_token")
+    assert "secure" in response.headers["set-cookie"].lower()
 
 
 def test_auth_post_allows_explicit_configured_origin(monkeypatch):
