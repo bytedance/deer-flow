@@ -695,6 +695,13 @@ skills:
   # Override with DEER_FLOW_SKILLS_PATH when this field is omitted.
   # Uncomment to customize:
   # path: /absolute/path/to/custom/skills
+  #
+  # Docker Compose note:
+  # - Service containers mount the repo skills directory at /app/skills.
+  # - The agent sandbox reads skills through container_path, normally /mnt/skills.
+  # - For offline custom skills, add:
+  #   skills/custom/<skill-name>/SKILL.md
+  #   and ask the agent to read /mnt/skills/custom/<skill-name>/SKILL.md.
 
   # Path where skills are mounted in the sandbox container
   # This is used by the agent to access skills in both local and Docker sandbox

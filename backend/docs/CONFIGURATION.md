@@ -279,6 +279,14 @@ skills:
 - Each skill has a `SKILL.md` file with metadata
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
+- For Docker Compose, `skills.path` is resolved inside the DeerFlow service containers
+  such as gateway and langgraph. The agent reads the same skills through
+  `skills.container_path`, which defaults to `/mnt/skills`.
+- Do not instruct the agent to read `/app/skills/...` directly. Use the path shown in
+  the skill prompt, for example `/mnt/skills/custom/my-skill/SKILL.md`.
+- To add an offline custom skill, place it at
+  `skills/custom/<skill-name>/SKILL.md`, keep `container_path: /mnt/skills`, and
+  restart DeerFlow so the services reload the skills directory.
 
 **Per-Agent Skill Filtering**:
 Custom agents can restrict which skills they load by defining a `skills` field in their `config.yaml` (located at `workspace/agents/<agent_name>/config.yaml`):
