@@ -181,12 +181,19 @@ def create_auth_middleware():
                 reset_tenant_id(ctx_token)
 
         elif cookie_token:
-            # Cookie-based auth: delegate JWT validation to AuthMiddleware which
-            # uses auth/jwt.py (same library as the login endpoint). We only
-            # extract the tenant from the header.
-            logger.debug("create_auth_middleware: cookie found for path=%s, passing through to AuthMiddleware",
-                         request.url.path)
-            tenant_id = request.headers.get("X-DeerFlow-Tenant", "default")
+            # Cookie-based auth: decode the JWT to extract tenant_id from
+            # token claims. Falls back to X-DeerFlow-Tenant header when the
+            # cookie JWT is expired/malformed (the inner AuthMiddleware will
+            # reject the request with a proper 401 in that case).
+            from app.gateway.auth.errors import TokenError
+            from app.gateway.auth.jwt import decode_token as decode_cookie_token
+
+            payload = decode_cookie_token(cookie_token)
+            if isinstance(payload, TokenError):
+                tenant_id = request.headers.get("X-DeerFlow-Tenant", "default")
+            else:
+                tenant_id = payload.tenant_id
+
             try:
                 validate_tenant_id(tenant_id)
             except ValueError as e:

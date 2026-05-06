@@ -18,6 +18,7 @@ export async function getServerSideUser(): Promise<AuthResult> {
         email: "e2e@test.local",
         system_role: "admin",
         needs_setup: false,
+        tenant_id: "default",
       },
     };
   }

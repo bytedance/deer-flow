@@ -4,14 +4,22 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   createTenant,
   deleteTenant,
+  deleteTenantUser,
+  listTenantUsers,
   listTenants,
   updateTenant,
 } from "@/core/admin/api";
-import type { TenantSummary } from "@/core/admin/types";
+import type { TenantSummary, TenantUser } from "@/core/admin/types";
 import { useI18n } from "@/core/i18n/hooks";
 
 export default function AdminTenantsPage() {
@@ -25,6 +33,10 @@ export default function AdminTenantsPage() {
   const [editDailyQuota, setEditDailyQuota] = useState("");
   const [editMonthlyQuota, setEditMonthlyQuota] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [manageUsersTenantId, setManageUsersTenantId] = useState<string | null>(null);
+  const [tenantUsers, setTenantUsers] = useState<TenantUser[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [removeConfirmUserId, setRemoveConfirmUserId] = useState<string | null>(null);
 
   const refresh = () => {
     listTenants()
@@ -99,6 +111,34 @@ export default function AdminTenantsPage() {
       await deleteTenant(tenantId);
       setDeleteConfirm(null);
       setError(null);
+      refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handleManageUsers = async (tenantId: string) => {
+    setManageUsersTenantId(tenantId);
+    setLoadingUsers(true);
+    setError(null);
+    try {
+      const users = await listTenantUsers(tenantId);
+      setTenantUsers(users);
+    } catch (err) {
+      setError((err as Error).message);
+      setTenantUsers([]);
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  const handleRemoveUser = async (userId: string) => {
+    if (!manageUsersTenantId) return;
+    try {
+      await deleteTenantUser(manageUsersTenantId, userId);
+      setRemoveConfirmUserId(null);
+      setError(null);
+      setTenantUsers((prev) => prev.filter((u) => u.id !== userId));
       refresh();
     } catch (err) {
       setError((err as Error).message);
@@ -203,6 +243,13 @@ export default function AdminTenantsPage() {
                         >
                           {t.admin.edit}
                         </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleManageUsers(tenant.tenant_id)}
+                        >
+                          {t.admin.manageUsers}
+                        </Button>
                         {tenant.tenant_id !== "default" && (
                           <Button
                             variant="outline"
@@ -274,6 +321,75 @@ export default function AdminTenantsPage() {
           );
         })}
       </div>
+
+      <Dialog
+        open={!!manageUsersTenantId}
+        onOpenChange={(open) => {
+          if (!open) {
+            setManageUsersTenantId(null);
+            setTenantUsers([]);
+            setRemoveConfirmUserId(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {t.admin.tenantUsers} — {manageUsersTenantId}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            {loadingUsers && (
+              <p className="text-sm text-muted-foreground">Loading...</p>
+            )}
+            {!loadingUsers && tenantUsers.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                {t.admin.noTenantUsers}
+              </p>
+            )}
+            {tenantUsers.map((u) => (
+              <div
+                key={u.id}
+                className="flex items-center justify-between rounded border p-3"
+              >
+                <div>
+                  <p className="text-sm font-medium">{u.email}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {u.system_role}
+                    {u.needs_setup ? " · needs setup" : ""}
+                  </p>
+                </div>
+                {removeConfirmUserId === u.id ? (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={() => handleRemoveUser(u.id)}
+                    >
+                      {t.admin.confirmDelete}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setRemoveConfirmUserId(null)}
+                    >
+                      {t.admin.cancel}
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setRemoveConfirmUserId(u.id)}
+                  >
+                    {t.admin.removeUser}
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

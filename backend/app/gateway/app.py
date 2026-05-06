@@ -77,23 +77,49 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     alongside the auth module via create_all, so freshly created tables
     never contain NULL-owner rows.
     """
-    from sqlalchemy import select
+    from sqlalchemy import select, text
 
-    from app.gateway.deps import get_local_provider
-    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.engine import get_engine, get_session_factory
     from deerflow.persistence.user.model import UserRow
 
-    try:
-        provider = get_local_provider()
-    except RuntimeError:
-        # Auth persistence may not be initialized in some test/boot paths.
-        # Skip admin migration work rather than failing gateway startup.
-        logger.warning("Auth persistence not ready; skipping admin bootstrap check")
-        return
+    # ── Schema migration: add tenant_id column to existing databases ──
+    # create_all only creates tables, not columns. Run ALTER TABLE for
+    # databases created before tenant_id was added to the UserRow model.
+    engine = get_engine()
+    if engine is not None and engine.url.get_backend_name() == "sqlite":
+        async with engine.begin() as conn:
+            # Check if the column already exists
+            result = await conn.execute(
+                text("PRAGMA table_info('users')")
+            )
+            columns = {row[1] for row in result.fetchall()}
+            if "tenant_id" not in columns:
+                logger.info("Migrating users table: adding tenant_id column")
+                await conn.execute(
+                    text("ALTER TABLE users ADD COLUMN tenant_id VARCHAR(64) NOT NULL DEFAULT 'default'")
+                )
+                logger.info("Migration complete: tenant_id column added")
+            # Always clean up legacy email-only unique index so the
+            # composite (email, tenant_id) index is the sole uniqueness
+            # constraint. Safe to run on every boot (DROP IF EXISTS).
+            try:
+                await conn.execute(text("DROP INDEX IF EXISTS ix_users_email"))
+            except Exception:
+                pass
+            await conn.execute(
+                text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_tenant ON users (email, tenant_id)")
+            )
 
+    # Check session factory BEFORE trying get_local_provider(), which raises
+    # a cryptic RuntimeError when the persistence engine isn't ready yet.
     sf = get_session_factory()
     if sf is None:
+        logger.info("Persistence engine not available; skipping admin bootstrap check")
         return
+
+    from app.gateway.deps import get_local_provider
+
+    provider = get_local_provider()
 
     admin_count = await provider.count_admin_users()
 

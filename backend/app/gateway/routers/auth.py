@@ -108,6 +108,7 @@ class RegisterRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    tenant_id: str | None = Field(default=None, description="Tenant ID to register in; uses header if omitted")
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -282,7 +283,7 @@ async def login_local(
     client_ip = _get_client_ip(request)
     _check_rate_limit(client_ip)
 
-    user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password})
+    user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password, "tenant_id": request.headers.get("X-DeerFlow-Tenant", "default")})
 
     if user is None:
         _record_login_failure(client_ip)
@@ -292,7 +293,7 @@ async def login_local(
         )
 
     _record_login_success(client_ip)
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    token = create_access_token(str(user.id), token_version=user.token_version, tenant_id=user.tenant_id)
     _set_session_cookie(response, token, request)
 
     return LoginResponse(
@@ -309,17 +310,18 @@ async def register(request: Request, response: Response, body: RegisterRequest):
     Auto-login by setting the session cookie.
     """
     try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
+        tenant_id = body.tenant_id or request.headers.get("X-DeerFlow-Tenant", "default")
+        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user", tenant_id=tenant_id)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
         )
 
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    token = create_access_token(str(user.id), token_version=user.token_version, tenant_id=user.tenant_id)
     _set_session_cookie(response, token, request)
 
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role)
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, tenant_id=user.tenant_id)
 
 
 @router.post("/logout", response_model=MessageResponse)
@@ -369,7 +371,7 @@ async def change_password(request: Request, response: Response, body: ChangePass
     await provider.update_user(user)
 
     # Re-issue cookie with new token_version
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    token = create_access_token(str(user.id), token_version=user.token_version, tenant_id=user.tenant_id)
     _set_session_cookie(response, token, request)
 
     return MessageResponse(message="Password changed successfully")
@@ -379,7 +381,7 @@ async def change_password(request: Request, response: Response, body: ChangePass
 async def get_me(request: Request):
     """Get current authenticated user info."""
     user = await get_current_user_from_request(request)
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, needs_setup=user.needs_setup)
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, needs_setup=user.needs_setup, tenant_id=user.tenant_id)
 
 
 _SETUP_STATUS_COOLDOWN: dict[str, float] = {}
@@ -444,7 +446,7 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
         )
 
     try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
+        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False, tenant_id="default")
     except ValueError:
         # DB unique-constraint race: another concurrent request beat us.
         raise HTTPException(
@@ -452,10 +454,10 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
             detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
         )
 
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    token = create_access_token(str(user.id), token_version=user.token_version, tenant_id=user.tenant_id)
     _set_session_cookie(response, token, request)
 
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role)
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, tenant_id=user.tenant_id)
 
 
 # ── OAuth Endpoints (Future/Placeholder) ─────────────────────────────────

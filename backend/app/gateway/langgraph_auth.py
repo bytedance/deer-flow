@@ -8,6 +8,9 @@ Two layers:
   1. @auth.authenticate — validates JWT cookie, extracts user_id,
      and enforces CSRF on state-changing methods (POST/PUT/DELETE/PATCH)
   2. @auth.on — returns metadata filter so each user only sees own threads
+
+The LangGraph Server runs in a separate process from the Gateway, so it must
+lazy-initialise its own persistence engine before using ``get_local_provider()``.
 """
 
 import secrets
@@ -22,6 +25,29 @@ auth = Auth()
 
 # Methods that require CSRF validation (state-changing per RFC 7231).
 _CSRF_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+_engine_initialised: bool = False
+
+
+async def _ensure_engine() -> None:
+    """Lazy-initialise the persistence engine for the LangGraph Server process.
+
+    The Gateway initialises its engine in ``app.py:lifespan``, but the
+    LangGraph Server is a separate process that never touches that code
+    path.  We initialise on first authenticated request so that
+    ``get_local_provider()`` can reach the users table.
+    """
+    global _engine_initialised
+
+    if _engine_initialised:
+        return
+
+    from deerflow.config.app_config import get_app_config
+    from deerflow.persistence.engine import init_engine_from_config
+
+    config = get_app_config()
+    await init_engine_from_config(config.database)
+    _engine_initialised = True
 
 
 def _check_csrf(request) -> None:
@@ -76,6 +102,7 @@ async def authenticate(request):
             detail="Invalid token",
         )
 
+    await _ensure_engine()
     user = await get_local_provider().get_user(payload.sub)
     if user is None:
         raise Auth.exceptions.HTTPException(

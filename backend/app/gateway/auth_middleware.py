@@ -24,6 +24,17 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
 
+
+class _DefaultUser:
+    """Minimal user object used when auth is disabled.
+
+    Satisfies the ``CurrentUser`` protocol so that repository-layer
+    ``resolve_user_id(AUTO)`` works without a real authenticated user.
+    """
+
+    id: str = "default"
+
+
 # Paths that never require authentication.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/health",
@@ -82,10 +93,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # When auth is disabled, skip authentication entirely.
         # The create_auth_middleware (registered before this one) handles
         # tenant extraction from the X-DeerFlow-Tenant header.
+        # We still set a default user context so repository-layer owner
+        # filtering works (resolve_user_id(AUTO) won't raise RuntimeError).
         from deerflow.config.auth_config import get_auth_config
 
         if not get_auth_config().enabled:
-            return await call_next(request)
+            user = _DefaultUser()
+            token = set_current_user(user)
+            try:
+                return await call_next(request)
+            finally:
+                reset_current_user(token)
 
         internal_user = None
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):

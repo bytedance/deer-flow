@@ -26,7 +26,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.runtime import serialize_channel_values
-from deerflow.utils.time import coerce_iso
+from deerflow.utils.time import coerce_iso, now_iso
 
 # ---------------------------------------------------------------------------
 # Store namespace

@@ -257,7 +257,8 @@ def _build_middlewares(
     Returns:
         List of middleware instances.
     """
-    middlewares = build_lead_runtime_middlewares(lazy_init=True)
+    resolved_app_config = app_config or get_app_config()
+    middlewares = build_lead_runtime_middlewares(lazy_init=True, app_config=resolved_app_config)
 
     # Add Content Safety middlewares if enabled
     from deerflow.config.content_safety_config import get_content_safety_config
@@ -307,16 +308,7 @@ def _build_middlewares(
 
     # Add TokenUsageMiddleware when token_usage tracking is enabled
     if get_app_config().token_usage.enabled:
-        cost_config = get_app_config().cost
-        if cost_config.enabled:
-            from deerflow.cost.calculator import CostCalculator
-            from deerflow.cost.storage import UsageStorage
-
-            storage = UsageStorage()
-            calculator = CostCalculator(cost_config.model_pricing)
-            middlewares.append(TokenUsageMiddleware(storage=storage, calculator=calculator))
-        else:
-            middlewares.append(TokenUsageMiddleware())
+        middlewares.append(TokenUsageMiddleware())
 
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))
@@ -372,6 +364,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
 
+    resolved_app_config = app_config
+
     cfg = config.get("configurable", {})
     # LangGraph >= 0.6.0 passes user-facing config via ``context`` instead of
     # ``configurable``, and rejects requests that include both. Merge context
@@ -402,9 +396,9 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
     # Final model name resolution: request → agent config → global default, with fallback for unknown names
-    model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=resolved_app_config)
+    model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=app_config)
 
-    model_config = resolved_app_config.get_model_config(model_name)
+    model_config = app_config.get_model_config(model_name)
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")

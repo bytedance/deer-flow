@@ -7,6 +7,8 @@ export const userSchema = z.object({
   email: z.string().email(),
   system_role: z.enum(["admin", "user"]),
   needs_setup: z.boolean().optional().default(false),
+  tenant_id: z.string().optional().default("default"),
+  tenant_name: z.string().optional(),
 });
 
 export type User = z.infer<typeof userSchema>;

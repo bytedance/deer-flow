@@ -478,6 +478,11 @@ export interface Translations {
     confirmDelete: string;
     confirmDeleteDesc: string;
     cancel: string;
+    manageUsers: string;
+    tenantUsers: string;
+    removeUser: string;
+    noTenantUsers: string;
+    tenantUserRemoveConfirm: string;
     tenantDisabledTitle: string;
     tenantDisabledDesc: string;
     tenantNotFoundTitle: string;

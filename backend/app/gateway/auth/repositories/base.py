@@ -79,8 +79,8 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def count_users(self) -> int:
-        """Return total number of registered users."""
+    async def count_users(self, tenant_id: str | None = None) -> int:
+        """Return total number of registered users, optionally filtered by tenant."""
         raise NotImplementedError
 
     @abstractmethod
@@ -98,5 +98,44 @@ class UserRepository(ABC):
 
         Returns:
             User if found, None otherwise
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_user_by_email_and_tenant(self, email: str, tenant_id: str) -> User | None:
+        """Get user by email within a specific tenant.
+
+        Args:
+            email: User email address
+            tenant_id: Tenant ID to scope the lookup
+
+        Returns:
+            User if found, None otherwise
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_users(self, tenant_id: str, limit: int = 100, offset: int = 0) -> list[User]:
+        """List users in a tenant with pagination.
+
+        Args:
+            tenant_id: Tenant ID to filter by
+            limit: Max users to return
+            offset: Pagination offset
+
+        Returns:
+            List of User objects
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_user(self, user_id: str) -> bool:
+        """Delete a user by ID.
+
+        Args:
+            user_id: User UUID as string
+
+        Returns:
+            True if the user was deleted, False if not found
         """
         raise NotImplementedError

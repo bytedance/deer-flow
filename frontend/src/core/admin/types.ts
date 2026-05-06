@@ -33,6 +33,14 @@ export interface UpdateTenantRequest {
   monthly_quota_usd?: number;
 }
 
+export interface TenantUser {
+  id: string;
+  email: string;
+  system_role: "admin" | "user";
+  needs_setup: boolean;
+  tenant_id: string;
+}
+
 export interface UsageRecord {
   timestamp: string;
   tenant_id: string;

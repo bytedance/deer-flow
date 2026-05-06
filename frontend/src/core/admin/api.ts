@@ -9,6 +9,7 @@ import type {
   CostSummary,
   CreateTenantRequest,
   TenantSummary,
+  TenantUser,
   UpdateBudgetRequest,
   UpdateTenantRequest,
   UsageRecord,
@@ -65,6 +66,23 @@ export async function deleteTenant(tenantId: string): Promise<void> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.detail ?? `Failed to delete tenant: ${res.statusText}`);
+  }
+}
+
+// ── Tenant Users ──
+
+export async function listTenantUsers(tenantId: string): Promise<TenantUser[]> {
+  const res = await api(`/api/admin/tenants/${encodeURIComponent(tenantId)}/users`);
+  return parseJSON(res, "Failed to list tenant users");
+}
+
+export async function deleteTenantUser(tenantId: string, userId: string): Promise<void> {
+  const res = await api(`/api/admin/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `Failed to delete user: ${res.statusText}`);
   }
 }
 

@@ -180,7 +180,7 @@ def get_local_provider() -> LocalAuthProvider:
 
         sf = get_session_factory()
         if sf is None:
-            raise RuntimeError("get_local_provider() called before init_engine_from_config(); cannot access users table")
+            raise HTTPException(status_code=503, detail="Database not available — persistence engine not initialized")
         _cached_repo = SQLiteUserRepository(sf)
     if _cached_local_provider is None:
         from app.gateway.auth.local_provider import LocalAuthProvider
@@ -216,6 +216,12 @@ async def get_current_user_from_request(request: Request):
             status_code=401,
             detail=AuthErrorResponse(code=token_error_to_code(payload), message=f"Token error: {payload.value}").model_dump(),
         )
+
+    # Set tenant context from the JWT payload so downstream code that relies
+    # on get_current_tenant_id() sees the authenticated user's actual tenant.
+    from deerflow.config.tenant import set_current_tenant_id
+
+    set_current_tenant_id(payload.tenant_id)
 
     provider = get_local_provider()
     user = await provider.get_user(payload.sub)

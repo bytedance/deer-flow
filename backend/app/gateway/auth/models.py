@@ -33,6 +33,9 @@ class User(BaseModel):
     needs_setup: bool = Field(default=False, description="True for auto-created admin until setup completes")
     token_version: int = Field(default=0, description="Incremented on password change to invalidate old JWTs")
 
+    # Multi-tenant
+    tenant_id: str = Field(default="default", description="Tenant this user belongs to")
+
 
 class UserResponse(BaseModel):
     """Response model for user info endpoint."""
@@ -41,6 +44,7 @@ class UserResponse(BaseModel):
     email: str
     system_role: Literal["admin", "user"]
     needs_setup: bool = False
+    tenant_id: str = "default"
 
 
 class LoginRequest(BaseModel):

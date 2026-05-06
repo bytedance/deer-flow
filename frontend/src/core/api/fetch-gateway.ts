@@ -1,3 +1,4 @@
+import { fetch as fetchWithAuth } from "./fetcher";
 import { getTenantHeaders } from "../tenant";
 
 /**
@@ -15,5 +16,5 @@ export async function fetchGateway(
       headers.set(key, value);
     }
   }
-  return fetch(url, { ...init, headers });
+  return fetchWithAuth(url, { ...init, headers });
 }

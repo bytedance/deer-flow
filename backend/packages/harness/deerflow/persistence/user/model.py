@@ -25,7 +25,7 @@ class UserRow(Base):
     # UUIDs are stored as 36-char strings for cross-backend portability.
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
 
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
     password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     # "admin" | "user" — kept as plain string to avoid ALTER TABLE pain
@@ -48,6 +48,9 @@ class UserRow(Base):
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
 
+    # Multi-tenant: every user belongs to exactly one tenant.
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default="default", index=True)
+
     __table_args__ = (
         Index(
             "idx_users_oauth_identity",
@@ -55,5 +58,11 @@ class UserRow(Base):
             "oauth_id",
             unique=True,
             sqlite_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_users_email_tenant",
+            "email",
+            "tenant_id",
+            unique=True,
         ),
     )

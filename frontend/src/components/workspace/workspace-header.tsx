@@ -11,8 +11,8 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
-import { useTenant } from "@/core/tenant";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -20,13 +20,12 @@ export function WorkspaceHeader({ className }: { className?: string }) {
   const { t } = useI18n();
   const { state } = useSidebar();
   const pathname = usePathname();
-  const [tenantId] = useTenant();
-  const isNonDefaultTenant = tenantId !== "default";
+  const { user } = useAuth();
   return (
     <>
       <div
         className={cn(
-          "group/workspace-header flex h-12 flex-col justify-center",
+          "group/workspace-header flex min-h-12 flex-col justify-center py-1",
           className,
         )}
       >
@@ -39,20 +38,29 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
-            {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ? (
-              <Link href="/" className="text-primary ml-2 font-serif">
-                DeerFlow
-              </Link>
-            ) : (
-              <div className="text-primary ml-2 cursor-default font-serif">
-                DeerFlow
-              </div>
-            )}
-            {isNonDefaultTenant && (
-              <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-900 dark:text-amber-200">
-                {tenantId}
-              </span>
-            )}
+            <div className="ml-2 min-w-0 flex-1">
+              {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ? (
+                <Link href="/" className="text-primary font-serif">
+                  DeerFlow
+                </Link>
+              ) : (
+                <div className="text-primary cursor-default font-serif">
+                  DeerFlow
+                </div>
+              )}
+              {user && (
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate text-[11px] text-muted-foreground">
+                    {user.email}
+                  </span>
+                  {user.system_role === "admin" && (
+                    <span className="shrink-0 rounded bg-blue-100 px-1 py-px text-[9px] font-medium text-blue-700 dark:bg-blue-900 dark:text-blue-200">
+                      admin
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
             <SidebarTrigger />
           </div>
         )}

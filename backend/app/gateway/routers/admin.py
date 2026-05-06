@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.auth.dependencies import require_admin
-from app.gateway.deps import get_checkpointer
+from app.gateway.auth.models import UserResponse
+from app.gateway.deps import get_checkpointer, get_local_provider
 from deerflow.config.tenant_storage import TenantConfig, TenantStorage
 from deerflow.content_safety.log_storage import AuditLogEntry, AuditLogStorage
 from deerflow.cost.storage import UsageStorage
@@ -81,6 +82,7 @@ def _build_tenant_summary(
     today_records: list,
     month_records: list,
     thread_count: int = 0,
+    user_count: int = 0,
 ) -> TenantSummary:
     """Build a TenantSummary from a TenantConfig and usage data."""
     tenant_today = [r for r in today_records if r.tenant_id == tc.tenant_id]
@@ -89,7 +91,7 @@ def _build_tenant_summary(
         tenant_id=tc.tenant_id,
         name=tc.name,
         created_at=tc.created_at,
-        user_count=1,
+        user_count=user_count,
         thread_count=thread_count,
         cost_today=round(sum(r.cost_usd for r in tenant_today), 4),
         cost_month=round(sum(r.cost_usd for r in tenant_month), 4),
@@ -173,12 +175,19 @@ async def list_tenants(request: Request, user=Depends(require_admin)) -> list[Te
     ts.ensure_default()
     all_tenants = ts.list_all()
 
+    try:
+        provider = get_local_provider()
+    except RuntimeError:
+        provider = None
+
     result: list[TenantSummary] = []
     for tc in all_tenants:
+        user_count = await provider.count_users_by_tenant(tc.tenant_id) if provider else 0
         result.append(
             _build_tenant_summary(
                 tc, today_records, month_records,
                 thread_count=thread_counts.get(tc.tenant_id, 0),
+                user_count=user_count,
             )
         )
 
@@ -225,6 +234,49 @@ def delete_tenant(tenant_id: str, user=Depends(require_admin)) -> dict:
     ts = _get_tenant_storage()
     if not ts.delete(tenant_id):
         raise HTTPException(status_code=404, detail=f"Tenant {tenant_id!r} not found")
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# Tenant Users
+# ---------------------------------------------------------------------------
+
+
+@router.get("/tenants/{tenant_id}/users", response_model=list[UserResponse])
+async def list_tenant_users(tenant_id: str, user=Depends(require_admin)) -> list[UserResponse]:
+    """List all users in a tenant (admin only)."""
+    try:
+        provider = get_local_provider()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="User service not available")
+    users = await provider.list_users(tenant_id)
+    return [
+        UserResponse(
+            id=str(u.id),
+            email=u.email,
+            system_role=u.system_role,
+            needs_setup=u.needs_setup,
+            tenant_id=u.tenant_id,
+        )
+        for u in users
+    ]
+
+
+@router.delete("/tenants/{tenant_id}/users/{user_id}")
+async def delete_tenant_user(tenant_id: str, user_id: str, user=Depends(require_admin)) -> dict:
+    """Remove a user from a tenant (admin only)."""
+    try:
+        provider = get_local_provider()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="User service not available")
+    target = await provider.get_user(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="User not found in this tenant")
+    if target.system_role == "admin" and await provider.count_admin_users() <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
+    await provider.delete_user(user_id)
     return {"success": True}
 
 

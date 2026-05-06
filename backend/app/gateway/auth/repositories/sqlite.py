@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import UTC
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -46,6 +46,7 @@ class SQLiteUserRepository(UserRepository):
             oauth_id=row.oauth_id,
             needs_setup=row.needs_setup,
             token_version=row.token_version,
+            tenant_id=row.tenant_id,
         )
 
     @staticmethod
@@ -60,6 +61,7 @@ class SQLiteUserRepository(UserRepository):
             oauth_id=user.oauth_id,
             needs_setup=user.needs_setup,
             token_version=user.token_version,
+            tenant_id=user.tenant_id,
         )
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -106,6 +108,7 @@ class SQLiteUserRepository(UserRepository):
             row.oauth_id = user.oauth_id
             row.needs_setup = user.needs_setup
             row.token_version = user.token_version
+            row.tenant_id = user.tenant_id
             await session.commit()
         return user
 
@@ -125,3 +128,30 @@ class SQLiteUserRepository(UserRepository):
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             return self._row_to_user(row) if row is not None else None
+
+    async def get_user_by_email_and_tenant(self, email: str, tenant_id: str) -> User | None:
+        stmt = select(UserRow).where(UserRow.email == email, UserRow.tenant_id == tenant_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return self._row_to_user(row) if row is not None else None
+
+    async def count_users(self, tenant_id: str | None = None) -> int:
+        stmt = select(func.count()).select_from(UserRow)
+        if tenant_id is not None:
+            stmt = stmt.where(UserRow.tenant_id == tenant_id)
+        async with self._sf() as session:
+            return await session.scalar(stmt) or 0
+
+    async def list_users(self, tenant_id: str, limit: int = 100, offset: int = 0) -> list[User]:
+        stmt = select(UserRow).where(UserRow.tenant_id == tenant_id).order_by(UserRow.created_at.desc()).offset(offset).limit(limit)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_user(row) for row in result.scalars().all()]
+
+    async def delete_user(self, user_id: str) -> bool:
+        stmt = delete(UserRow).where(UserRow.id == user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount > 0

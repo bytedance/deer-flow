@@ -25,18 +25,19 @@ class LocalAuthProvider(AuthProvider):
         """Authenticate with email and password.
 
         Args:
-            credentials: dict with 'email' and 'password' keys
+            credentials: dict with 'email', 'password', and optionally 'tenant_id' keys
 
         Returns:
             User if authentication succeeds, None otherwise
         """
         email = credentials.get("email")
         password = credentials.get("password")
+        tenant_id = credentials.get("tenant_id", "default")
 
         if not email or not password:
             return None
 
-        user = await self._repo.get_user_by_email(email)
+        user = await self._repo.get_user_by_email_and_tenant(email, tenant_id)
         if user is None:
             return None
 
@@ -62,7 +63,7 @@ class LocalAuthProvider(AuthProvider):
         """Get user by ID."""
         return await self._repo.get_user_by_id(user_id)
 
-    async def create_user(self, email: str, password: str | None = None, system_role: str = "user", needs_setup: bool = False) -> User:
+    async def create_user(self, email: str, password: str | None = None, system_role: str = "user", needs_setup: bool = False, tenant_id: str = "default") -> User:
         """Create a new local user.
 
         Args:
@@ -70,6 +71,7 @@ class LocalAuthProvider(AuthProvider):
             password: Plain text password (will be hashed)
             system_role: Role to assign ("admin" or "user")
             needs_setup: If True, user must complete setup on first login
+            tenant_id: Tenant the user belongs to
 
         Returns:
             Created User instance
@@ -80,6 +82,7 @@ class LocalAuthProvider(AuthProvider):
             password_hash=password_hash,
             system_role=system_role,
             needs_setup=needs_setup,
+            tenant_id=tenant_id,
         )
         return await self._repo.create_user(user)
 
@@ -102,3 +105,15 @@ class LocalAuthProvider(AuthProvider):
     async def get_user_by_email(self, email: str) -> User | None:
         """Get user by email."""
         return await self._repo.get_user_by_email(email)
+
+    async def count_users_by_tenant(self, tenant_id: str) -> int:
+        """Return number of users in a tenant."""
+        return await self._repo.count_users(tenant_id=tenant_id)
+
+    async def list_users(self, tenant_id: str, limit: int = 100, offset: int = 0) -> list[User]:
+        """List users in a tenant."""
+        return await self._repo.list_users(tenant_id, limit=limit, offset=offset)
+
+    async def delete_user(self, user_id: str) -> bool:
+        """Delete a user by ID. Returns True if deleted, False if not found."""
+        return await self._repo.delete_user(user_id)
