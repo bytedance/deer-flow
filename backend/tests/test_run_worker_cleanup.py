@@ -28,7 +28,7 @@ class _FakeAgent:
 
 
 def _make_request(app: FastAPI) -> SimpleNamespace:
-    return SimpleNamespace(app=app, headers={})
+    return SimpleNamespace(app=app, headers={}, _deerflow_test_bypass_auth=True)
 
 
 async def _run_completed_agent(monkeypatch: pytest.MonkeyPatch, *, thread_id: str = "thread-1"):
@@ -61,7 +61,7 @@ async def _run_completed_agent(monkeypatch: pytest.MonkeyPatch, *, thread_id: st
         bridge,
         manager,
         record,
-        checkpointer=_FakeCheckpointer(),
+        ctx=worker.RunContext(checkpointer=_FakeCheckpointer()),
         agent_factory=lambda config: _FakeAgent(),
         graph_input={"messages": []},
         config={"configurable": {"thread_id": thread_id}},
@@ -92,11 +92,11 @@ async def test_join_endpoints_return_404_after_completed_run_cleanup(monkeypatch
     request = _make_request(app)
 
     with pytest.raises(HTTPException, match="not found") as join_exc:
-        await join_run(record.thread_id, record.run_id, request)
+        await join_run(thread_id=record.thread_id, run_id=record.run_id, request=request)
     assert join_exc.value.status_code == 404
 
     with pytest.raises(HTTPException, match="not found") as stream_exc:
-        await stream_existing_run(record.thread_id, record.run_id, request)
+        await stream_existing_run(thread_id=record.thread_id, run_id=record.run_id, request=request)
     assert stream_exc.value.status_code == 404
 
 
@@ -127,7 +127,7 @@ async def test_run_completion_cleanup_logs_background_failures(monkeypatch: pyte
             bridge,
             manager,
             record,
-            checkpointer=_FakeCheckpointer(),
+            ctx=worker.RunContext(checkpointer=_FakeCheckpointer()),
             agent_factory=lambda config: _FakeAgent(),
             graph_input={"messages": []},
             config={"configurable": {"thread_id": record.thread_id}},
