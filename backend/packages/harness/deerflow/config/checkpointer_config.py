@@ -40,7 +40,10 @@ def set_checkpointer_config(config: CheckpointerConfig | None) -> None:
     _checkpointer_config = config
 
 
-def load_checkpointer_config_from_dict(config_dict: dict) -> None:
+def load_checkpointer_config_from_dict(config_dict: dict | None) -> None:
     """Load checkpointer configuration from a dictionary."""
     global _checkpointer_config
+    if config_dict is None:
+        _checkpointer_config = None
+        return
     _checkpointer_config = CheckpointerConfig(**config_dict)
