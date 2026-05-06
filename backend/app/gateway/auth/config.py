@@ -31,7 +31,12 @@ _auth_config: AuthConfig | None = None
 
 
 def get_auth_config() -> AuthConfig:
-    """Get the global AuthConfig instance. Parses from env on first call."""
+    """Get the global AuthConfig instance. Parses from env on first call.
+
+    When ``AUTH_JWT_SECRET`` is not set in the environment, a random secret
+    is generated and persisted to ``.deer-flow/jwt_secret`` so that sessions
+    survive process restarts (e.g. uvicorn --reload in dev mode).
+    """
     global _auth_config
     if _auth_config is None:
         from dotenv import load_dotenv
@@ -39,16 +44,42 @@ def get_auth_config() -> AuthConfig:
         load_dotenv()
         jwt_secret = os.environ.get("AUTH_JWT_SECRET")
         if not jwt_secret:
-            jwt_secret = secrets.token_urlsafe(32)
+            jwt_secret = _load_or_generate_jwt_secret()
             os.environ["AUTH_JWT_SECRET"] = jwt_secret
-            logger.warning(
-                "⚠ AUTH_JWT_SECRET is not set — using an auto-generated ephemeral secret. "
-                "Sessions will be invalidated on restart. "
-                "For production, add AUTH_JWT_SECRET to your .env file: "
-                'python -c "import secrets; print(secrets.token_urlsafe(32))"'
-            )
         _auth_config = AuthConfig(jwt_secret=jwt_secret)
     return _auth_config
+
+
+def _jwt_secret_file() -> str:
+    """Path to the persisted JWT secret file."""
+    from deerflow.config.runtime_paths import runtime_home
+
+    return os.path.join(runtime_home(), "jwt_secret")
+
+
+def _load_or_generate_jwt_secret() -> str:
+    """Load a persisted JWT secret, or generate and persist a new one."""
+    secret_path = _jwt_secret_file()
+    try:
+        with open(secret_path, "r") as f:
+            existing = f.read().strip()
+            if existing:
+                logger.info("Loaded persisted JWT secret from %s", secret_path)
+                return existing
+    except FileNotFoundError:
+        pass
+
+    jwt_secret = secrets.token_urlsafe(32)
+    os.makedirs(os.path.dirname(secret_path), exist_ok=True)
+    with open(secret_path, "w") as f:
+        f.write(jwt_secret)
+    logger.warning(
+        "AUTH_JWT_SECRET is not set — generated and persisted to %s. "
+        "For production, set AUTH_JWT_SECRET in your .env file: "
+        'python -c "import secrets; print(secrets.token_urlsafe(32))"',
+        secret_path,
+    )
+    return jwt_secret
 
 
 def set_auth_config(config: AuthConfig) -> None:

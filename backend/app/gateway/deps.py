@@ -194,11 +194,16 @@ async def get_current_user_from_request(request: Request):
 
     Raises HTTPException 401 if not authenticated.
     """
+    import logging
+
     from app.gateway.auth import decode_token
     from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError, token_error_to_code
 
+    logger = logging.getLogger(__name__)
+
     access_token = request.cookies.get("access_token")
     if not access_token:
+        logger.warning("get_current_user_from_request: no access_token cookie for path=%s", request.url.path)
         raise HTTPException(
             status_code=401,
             detail=AuthErrorResponse(code=AuthErrorCode.NOT_AUTHENTICATED, message="Not authenticated").model_dump(),
@@ -206,6 +211,7 @@ async def get_current_user_from_request(request: Request):
 
     payload = decode_token(access_token)
     if isinstance(payload, TokenError):
+        logger.warning("get_current_user_from_request: TokenError=%s for path=%s", payload.value, request.url.path)
         raise HTTPException(
             status_code=401,
             detail=AuthErrorResponse(code=token_error_to_code(payload), message=f"Token error: {payload.value}").model_dump(),

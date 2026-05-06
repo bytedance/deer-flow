@@ -9,6 +9,7 @@ owner filtering works automatically via the sentinel pattern.
 Fine-grained permission checks remain in authz.py decorators.
 """
 
+import logging
 from collections.abc import Callable
 
 from fastapi import HTTPException, Request, Response
@@ -20,6 +21,8 @@ from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+logger = logging.getLogger(__name__)
 
 # Paths that never require authentication.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
@@ -88,8 +91,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
             internal_user = get_internal_user()
 
-        # Non-public path: require session cookie
+        # If the outer create_auth_middleware already validated a Bearer token
+        # (API key or JWT from Authorization header), pass through — auth is
+        # already handled and request.state.user is set.
         if internal_user is None and not request.cookies.get("access_token"):
+            if hasattr(request.state, "user") and request.state.user is not None:
+                return await call_next(request)
+
             return JSONResponse(
                 status_code=401,
                 content={
@@ -119,6 +127,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             try:
                 user = await get_current_user_from_request(request)
             except HTTPException as exc:
+                logger.warning("AuthMiddleware: JWT validation failed for path=%s — status=%s detail=%s",
+                               request.url.path, exc.status_code, exc.detail)
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
         # Stamp both request.state.user (for the contextvar pattern)
@@ -128,6 +138,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.user = user
         request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
         token = set_current_user(user)
+        logger.debug("AuthMiddleware: user=%s authenticated for path=%s", getattr(user, 'id', user), request.url.path)
         try:
             return await call_next(request)
         finally:

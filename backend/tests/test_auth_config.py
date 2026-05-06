@@ -110,7 +110,8 @@ def test_auth_config_from_env():
             cfg._auth_config = old
 
 
-def test_auth_config_missing_secret_generates_ephemeral(caplog):
+def test_auth_config_missing_secret_generates_ephemeral(caplog, tmp_path):
+    """When AUTH_JWT_SECRET is unset and no persisted file exists, an ephemeral secret is generated and persisted."""
     import logging
 
     import app.gateway.auth.config as cfg
@@ -120,9 +121,36 @@ def test_auth_config_missing_secret_generates_ephemeral(caplog):
     try:
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("AUTH_JWT_SECRET", None)
-            with caplog.at_level(logging.WARNING):
-                config = cfg.get_auth_config()
+            # Patch the secret file path to a non-existent location so we test first-boot behavior
+            nonexistent = str(tmp_path / "nonexistent" / "jwt_secret")
+            with patch.object(cfg, "_jwt_secret_file", return_value=nonexistent):
+                with caplog.at_level(logging.WARNING):
+                    config = cfg.get_auth_config()
             assert config.jwt_secret
             assert any("AUTH_JWT_SECRET" in msg for msg in caplog.messages)
+    finally:
+        cfg._auth_config = old
+
+
+def test_auth_config_loads_persisted_jwt_secret(caplog, tmp_path):
+    """When AUTH_JWT_SECRET is unset but a persisted file exists, the secret is loaded from file."""
+    import logging
+
+    import app.gateway.auth.config as cfg
+
+    # Create a persisted secret file
+    secret_file = tmp_path / "jwt_secret"
+    secret_file.write_text("persisted-secret-value")
+
+    old = cfg._auth_config
+    cfg._auth_config = None
+    try:
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("AUTH_JWT_SECRET", None)
+            with patch.object(cfg, "_jwt_secret_file", return_value=str(secret_file)):
+                with caplog.at_level(logging.INFO):
+                    config = cfg.get_auth_config()
+            assert config.jwt_secret == "persisted-secret-value"
+            assert any("Loaded persisted JWT secret" in msg for msg in caplog.messages)
     finally:
         cfg._auth_config = old

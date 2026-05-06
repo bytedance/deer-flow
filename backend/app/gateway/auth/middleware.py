@@ -113,25 +113,79 @@ def create_auth_middleware():
                 reset_tenant_id(token)
 
         # Auth enabled: resolve token from Authorization header or access_token cookie.
-        # Cookie-based auth is the primary frontend mechanism (HttpOnly cookie set at login).
+        # Cookie-based auth is the primary frontend mechanism (HttpOnly cookie set
+        # at login via auth/jwt.py). The outer AuthMiddleware validates cookie JWTs
+        # using the same jwt.py library — we only need to extract the tenant here
+        # and pass through.
         # Bearer token auth is for API clients (SDK, IM channels, CI/CD).
         auth_header = request.headers.get("Authorization", "")
         cookie_token = request.cookies.get("access_token")
-        token_value: str | None = None
 
         if auth_header.startswith("Bearer "):
             token_value = auth_header[7:]
+
+            # Try API Key first (df- prefix)
+            if token_value.startswith("df-"):
+                meta = verify_and_track_api_key(token_value)
+                if meta is None:
+                    return _json_error(401, "Invalid or revoked API key")
+                tenant_id = request.headers.get("X-DeerFlow-Tenant", "default")
+                try:
+                    validate_tenant_id(tenant_id)
+                except ValueError as e:
+                    return _json_error(400, str(e))
+                error = _check_tenant_active(tenant_id, request.url.path)
+                if error is not None:
+                    return error
+                ctx_token = set_current_tenant_id(tenant_id)
+                request.state.user = {
+                    "username": f"apikey:{meta['name']}",
+                    "tenant_id": tenant_id,
+                    "role": "member",
+                    "auth_method": "api_key",
+                }
+                try:
+                    return await call_next(request)
+                finally:
+                    reset_tenant_id(ctx_token)
+
+            # Bearer JWT validation (for API clients using jwt_handler format)
+            try:
+                payload = decode_token(token_value)
+            except ValueError as e:
+                return _json_error(401, str(e))
+
+            if payload.get("type") != "access":
+                return _json_error(401, "Token is not an access token")
+
+            tenant_id = payload.get("tenant_id", "default")
+            try:
+                validate_tenant_id(tenant_id)
+            except ValueError as e:
+                return _json_error(400, str(e))
+
+            error = _check_tenant_active(tenant_id, request.url.path)
+            if error is not None:
+                return error
+
+            ctx_token = set_current_tenant_id(tenant_id)
+            request.state.user = {
+                "username": payload["sub"],
+                "tenant_id": tenant_id,
+                "role": payload.get("role", "member"),
+                "auth_method": "jwt",
+            }
+            try:
+                return await call_next(request)
+            finally:
+                reset_tenant_id(ctx_token)
+
         elif cookie_token:
-            token_value = cookie_token
-
-        if not token_value:
-            return _json_error(401, "Missing or invalid Authorization header")
-
-        # Try API Key first (df- prefix)
-        if token_value.startswith("df-"):
-            meta = verify_and_track_api_key(token_value)
-            if meta is None:
-                return _json_error(401, "Invalid or revoked API key")
+            # Cookie-based auth: delegate JWT validation to AuthMiddleware which
+            # uses auth/jwt.py (same library as the login endpoint). We only
+            # extract the tenant from the header.
+            logger.debug("create_auth_middleware: cookie found for path=%s, passing through to AuthMiddleware",
+                         request.url.path)
             tenant_id = request.headers.get("X-DeerFlow-Tenant", "default")
             try:
                 validate_tenant_id(tenant_id)
@@ -140,47 +194,14 @@ def create_auth_middleware():
             error = _check_tenant_active(tenant_id, request.url.path)
             if error is not None:
                 return error
-            ctx_token = set_current_tenant_id(tenant_id)
-            request.state.user = {
-                "username": f"apikey:{meta['name']}",
-                "tenant_id": tenant_id,
-                "role": "member",
-                "auth_method": "api_key",
-            }
+            token = set_current_tenant_id(tenant_id)
             try:
                 return await call_next(request)
             finally:
-                reset_tenant_id(ctx_token)
+                reset_tenant_id(token)
 
-        # JWT validation
-        try:
-            payload = decode_token(token_value)
-        except ValueError as e:
-            return _json_error(401, str(e))
-
-        if payload.get("type") != "access":
-            return _json_error(401, "Token is not an access token")
-
-        tenant_id = payload.get("tenant_id", "default")
-        try:
-            validate_tenant_id(tenant_id)
-        except ValueError as e:
-            return _json_error(400, str(e))
-
-        error = _check_tenant_active(tenant_id, request.url.path)
-        if error is not None:
-            return error
-
-        ctx_token = set_current_tenant_id(tenant_id)
-        request.state.user = {
-            "username": payload["sub"],
-            "tenant_id": tenant_id,
-            "role": payload.get("role", "member"),
-            "auth_method": "jwt",
-        }
-        try:
-            return await call_next(request)
-        finally:
-            reset_tenant_id(ctx_token)
+        else:
+            logger.warning("create_auth_middleware: no Bearer token or cookie for path=%s", request.url.path)
+            return _json_error(401, "Missing or invalid Authorization header")
 
     return auth_middleware
