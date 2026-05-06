@@ -206,7 +206,6 @@ init() {
 }
 
 # Start Docker development environment
-# Usage: start [--gateway]
 start() {
     local sandbox_mode
     local services
@@ -227,21 +226,12 @@ start() {
     sandbox_mode="$(detect_sandbox_mode)"
     SANDBOX_IMAGE="$(get_configured_sandbox_image)"
 
-    if $gateway_mode; then
-        services="frontend gateway nginx"
-        if [ "$sandbox_mode" = "provisioner" ]; then
-            services="frontend gateway provisioner nginx"
-        fi
-    else
-        services="frontend gateway langgraph nginx"
-        if [ "$sandbox_mode" = "provisioner" ]; then
-            services="frontend gateway langgraph provisioner nginx"
-        fi
+    services="frontend gateway nginx"
+    if [ "$sandbox_mode" = "provisioner" ]; then
+        services="frontend gateway provisioner nginx"
     fi
 
-    if $gateway_mode; then
-        echo -e "${BLUE}Runtime: Gateway mode (experimental) — no LangGraph container${NC}"
-    fi
+    echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
     echo -e "${BLUE}Detected sandbox mode: $sandbox_mode${NC}"
     if [ "$sandbox_mode" = "provisioner" ]; then
         echo -e "${BLUE}Provisioner enabled (Kubernetes mode).${NC}"
@@ -319,12 +309,8 @@ start() {
     echo ""
     echo "  🌐 Application: http://localhost:2026"
     echo "  📡 API Gateway: http://localhost:2026/api/*"
-    if $gateway_mode; then
-        echo "  🤖 Runtime:     Gateway embedded"
-        echo "  API:            /api/langgraph/* → Gateway (compat)"
-    else
-        echo "  🤖 LangGraph:   http://localhost:2026/api/langgraph/*"
-    fi
+    echo "  🤖 Runtime:     Gateway embedded"
+    echo "  API:            /api/langgraph/* → Gateway"
     echo ""
     echo "  📋 View logs: make docker-logs"
     echo "  🛑 Stop:      make docker-stop"
@@ -404,7 +390,6 @@ help() {
     echo "Commands:"
     echo "  init              - Pull the sandbox image (speeds up first Pod startup)"
     echo "  start             - Start Docker services (auto-detects sandbox mode from config.yaml)"
-    echo "  start --gateway   - Start without LangGraph container (Gateway mode, experimental)"
     echo "  restart           - Restart all running Docker services"
     echo "  logs [option] - View Docker development logs"
     echo "                  --frontend   View frontend logs only"

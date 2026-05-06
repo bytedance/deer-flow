@@ -3,6 +3,7 @@ import logging
 from langchain.chat_models import BaseChatModel
 
 from deerflow.config import get_app_config
+from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_class
 from deerflow.tracing import build_tracing_callbacks
 
@@ -46,7 +47,7 @@ def _enable_stream_usage_by_default(model_use_path: str, model_settings_from_con
         model_settings_from_config["stream_usage"] = True
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, **kwargs) -> BaseChatModel:
+def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
@@ -55,7 +56,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     Returns:
         A chat model instance.
     """
-    config = get_app_config()
+    config = app_config or get_app_config()
     if name is None:
         name = config.models[0].name
     model_config = config.get_model_config(name)
@@ -131,7 +132,22 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"
 
-    model_instance = model_class(**{**model_settings_from_config, **kwargs})
+    # For MindIE models: enforce conservative retry defaults.
+    # Timeout normalization is handled inside MindIEChatModel itself.
+    if getattr(model_class, "__name__", "") == "MindIEChatModel":
+        # Enforce max_retries constraint to prevent cascading timeouts.
+        model_settings_from_config["max_retries"] = model_settings_from_config.get("max_retries", 1)
+
+    # Ensure stream_usage is enabled so that token usage metadata is available
+    # in streaming responses.  LangChain's BaseChatOpenAI only defaults
+    # stream_usage=True when no custom base_url/api_base is set, so models
+    # hitting third-party endpoints (e.g. doubao, deepseek) silently lose
+    # usage data.  We default it to True unless explicitly configured.
+    if "stream_usage" not in model_settings_from_config and "stream_usage" not in kwargs:
+        if "stream_usage" in getattr(model_class, "model_fields", {}):
+            model_settings_from_config["stream_usage"] = True
+
+    model_instance = model_class(**kwargs, **model_settings_from_config)
 
     callbacks = build_tracing_callbacks()
     if callbacks:

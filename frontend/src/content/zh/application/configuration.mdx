@@ -1,0 +1,223 @@
+---
+title: 配置
+description: 本页面涵盖 DeerFlow 应用的所有配置层——`config.yaml`、前端环境变量、`extensions_config.json` 和运行时环境变量。
+---
+
+import { Callout, Cards, Tabs } from "nextra/components";
+
+# 配置
+
+本页面涵盖 DeerFlow 应用的所有配置层——`config.yaml`、前端环境变量、`extensions_config.json` 和运行时环境变量。
+
+## config.yaml
+
+`config.yaml` 是 DeerFlow 的主要配置文件。所有 Agent 行为、模型选择、工具加载和运行时功能都由它控制。
+
+参见[配置](/docs/harness/configuration)参考页面了解文件格式和每个章节的详细说明。
+
+### 模型提供商
+
+<Tabs items={["OpenAI", "Claude", "Gemini", "DeepSeek", "Ollama（本地）"]}>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+    thinking_enabled: false
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: claude-sonnet
+    use: langchain_anthropic:ChatAnthropic
+    model: claude-sonnet-4-5
+    api_key: $ANTHROPIC_API_KEY
+    max_tokens: 16000
+    supports_vision: true
+    thinking_enabled: false
+```
+
+启用扩展思考：
+
+```yaml
+- name: claude-extended-thinking
+  use: langchain_anthropic:ChatAnthropic
+  model: claude-sonnet-4-5
+  api_key: $ANTHROPIC_API_KEY
+  max_tokens: 16000
+  thinking_enabled: true
+  extra_body:
+    thinking:
+      type: enabled
+      budget_tokens: 10000
+```
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: gemini
+    use: langchain_google_genai:ChatGoogleGenerativeAI
+    model: gemini-2.5-pro-preview-03-25
+    api_key: $GEMINI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+    thinking_enabled: false
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: deepseek
+    use: langchain_openai:ChatOpenAI
+    model: deepseek-reasoner
+    api_key: $DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: false
+    thinking_enabled: true
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: ollama-llama
+    use: langchain_ollama:ChatOllama
+    model: llama3.3
+    base_url: http://localhost:11434
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: false
+    thinking_enabled: false
+```
+
+确保 Ollama 已运行并已拉取所需模型：
+
+```bash
+ollama pull llama3.3
+```
+
+  </Tabs.Tab>
+</Tabs>
+
+### 沙箱
+
+```yaml
+# 本地开发（默认）
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false
+
+# 基于容器（推荐用于多用户）
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  replicas: 3
+  idle_timeout: 600
+```
+
+### 工具
+
+参见[工具](/docs/harness/tools)页面了解完整的工具配置参考。快速参考：
+
+```yaml
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+### 技能
+
+```yaml
+skills:
+  container_path: /mnt/skills
+  # path: /custom/path/to/skills  # 可选；默认为仓库 skills/ 目录
+```
+
+技能可用性在 `extensions_config.json` 中管理（参见下方）。
+
+### 检查点（线程持久化）
+
+```yaml
+checkpointer:
+  type: sqlite
+  connection_string: .deer-flow/checkpoints.db
+
+# 或使用 Redis（高负载生产环境）：
+# checkpointer:
+#   type: redis
+#   connection_string: redis://localhost:6379/0
+```
+
+## 前端环境变量
+
+前端通过 `.env.local`（本地开发）或 Docker Compose 环境中的环境变量配置。
+
+| 变量                  | 必需       | 描述                                               |
+| --------------------- | ---------- | -------------------------------------------------- |
+| `BETTER_AUTH_SECRET`  | 是（生产） | 会话管理的密钥（最少 32 个字符）                   |
+| `BETTER_AUTH_URL`     | 推荐       | 你的应用公开 URL（例如 `https://your-domain.com`） |
+| `SKIP_ENV_VALIDATION` | 否         | 设为 `1` 跳过构建时环境变量验证                    |
+
+本地开发：
+
+```bash
+# frontend/.env.local
+BETTER_AUTH_SECRET=local-dev-secret-at-least-32-chars
+```
+
+<Callout type="warning">
+  不要在生产中使用 <code>SKIP_ENV_VALIDATION=1</code>。为{" "}
+  <code>BETTER_AUTH_SECRET</code> 设置一个真实值。
+</Callout>
+
+## extensions_config.json
+
+`extensions_config.json` 控制 MCP 服务器和技能的运行时启用状态，独立于 `config.yaml`。
+
+默认位置：项目根目录（与 `config.yaml` 同一目录）。
+
+### MCP 服务器
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### 技能启用状态
+
+技能启用状态会反映在 `extensions_config.json` 中。你可以直接编辑它，或通过 DeerFlow 应用界面进行管理。
+
+## 运行时环境变量
+
+这些变量在 DeerFlow 进程中设置（通过 `.env`、Docker 环境或 shell）：
+
+| 变量                    | 默认值           | 描述                                             |
+| ----------------------- | ---------------- | ------------------------------------------------ |
+| `DEER_FLOW_CONFIG_PATH` | 自动发现         | `config.yaml` 的绝对路径                         |
+| `LOG_LEVEL`             | `info`           | 日志详细程度（`debug`/`info`/`warning`/`error`） |
+| `DEER_FLOW_ROOT`        | 仓库根目录       | 用于 Docker 中的技能和线程挂载                   |
+| `LANGGRAPH_UPSTREAM`    | `langgraph:2024` | nginx 代理的 LangGraph 地址                      |
+
+<Cards num={2}>
+  <Cards.Card title="Harness 配置" href="/docs/harness/configuration" />
+  <Cards.Card title="部署指南" href="/docs/application/deployment-guide" />
+</Cards>

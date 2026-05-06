@@ -4,16 +4,23 @@ Pure business logic — no FastAPI/HTTP dependencies.
 Both Gateway and Client delegate to these functions.
 """
 
+import errno
 import os
 import re
+import stat
 from pathlib import Path
 from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 
 
 class PathTraversalError(ValueError):
     """Raised when a path escapes its allowed base directory."""
+
+
+class UnsafeUploadPathError(ValueError):
+    """Raised when an upload destination is not a safe regular file path."""
 
 
 # thread_id must be alphanumeric, hyphens, underscores, or dots only.
@@ -33,7 +40,7 @@ def validate_thread_id(thread_id: str) -> None:
 def get_uploads_dir(thread_id: str) -> Path:
     """Return the uploads directory path for a thread (no side effects)."""
     validate_thread_id(thread_id)
-    return get_paths().sandbox_uploads_dir(thread_id)
+    return get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
 
 
 def ensure_uploads_dir(thread_id: str) -> Path:
@@ -106,6 +113,64 @@ def validate_path_traversal(path: Path, base: Path) -> None:
         path.resolve().relative_to(base.resolve())
     except ValueError:
         raise PathTraversalError("Path traversal detected") from None
+
+
+def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, object]:
+    """Open an upload destination for safe streaming writes.
+
+    Upload directories may be mounted into local sandboxes. A sandbox process can
+    therefore leave a symlink at a future upload filename. Normal ``Path.write_bytes``
+    follows that link and can overwrite files outside the uploads directory with
+    gateway privileges. This helper rejects symlink destinations and uses
+    ``O_NOFOLLOW`` where available so the final path component cannot be raced into
+    a symlink between validation and open.
+    """
+    safe_name = normalize_filename(filename)
+    dest = base_dir / safe_name
+
+    try:
+        st = os.lstat(dest)
+    except FileNotFoundError:
+        st = None
+
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
+
+    validate_path_traversal(dest, base_dir)
+
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise UnsafeUploadPathError("Upload writes require O_NOFOLLOW support")
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+
+    try:
+        fd = os.open(dest, flags, 0o600)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
+            raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
+        raise
+
+    try:
+        opened_stat = os.fstat(fd)
+        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
+            raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
+        os.ftruncate(fd, 0)
+        fh = os.fdopen(fd, "wb")
+        fd = -1
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return dest, fh
+
+
+def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
+    """Write upload bytes without following a pre-existing destination symlink."""
+    dest, fh = open_upload_file_no_symlink(base_dir, filename)
+    with fh:
+        fh.write(data)
+    return dest
 
 
 def list_files_in_dir(directory: Path) -> dict:

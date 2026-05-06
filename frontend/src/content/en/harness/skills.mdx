@@ -1,3 +1,165 @@
+---
+title: Skills
+description: A skill is more than a prompt. It is a self-contained capability package that can include structured instructions, step-by-step workflows, domain-specific best practices, supporting resources, and tool configurations. Skills are loaded on demand — they inject their content when a task calls for them and stay out of the context otherwise.
+---
+
+import { Callout, Cards, FileTree, Steps } from "nextra/components";
+
 # Skills
 
-TBD
+<Callout type="info" emoji="🎯">
+  Skills are task-oriented capability packages that teach the agent how to do a
+  specific class of work. The base agent stays general; skills provide
+  specialization only when needed.
+</Callout>
+
+A skill is more than a prompt. It is a self-contained capability package that can include structured instructions, step-by-step workflows, domain-specific best practices, supporting resources, and tool configurations. Skills are loaded on demand — they inject their content when a task calls for them and stay out of the context otherwise.
+
+## What a skill contains
+
+Each skill lives in its own subdirectory under `skills/public/` (or `skills/custom/` for user-created skills). The directory contains a `SKILL.md` file that defines the skill's metadata, instructions, and workflow.
+
+<FileTree>
+  <FileTree.Folder name="skills/" defaultOpen>
+    <FileTree.Folder name="public/" defaultOpen>
+      <FileTree.Folder name="deep-research/" defaultOpen>
+        <FileTree.File name="SKILL.md" />
+      </FileTree.Folder>
+      <FileTree.Folder name="data-analysis/">
+        <FileTree.File name="SKILL.md" />
+      </FileTree.Folder>
+      <FileTree.Folder name="chart-visualization/">
+        <FileTree.File name="SKILL.md" />
+      </FileTree.Folder>
+    </FileTree.Folder>
+    <FileTree.Folder name="custom/">
+      <FileTree.File name="(your custom skills go here)" />
+    </FileTree.Folder>
+  </FileTree.Folder>
+</FileTree>
+
+The `SKILL.md` file is the authoritative definition of the skill. It is parsed by `skills/parser.py` to extract the skill name, description, category, instructions, and any dependencies or tool requirements.
+
+## Built-in skills
+
+DeerFlow ships with the following public skills:
+
+| Skill                          | Description                                                                      |
+| ------------------------------ | -------------------------------------------------------------------------------- |
+| `deep-research`                | Multi-step research with source gathering, cross-checking, and structured output |
+| `data-analysis`                | Data exploration, statistical analysis, and insight generation                   |
+| `chart-visualization`          | Chart and graph creation from data                                               |
+| `ppt-generation`               | Presentation slide generation                                                    |
+| `image-generation`             | AI image generation workflows                                                    |
+| `code-documentation`           | Automated code documentation generation                                          |
+| `newsletter-generation`        | Newsletter content creation                                                      |
+| `podcast-generation`           | Podcast script and outline generation                                            |
+| `academic-paper-review`        | Structured academic paper analysis                                               |
+| `consulting-analysis`          | Business consulting frameworks and analysis                                      |
+| `systematic-literature-review` | Literature review methodology and synthesis                                      |
+| `github-deep-research`         | Repository and code deep-dive research                                           |
+| `frontend-design`              | Frontend design and UI workflow                                                  |
+| `web-design-guidelines`        | Web design standards and review                                                  |
+| `video-generation`             | Video content planning and generation                                            |
+
+## Skill lifecycle
+
+<Steps>
+
+### Discovery and loading
+
+`load_skills()` in `skills/loader.py` scans both `public/` and `custom/` directories under the configured skills path. It re-reads `ExtensionsConfig.from_file()` on every call, which means enabling or disabling a skill through the Gateway API takes effect immediately in the running LangGraph server without a restart.
+
+### Parsing
+
+`parser.py` reads each `SKILL.md` file and extracts structured metadata: name, description, category, instructions, and any tool or resource requirements.
+
+### Security scanning
+
+`security_scanner.py` checks skill content for potentially dangerous patterns before it is loaded into the agent's context. This step runs during skill loading to prevent malicious skill content from being injected.
+
+### Dependency installation
+
+`installer.py` handles any Python or system dependencies declared by the skill. Dependencies are installed into the runtime environment when the skill is first loaded.
+
+### Context injection
+
+When the agent is invoked with a specific skill in scope, the skill's instructions are injected into the system prompt. The agent then has access to the skill's workflow, best practices, and domain knowledge for the duration of that conversation.
+
+</Steps>
+
+## Configuration
+
+The skills system is configured under `skills:` in `config.yaml`:
+
+```yaml
+skills:
+  # Path to skills directory on the host.
+  # Default: ../skills relative to the backend directory.
+  # Uncomment to customize:
+  # path: /absolute/path/to/custom/skills
+
+  # Path where skills are mounted in the sandbox container.
+  # The agent uses this path to access skill files during execution.
+  container_path: /mnt/skills
+```
+
+The `container_path` is important: it tells the agent where to find skill resources inside the sandbox. The harness automatically mounts the host skills directory to this container path.
+
+## Enabling and disabling skills
+
+Skill availability is tracked in `extensions_config.json` (separate from `config.yaml`). You can manage skill state:
+
+- **Through the DeerFlow App UI**: the skills panel lets you toggle skills on and off.
+- **Through the Gateway API**: `POST /api/extensions/skills/{name}/enable` and `/disable`.
+- **By editing `extensions_config.json` directly**.
+
+Because `load_skills()` re-reads the extensions config on every call, changes take effect immediately — no server restart required.
+
+## Restricting skills per custom agent
+
+A custom agent can be restricted to a specific subset of skills. In the agent's config (stored in `agents/{name}/config.yaml`), set a `skills` list:
+
+```yaml
+# agents/my-researcher/config.yaml
+name: my-researcher
+skills:
+  - deep-research
+  - academic-paper-review
+  # Omit all other skills
+```
+
+- **Omitted or null**: the agent loads all globally enabled skills.
+- **Empty list `[]`**: the agent has no skills.
+- **Named list**: the agent loads only those specific skills.
+
+## Skill evolution
+
+DeerFlow includes an optional **skill evolution** feature that allows the agent to autonomously create and improve skills in the `skills/custom/` directory:
+
+```yaml
+skill_evolution:
+  enabled: false # Set to true to allow agent-managed skill creation
+  moderation_model_name: null # Model for security scanning (null = use default)
+```
+
+<Callout type="warning">
+  Enable skill evolution only in environments where you trust the agent's
+  outputs. Newly created skills are security-scanned before being loaded, but
+  the feature gives the agent write access to the skills directory.
+</Callout>
+
+## Writing a custom skill
+
+To create a custom skill:
+
+1. Create a new directory under `skills/custom/your-skill-name/`
+2. Add a `SKILL.md` file that defines the skill's metadata and instructions
+3. The skill will be discovered automatically on the next `load_skills()` call
+
+The `SKILL.md` format follows the same structure as the built-in skills. Use one of the existing public skills as a reference for the expected format.
+
+<Cards num={2}>
+  <Cards.Card title="Sandbox" href="/docs/harness/sandbox" />
+  <Cards.Card title="Tools" href="/docs/harness/tools" />
+</Cards>

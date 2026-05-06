@@ -1,4 +1,4 @@
-"""In-memory run registry."""
+"""In-memory run registry with optional persistent RunStore backing."""
 
 from __future__ import annotations
 
@@ -6,15 +6,16 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus
 
+if TYPE_CHECKING:
+    from deerflow.runtime.runs.store.base import RunStore
+
 logger = logging.getLogger(__name__)
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 @dataclass
@@ -38,11 +39,43 @@ class RunRecord:
 
 
 class RunManager:
-    """In-memory run registry.  All mutations are protected by an asyncio lock."""
+    """In-memory run registry with optional persistent RunStore backing.
 
-    def __init__(self) -> None:
+    All mutations are protected by an asyncio lock. When a ``store`` is
+    provided, serializable metadata is also persisted to the store so
+    that run history survives process restarts.
+    """
+
+    def __init__(self, store: RunStore | None = None) -> None:
         self._runs: dict[str, RunRecord] = {}
         self._lock = asyncio.Lock()
+        self._store = store
+
+    async def _persist_to_store(self, record: RunRecord) -> None:
+        """Best-effort persist run record to backing store."""
+        if self._store is None:
+            return
+        try:
+            await self._store.put(
+                record.run_id,
+                thread_id=record.thread_id,
+                assistant_id=record.assistant_id,
+                status=record.status.value,
+                multitask_strategy=record.multitask_strategy,
+                metadata=record.metadata or {},
+                kwargs=record.kwargs or {},
+                created_at=record.created_at,
+            )
+        except Exception:
+            logger.warning("Failed to persist run %s to store", record.run_id, exc_info=True)
+
+    async def update_run_completion(self, run_id: str, **kwargs) -> None:
+        """Persist token usage and completion data to the backing store."""
+        if self._store is not None:
+            try:
+                await self._store.update_run_completion(run_id, **kwargs)
+            except Exception:
+                logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
 
     async def create(
         self,
@@ -71,6 +104,7 @@ class RunManager:
         )
         async with self._lock:
             self._runs[run_id] = record
+        await self._persist_to_store(record)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -83,7 +117,7 @@ class RunManager:
         async with self._lock:
             # Dict insertion order matches creation order, so reversing it gives
             # us deterministic newest-first results even when timestamps tie.
-            return [r for r in reversed(self._runs.values()) if r.thread_id == thread_id]
+            return [r for r in self._runs.values() if r.thread_id == thread_id]
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
@@ -96,6 +130,11 @@ class RunManager:
             record.updated_at = _now_iso()
             if error is not None:
                 record.error = error
+        if self._store is not None:
+            try:
+                await self._store.update_status(run_id, status.value, error=error)
+            except Exception:
+                logger.warning("Failed to persist status update for run %s", run_id, exc_info=True)
         logger.info("Run %s -> %s", run_id, status.value)
 
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> bool:
@@ -185,6 +224,7 @@ class RunManager:
             )
             self._runs[run_id] = record
 
+        await self._persist_to_store(record)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 

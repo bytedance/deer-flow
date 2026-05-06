@@ -1,0 +1,156 @@
+---
+title: Lead Agent
+description: The Lead Agent is the central executor in a DeerFlow thread. Every conversation, task, and workflow flows through it. Understanding how it works helps you configure it effectively and extend it when needed.
+---
+
+import { Callout, Cards, Steps } from "nextra/components";
+
+# Lead Agent
+
+<Callout type="info" emoji="🧠">
+  The Lead Agent is the primary reasoning and orchestration unit in every
+  DeerFlow thread. It decides what to do, calls tools, delegates to subagents,
+  and returns artifacts.
+</Callout>
+
+The Lead Agent is the central executor in a DeerFlow thread. Every conversation, task, and workflow flows through it. Understanding how it works helps you configure it effectively and extend it when needed.
+
+## What the Lead Agent does
+
+The Lead Agent is responsible for:
+
+- receiving user messages and maintaining conversation state,
+- reasoning about what to do next (planning, tool selection, delegation),
+- calling tools — built-in, community, MCP, or skill tools,
+- delegating subtasks to subagents via the `task` tool,
+- managing artifacts (files, outputs, deliverables),
+- updating the todo list in plan mode, and
+- returning final responses or artifacts to the user.
+
+The Lead Agent does not hardcode a specific workflow. It uses the model's reasoning to adapt to whatever task the user provides, guided by the system prompt and the skills currently in scope.
+
+## Runtime foundation
+
+The Lead Agent is built on **LangGraph** and **LangChain Agent** primitives. Specifically:
+
+- [`create_agent`](https://python.langchain.com/docs/concepts/agents/) from `langchain.agents` wraps the LLM into a tool-calling agent loop.
+- LangGraph manages the `ThreadState` and provides the checkpointing, streaming, and graph execution model.
+- A **middleware chain** wraps every turn of the agent loop, providing cross-cutting capabilities like memory, summarization, and clarification.
+
+## Execution flow
+
+<Steps>
+
+### Receive message
+
+The user message arrives and is added to `ThreadState.messages`. The `ThreadState` holds the full conversation history, any active todo list, accumulated artifacts, and runtime metadata.
+
+### Middleware pre-processing
+
+Before the model is called, each active middleware has a chance to modify the state. For example, the `MemoryMiddleware` injects persisted memory facts into the system prompt, and the `SummarizationMiddleware` may condense old messages if the token budget is exceeded.
+
+### LLM reasoning
+
+The model receives the current messages (including system prompt with active skill instructions) and produces either a direct reply or one or more tool call requests.
+
+### Tool execution
+
+If tool calls are requested, they are dispatched to the appropriate handlers — sandbox tools for file and command work, community tools for web access, or the `task` tool for subagent delegation.
+
+### Middleware post-processing
+
+After tool results are returned and before the next model call, middlewares run again. The `TitleMiddleware` may generate a thread title on the first exchange, and the `TodoMiddleware` may update the task list.
+
+### Loop or respond
+
+If the model needs more information (e.g., a tool returned partial results), the loop continues. When the model decides the task is complete, it produces a final message and the loop ends.
+
+### State update
+
+`ThreadState` is updated with new messages, artifacts, and memory queues. If a checkpointer is configured, the state is persisted.
+
+</Steps>
+
+## Model selection
+
+The Lead Agent resolves which model to use at runtime using the following priority order:
+
+1. `model_name` (or `model`) from the per-request configuration, if provided and valid.
+2. The `model` field of the active custom agent's config, if an agent is specified.
+3. The first model in the `models:` list in `config.yaml` (the global default).
+
+If the requested model name is not found in the config, the system falls back to the default model and logs a warning.
+
+```yaml
+models:
+  - name: my-primary-model
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+
+  - name: my-fast-model
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o-mini
+    api_key: $OPENAI_API_KEY
+```
+
+The first entry (`my-primary-model`) becomes the default. Any request that does not specify a model, or specifies an unknown model name, will use it.
+
+## Thinking mode
+
+If the model supports extended thinking (e.g., DeepSeek Reasoner, Doubao with thinking enabled, Anthropic Claude with thinking), the Lead Agent can run in **thinking mode**. In this mode, the model's internal reasoning steps are visible in the response stream.
+
+Thinking mode is controlled per-request through the `thinking_enabled` flag. If thinking is enabled but the configured model does not support it, the system falls back gracefully and logs a warning.
+
+```yaml
+models:
+  - name: deepseek-v3
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: deepseek-reasoner
+    api_key: $DEEPSEEK_API_KEY
+    supports_thinking: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+```
+
+## Plan mode
+
+When `is_plan_mode` is set to `true` in the request configuration, the `TodoMiddleware` is activated. The agent then maintains a structured task list, marking items as `in_progress`, `completed`, or `pending` as it works through a complex task. This provides visibility into the agent's progress for the user.
+
+Plan mode is appropriate for complex, multi-step tasks where showing incremental progress is valuable. For simple requests, it is better left disabled to avoid unnecessary overhead.
+
+## Custom agents
+
+The same Lead Agent runtime powers both the default agent and any custom agents you create. A custom agent differs only in:
+
+- its **name** (ASCII slug, auto-derived from `display_name`),
+- its **system prompt** or agent-specific instructions,
+- which **skills** it has access to,
+- which **tool groups** it can use, and
+- which **model** it defaults to.
+
+Custom agents are created through the DeerFlow App UI or via the `/api/agents` endpoint. Their configuration is stored in `agents/{name}/config.yaml` relative to the backend directory.
+
+<Callout type="tip">
+  When a custom agent is selected in a thread, the Lead Agent loads that agent's
+  config at runtime. Switching models or skills for a specific agent does not
+  require restarting the server.
+</Callout>
+
+## Bootstrap mode
+
+DeerFlow includes a special **bootstrap mode** for the initial setup of custom agents. When `is_bootstrap: true` is passed in the request config, the Lead Agent runs with a minimal system prompt and only the core setup tools exposed. This is used internally to guide the first-run agent configuration flow.
+
+<Cards num={2}>
+  <Cards.Card title="Middlewares" href="/docs/harness/middlewares" />
+  <Cards.Card title="Tools" href="/docs/harness/tools" />
+</Cards>

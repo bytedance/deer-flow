@@ -124,7 +124,7 @@ title:
 # checkpointer.py
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-checkpointer = SqliteSaver.from_conn_string("checkpoints.db")
+checkpointer = SqliteSaver.from_conn_string("deerflow.db")
 ```
 
 ```json

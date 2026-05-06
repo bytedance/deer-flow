@@ -414,6 +414,27 @@ def _make_async_iterator(items):
 
 
 class TestChannelManager:
+    def test_get_client_includes_csrf_header_and_cookie(self):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store, langgraph_url="http://localhost:8001")
+
+        with patch("langgraph_sdk.get_client") as get_client:
+            get_client.return_value = object()
+
+            manager._get_client()
+
+        get_client.assert_called_once()
+        kwargs = get_client.call_args.kwargs
+        assert kwargs["url"] == "http://localhost:8001"
+        headers = kwargs["headers"]
+        csrf_token = headers["X-CSRF-Token"]
+        assert csrf_token
+        assert headers["Cookie"] == f"csrf_token={csrf_token}"
+        assert headers["X-DeerFlow-Internal-Token"]
+
     def test_handle_chat_calls_channel_receive_file_for_inbound_files(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
@@ -441,6 +462,7 @@ class TestChannelManager:
             )
             mock_channel = MagicMock()
             mock_channel.receive_file = AsyncMock(return_value=modified_msg)
+            mock_channel.supports_streaming = False
             mock_service = MagicMock()
             mock_service.get_channel.return_value = mock_channel
             monkeypatch.setattr("app.channels.service.get_channel_service", lambda: mock_service)
@@ -495,7 +517,7 @@ class TestChannelManager:
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
-            # Thread should be created on the LangGraph Server
+            # Thread should be created through Gateway
             mock_client.threads.create.assert_called_once()
 
             # Thread ID should be stored
@@ -511,6 +533,89 @@ class TestChannelManager:
 
             assert len(outbound_received) == 1
             assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_handle_chat_outbound_preserves_inbound_metadata(self):
+        """DingTalk (and similar) need inbound metadata on outbound sends (e.g. sender_staff_id)."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            await manager.start()
+
+            meta = {
+                "sender_staff_id": "staff_001",
+                "conversation_type": "1",
+                "conversation_id": "conv_001",
+            }
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                metadata=meta,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].metadata == meta
+
+        _run(go())
+
+    def test_handle_chat_outbound_drops_large_metadata_keys(self):
+        """Large metadata keys like raw_message should be stripped from outbound messages."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            await manager.start()
+
+            meta = {
+                "sender_staff_id": "staff_001",
+                "conversation_type": "1",
+                "raw_message": {"huge": "payload" * 1000},
+                "ref_msg": {"also": "large"},
+            }
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                metadata=meta,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            out_meta = outbound_received[0].metadata
+            assert "sender_staff_id" in out_meta
+            assert "conversation_type" in out_meta
+            assert "raw_message" not in out_meta
+            assert "ref_msg" not in out_meta
 
         _run(go())
 
@@ -1987,29 +2092,104 @@ class TestChannelService:
     def test_service_urls_fall_back_to_env(self, monkeypatch):
         from app.channels.service import ChannelService
 
-        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://langgraph:2024")
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://gateway:8001/api")
         monkeypatch.setenv("DEER_FLOW_CHANNELS_GATEWAY_URL", "http://gateway:8001")
 
         service = ChannelService(channels_config={})
 
-        assert service.manager._langgraph_url == "http://langgraph:2024"
+        assert service.manager._langgraph_url == "http://gateway:8001/api"
         assert service.manager._gateway_url == "http://gateway:8001"
 
     def test_config_service_urls_override_env(self, monkeypatch):
         from app.channels.service import ChannelService
 
-        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://langgraph:2024")
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://gateway:8001/api")
         monkeypatch.setenv("DEER_FLOW_CHANNELS_GATEWAY_URL", "http://gateway:8001")
 
         service = ChannelService(
             channels_config={
-                "langgraph_url": "http://custom-langgraph:2024",
+                "langgraph_url": "http://custom-gateway:8001/api",
                 "gateway_url": "http://custom-gateway:8001",
             }
         )
 
-        assert service.manager._langgraph_url == "http://custom-langgraph:2024"
+        assert service.manager._langgraph_url == "http://custom-gateway:8001/api"
         assert service.manager._gateway_url == "http://custom-gateway:8001"
+
+    def test_from_app_config_uses_explicit_config(self):
+        from app.channels.service import ChannelService
+
+        app_config = SimpleNamespace(
+            model_extra={
+                "channels": {
+                    "telegram": {"enabled": False},
+                }
+            }
+        )
+
+        with patch("deerflow.config.app_config.get_app_config", side_effect=AssertionError("should not read global config")):
+            service = ChannelService.from_app_config(app_config)
+
+        assert service._config == {"telegram": {"enabled": False}}
+
+    def test_disabled_channel_with_string_creds_emits_warning(self, caplog):
+        """Warning is emitted when a channel has string credentials but enabled=false."""
+        import logging
+
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "wecom": {"enabled": False, "bot_id": "corp123", "bot_secret": "secret"},
+                }
+            )
+            with caplog.at_level(logging.WARNING, logger="app.channels.service"):
+                await service.start()
+            await service.stop()
+
+        _run(go())
+        assert any("wecom" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_disabled_channel_with_int_creds_emits_warning(self, caplog):
+        """Warning is emitted even when YAML-parsed integer credentials are present."""
+        import logging
+
+        from app.channels.service import ChannelService
+
+        async def go():
+            # Simulate YAML parsing a numeric token/ID as an int
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": False, "bot_token": 123456789},
+                }
+            )
+            with caplog.at_level(logging.WARNING, logger="app.channels.service"):
+                await service.start()
+            await service.stop()
+
+        _run(go())
+        assert any("telegram" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_disabled_channel_without_creds_emits_info(self, caplog):
+        """Only an info log (no warning) is emitted when a channel is disabled with no credentials."""
+        import logging
+
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": False},
+                }
+            )
+            with caplog.at_level(logging.DEBUG, logger="app.channels.service"):
+                await service.start()
+            await service.stop()
+
+        _run(go())
+        warning_records = [r for r in caplog.records if "telegram" in r.message and r.levelno == logging.WARNING]
+        assert not warning_records
 
 
 # ---------------------------------------------------------------------------
@@ -2046,6 +2226,11 @@ class TestSlackSendRetry:
 
 
 class TestSlackAllowedUsers:
+    @staticmethod
+    def _submit_coro(coro, loop):
+        coro.close()
+        return MagicMock()
+
     def test_numeric_allowed_users_match_string_event_user_id(self):
         from app.channels.slack import SlackChannel
 
@@ -2067,13 +2252,9 @@ class TestSlackAllowedUsers:
             "ts": "1710000000.000100",
         }
 
-        def submit_coro(coro, loop):
-            coro.close()
-            return MagicMock()
-
         with patch(
             "app.channels.slack.asyncio.run_coroutine_threadsafe",
-            side_effect=submit_coro,
+            side_effect=self._submit_coro,
         ) as submit:
             channel._handle_message_event(event)
 
@@ -2084,6 +2265,74 @@ class TestSlackAllowedUsers:
         assert inbound.user_id == "123456"
         assert inbound.chat_id == "C123"
         assert inbound.text == "hello from slack"
+
+    def test_string_allowed_users_match_event_user_id(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(
+            bus=bus,
+            config={"allowed_users": "U123456"},
+        )
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "user": "U123456",
+            "text": "hello from slack",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ) as submit:
+            channel._handle_message_event(event)
+
+        channel._add_reaction.assert_called_once_with("C123", "1710000000.000100", "eyes")
+        channel._send_running_reply.assert_called_once_with("C123", "1710000000.000100")
+        submit.assert_called_once()
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.user_id == "U123456"
+        assert inbound.chat_id == "C123"
+        assert inbound.text == "hello from slack"
+
+    def test_scalar_allowed_users_warns_and_matches_stringified_event_user_id(self, caplog):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        with caplog.at_level("WARNING"):
+            channel = SlackChannel(
+                bus=bus,
+                config={"allowed_users": 123456},
+            )
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "user": "123456",
+            "text": "hello from slack",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ) as submit:
+            channel._handle_message_event(event)
+
+        assert "Slack allowed_users should be a list" in caplog.text
+        submit.assert_called_once()
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.user_id == "123456"
 
     def test_raises_after_all_retries_exhausted(self):
         from app.channels.slack import SlackChannel

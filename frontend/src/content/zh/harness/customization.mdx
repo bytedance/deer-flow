@@ -1,0 +1,157 @@
+---
+title: 自定义与扩展
+description: DeerFlow 的可插拔架构意味着系统的大多数部分都可以在不 fork 核心的情况下被替换或扩展。本页面列举了扩展点，并解释如何使用每一个。
+---
+
+import { Callout, Cards } from "nextra/components";
+
+# 自定义与扩展
+
+<Callout type="info" emoji="🔧">
+  DeerFlow
+  设计为可适配的。你可以通过编写自定义中间件、添加新工具、构建技能包以及通过
+  config.yaml 的 <code>use:</code> 字段替换任何内置组件来扩展 Agent 行为。
+</Callout>
+
+DeerFlow 的可插拔架构意味着系统的大多数部分都可以在不 fork 核心的情况下被替换或扩展。本页面列举了扩展点，并解释如何使用每一个。
+
+## 自定义中间件
+
+中间件是为 Lead Agent 添加行为的主要扩展点。它们包裹每次 LLM 调用，可以在模型调用前后读取和修改 Agent 的状态。
+
+添加自定义中间件：
+
+1. 实现 `langchain.agents.middleware` 中的 `AgentMiddleware` 接口。
+2. 在构建 Agent 时通过 `custom_middlewares` 参数传入你的中间件。
+
+```python
+from langchain.agents.middleware import AgentMiddleware
+from deerflow.agents.thread_state import ThreadState
+
+class AuditMiddleware(AgentMiddleware):
+    async def on_start(self, state: ThreadState, config):
+        # 在每次模型调用前运行
+        print(f"[审计] 轮次开始：上下文中有 {len(state.messages)} 条消息")
+        return state, config
+
+    async def on_end(self, state: ThreadState, config):
+        # 在每次模型调用后运行
+        print(f"[审计] 轮次结束：最后一条消息类型 = {state.messages[-1].type}")
+        return state, config
+```
+
+自定义中间件在链末尾 `ClarificationMiddleware` 之前注入，后者始终最后运行。
+
+## 自定义工具
+
+在 `config.yaml` 的 `tools:` 下注册新工具，将其添加到 Agent：
+
+```yaml
+tools:
+  - use: mypackage.tools:my_custom_tool
+    api_key: $MY_TOOL_API_KEY
+```
+
+你的工具必须是 LangChain `BaseTool` 或用 `@tool` 装饰的函数。它将使用 `use:` 类路径和配置条目中的任何额外字段实例化。
+
+```python
+# mypackage/tools.py
+from langchain_core.tools import tool
+
+@tool
+def my_custom_tool(query: str) -> str:
+    """搜索我的自定义数据源。"""
+    return do_search(query)
+```
+
+## 自定义沙箱提供者
+
+沙箱可以通过实现 `SandboxProvider` 接口来替换：
+
+```python
+from deerflow.sandbox.sandbox_provider import SandboxProvider
+
+class MyCustomSandboxProvider(SandboxProvider):
+    def acquire(self, thread_id: str | None = None) -> str:
+        # 返回 sandbox_id
+        ...
+
+    def get(self, sandbox_id: str):
+        # 返回此 id 的沙箱实例
+        ...
+
+    def release(self, sandbox_id: str) -> None:
+        # 清理
+        ...
+```
+
+然后在 `config.yaml` 中引用：
+
+```yaml
+sandbox:
+  use: mypackage.sandbox:MyCustomSandboxProvider
+```
+
+## 自定义记忆存储
+
+通过实现 `MemoryStorage` 将基于文件的记忆替换为任何持久化存储：
+
+```python
+from deerflow.agents.memory.storage import MemoryStorage
+from typing import Any
+
+class RedisMemoryStorage(MemoryStorage):
+    def load(self, agent_name: str | None = None) -> dict[str, Any]:
+        ...
+
+    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
+        ...
+
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+        ...
+```
+
+在 `config.yaml` 中配置：
+
+```yaml
+memory:
+  storage_class: mypackage.storage:RedisMemoryStorage
+```
+
+## 自定义技能
+
+技能是最简单的扩展点。在 `skills/custom/your-skill-name/` 下创建一个目录，并在其中添加 `SKILL.md` 文件。技能将在下次 `load_skills()` 调用时自动被发现。
+
+参见[技能](/docs/harness/skills)页面了解完整的目录结构和 `SKILL.md` 格式。
+
+## 自定义模型
+
+任何与 LangChain 兼容的聊天模型都可以通过在 `use:` 字段中指定来使用：
+
+```yaml
+models:
+  - name: my-custom-model
+    use: mypackage.models:MyCustomChatModel
+    # 任何额外字段都作为 kwargs 传递给构造函数
+    base_url: http://my-model-server:8080
+    api_key: $MY_MODEL_API_KEY
+```
+
+模型类必须实现 LangChain 的 `BaseChatModel` 接口。
+
+## 自定义检查点
+
+线程状态持久化可以使用任何与 LangGraph 兼容的检查点器：
+
+```yaml
+checkpointer:
+  type: sqlite
+  connection_string: ./my-checkpoints.db
+```
+
+对于自定义后端，实现 LangGraph 的 `BaseCheckpointSaver` 接口，并在初始化 `DeerFlowClient` 时以编程方式配置它。
+
+<Cards num={2}>
+  <Cards.Card title="集成指南" href="/docs/harness/integration-guide" />
+  <Cards.Card title="配置" href="/docs/harness/configuration" />
+</Cards>

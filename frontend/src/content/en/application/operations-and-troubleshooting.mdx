@@ -1,3 +1,179 @@
+---
+title: Operations and Troubleshooting
+description: This page covers day-to-day operational tasks and solutions to common problems when running DeerFlow App.
+---
+
+import { Callout, Cards } from "nextra/components";
+
 # Operations and Troubleshooting
 
-TBD
+This page covers day-to-day operational tasks and solutions to common problems when running DeerFlow App.
+
+## Log files
+
+All services write logs to the `logs/` directory when started with `make dev`:
+
+| File                 | Service                              |
+| -------------------- | ------------------------------------ |
+| `logs/langgraph.log` | LangGraph / DeerFlow Harness runtime |
+| `logs/gateway.log`   | FastAPI Gateway API                  |
+| `logs/frontend.log`  | Next.js frontend dev server          |
+| `logs/nginx.log`     | nginx reverse proxy                  |
+
+Tail logs in real time:
+
+```bash
+tail -f logs/langgraph.log
+tail -f logs/gateway.log
+```
+
+Adjust the runtime log level in `config.yaml`:
+
+```yaml
+log_level: debug # debug | info | warning | error
+```
+
+## Health checks
+
+Verify each service is responding:
+
+```bash
+# Gateway health
+curl http://localhost:8001/health
+
+# LangGraph health
+curl http://localhost:2024/ok
+
+# Through nginx (verifies full proxy chain)
+curl http://localhost:2026/api/models
+```
+
+## Config upgrade
+
+When you pull a new version of DeerFlow, the `config_version` in `config.example.yaml` may be higher than your `config.yaml`. To merge new fields without losing your customizations:
+
+```bash
+make config-upgrade
+```
+
+Check the current version in your config:
+
+```bash
+grep config_version config.yaml
+```
+
+## Common problems
+
+### The app loads but the agent doesn't respond
+
+1. Check `logs/langgraph.log` for startup errors.
+2. Verify your model is correctly configured in `config.yaml` with a valid API key.
+3. Confirm the API key environment variable is set in the shell that ran `make dev`.
+4. Test the model endpoint directly with `curl` to rule out network issues.
+
+---
+
+### Model API errors in the agent response
+
+The agent reports an error like `"No chat models are configured"` or `"model not found"`:
+
+- Check that the `models:` section in `config.yaml` has at least one entry.
+- Verify the `name:` field matches what you are requesting in the UI.
+- Check that `api_key:` is referencing the correct environment variable and that the variable is set.
+
+---
+
+### Frontend build fails with `BETTER_AUTH_SECRET`
+
+```
+Error: BETTER_AUTH_SECRET is required
+```
+
+Set the environment variable before building:
+
+```bash
+export BETTER_AUTH_SECRET=$(openssl rand -base64 32)
+pnpm build
+```
+
+Or set it in your `.env` file at the repo root.
+
+---
+
+### Sandbox-related tool failures
+
+If file tools (`read_file`, `ls`, `bash`) fail with permission or path errors:
+
+1. For `LocalSandboxProvider`: check that `allow_host_bash` is set correctly and that the agent has read/write access to the thread data directory.
+2. For container sandboxes: verify Docker (or Apple Container) is running and the sandbox image is accessible.
+3. For K8s Provisioner: check that the provisioner service is healthy (`curl http://localhost:8002/health`) and that the K8s cluster is reachable.
+
+---
+
+### K8s Provisioner not connecting
+
+```
+Connection refused: http://provisioner:8002
+```
+
+- Ensure the provisioner service is running: `docker compose ps`.
+- Check that `K8S_API_SERVER` is set correctly (should point to the K8s API from inside the container, not `localhost`).
+- Verify `~/.kube/config` is mounted and the cluster is reachable from the container host.
+
+---
+
+### MCP tools not loading
+
+If MCP tools appear in `extensions_config.json` but are not available in the agent:
+
+1. Check `logs/langgraph.log` for MCP initialization errors.
+2. Verify the MCP server command is installed (`npx`, `uvx`, or the relevant binary).
+3. Test the server command manually to confirm it starts without errors.
+4. Set `log_level: debug` to see detailed MCP loading output.
+
+---
+
+### Memory not persisting across sessions
+
+- Verify `memory.enabled: true` in `config.yaml`.
+- Check that the storage path is writable: `ls -la backend/.deer-flow/`.
+- Look for memory update errors in `logs/langgraph.log` (search for "memory").
+
+## Data backup
+
+Thread data and memory are stored under `backend/.deer-flow/`:
+
+```
+backend/.deer-flow/
+  memory.json           # global agent memory
+  agents/               # per-agent memory
+  threads/              # thread working directories
+    {thread_id}/
+      user-data/
+        uploads/
+        outputs/
+  checkpoints.db        # SQLite checkpoints (if configured)
+```
+
+Back up this entire directory to preserve conversation history, artifacts, and learned memory.
+
+In Docker deployments, the bind-mounted host path (`$DEER_FLOW_ROOT/backend/.deer-flow/`) is the source of truth — back up the host path.
+
+## Restarting services
+
+To restart a single service (local deployment):
+
+```bash
+make stop
+make dev
+```
+
+Individual service restart scripts are in `scripts/`. For targeted restarts, you can kill and relaunch individual processes manually using the PIDs in the log files.
+
+<Cards num={2}>
+  <Cards.Card
+    title="Deployment Guide"
+    href="/docs/application/deployment-guide"
+  />
+  <Cards.Card title="Configuration" href="/docs/application/configuration" />
+</Cards>

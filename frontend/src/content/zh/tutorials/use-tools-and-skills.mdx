@@ -1,0 +1,52 @@
+---
+title: 使用工具和技能
+description: 本教程介绍如何在 DeerFlow 中配置和使用工具（Tools）与技能（Skills），让 Agent 能够访问搜索、文件操作和特定领域能力。
+---
+
+# 使用工具和技能
+
+本教程介绍如何在 DeerFlow 中配置和使用工具（Tools）与技能（Skills），让 Agent 能够访问搜索、文件操作和特定领域能力。
+
+## 配置工具
+
+在 `config.yaml` 中添加工具：
+
+```yaml
+tools:
+  # 网络搜索
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+
+  # 网页内容抓取
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+
+  # 沙箱文件操作
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+## 启用技能
+
+通过 DeerFlow 应用界面的技能面板启用技能，或直接编辑 `extensions_config.json`。
+
+示例：启用深度研究技能
+
+1. 打开 DeerFlow 应用
+2. 点击侧边栏中的扩展/技能图标
+3. 找到 `deep-research`，切换为启用
+
+## 使用技能进行研究
+
+启用 `deep-research` 技能后，在对话中选择该技能，然后发送研究请求：
+
+```
+对量子计算的最新进展进行深度研究，重点关注实用化应用前景
+```
+
+Agent 将执行多步骤研究工作流，包括搜索、信息汇总和报告生成。
+
+## 下一步
+
+- [使用记忆系统](/docs/tutorials/work-with-memory)
+- [技能文档](/docs/harness/skills)

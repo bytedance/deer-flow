@@ -39,7 +39,7 @@ def test_present_files_keeps_virtual_outputs_path(tmp_path, monkeypatch):
     monkeypatch.setattr(
         present_file_tool_module,
         "get_paths",
-        lambda: SimpleNamespace(resolve_virtual_path=lambda thread_id, path: artifact_path),
+        lambda: SimpleNamespace(resolve_virtual_path=lambda thread_id, path, *, user_id=None: artifact_path),
     )
 
     result = present_file_tool_module.present_file_tool.func(

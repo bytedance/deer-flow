@@ -1,0 +1,205 @@
+---
+title: 中间件
+description: 每次 Lead Agent 调用 LLM 时，都会先后执行一条**中间件链**。中间件可以读取和修改 Agent 的状态、向系统提示注入内容、拦截工具调用，并对模型输出做出反应。
+---
+
+import { Callout } from "nextra/components";
+
+# 中间件
+
+<Callout type="info" emoji="🔌">
+  中间件包裹 Lead Agent 中的每次 LLM
+  调用。它们是添加跨领域行为（如记忆、摘要压缩、澄清和 token
+  追踪）的主要扩展点。
+</Callout>
+
+每次 Lead Agent 调用 LLM 时，都会先后执行一条**中间件链**。中间件可以读取和修改 Agent 的状态、向系统提示注入内容、拦截工具调用，并对模型输出做出反应。
+
+这种设计使 Agent 核心保持简单稳定，同时允许丰富的可组合行为分层叠加。
+
+## 链的工作方式
+
+中间件链在每次 Agent 调用时根据当前配置和请求参数构建一次。中间件按定义的顺序运行：
+
+1. 运行时中间件（错误处理、线程数据、上传、悬空工具调用修补）
+2. `SummarizationMiddleware` — 上下文压缩（如果启用）
+3. `TodoMiddleware` — 任务列表管理（仅计划模式）
+4. `TokenUsageMiddleware` — token 追踪（如果启用）
+5. `TitleMiddleware` — 自动生成线程标题
+6. `MemoryMiddleware` — 跨会话记忆注入和队列
+7. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
+8. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
+9. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
+10. `LoopDetectionMiddleware` — 打破重复工具调用循环
+11. 自定义中间件（如有）
+12. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
+
+顺序很重要。摘要压缩在早期运行以在其他处理之前减少上下文。澄清总是最后运行，这样它可以在所有其他中间件完成后拦截。
+
+## 中间件参考
+
+### ClarificationMiddleware
+
+拦截澄清工具调用，并将其转换为面向用户的信息请求。当模型决定在继续之前需要询问用户某事时，此中间件会将该请求呈现出来。
+
+**配置**：由 `guardrails.clarification` 设置控制。
+
+---
+
+### LoopDetectionMiddleware
+
+检测 Agent 是否在没有取得进展的情况下重复进行相同的工具调用。检测到循环时，中间件会介入打破循环，防止 Agent 无限消耗轮次。
+
+**配置**：内置，无需用户配置。
+
+---
+
+### MemoryMiddleware
+
+在每次对话开始时读取持久化记忆事实并将其注入到系统提示中。对话结束后，将后台更新排队，以将新信息纳入记忆存储。
+
+**配置**：参见[记忆系统](/docs/harness/memory)页面和 `config.yaml` 中的 `memory:` 部分。
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  max_injection_tokens: 2000
+  debounce_seconds: 30
+```
+
+---
+
+### SubagentLimitMiddleware
+
+限制 Agent 在单次轮次中可以进行的并行子 Agent 任务调用数量。这防止 Agent 生成无限数量的并发子 Agent。
+
+**配置**：每次请求配置中的 `subagent_enabled` 和 `max_concurrent_subagents`。
+
+---
+
+### TitleMiddleware
+
+在第一次交互后自动为线程生成标题。标题从用户的第一条消息和 Agent 的响应中派生。
+
+**配置**：`config.yaml` 中的 `title:` 部分。
+
+```yaml
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null # 使用默认模型
+```
+
+---
+
+### TodoMiddleware
+
+当计划模式激活时，维护一个对用户可见的结构化任务列表。Agent 使用 `write_todos` 工具，随着完成复杂目标，将任务标记为 `pending`、`in_progress` 或 `completed`。
+
+**激活**：在请求配置中设置 `is_plan_mode: true` 时自动启用。不需要 `config.yaml` 条目。
+
+---
+
+### TokenUsageMiddleware
+
+追踪每次模型调用的 LLM token 消耗，并以 `info` 级别记录。对于监控成本和了解长时序任务中 token 的使用位置很有帮助。
+
+**配置**：`config.yaml` 中的 `token_usage:` 部分。
+
+```yaml
+token_usage:
+  enabled: false
+```
+
+---
+
+### SummarizationMiddleware
+
+当对话变长时，对旧消息进行摘要以减少上下文大小。摘要被注入回对话，替代原始消息，在不需要完整 token 成本的情况下保留含义。
+
+**配置**：`config.yaml` 中的 `summarization:` 部分。详见下方详细配置。
+
+---
+
+### ViewImageMiddleware
+
+当当前模型支持视觉（`supports_vision: true`）时，此中间件拦截 `view_image` 工具调用，并将图像内容直接注入到模型的上下文中以便分析。
+
+**激活**：当解析的模型具有 `supports_vision: true` 时自动启用。
+
+---
+
+### DeferredToolFilterMiddleware
+
+当工具搜索启用时，此中间件从模型上下文中隐藏延迟工具 schema。工具通过 `tool_search` 工具按需发现，而不是预先全部列出，从而减少上下文使用。
+
+**配置**：`config.yaml` 中的 `tool_search.enabled: true`。
+
+## 摘要压缩配置详解
+
+`SummarizationMiddleware` 是长时序任务中影响最大的中间件之一。完整配置参考如下：
+
+```yaml
+summarization:
+  enabled: true
+
+  # 摘要使用的模型（null = 使用默认模型）
+  # 推荐使用轻量级、经济的模型，如 "gpt-4o-mini"
+  model_name: null
+
+  # 触发条件——满足任意一个条件时运行摘要
+  trigger:
+    - type: tokens # 当上下文超过 N 个 token 时触发
+      value: 15564
+    # - type: messages  # 当消息数超过 N 时触发
+    #   value: 50
+    # - type: fraction  # 当上下文达到模型最大输入的 X% 时触发
+    #   value: 0.8
+
+  # 摘要后保留多少最近历史
+  keep:
+    type: messages
+    value: 10 # 保留最近 10 条消息
+    # 或者按 token 保留：
+    # type: tokens
+    # value: 3000
+
+  # 为摘要器准备消息时要裁剪的最大 token 数
+  trim_tokens_to_summarize: 15564
+
+  # 自定义摘要提示词（null = 使用默认 LangChain 提示词）
+  summary_prompt: null
+```
+
+**触发类型**：
+
+- `tokens`：当对话中总 token 数超过 `value` 时触发。
+- `messages`：当消息数超过 `value` 时触发。
+- `fraction`：当上下文达到模型最大输入 token 限制的 `value` 比例时触发。
+
+**保留类型**：
+
+- `messages`：摘要后保留最后 `value` 条消息。
+- `tokens`：保留最近 `value` 个 token 的历史。
+- `fraction`：保留模型最大输入 token 限制的 `value` 比例的最近历史。
+
+## 编写自定义中间件
+
+自定义中间件可以注入到链中用于专业用途。中间件必须实现 `langchain.agents.middleware` 中的 `AgentMiddleware` 接口：
+
+```python
+from langchain.agents.middleware import AgentMiddleware
+
+class MyMiddleware(AgentMiddleware):
+    async def on_start(self, state, config):
+        # 在模型调用前运行
+        return state, config
+
+    async def on_end(self, state, config):
+        # 在模型调用后运行
+        return state, config
+```
+
+自定义中间件在链末尾 `ClarificationMiddleware` 之前注入。

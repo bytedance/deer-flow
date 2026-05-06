@@ -1,0 +1,113 @@
+---
+title: 快速上手
+description: 学习如何使用 create_deerflow_agent 创建并运行 DeerFlow Agent，从模型初始化到流式响应。
+---
+
+import { Callout, Cards, Steps } from "nextra/components";
+
+# 快速上手
+
+<Callout type="info" emoji="🚀">
+  本指南介绍如何在 Python 中通过 <code>create_deerflow_agent</code>
+  创建并运行一个 DeerFlow Agent。
+</Callout>
+
+理解 DeerFlow Harness 的最快方式，是直接在代码里创建一个 Agent。本快速上手指南将带你完成模型初始化、Agent 创建，以及响应流式输出。
+
+## 前置条件
+
+DeerFlow Harness 需要 Python 3.12 或更高版本。该包是 `deerflow` 代码库的一部分，位于 `backend/packages/harness` 下。
+
+如果你从仓库克隆开始：
+
+```bash
+cd backend
+uv sync
+```
+
+你还需要准备一个来自对应 LangChain Provider 包的聊天模型实例。
+
+## 创建第一个 Agent
+
+<Steps>
+
+### 导入工厂函数与模型类
+
+```python
+from deerflow.agents import create_deerflow_agent
+from langchain_openai import ChatOpenAI
+```
+
+### 创建模型
+
+```python
+model = ChatOpenAI(
+    model="gpt-4o",
+    api_key="YOUR_OPENAI_API_KEY",
+)
+```
+
+### 创建 Agent
+
+```python
+agent = create_deerflow_agent(model)
+```
+
+这会返回一个已经编译好的 LangGraph Agent，并带有 DeerFlow 默认的中间件链。
+
+### 流式获取响应
+
+```python
+for event in agent.stream(
+    {"messages": [{"role": "user", "content": "解释一下 DeerFlow Harness 是什么。"}]},
+    stream_mode=["messages", "values"],
+):
+    print(event)
+```
+
+</Steps>
+
+## 添加工具或行为
+
+你可以通过传入工具、系统提示词、运行时特性、中间件或 checkpointer 来自定义 Agent。
+
+```python
+from deerflow.agents import RuntimeFeatures, create_deerflow_agent
+
+agent = create_deerflow_agent(
+    model,
+    system_prompt="你是一个简洁的研究助手。",
+    features=RuntimeFeatures(subagent=True, memory=False),
+    plan_mode=True,
+    name="research-agent",
+)
+```
+
+常用参数：
+
+| 参数               | 说明                       |
+| ------------------ | -------------------------- |
+| `tools`            | 提供给 Agent 的额外工具    |
+| `system_prompt`    | 自定义系统提示词           |
+| `features`         | 启用或替换内置运行时能力   |
+| `extra_middleware` | 将自定义中间件插入默认链路 |
+| `plan_mode`        | 启用 Todo 风格的任务跟踪   |
+| `checkpointer`     | 为多轮运行持久化状态       |
+| `name`             | Agent 的逻辑名称           |
+
+## 什么时候使用 DeerFlowClient
+
+如果你想直接操作底层的编译后 Agent 图，使用 `create_deerflow_agent()`。
+
+如果你想使用更高层的嵌入式应用接口，则应使用 `DeerFlowClient`，例如：
+
+- 面向线程的对话封装，
+- 模型 / 技能 / 记忆管理 API，
+- 文件上传与 artifacts，
+- 与 Gateway 一致的返回格式。
+
+<Cards num={3}>
+  <Cards.Card title="设计理念" href="/docs/harness/design-principles" />
+  <Cards.Card title="Lead Agent" href="/docs/harness/lead-agent" />
+  <Cards.Card title="配置" href="/docs/harness/configuration" />
+</Cards>

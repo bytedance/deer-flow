@@ -9,6 +9,8 @@ Covers:
 - Skills filter passthrough in task_tool config assembly
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from deerflow.config.subagents_config import (
@@ -343,11 +345,53 @@ class TestRegistryCustomAgentLookup:
         assert config.timeout_seconds == 600
         assert config.model == "inherit"
 
+    def test_custom_agent_found_from_explicit_app_config_without_global_config(self, monkeypatch):
+        from deerflow.subagents.registry import get_subagent_config
+
+        def fail_get_subagents_app_config():
+            raise AssertionError("ambient get_subagents_app_config() must not be used when app_config is explicit")
+
+        monkeypatch.setattr("deerflow.config.subagents_config.get_subagents_app_config", fail_get_subagents_app_config)
+
+        app_config = SimpleNamespace(
+            subagents=SubagentsAppConfig(
+                custom_agents={
+                    "analysis": CustomSubagentConfig(
+                        description="Data analysis specialist",
+                        system_prompt="You are a data analysis subagent.",
+                        skills=["data-analysis"],
+                    )
+                }
+            )
+        )
+
+        config = get_subagent_config("analysis", app_config=app_config)
+
+        assert config is not None
+        assert config.name == "analysis"
+        assert config.skills == ["data-analysis"]
+
     def test_custom_agent_not_found(self):
         from deerflow.subagents.registry import get_subagent_config
 
         _reset_subagents_config()
         assert get_subagent_config("nonexistent") is None
+
+    def test_get_available_subagent_names_falls_back_when_subagents_app_config_lacks_sandbox(self, monkeypatch):
+        from deerflow.subagents import registry as registry_module
+        from deerflow.subagents.registry import get_available_subagent_names
+
+        captured: dict[str, tuple] = {}
+
+        def fake_is_host_bash_allowed(*args, **kwargs):
+            captured["args"] = args
+            return True
+
+        monkeypatch.setattr(registry_module, "is_host_bash_allowed", fake_is_host_bash_allowed)
+
+        get_available_subagent_names(app_config=SubagentsAppConfig())
+
+        assert captured["args"] == ()
 
     def test_builtin_takes_priority_over_custom(self):
         """If a custom agent has the same name as a builtin, builtin wins."""

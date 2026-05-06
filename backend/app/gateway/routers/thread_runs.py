@@ -19,7 +19,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.gateway.deps import get_checkpointer, get_run_manager, get_stream_bridge
+from app.gateway.authz import require_permission
+from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
 from deerflow.runtime import RunRecord, serialize_channel_values
 
@@ -92,6 +93,7 @@ def _record_to_response(record: RunRecord) -> RunResponse:
 
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
+@require_permission("runs", "create", owner_check=True, require_existing=True)
 async def create_run(thread_id: str, body: RunCreateRequest, request: Request) -> RunResponse:
     """Create a background run (returns immediately)."""
     record = await start_run(body, thread_id, request)
@@ -99,6 +101,7 @@ async def create_run(thread_id: str, body: RunCreateRequest, request: Request) -
 
 
 @router.post("/{thread_id}/runs/stream")
+@require_permission("runs", "create", owner_check=True, require_existing=True)
 async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
@@ -126,6 +129,7 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
 
 
 @router.post("/{thread_id}/runs/wait", response_model=dict)
+@require_permission("runs", "create", owner_check=True, require_existing=True)
 async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until it completes, returning the final state."""
     record = await start_run(body, thread_id, request)
@@ -151,6 +155,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
+@require_permission("runs", "read", owner_check=True)
 async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
     """List all runs for a thread."""
     run_mgr = get_run_manager(request)
@@ -159,6 +164,7 @@ async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
 
 
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)
+@require_permission("runs", "read", owner_check=True)
 async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
@@ -169,6 +175,7 @@ async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
 
 
 @router.post("/{thread_id}/runs/{run_id}/cancel")
+@require_permission("runs", "cancel", owner_check=True, require_existing=True)
 async def cancel_run(
     thread_id: str,
     run_id: str,
@@ -206,6 +213,7 @@ async def cancel_run(
 
 
 @router.get("/{thread_id}/runs/{run_id}/join")
+@require_permission("runs", "read", owner_check=True)
 async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
     bridge = get_stream_bridge(request)
@@ -226,6 +234,7 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
 
 
 @router.api_route("/{thread_id}/runs/{run_id}/stream", methods=["GET", "POST"], response_model=None)
+@require_permission("runs", "read", owner_check=True)
 async def stream_existing_run(
     thread_id: str,
     run_id: str,
@@ -265,3 +274,104 @@ async def stream_existing_run(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Messages / Events / Token usage endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{thread_id}/messages")
+@require_permission("runs", "read", owner_check=True)
+async def list_thread_messages(
+    thread_id: str,
+    request: Request,
+    limit: int = Query(default=50, le=200),
+    before_seq: int | None = Query(default=None),
+    after_seq: int | None = Query(default=None),
+) -> list[dict]:
+    """Return displayable messages for a thread (across all runs), with feedback attached."""
+    event_store = get_run_event_store(request)
+    messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
+
+    # Attach feedback to the last AI message of each run
+    feedback_repo = get_feedback_repo(request)
+    user_id = await get_current_user(request)
+    feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
+
+    # Find the last ai_message per run_id
+    last_ai_per_run: dict[str, int] = {}  # run_id -> index in messages list
+    for i, msg in enumerate(messages):
+        if msg.get("event_type") == "ai_message":
+            last_ai_per_run[msg["run_id"]] = i
+
+    # Attach feedback field
+    last_ai_indices = set(last_ai_per_run.values())
+    for i, msg in enumerate(messages):
+        if i in last_ai_indices:
+            run_id = msg["run_id"]
+            fb = feedback_map.get(run_id)
+            msg["feedback"] = (
+                {
+                    "feedback_id": fb["feedback_id"],
+                    "rating": fb["rating"],
+                    "comment": fb.get("comment"),
+                }
+                if fb
+                else None
+            )
+        else:
+            msg["feedback"] = None
+
+    return messages
+
+
+@router.get("/{thread_id}/runs/{run_id}/messages")
+@require_permission("runs", "read", owner_check=True)
+async def list_run_messages(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=50, le=200, ge=1),
+    before_seq: int | None = Query(default=None),
+    after_seq: int | None = Query(default=None),
+) -> dict:
+    """Return paginated messages for a specific run.
+
+    Response: { data: [...], has_more: bool }
+    """
+    event_store = get_run_event_store(request)
+    rows = await event_store.list_messages_by_run(
+        thread_id,
+        run_id,
+        limit=limit + 1,
+        before_seq=before_seq,
+        after_seq=after_seq,
+    )
+    has_more = len(rows) > limit
+    data = rows[:limit] if has_more else rows
+    return {"data": data, "has_more": has_more}
+
+
+@router.get("/{thread_id}/runs/{run_id}/events")
+@require_permission("runs", "read", owner_check=True)
+async def list_run_events(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    event_types: str | None = Query(default=None),
+    limit: int = Query(default=500, le=2000),
+) -> list[dict]:
+    """Return the full event stream for a run (debug/audit)."""
+    event_store = get_run_event_store(request)
+    types = event_types.split(",") if event_types else None
+    return await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)
+
+
+@router.get("/{thread_id}/token-usage")
+@require_permission("threads", "read", owner_check=True)
+async def thread_token_usage(thread_id: str, request: Request) -> dict:
+    """Thread-level token usage aggregation."""
+    run_store = get_run_store(request)
+    agg = await run_store.aggregate_tokens_by_thread(thread_id)
+    return {"thread_id": thread_id, **agg}

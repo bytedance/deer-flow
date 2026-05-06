@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+from deerflow.skills.types import SKILL_MD_FILE
+
 # Allowed properties in SKILL.md frontmatter
 ALLOWED_FRONTMATTER_PROPERTIES = {"name", "description", "license", "allowed-tools", "metadata", "compatibility", "version", "author"}
 
@@ -21,9 +23,9 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     Returns:
         Tuple of (is_valid, message, skill_name).
     """
-    skill_md = skill_dir / "SKILL.md"
+    skill_md = skill_dir / SKILL_MD_FILE
     if not skill_md.exists():
-        return False, "SKILL.md not found", None
+        return False, f"{SKILL_MD_FILE} not found", None
 
     content = skill_md.read_text(encoding="utf-8")
     if not content.startswith("---"):

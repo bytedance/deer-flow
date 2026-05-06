@@ -1,3 +1,178 @@
+---
+title: Customization
+description: DeerFlow's pluggable architecture means most parts of the system can be replaced or extended without forking the core. This page maps the extension points and explains how to use each one.
+---
+
+import { Callout, Cards } from "nextra/components";
+
 # Customization
 
-TBD
+<Callout type="info" emoji="🔧">
+  DeerFlow is designed to be adapted. You can extend agent behavior by writing
+  custom middlewares, adding new tools, building skill packs, and replacing any
+  built-in component through the config.yaml <code>use:</code> field.
+</Callout>
+
+DeerFlow's pluggable architecture means most parts of the system can be replaced or extended without forking the core. This page maps the extension points and explains how to use each one.
+
+## Custom middlewares
+
+Middlewares are the primary extension point for adding behavior to the Lead Agent. They wrap every LLM turn and can read and modify the agent's state before or after the model call.
+
+To add a custom middleware:
+
+1. Implement the `AgentMiddleware` interface from `langchain.agents.middleware`.
+2. Pass your middleware to the `custom_middlewares` parameter when building the agent.
+
+```python
+from langchain.agents.middleware import AgentMiddleware
+from deerflow.agents.thread_state import ThreadState
+
+class AuditMiddleware(AgentMiddleware):
+    async def on_start(self, state: ThreadState, config):
+        # Runs before each model call
+        print(f"[audit] turn starts: {len(state.messages)} messages in context")
+        return state, config
+
+    async def on_end(self, state: ThreadState, config):
+        # Runs after each model call
+        print(f"[audit] turn ends: last message type = {state.messages[-1].type}")
+        return state, config
+```
+
+Custom middlewares are injected into the chain immediately before `ClarificationMiddleware`, which always runs last.
+
+## Custom tools
+
+Add new tools to the agent by registering them in `config.yaml` under `tools:`:
+
+```yaml
+tools:
+  - use: mypackage.tools:my_custom_tool
+    api_key: $MY_TOOL_API_KEY
+```
+
+Your tool must be a LangChain `BaseTool` or a function decorated with `@tool`. It will be instantiated using the `use:` class path and any additional fields from the config entry.
+
+For community-style tools, the pattern is a module-level function or class that returns a `BaseTool`:
+
+```python
+# mypackage/tools.py
+from langchain_core.tools import tool
+
+@tool
+def my_custom_tool(query: str) -> str:
+    """Search my custom data source."""
+    return do_search(query)
+```
+
+## Custom sandbox provider
+
+The sandbox can be replaced by implementing the `SandboxProvider` interface:
+
+```python
+from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox import Sandbox
+
+class MyCustomSandboxProvider(SandboxProvider):
+    def acquire(self, thread_id: str | None = None) -> str:
+        # Return a sandbox_id
+        ...
+
+    def get(self, sandbox_id: str) -> Sandbox | None:
+        # Return the sandbox instance for this id
+        ...
+
+    def release(self, sandbox_id: str) -> None:
+        # Cleanup
+        ...
+```
+
+Then reference it in `config.yaml`:
+
+```yaml
+sandbox:
+  use: mypackage.sandbox:MyCustomSandboxProvider
+```
+
+## Custom memory storage
+
+Replace the file-based memory with any persistent store by implementing `MemoryStorage`:
+
+```python
+from deerflow.agents.memory.storage import MemoryStorage
+from typing import Any
+
+class RedisMemoryStorage(MemoryStorage):
+    def load(self, agent_name: str | None = None) -> dict[str, Any]:
+        ...
+
+    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
+        ...
+
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+        ...
+```
+
+Configure it in `config.yaml`:
+
+```yaml
+memory:
+  storage_class: mypackage.storage:RedisMemoryStorage
+```
+
+## Custom skills
+
+Skills are the easiest extension point. Create a directory under `skills/custom/your-skill-name/` with a `SKILL.md` file. The skill is discovered automatically on the next `load_skills()` call.
+
+See [Skills](/docs/harness/skills) for the full directory structure and `SKILL.md` format.
+
+## Custom models
+
+Any LangChain-compatible chat model can be used by specifying it in the `use:` field:
+
+```yaml
+models:
+  - name: my-custom-model
+    use: mypackage.models:MyCustomChatModel
+    # Any extra fields are passed as kwargs to the constructor
+    base_url: http://my-model-server:8080
+    api_key: $MY_MODEL_API_KEY
+```
+
+The model class must implement the LangChain `BaseChatModel` interface.
+
+## Custom checkpointer
+
+Thread state persistence can use any LangGraph-compatible checkpointer:
+
+```yaml
+checkpointer:
+  type: sqlite
+  connection_string: ./my-checkpoints.db
+```
+
+For custom backends, implement the LangGraph `BaseCheckpointSaver` interface and configure it programmatically when initializing the `DeerFlowClient`.
+
+## Guardrails
+
+Add pre-execution authorization for tool calls through the `guardrails:` config:
+
+```yaml
+guardrails:
+  enabled: true
+  provider:
+    use: deerflow.guardrails.builtin:AllowlistProvider
+    config:
+      denied_tools: ["bash", "write_file"]
+```
+
+For custom guardrail logic, implement a class with `evaluate()` and `aevaluate()` methods and reference it via `use:`.
+
+<Cards num={2}>
+  <Cards.Card
+    title="Integration Guide"
+    href="/docs/harness/integration-guide"
+  />
+  <Cards.Card title="Configuration" href="/docs/harness/configuration" />
+</Cards>

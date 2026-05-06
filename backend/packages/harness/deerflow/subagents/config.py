@@ -1,6 +1,10 @@
 """Subagent configuration definitions."""
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from deerflow.config.app_config import AppConfig
 
 
 @dataclass
@@ -29,3 +33,24 @@ class SubagentConfig:
     model: str = "inherit"
     max_turns: int = 50
     timeout_seconds: int = 900
+
+
+def _default_model_name(app_config: "AppConfig") -> str:
+    if not app_config.models:
+        raise ValueError("No chat models are configured. Please configure at least one model in config.yaml.")
+    return app_config.models[0].name
+
+
+def resolve_subagent_model_name(config: SubagentConfig, parent_model: str | None, *, app_config: "AppConfig | None" = None) -> str:
+    """Resolve the effective model name a subagent should use."""
+    if config.model != "inherit":
+        return config.model
+
+    if parent_model is not None:
+        return parent_model
+
+    if app_config is None:
+        from deerflow.config import get_app_config
+
+        app_config = get_app_config()
+    return _default_model_name(app_config)

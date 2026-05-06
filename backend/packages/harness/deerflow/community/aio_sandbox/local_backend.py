@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import subprocess
 from datetime import datetime
 
@@ -84,6 +85,88 @@ def _format_container_mount(runtime: str, host_path: str, container_path: str, r
     if read_only:
         mount_spec += ":ro"
     return ["-v", mount_spec]
+
+
+def _redact_container_command_for_log(cmd: list[str]) -> list[str]:
+    """Return a Docker/Container command with environment values redacted."""
+    redacted: list[str] = []
+    redact_next_env = False
+
+    for arg in cmd:
+        if redact_next_env:
+            if "=" in arg:
+                key = arg.split("=", 1)[0]
+                redacted.append(f"{key}=<redacted>" if key else "<redacted>")
+            else:
+                redacted.append(arg)
+            redact_next_env = False
+            continue
+
+        if arg in {"-e", "--env"}:
+            redacted.append(arg)
+            redact_next_env = True
+            continue
+
+        if arg.startswith("--env="):
+            value = arg.removeprefix("--env=")
+            if "=" in value:
+                key = value.split("=", 1)[0]
+                redacted.append(f"--env={key}=<redacted>" if key else "--env=<redacted>")
+            else:
+                redacted.append(arg)
+            continue
+
+        redacted.append(arg)
+
+    return redacted
+
+
+def _format_container_command_for_log(cmd: list[str]) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline(cmd)
+    return shlex.join(cmd)
+
+
+def _normalize_sandbox_host(host: str) -> str:
+    return host.strip().lower()
+
+
+def _is_ipv6_loopback_sandbox_host(host: str) -> bool:
+    return _normalize_sandbox_host(host) in {"::1", "[::1]"}
+
+
+def _is_loopback_sandbox_host(host: str) -> bool:
+    return _normalize_sandbox_host(host) in {"", "localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | None = None) -> str:
+    """Choose the host interface for legacy Docker ``-p`` sandbox publishing.
+
+    Bare-metal/local runs talk to sandboxes through localhost and should not
+    expose the sandbox HTTP API on every host interface.  Docker-outside-of-
+    Docker deployments commonly use ``host.docker.internal`` from another
+    container; keep their legacy broad bind unless operators opt into a
+    narrower bind with ``DEER_FLOW_SANDBOX_BIND_HOST``.  When operators choose
+    an IPv6 loopback sandbox host, bind Docker to IPv6 loopback as well so the
+    advertised sandbox URL and published socket use the same address family.
+    """
+    explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST")
+    if explicit_bind is not None:
+        explicit_bind = explicit_bind.strip()
+        if explicit_bind:
+            logger.debug("Docker sandbox bind: %s (explicit bind host override)", explicit_bind)
+            return explicit_bind
+
+    host = sandbox_host if sandbox_host is not None else os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+    if _is_ipv6_loopback_sandbox_host(host):
+        logger.debug("Docker sandbox bind: [::1] (IPv6 loopback sandbox host)")
+        return "[::1]"
+    if _is_loopback_sandbox_host(host):
+        logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
+        return "127.0.0.1"
+
+    logger.debug("Docker sandbox bind: 0.0.0.0 (non-loopback sandbox host compatibility)")
+    return "0.0.0.0"
 
 
 class LocalContainerBackend(SandboxBackend):
@@ -424,12 +507,17 @@ class LocalContainerBackend(SandboxBackend):
         if self._runtime == "docker":
             cmd.extend(["--security-opt", "seccomp=unconfined"])
 
+        if self._runtime == "docker":
+            port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"
+        else:
+            port_mapping = f"{port}:8080"
+
         cmd.extend(
             [
                 "--rm",
                 "-d",
                 "-p",
-                f"{port}:8080",
+                port_mapping,
                 "--name",
                 container_name,
             ]
@@ -464,7 +552,8 @@ class LocalContainerBackend(SandboxBackend):
 
         cmd.append(self._image)
 
-        logger.info(f"Starting container using {self._runtime}: {' '.join(cmd)}")
+        log_cmd = _format_container_command_for_log(_redact_container_command_for_log(cmd))
+        logger.info(f"Starting container using {self._runtime}: {log_cmd}")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)

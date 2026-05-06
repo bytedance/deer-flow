@@ -155,6 +155,7 @@ export function InputBox({
   const [followupsLoading, setFollowupsLoading] = useState(false);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
+  const messagesRef = useRef(thread.messages);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
@@ -355,6 +356,10 @@ export function InputBox({
   }, [showFollowups]);
 
   useEffect(() => {
+    messagesRef.current = thread.messages;
+  }, [thread.messages]);
+
+  useEffect(() => {
     return () => followupsVisibilityChangeRef.current?.(false);
   }, []);
 
@@ -370,14 +375,16 @@ export function InputBox({
       return;
     }
 
-    const lastAi = [...thread.messages].reverse().find((m) => m.type === "ai");
+    const lastAi = [...messagesRef.current]
+      .reverse()
+      .find((m) => m.type === "ai");
     const lastAiId = lastAi?.id ?? null;
     if (!lastAiId || lastAiId === lastGeneratedForAiIdRef.current) {
       return;
     }
     lastGeneratedForAiIdRef.current = lastAiId;
 
-    const recent = thread.messages
+    const recent = messagesRef.current
       .filter((m) => m.type === "human" || m.type === "ai")
       .map((m) => {
         const role = m.type === "human" ? "user" : "assistant";
@@ -427,7 +434,7 @@ export function InputBox({
       });
 
     return () => controller.abort();
-  }, [context.model_name, disabled, isMock, status, thread.messages, threadId]);
+  }, [context.model_name, disabled, isMock, status, threadId]);
 
   return (
     <div ref={promptRootRef} className="relative flex flex-col gap-4">

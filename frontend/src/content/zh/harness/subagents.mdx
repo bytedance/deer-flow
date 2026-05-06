@@ -1,0 +1,127 @@
+---
+title: 子 Agent
+description: 当一个任务对单个推理线程来说太宽泛，或者部分任务可以并行完成时，Lead Agent 将工作委派给**子 Agent**。子 Agent 是一个独立的 Agent 调用，接收特定任务、执行并返回结果。
+---
+
+import { Callout, Cards } from "nextra/components";
+
+# 子 Agent
+
+<Callout type="info" emoji="👥">
+  子 Agent 是 Lead Agent
+  委派子任务的专注执行者。它们以隔离的上下文运行，在处理并行或专业工作的同时保持主对话清晰。
+</Callout>
+
+当一个任务对单个推理线程来说太宽泛，或者部分任务可以并行完成时，Lead Agent 将工作委派给**子 Agent**。子 Agent 是一个独立的 Agent 调用，接收特定任务、执行并返回结果。
+
+## 为什么子 Agent 很重要
+
+子 Agent 解决了长时序工作流中的两个关键问题：
+
+1. **上下文隔离**：子 Agent 只看到完成其任务所需的信息，而不是整个父对话。这保持了每个 Agent 的工作上下文专注且可控。
+2. **并行性**：多个子 Agent 可以并发运行，允许任务的独立部分（例如同时研究多个话题）并行处理。
+
+## 内置子 Agent
+
+DeerFlow 内置两个子 Agent：
+
+### general-purpose
+
+通用推理和执行 Agent，适合委派需要多步骤推理、网络搜索、文件操作和产出物生成的复杂子任务。
+
+- **默认超时**：900 秒（15 分钟）
+- **默认最大轮次**：160
+
+### bash
+
+专门用于在沙箱内执行命令行任务的子 Agent，适合脚本编写、数据处理、文件转换和环境设置任务。
+
+- **默认超时**：900 秒（15 分钟）
+- **默认最大轮次**：80
+- **可用性**：仅当沙箱的 `bash` 工具可用时才暴露（`allow_host_bash: true` 或配置了容器沙箱）
+
+## 委派流程
+
+Lead Agent 使用内置 `task` 工具将工作委派给子 Agent：
+
+```
+task(
+  agent="general-purpose",
+  task="研究 Acme Corp 的前 5 个竞争对手并总结其定价",
+  context="专注于 B2B SaaS 定价模型"
+)
+```
+
+运行时然后：
+
+1. 从注册表查找子 Agent 配置，应用任何 `config.yaml` 覆盖。
+2. 用子 Agent 自己的提示词和工具创建新的 Agent 调用。
+3. 将子 Agent 运行到完成（或直到超时/最大轮次）。
+4. 将子 Agent 的最终输出作为工具结果返回给 Lead Agent。
+
+## 配置
+
+子 Agent 超时和最大轮次通过 `config.yaml` 中的 `subagents:` 部分控制：
+
+```yaml
+subagents:
+  # 所有子 Agent 的默认超时（秒，默认：900 = 15 分钟）
+  timeout_seconds: 900
+
+  # 可选：覆盖所有子 Agent 的最大轮次
+  # max_turns: 120
+
+  # 可选：按 Agent 覆盖
+  agents:
+    general-purpose:
+      timeout_seconds: 1800 # 复杂任务 30 分钟
+      max_turns: 160
+    bash:
+      timeout_seconds: 300 # 快速命令 5 分钟
+      max_turns: 80
+```
+
+按 Agent 覆盖优先于全局 `timeout_seconds` 和 `max_turns` 设置。
+
+## 并发限制
+
+`SubagentLimitMiddleware` 控制 Lead Agent 在单次轮次中可以并行调用多少个子 Agent，通过每次请求的配置控制：
+
+- `subagent_enabled`：是否为此会话激活子 Agent 委派
+- `max_concurrent_subagents`：单次轮次中最大并行任务调用数（默认：3）
+
+如果 Agent 尝试调用超过限制的子 Agent，中间件会裁剪多余的调用。
+
+## ACP Agent（外部 Agent）
+
+除内置子 Agent 外，DeerFlow 还通过 **Agent Connect Protocol (ACP)** 支持委派给外部 Agent。ACP 允许 DeerFlow 调用作为独立进程运行的 Agent（包括用 ACP 适配器包装的第三方 CLI 工具）。
+
+在 `config.yaml` 中配置 ACP Agent：
+
+```yaml
+acp_agents:
+  claude_code:
+    command: npx
+    args: ["-y", "@zed-industries/claude-agent-acp"]
+    description: 用于实现、重构和调试的 Claude Code
+    model: null
+
+  codex:
+    command: npx
+    args: ["-y", "@zed-industries/codex-acp"]
+    description: 用于仓库任务和代码生成的 Codex CLI
+    model: null
+```
+
+Lead Agent 通过 `invoke_acp_agent` 内置工具调用 ACP Agent。
+
+<Callout type="tip">
+  ACP Agent 作为 DeerFlow 管理的子进程运行，通过 ACP 协议通信。标准 CLI
+  工具（如原始的 `claude` 或 `codex` 命令）默认不兼容
+  ACP——请使用上面列出的适配器包或兼容的 ACP 封装器。
+</Callout>
+
+<Cards num={2}>
+  <Cards.Card title="沙箱" href="/docs/harness/sandbox" />
+  <Cards.Card title="MCP 集成" href="/docs/harness/mcp" />
+</Cards>

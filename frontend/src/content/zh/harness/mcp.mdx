@@ -1,0 +1,111 @@
+---
+title: MCP 集成
+description: Model Context Protocol（MCP） 是连接语言模型与外部工具和数据源的开放标准。DeerFlow 的 MCP 集成允许你用任何实现了 MCP 协议的工具服务器扩展 Agent——无需修改 Harness 本身。
+---
+
+import { Callout, Cards, Steps } from "nextra/components";
+
+# MCP 集成
+
+<Callout type="info" emoji="🔌">
+  Model Context Protocol（MCP）让 DeerFlow
+  能够连接任何外部工具服务器。连接后，MCP 工具与内置工具一样对 Lead Agent 可用。
+</Callout>
+
+**Model Context Protocol（MCP）** 是连接语言模型与外部工具和数据源的开放标准。DeerFlow 的 MCP 集成允许你用任何实现了 MCP 协议的工具服务器扩展 Agent——无需修改 Harness 本身。
+
+## 配置
+
+MCP 服务器在 `extensions_config.json` 中配置，这个文件独立于 `config.yaml`。这种分离允许 MCP 和技能配置独立管理，并在运行时通过 Gateway API 更新。
+
+默认位置是项目根目录（与 `config.yaml` 同一目录）。
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"],
+      "enabled": true
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+      "enabled": true
+    },
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"],
+      "enabled": false
+    }
+  }
+}
+```
+
+每个服务器条目支持：
+
+- `command`：要运行的可执行文件（如 `npx`、`uvx`、`python`）
+- `args`：命令参数数组
+- `enabled`：服务器是否激活（可切换而无需删除条目）
+- `env`：可选地注入到服务器进程中的环境变量
+
+## 工具如何加载
+
+<Steps>
+
+### 启动初始化
+
+DeerFlow 服务器启动时调用 `initialize_mcp_tools()`。这连接到所有启用的 MCP 服务器，检索其工具 schema，并缓存结果。
+
+### 缓存失效
+
+MCP 工具缓存追踪 `extensions_config.json` 的修改时间（`mtime`）。当文件更改时——例如通过 Gateway API 启用或禁用服务器时——缓存被标记为过时，下次请求时重新加载工具。
+
+这意味着 MCP 服务器更改无需重启 DeerFlow 服务器即可生效。
+
+### 工具可用性
+
+加载后，MCP 工具与内置和社区工具一起出现在 Lead Agent 的工具列表中。Agent 使用与其他工具相同的机制选择和调用它们。
+
+</Steps>
+
+## 工具搜索集成
+
+当许多 MCP 服务器暴露大量工具时，预先将所有工具加载到 Agent 上下文中会增加 token 使用量并降低工具选择准确性。
+
+启用**工具搜索**改为按需加载 MCP 工具：
+
+```yaml
+# config.yaml
+tool_search:
+  enabled: true
+```
+
+启用工具搜索后，MCP 工具按名称列在系统提示中，但不包含完整的工具 schema。Agent 使用 `tool_search` 内置工具发现它们，只将需要的工具加载到上下文中。
+
+## OAuth 支持
+
+某些 MCP 服务器需要 OAuth 认证。DeerFlow 的 `mcp/oauth.py` 处理声明了 OAuth 需求的服务器的 OAuth 流程。
+
+当连接到受 OAuth 保护的 MCP 服务器时，DeerFlow 会：
+
+1. 从服务器能力头中检测 OAuth 需求
+2. 使用 `get_initial_oauth_headers()` 构建适当的授权头
+3. 通过 `build_oauth_tool_interceptor()` 用 OAuth 拦截器包装工具调用
+
+OAuth 流程对 Lead Agent 是透明的——它只是调用工具，DeerFlow 处理认证。
+
+## 管理 MCP 服务器
+
+MCP 服务器可以通过多种方式管理：
+
+- **通过 DeerFlow 应用界面**：扩展面板显示已连接的 MCP 服务器，允许你启用/禁用它们。
+- **通过 Gateway API**：`POST /api/extensions/mcp/{name}/enable` 和 `/disable`。
+- **直接编辑 `extensions_config.json`**：适用于脚本化或程序化配置。
+
+由于基于文件 mtime 的缓存失效机制，更改会自动被检测到。
+
+<Cards num={2}>
+  <Cards.Card title="工具" href="/docs/harness/tools" />
+  <Cards.Card title="配置" href="/docs/harness/configuration" />
+</Cards>

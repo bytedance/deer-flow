@@ -2,11 +2,12 @@
 
 from .manager import ConflictError, RunManager, RunRecord, UnsupportedStrategyError
 from .schemas import DisconnectMode, RunStatus
-from .worker import run_agent
+from .worker import RunContext, run_agent
 
 __all__ = [
     "ConflictError",
     "DisconnectMode",
+    "RunContext",
     "RunManager",
     "RunRecord",
     "RunStatus",
