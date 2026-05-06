@@ -22,16 +22,20 @@ test.describe("Chat: thread API request ordering on first send", () => {
       phase: "sent" | "done";
       url: string;
       method: string;
-      ts: number;
+      seq: number;
     };
     const events: EventLog[] = [];
+    // Monotonic sequence number — Date.now() is millisecond-resolution and
+    // would let two requests share a timestamp, which would defeat the
+    // strict-ordering assertions below.
+    let nextSeq = 0;
 
     page.on("request", (req) => {
       events.push({
         phase: "sent",
         url: req.url(),
         method: req.method(),
-        ts: Date.now(),
+        seq: nextSeq++,
       });
     });
     page.on("requestfinished", (req) => {
@@ -39,7 +43,7 @@ test.describe("Chat: thread API request ordering on first send", () => {
         phase: "done",
         url: req.url(),
         method: req.method(),
-        ts: Date.now(),
+        seq: nextSeq++,
       });
     });
 
@@ -90,13 +94,13 @@ test.describe("Chat: thread API request ordering on first send", () => {
 
     const earlyHistory = events.filter(
       (e) =>
-        e.phase === "sent" && isHistory(e.url) && e.ts < runsStreamSent!.ts,
+        e.phase === "sent" && isHistory(e.url) && e.seq < runsStreamSent!.seq,
     );
     const earlyRunsList = events.filter(
       (e) =>
         e.phase === "sent" &&
         isRunsList(e.url, e.method) &&
-        e.ts < runsStreamSent!.ts,
+        e.seq < runsStreamSent!.seq,
     );
 
     expect(
