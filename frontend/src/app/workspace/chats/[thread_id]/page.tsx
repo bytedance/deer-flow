@@ -58,10 +58,10 @@ export default function ChatPage() {
     threadId: isNewThread ? undefined : threadId,
     context: settings.context,
     isMock,
-    onSend: (_threadId) => {
-      setThreadId(_threadId);
-      setIsNewThread(false);
-    },
+    // No onSend handler: the LangGraph SDK eagerly fetches /history once it
+    // sees a thread id, so we must not forward the client-generated id until
+    // onStart (fired from onCreated, when the backend has the thread). See
+    // https://github.com/bytedance/deer-flow/issues/2746.
     onStart: (createdThreadId) => {
       setThreadId(createdThreadId);
       setIsNewThread(false);
