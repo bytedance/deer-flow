@@ -15,6 +15,17 @@ export class AgentNameCheckError extends Error {
   }
 }
 
+export class AgentsApiDisabledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentsApiDisabledError";
+  }
+}
+
+function isAgentsApiDisabledDetail(detail: string | undefined): boolean {
+  return typeof detail === "string" && detail.includes("agents_api.enabled");
+}
+
 export async function listAgents(): Promise<Agent[]> {
   const res = await fetch(`${getBackendBaseURL()}/api/agents`);
   if (!res.ok) throw new Error(`Failed to load agents: ${res.statusText}`);
@@ -36,6 +47,9 @@ export async function createAgent(request: CreateAgentRequest): Promise<Agent> {
   });
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    if (isAgentsApiDisabledDetail(err.detail)) {
+      throw new AgentsApiDisabledError(err.detail!);
+    }
     throw new Error(err.detail ?? `Failed to create agent: ${res.statusText}`);
   }
   return res.json() as Promise<Agent>;
@@ -81,6 +95,9 @@ export async function checkAgentName(
 
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    if (isAgentsApiDisabledDetail(err.detail)) {
+      throw new AgentsApiDisabledError(err.detail!);
+    }
     if (BACKEND_UNAVAILABLE_STATUSES.has(res.status)) {
       throw new AgentNameCheckError(
         "Could not reach the DeerFlow backend.",
