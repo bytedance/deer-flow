@@ -33,6 +33,10 @@ _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
 _DEFAULT_TOOL_FREQ_WARN = 30  # warn after 30 calls to the same tool type
 _DEFAULT_TOOL_FREQ_HARD_LIMIT = 50  # force-stop after 50 calls to the same tool type
+_DEFAULT_CYCLE_MIN_LEN = 2
+_DEFAULT_CYCLE_MAX_LEN = 4
+_DEFAULT_CYCLE_REPEATS_WARN = 3  # warn when a cycle repeats 3 times
+_DEFAULT_CYCLE_REPEATS_HARD = 4  # hard-stop at 4 repeats
 
 
 def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
@@ -154,6 +158,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             Default: 30.
         tool_freq_hard_limit: Number of calls to the same tool type before
             forcing a stop. Default: 50.
+        cycle_min_len: Minimum tool-name cycle length to detect. Default: 2.
+        cycle_max_len: Maximum tool-name cycle length to detect. Default: 4.
+        cycle_repeats_warn: Number of repeated cycles before injecting a
+            warning. Default: 3.
+        cycle_repeats_hard: Number of repeated cycles before forcing a stop.
+            Default: 4.
     """
 
     def __init__(
@@ -164,6 +174,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         max_tracked_threads: int = _DEFAULT_MAX_TRACKED_THREADS,
         tool_freq_warn: int = _DEFAULT_TOOL_FREQ_WARN,
         tool_freq_hard_limit: int = _DEFAULT_TOOL_FREQ_HARD_LIMIT,
+        cycle_min_len: int = _DEFAULT_CYCLE_MIN_LEN,
+        cycle_max_len: int = _DEFAULT_CYCLE_MAX_LEN,
+        cycle_repeats_warn: int = _DEFAULT_CYCLE_REPEATS_WARN,
+        cycle_repeats_hard: int = _DEFAULT_CYCLE_REPEATS_HARD,
     ):
         super().__init__()
         self.warn_threshold = warn_threshold
@@ -172,13 +186,19 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.max_tracked_threads = max_tracked_threads
         self.tool_freq_warn = tool_freq_warn
         self.tool_freq_hard_limit = tool_freq_hard_limit
+        self.cycle_min_len = cycle_min_len
+        self.cycle_max_len = cycle_max_len
+        self.cycle_repeats_warn = cycle_repeats_warn
+        self.cycle_repeats_hard = cycle_repeats_hard
         self._lock = threading.Lock()
         # Per-thread tracking using OrderedDict for LRU eviction
         self._history: OrderedDict[str, list[str]] = OrderedDict()
+        self._name_history: OrderedDict[str, list[str]] = OrderedDict()
         self._warned: dict[str, set[str]] = defaultdict(set)
         # Per-thread, per-tool-type cumulative call counts
         self._tool_freq: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._tool_freq_warned: dict[str, set[str]] = defaultdict(set)
+        self._cycle_warned: dict[str, set[str]] = defaultdict(set)
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""
@@ -194,19 +214,49 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         """
         while len(self._history) > self.max_tracked_threads:
             evicted_id, _ = self._history.popitem(last=False)
+            self._name_history.pop(evicted_id, None)
             self._warned.pop(evicted_id, None)
             self._tool_freq.pop(evicted_id, None)
             self._tool_freq_warned.pop(evicted_id, None)
+            self._cycle_warned.pop(evicted_id, None)
             logger.debug("Evicted loop tracking for thread %s (LRU)", evicted_id)
+
+    @staticmethod
+    def _detect_cycle(names: list[str], min_len: int, max_len: int, min_repeats: int) -> str | None:
+        """Return the tail cycle pattern if tool names repeat in a short alternating cycle."""
+        if not names:
+            return None
+
+        for cycle_len in range(min_len, max_len + 1):
+            need = cycle_len * min_repeats
+            if len(names) < need:
+                continue
+
+            tail = names[-need:]
+            cycle = tail[:cycle_len]
+            if len(set(cycle)) < 2:
+                continue
+
+            ok = True
+            for i in range(0, need, cycle_len):
+                if tail[i : i + cycle_len] != cycle:
+                    ok = False
+                    break
+            if ok:
+                return "→".join(cycle)
+
+        return None
 
     def _track_and_check(self, state: AgentState, runtime: Runtime) -> tuple[str | None, bool]:
         """Track tool calls and check for loops.
 
-        Two detection layers:
+        Three detection layers:
           1. **Hash-based** (existing): catches identical tool call sets.
-          2. **Frequency-based** (new): catches the same *tool type* being
+          2. **Frequency-based**: catches the same *tool type* being
              called many times with varying arguments (e.g. ``read_file``
              on 40 different files).
+          3. **Cycle-based**: catches alternating short tool-name patterns
+             whose arguments differ on each call.
 
         Returns:
             (warning_message_or_none, should_hard_stop)
@@ -230,8 +280,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # Touch / create entry (move to end for LRU)
             if thread_id in self._history:
                 self._history.move_to_end(thread_id)
+                self._name_history.move_to_end(thread_id)
             else:
                 self._history[thread_id] = []
+                self._name_history[thread_id] = []
                 self._evict_if_needed()
 
             history = self._history[thread_id]
@@ -303,6 +355,53 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                             },
                         )
                         return _TOOL_FREQ_WARNING_MSG.format(tool_name=name, count=tc_count), False
+
+            # --- Layer 3: short alternating tool-name cycles ---
+            name_history = self._name_history[thread_id]
+            name_history.extend(name for name in tool_names if name)
+            max_cycle_window = max(
+                self.window_size * 4,
+                self.cycle_max_len * self.cycle_repeats_hard * 2,
+            )
+            if len(name_history) > max_cycle_window:
+                name_history[:] = name_history[-max_cycle_window:]
+
+            cycle = self._detect_cycle(
+                name_history,
+                self.cycle_min_len,
+                self.cycle_max_len,
+                self.cycle_repeats_hard,
+            )
+            if cycle:
+                logger.error(
+                    "Tool-name cycle hard limit reached — forcing stop",
+                    extra={
+                        "thread_id": thread_id,
+                        "cycle": cycle,
+                        "tools": tool_names,
+                    },
+                )
+                return _HARD_STOP_MSG, True
+
+            cycle = self._detect_cycle(
+                name_history,
+                self.cycle_min_len,
+                self.cycle_max_len,
+                self.cycle_repeats_warn,
+            )
+            if cycle:
+                warned = self._cycle_warned[thread_id]
+                if cycle not in warned:
+                    warned.add(cycle)
+                    logger.warning(
+                        "Tool-name cycle detected — injecting warning",
+                        extra={
+                            "thread_id": thread_id,
+                            "cycle": cycle,
+                            "tools": tool_names,
+                        },
+                    )
+                    return _WARNING_MSG, False
 
         return None, False
 
@@ -395,11 +494,15 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             if thread_id:
                 self._history.pop(thread_id, None)
+                self._name_history.pop(thread_id, None)
                 self._warned.pop(thread_id, None)
                 self._tool_freq.pop(thread_id, None)
                 self._tool_freq_warned.pop(thread_id, None)
+                self._cycle_warned.pop(thread_id, None)
             else:
                 self._history.clear()
+                self._name_history.clear()
                 self._warned.clear()
                 self._tool_freq.clear()
                 self._tool_freq_warned.clear()
+                self._cycle_warned.clear()
