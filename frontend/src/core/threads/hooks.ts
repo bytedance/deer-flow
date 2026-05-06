@@ -1,4 +1,4 @@
-import type { AIMessage, Message } from "@langchain/langgraph-sdk";
+import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -629,6 +629,21 @@ export function useThreads(
       }
 
       return response.json() as Promise<AgentThread[]>;
+    },
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useThreadRuns(threadId?: string) {
+  const apiClient = getAPIClient();
+  return useQuery<Run[]>({
+    queryKey: ["thread", threadId],
+    queryFn: async () => {
+      if (!threadId) {
+        return [];
+      }
+      const response = await apiClient.runs.list(threadId);
+      return response;
     },
     refetchOnWindowFocus: false,
   });

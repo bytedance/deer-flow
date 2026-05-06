@@ -14,6 +14,7 @@ from deerflow.runtime.runs.store.base import RunStore
 class MemoryRunStore(RunStore):
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
+        self._seq = 0
 
     async def put(
         self,
@@ -30,6 +31,7 @@ class MemoryRunStore(RunStore):
         created_at=None,
     ):
         now = datetime.now(UTC).isoformat()
+        self._seq += 1
         self._runs[run_id] = {
             "run_id": run_id,
             "thread_id": thread_id,
@@ -42,6 +44,7 @@ class MemoryRunStore(RunStore):
             "error": error,
             "created_at": created_at or now,
             "updated_at": now,
+            "_seq": self._seq,
         }
 
     async def get(self, run_id):
@@ -49,7 +52,7 @@ class MemoryRunStore(RunStore):
 
     async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
         results = [r for r in self._runs.values() if r["thread_id"] == thread_id and (user_id is None or r.get("user_id") == user_id)]
-        results.sort(key=lambda r: r["created_at"], reverse=True)
+        results.sort(key=lambda r: (r["created_at"], r.get("_seq", 0)), reverse=True)
         return results[:limit]
 
     async def update_status(self, run_id, status, *, error=None):

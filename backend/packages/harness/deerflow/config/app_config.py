@@ -31,6 +31,7 @@ from deerflow.config.title_config import TitleConfig, load_title_config_from_dic
 from deerflow.config.token_usage_config import TokenUsageConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.config.runtime_paths import existing_project_file
 
 load_dotenv()
 
@@ -163,57 +164,6 @@ class AppConfig(BaseModel):
         config_data = cls.resolve_env_variables(config_data)
         cls._apply_database_defaults(config_data)
 
-<<<<<<< HEAD
-        # Load title config if present
-        if "title" in config_data:
-            load_title_config_from_dict(config_data["title"])
-
-        # Load summarization config if present
-        if "summarization" in config_data:
-            load_summarization_config_from_dict(config_data["summarization"])
-
-        # Load memory config if present
-        if "memory" in config_data:
-            load_memory_config_from_dict(config_data["memory"])
-
-        # Load RAG config if present
-        if "rag" in config_data:
-            load_rag_config_from_dict(config_data["rag"])
-
-        # Always refresh agents API config so removed config sections reset
-        # singleton-backed state to its default/disabled values on reload.
-        load_agents_api_config_from_dict(config_data.get("agents_api") or {})
-
-        # Load subagents config if present
-        if "subagents" in config_data:
-            load_subagents_config_from_dict(config_data["subagents"])
-
-        # Load tool_search config if present
-        if "tool_search" in config_data:
-            load_tool_search_config_from_dict(config_data["tool_search"])
-
-        # Load guardrails config if present
-        if "guardrails" in config_data:
-            load_guardrails_config_from_dict(config_data["guardrails"])
-
-        # Load auth config if present
-        if "auth" in config_data:
-            load_auth_config_from_dict(config_data["auth"])
-
-        # Load rate_limit config if present
-        if "rate_limit" in config_data:
-            load_rate_limit_config_from_dict(config_data["rate_limit"])
-
-        # Load content_safety config if present
-        if "content_safety" in config_data:
-            load_content_safety_config_from_dict(config_data["content_safety"])
-
-        # Load cost config if present
-        if "cost" in config_data:
-            load_cost_config_from_dict(config_data["cost"])
-
-=======
->>>>>>> 4ead2c6b197bcfa863b8381b3e30484060e41e0c
         # Load circuit_breaker config if present
         if "circuit_breaker" in config_data:
             config_data["circuit_breaker"] = config_data["circuit_breaker"]

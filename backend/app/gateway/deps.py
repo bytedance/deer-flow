@@ -47,7 +47,6 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         async with langgraph_runtime(app):
             yield
     """
-    from deerflow.agents.checkpointer.async_provider import make_checkpointer
     from deerflow.agents.memory.storage import set_gateway_store, set_memory_storage
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.runtime import make_store, make_stream_bridge

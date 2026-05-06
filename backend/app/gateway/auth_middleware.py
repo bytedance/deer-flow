@@ -76,6 +76,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if _is_public(request.url.path):
             return await call_next(request)
 
+        # When auth is disabled, skip authentication entirely.
+        # The create_auth_middleware (registered before this one) handles
+        # tenant extraction from the X-DeerFlow-Tenant header.
+        from deerflow.config.auth_config import get_auth_config
+
+        if not get_auth_config().enabled:
+            return await call_next(request)
+
         internal_user = None
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
             internal_user = get_internal_user()

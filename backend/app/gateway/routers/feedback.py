@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.auth.dependencies import require_admin
+from app.gateway.authz import require_permission
+from app.gateway.deps import get_current_user, get_feedback_repo, get_run_store
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.feedback.storage import FeedbackEntry, FeedbackStorage
 
-router = APIRouter(prefix="/api/feedback", tags=["feedback"])
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Simple feedback (legacy / non-run-scoped)
+# ---------------------------------------------------------------------------
+
+simple_feedback_router = APIRouter(prefix="/api/feedback", tags=["feedback"])
 
 
 class SubmitFeedbackRequest(BaseModel):
@@ -30,7 +40,7 @@ class FeedbackSummaryResponse(BaseModel):
     top_categories: list[dict]
 
 
-@router.post("")
+@simple_feedback_router.post("")
 async def submit_feedback(req: SubmitFeedbackRequest, request: Request) -> dict:
     """Submit user feedback for an AI response."""
     tenant_id = get_current_tenant_id()
@@ -49,7 +59,7 @@ async def submit_feedback(req: SubmitFeedbackRequest, request: Request) -> dict:
     return {"success": True, "id": entry.id}
 
 
-@router.get("/summary", response_model=FeedbackSummaryResponse)
+@simple_feedback_router.get("/summary", response_model=FeedbackSummaryResponse)
 async def get_feedback_summary(
     start_date: str | None = Query(default=None, description="Start date (ISO format)"),
     end_date: str | None = Query(default=None, description="End date (ISO format)"),
@@ -62,30 +72,12 @@ async def get_feedback_summary(
     )
     return FeedbackSummaryResponse(**summary)
 
-"""Feedback endpoints — create, list, stats, delete.
 
-Allows users to submit thumbs-up/down feedback on runs,
-optionally scoped to a specific message.
-"""
+# ---------------------------------------------------------------------------
+# Run-scoped feedback endpoints
+# ---------------------------------------------------------------------------
 
-from __future__ import annotations
-
-import logging
-from typing import Any
-
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
-
-from app.gateway.authz import require_permission
-from app.gateway.deps import get_current_user, get_feedback_repo, get_run_store
-
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["feedback"])
-
-
-# ---------------------------------------------------------------------------
-# Request / response models
-# ---------------------------------------------------------------------------
 
 
 class FeedbackCreateRequest(BaseModel):
@@ -115,11 +107,6 @@ class FeedbackStatsResponse(BaseModel):
     total: int = 0
     positive: int = 0
     negative: int = 0
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
 
 
 @router.put("/{thread_id}/runs/{run_id}/feedback", response_model=FeedbackResponse)
@@ -187,7 +174,6 @@ async def create_feedback(
 
     user_id = await get_current_user(request)
 
-    # Validate run exists and belongs to thread
     run_store = get_run_store(request)
     run = await run_store.get(run_id)
     if run is None:
@@ -240,7 +226,6 @@ async def delete_feedback(
 ) -> dict[str, bool]:
     """Delete a feedback record."""
     feedback_repo = get_feedback_repo(request)
-    # Verify feedback belongs to the specified thread/run before deleting
     existing = await feedback_repo.get(feedback_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Feedback {feedback_id} not found")

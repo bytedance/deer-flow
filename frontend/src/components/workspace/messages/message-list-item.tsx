@@ -48,7 +48,6 @@ import { humanMessagePlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CopyButton } from "../copy-button";
-import { FeedbackButtons } from "../feedback";
 
 import { MarkdownContent } from "./markdown-content";
 
@@ -165,8 +164,8 @@ export function MessageListItem({
                 ""
               }
             />
-            {!isHuman && (
-              <FeedbackButtons threadId={threadId} messageId={message.id} />
+            {!isHuman && runId && (
+              <FeedbackButtons threadId={threadId} runId={runId} initialFeedback={feedback ?? null} />
             )}
           </div>
         </MessageToolbar>

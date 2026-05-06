@@ -3,6 +3,7 @@ import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
+from deerflow.config.runtime_paths import runtime_home
 from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id
 
 # Virtual path prefix seen by agents inside the sandbox
@@ -158,18 +159,8 @@ class Paths:
 
     @property
     def agents_dir(self) -> Path:
-<<<<<<< HEAD
         """Root directory for all custom agents: ``{tenant_base_dir}/agents/``."""
         return self.tenant_base_dir / "agents"
-=======
-        """Legacy root for shared (pre user-isolation) custom agents: `{base_dir}/agents/`.
-
-        New code should use :meth:`user_agents_dir` instead. This property remains
-        only as a read-side fallback for installations that have not yet run the
-        ``migrate_user_isolation.py`` script.
-        """
-        return self.base_dir / "agents"
->>>>>>> 4ead2c6b197bcfa863b8381b3e30484060e41e0c
 
     def agent_dir(self, name: str) -> Path:
         """Legacy per-agent directory (no user isolation): `{base_dir}/agents/{name}/`."""

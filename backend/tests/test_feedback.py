@@ -140,10 +140,10 @@ class TestFeedbackStorage:
 class TestFeedbackRouter:
     @pytest.fixture
     def client(self):
-        from app.gateway.routers.feedback import router
+        from app.gateway.routers.feedback import simple_feedback_router
 
         app = FastAPI()
-        app.include_router(router)
+        app.include_router(simple_feedback_router)
 
         @app.get("/api/admin/tenants")
         def _admin():

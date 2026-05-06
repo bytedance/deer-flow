@@ -38,6 +38,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
   const client = new LangGraphClient({
     apiUrl: getLangGraphBaseURL(isMock),
     defaultHeaders: getTenantHeaders(),
+    onRequest: injectCsrfHeader,
   });
 
   const originalRunStream = client.runs.stream.bind(client.runs);
