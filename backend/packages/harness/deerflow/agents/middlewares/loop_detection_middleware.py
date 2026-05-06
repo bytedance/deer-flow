@@ -131,9 +131,17 @@ _TOOL_FREQ_WARNING_MSG = (
     "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
 )
 
-_HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
+_HARD_STOP_MSG = (
+    "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far. "
+    "If this is an intentional batch workflow, use runtime context loop_detection_disabled, configure batch_friendly_tools, "
+    "or set _loop_detection_skip=true in a tool call's args."
+)
 
-_TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
+_TOOL_FREQ_HARD_STOP_MSG = (
+    "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. "
+    "Producing final answer with results collected so far. If this is an intentional batch workflow, use runtime context "
+    "loop_detection_disabled, configure batch_friendly_tools, or set _loop_detection_skip=true in a tool call's args."
+)
 
 
 class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
@@ -154,6 +162,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             Default: 30.
         tool_freq_hard_limit: Number of calls to the same tool type before
             forcing a stop. Default: 50.
+        batch_friendly_tools: Tool names to exclude from both hash-based and
+            frequency-based loop detection. Default: None.
     """
 
     def __init__(
@@ -164,6 +174,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         max_tracked_threads: int = _DEFAULT_MAX_TRACKED_THREADS,
         tool_freq_warn: int = _DEFAULT_TOOL_FREQ_WARN,
         tool_freq_hard_limit: int = _DEFAULT_TOOL_FREQ_HARD_LIMIT,
+        batch_friendly_tools: set[str] | frozenset[str] | None = None,
     ):
         super().__init__()
         self.warn_threshold = warn_threshold
@@ -172,6 +183,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.max_tracked_threads = max_tracked_threads
         self.tool_freq_warn = tool_freq_warn
         self.tool_freq_hard_limit = tool_freq_hard_limit
+        self.batch_friendly_tools = frozenset(batch_friendly_tools or ())
         self._lock = threading.Lock()
         # Per-thread tracking using OrderedDict for LRU eviction
         self._history: OrderedDict[str, list[str]] = OrderedDict()
@@ -199,6 +211,22 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._tool_freq_warned.pop(evicted_id, None)
             logger.debug("Evicted loop tracking for thread %s (LRU)", evicted_id)
 
+    def _filter_tracked_calls(self, tool_calls: list[dict]) -> list[dict]:
+        """Return calls that should participate in loop tracking."""
+        tracked_calls = []
+        for tool_call in tool_calls:
+            name = tool_call.get("name", "")
+            if name in self.batch_friendly_tools:
+                continue
+
+            args, _ = _normalize_tool_call_args(tool_call.get("args", {}))
+            if args.get("_loop_detection_skip") is True:
+                continue
+
+            tracked_calls.append(tool_call)
+
+        return tracked_calls
+
     def _track_and_check(self, state: AgentState, runtime: Runtime) -> tuple[str | None, bool]:
         """Track tool calls and check for loops.
 
@@ -211,6 +239,9 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         Returns:
             (warning_message_or_none, should_hard_stop)
         """
+        if (getattr(runtime, "context", None) or {}).get("loop_detection_disabled"):
+            return None, False
+
         messages = state.get("messages", [])
         if not messages:
             return None, False
@@ -223,8 +254,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         if not tool_calls:
             return None, False
 
+        tracked_calls = self._filter_tracked_calls(tool_calls)
+        if not tracked_calls:
+            return None, False
+
         thread_id = self._get_thread_id(runtime)
-        call_hash = _hash_tool_calls(tool_calls)
+        call_hash = _hash_tool_calls(tracked_calls)
 
         with self._lock:
             # Touch / create entry (move to end for LRU)
@@ -240,7 +275,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 history[:] = history[-self.window_size :]
 
             count = history.count(call_hash)
-            tool_names = [tc.get("name", "?") for tc in tool_calls]
+            tool_names = [tc.get("name", "?") for tc in tracked_calls]
 
             # --- Layer 1: hash-based (identical call sets) ---
             if count >= self.hard_limit:
@@ -272,7 +307,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
             # --- Layer 2: per-tool-type frequency ---
             freq = self._tool_freq[thread_id]
-            for tc in tool_calls:
+            for tc in tracked_calls:
                 name = tc.get("name", "")
                 if not name:
                     continue
