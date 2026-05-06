@@ -10,7 +10,7 @@ class NamedTool(Protocol):
     name: str
 
 
-def allowed_tool_names_for_skills(skills: list[Skill]) -> list[str] | None:
+def allowed_tool_names_for_skills(skills: list[Skill]) -> set[str] | None:
     """Return the union of explicit skill allowed-tools declarations.
 
     None means legacy allow-all behavior. It is returned only when no loaded
@@ -33,7 +33,7 @@ def allowed_tool_names_for_skills(skills: list[Skill]) -> list[str] | None:
 
     if not has_explicit_declaration:
         return None
-    return sorted(allowed)
+    return allowed
 
 
 def filter_tools_by_skill_allowed_tools[ToolT: NamedTool](tools: list[ToolT], skills: list[Skill]) -> list[ToolT]:
@@ -41,5 +41,4 @@ def filter_tools_by_skill_allowed_tools[ToolT: NamedTool](tools: list[ToolT], sk
     if allowed is None:
         return tools
 
-    allowed_set = set(allowed)
-    return [tool for tool in tools if tool.name in allowed_set]
+    return [tool for tool in tools if tool.name in allowed]

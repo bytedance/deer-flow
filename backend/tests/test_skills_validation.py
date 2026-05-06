@@ -55,6 +55,8 @@ class TestValidateSkillFrontmatter:
         valid, msg, name = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "allowed-tools" in msg
+        assert str(tmp_path) not in msg
+        assert "SKILL.md" in msg
         assert name is None
 
     def test_rejects_allowed_tools_non_string_entry(self, tmp_path):
@@ -65,6 +67,8 @@ class TestValidateSkillFrontmatter:
         valid, msg, name = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "allowed-tools" in msg
+        assert str(tmp_path) not in msg
+        assert "SKILL.md" in msg
         assert name is None
 
     def test_missing_skill_md(self, tmp_path):

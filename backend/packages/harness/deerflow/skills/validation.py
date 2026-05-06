@@ -88,6 +88,6 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     try:
         parse_allowed_tools(frontmatter.get("allowed-tools"), skill_md)
     except ValueError as e:
-        return False, str(e), None
+        return False, str(e).replace(str(skill_md), SKILL_MD_FILE), None
 
     return True, "Skill is valid!", name
