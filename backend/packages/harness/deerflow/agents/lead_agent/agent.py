@@ -320,9 +320,9 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
 
 def _load_enabled_skills_for_tool_policy(available_skills: set[str] | None, *, app_config: AppConfig) -> list[Skill]:
     try:
-        from deerflow.agents.lead_agent.prompt import _get_enabled_skills_for_config
+        from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-        skills = _get_enabled_skills_for_config(app_config)
+        skills = get_enabled_skills_for_config(app_config)
     except Exception:
         logger.exception("Failed to load skills for allowed-tools policy")
         raise
