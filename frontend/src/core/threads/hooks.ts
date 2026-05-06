@@ -301,6 +301,10 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
+    prevMsgCountRef.current = thread.messages.length;
+    prevHumanMsgCountRef.current = thread.messages.filter(
+      (m) => m.type === "human",
+    ).length;
   }, [threadId]);
 
   // Clear optimistic when server messages arrive.
