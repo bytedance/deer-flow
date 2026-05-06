@@ -54,29 +54,21 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
     from deerflow.runtime.events.store import make_run_event_store
 
     async with AsyncExitStack() as stack:
-        app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge())
-        app.state.checkpointer = await stack.enter_async_context(make_checkpointer())
-        app.state.store = await stack.enter_async_context(make_store())
-        app.state.run_manager = RunManager()
-
-        # Wire the Store into memory storage so memory data shares the same
-        # persistence backend and tenant isolation as threads.
-        set_gateway_store(app.state.store)
-        yield
-        set_gateway_store(None)
-        set_memory_storage(None)
         config = getattr(app.state, "config", None)
         if config is None:
             raise RuntimeError("langgraph_runtime() requires app.state.config to be initialized")
 
-        app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
-
-        # Initialize persistence engine BEFORE checkpointer so that
-        # auto-create-database logic runs first (postgres backend).
+        # Initialize persistence engine BEFORE creating any singletons that
+        # depend on it (checkpointer, store, repositories, auth providers).
         await init_engine_from_config(config.database)
 
+        app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
+
+        # Wire the Store into memory storage so memory data shares the same
+        # persistence backend and tenant isolation as threads.
+        set_gateway_store(app.state.store)
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
@@ -106,6 +98,8 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
+            set_gateway_store(None)
+            set_memory_storage(None)
             await close_engine()
 
 

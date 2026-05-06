@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.auth_config import AuthConfig, load_auth_config_from_dict
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.content_safety_config import ContentSafetyConfig, load_content_safety_config_from_dict
 from deerflow.config.cost_config import CostConfig, load_cost_config_from_dict
@@ -105,6 +106,7 @@ class AppConfig(BaseModel):
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
     auth: AuthConfig = Field(default_factory=AuthConfig, description="API authentication configuration")
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig, description="Database backend configuration")
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig, description="API rate limiting configuration")
     content_safety: ContentSafetyConfig = Field(default_factory=ContentSafetyConfig, description="Content safety moderation configuration")
     cost: CostConfig = Field(default_factory=CostConfig, description="Cost management and budget control configuration")

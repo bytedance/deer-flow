@@ -26,6 +26,11 @@ _AUTH_WHITELIST = {
     "/openapi.json",
     "/api/auth/login",
     "/api/auth/refresh",
+    "/api/v1/auth/login/local",
+    "/api/v1/auth/register",
+    "/api/v1/auth/logout",
+    "/api/v1/auth/setup-status",
+    "/api/v1/auth/initialize",
 }
 
 
@@ -107,12 +112,20 @@ def create_auth_middleware():
             finally:
                 reset_tenant_id(token)
 
-        # Auth enabled: require Bearer token
+        # Auth enabled: resolve token from Authorization header or access_token cookie.
+        # Cookie-based auth is the primary frontend mechanism (HttpOnly cookie set at login).
+        # Bearer token auth is for API clients (SDK, IM channels, CI/CD).
         auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return _json_error(401, "Missing or invalid Authorization header")
+        cookie_token = request.cookies.get("access_token")
+        token_value: str | None = None
 
-        token_value = auth_header[7:]
+        if auth_header.startswith("Bearer "):
+            token_value = auth_header[7:]
+        elif cookie_token:
+            token_value = cookie_token
+
+        if not token_value:
+            return _json_error(401, "Missing or invalid Authorization header")
 
         # Try API Key first (df- prefix)
         if token_value.startswith("df-"):
