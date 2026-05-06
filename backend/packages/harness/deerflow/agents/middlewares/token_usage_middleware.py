@@ -141,6 +141,18 @@ class TokenUsageMiddleware(AgentMiddleware):
 
         if not self._check_llm_rate_limit(tenant_id, total_tokens):
             logger.warning("LLM rate limit triggered for tenant %s", tenant_id)
+            try:
+                from deerflow.events.bus import get_event_bus
+                from deerflow.events.models import Event, EventType
+
+                get_event_bus().publish(Event(
+                    type=EventType.TOKEN_THRESHOLD_EXCEEDED,
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
+                    data={"total_tokens": total_tokens, "input_tokens": input_tokens, "output_tokens": output_tokens},
+                ))
+            except Exception:
+                logger.debug("Event bus not available for token threshold event")
 
         if self.storage is not None and self.calculator is not None:
             try:

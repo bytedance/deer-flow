@@ -17,6 +17,7 @@ from app.gateway.routers import (
     auth_router,
     channels,
     cost,
+    feedback,
     mcp,
     memory,
     models,
@@ -247,6 +248,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Admin API is mounted at /api/admin
     app.include_router(admin.router)
+
+    # Feedback API is mounted at /api/feedback
+    app.include_router(feedback.router)
 
     # Tenant status API is mounted at /api/tenant
     app.include_router(tenant_status.router)

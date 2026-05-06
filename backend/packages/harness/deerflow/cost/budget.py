@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from deerflow.config.cost_config import BudgetConfigModel
 from deerflow.cost.storage import UsageStorage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -49,6 +52,24 @@ class BudgetChecker:
         threshold = self.config.alert_threshold_pct
         is_exceeded = daily_cost >= daily_limit or monthly_cost >= monthly_limit
         alert_triggered = daily_pct >= threshold * 100 or monthly_pct >= threshold * 100
+
+        if is_exceeded:
+            try:
+                from deerflow.events.bus import get_event_bus
+                from deerflow.events.models import Event, EventType
+
+                get_event_bus().publish(Event(
+                    type=EventType.BUDGET_EXCEEDED,
+                    tenant_id=tenant_id,
+                    data={
+                        "daily_cost": round(daily_cost, 4),
+                        "daily_limit": daily_limit,
+                        "monthly_cost": round(monthly_cost, 4),
+                        "monthly_limit": monthly_limit,
+                    },
+                ))
+            except Exception:
+                logger.debug("Event bus not available for budget event")
 
         return BudgetStatus(
             daily_cost=round(daily_cost, 4),
