@@ -11,6 +11,7 @@ def _make_skill(name: str) -> Skill:
         name=name,
         description=f"Description for {name}",
         license="MIT",
+        allowed_tools=None,
         skill_dir=Path(f"/tmp/{name}"),
         skill_file=Path(f"/tmp/{name}/SKILL.md"),
         relative_path=Path(name),

@@ -422,6 +422,59 @@ def test_task_tool_intersects_parent_and_subagent_skill_allowlists(monkeypatch):
     assert captured["config"].skills == ["safe-skill"]
 
 
+def test_task_tool_filters_tools_by_skill_allowed_tools(monkeypatch):
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    runtime.config["metadata"]["available_skills"] = ["safe-skill"]
+    events = []
+    captured = {}
+
+    class DummyTool:
+        def __init__(self, name: str):
+            self.name = name
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["tools"] = kwargs["tools"]
+            captured["config"] = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    class DummySkill:
+        name = "safe-skill"
+        allowed_tools = ["read_file"]
+
+    storage = MagicMock()
+    storage.load_skills.return_value = [DummySkill()]
+    get_available_tools = MagicMock(return_value=[DummyTool("read_file"), DummyTool("bash")])
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+    monkeypatch.setattr("deerflow.skills.storage.get_or_new_skill_storage", lambda **kwargs: storage)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="执行任务",
+        prompt="use skills",
+        subagent_type="general-purpose",
+        tool_call_id="tc-skill-tools",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    assert captured["config"].skills == ["safe-skill"]
+    assert [tool.name for tool in captured["tools"]] == ["read_file"]
+
+
 def test_task_tool_no_tool_groups_passes_none(monkeypatch):
     """Verify that when metadata has no tool_groups, groups=None is passed (backward compat)."""
     config = _make_subagent_config()

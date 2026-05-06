@@ -64,10 +64,18 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
         if license_text is not None:
             license_text = str(license_text).strip() or None
 
+        allowed_tools = metadata.get("allowed-tools")
+        if allowed_tools is not None:
+            if not isinstance(allowed_tools, list) or not all(isinstance(item, str) for item in allowed_tools):
+                logger.error("allowed-tools in %s must be a list of strings", skill_file)
+                return None
+            allowed_tools = [item.strip() for item in allowed_tools if item.strip()] or []
+
         return Skill(
             name=name,
             description=description,
             license=license_text,
+            allowed_tools=allowed_tools,
             skill_dir=skill_file.parent,
             skill_file=skill_file,
             relative_path=relative_path or Path(skill_file.parent.name),

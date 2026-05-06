@@ -48,6 +48,45 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
     return [skill for skill in child if skill in parent_set]
 
 
+def _resolve_allowed_tools_for_skills(skill_names: list[str] | None, *, app_config: "AppConfig | None" = None) -> list[str] | None:
+    """Return the union of allowed-tools declared by the selected skills.
+
+    None means "no skill in scope declared allowed-tools", so runtime behavior
+    stays backward-compatible. An empty list means the selected skills explicitly
+    deny all tools.
+    """
+    if skill_names is None:
+        return None
+
+    from deerflow.skills.storage import get_or_new_skill_storage
+
+    selected = set(skill_names)
+    declared: list[list[str]] = []
+    storage_kwargs = {"app_config": app_config} if app_config is not None else {}
+    try:
+        skills = get_or_new_skill_storage(**storage_kwargs).load_skills(enabled_only=True)
+    except FileNotFoundError:
+        # Preserve legacy behavior in minimal test/runtime environments that
+        # have skill names in memory but no materialized config/skills store.
+        return None
+
+    for skill in skills:
+        if skill.name in selected and skill.allowed_tools is not None:
+            declared.append(skill.allowed_tools)
+
+    if not declared:
+        return None
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for tool_list in declared:
+        for tool_name in tool_list:
+            if tool_name not in seen:
+                seen.add(tool_name)
+                merged.append(tool_name)
+    return merged
+
+
 @tool("task", parse_docstring=True)
 async def task_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
@@ -155,6 +194,7 @@ async def task_tool(
     if config.model == "inherit" and parent_model is None and resolved_app_config is None:
         resolved_app_config = get_app_config()
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
+    allowed_tools = _resolve_allowed_tools_for_skills(config.skills, app_config=resolved_app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
     available_tools_kwargs = {
@@ -165,6 +205,9 @@ async def task_tool(
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
     tools = get_available_tools(**available_tools_kwargs)
+    if allowed_tools is not None:
+        allowed_set = set(allowed_tools)
+        tools = [tool for tool in tools if tool.name in allowed_set]
 
     # Create executor
     executor_kwargs = {

@@ -86,6 +86,27 @@ def test_parse_license_field(tmp_path):
     assert skill.license == "MIT"
 
 
+def test_parse_allowed_tools_field(tmp_path):
+    """allowed-tools is parsed into a normalized string list when present."""
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools:\n  - read_file\n  - bash\n",
+    )
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.allowed_tools == ["read_file", "bash"]
+
+
+def test_parse_invalid_allowed_tools_returns_none(tmp_path):
+    """allowed-tools must be a list of strings."""
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: bash\n",
+    )
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is None
+
+
 def test_parse_missing_name_returns_none(tmp_path):
     """Skills missing a name field are rejected."""
     skill_file = _write_skill(tmp_path, "description: A test skill")
