@@ -271,7 +271,7 @@ class SubagentExecutor:
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
-    def _create_agent(self):
+    def _create_agent(self, tools: list[BaseTool] | None = None):
         """Create the agent instance."""
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
@@ -285,7 +285,7 @@ class SubagentExecutor:
 
         return create_agent(
             model=model,
-            tools=self.tools,
+            tools=tools if tools is not None else self.tools,
             middleware=middlewares,
             system_prompt=self.config.system_prompt,
             state_schema=ThreadState,
@@ -319,8 +319,8 @@ class SubagentExecutor:
             return [s for s in all_skills if s.name in allowed]
         return all_skills
 
-    def _apply_skill_allowed_tools(self, skills: list[Skill]) -> None:
-        self.tools = filter_tools_by_skill_allowed_tools(self._base_tools, skills)
+    def _apply_skill_allowed_tools(self, skills: list[Skill]) -> list[BaseTool]:
+        return filter_tools_by_skill_allowed_tools(self._base_tools, skills)
 
     async def _load_skill_messages(self, skills: list[Skill]) -> list[SystemMessage]:
         """Load skill content as conversation items based on config.skills.
@@ -353,21 +353,21 @@ class SubagentExecutor:
 
         return messages
 
-    async def _build_initial_state(self, task: str) -> dict[str, Any]:
+    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool]]:
         """Build the initial state for agent execution.
 
         Args:
             task: The task description.
 
         Returns:
-            Initial state dictionary.
+            Initial state dictionary and tools filtered by loaded skill metadata.
         """
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
-        self._apply_skill_allowed_tools(skills)
+        filtered_tools = self._apply_skill_allowed_tools(skills)
         skill_messages = await self._load_skill_messages(skills)
 
-        messages: list = []
+        messages: list[Any] = []
         # Skill content injected as developer/system messages before the task
         messages.extend(skill_messages)
         # Then the actual task
@@ -383,7 +383,7 @@ class SubagentExecutor:
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
 
-        return state
+        return state, filtered_tools
 
     async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -413,8 +413,8 @@ class SubagentExecutor:
             result.ai_messages = ai_messages
 
         try:
-            state = await self._build_initial_state(task)
-            agent = self._create_agent()
+            state, filtered_tools = await self._build_initial_state(task)
+            agent = self._create_agent(filtered_tools)
 
             # Build config with thread_id for sandbox access and recursion limit
             run_config: RunnableConfig = {

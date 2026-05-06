@@ -43,7 +43,7 @@ _MOCKED_MODULE_NAMES = [
 def _setup_executor_classes():
     """Set up mocked modules and import real executor classes.
 
-    This fixture runs once per session and yields the executor classes.
+    This fixture runs once per test and yields the executor classes.
     It handles module cleanup to avoid affecting other test files.
     """
     # Save original modules
@@ -531,8 +531,9 @@ class TestSkillAllowedTools:
         with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
             await executor._aexecute("Task")
 
-        assert [tool.name for tool in executor.tools] == ["bash", "read_file"]
         create_agent_mock.assert_called_once()
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["bash", "read_file"]
+        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
 
     @pytest.mark.anyio
     async def test_all_missing_allowed_tools_preserves_legacy_allow_all(self, classes, base_config, mock_agent, msg):
@@ -546,9 +547,10 @@ class TestSkillAllowedTools:
         async def load_skills():
             return [_skill("legacy-a", None), _skill("legacy-b", None)]
 
-        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent):
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
             await executor._aexecute("Task")
 
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["bash", "read_file", "web_search"]
         assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
 
     @pytest.mark.anyio
@@ -563,10 +565,11 @@ class TestSkillAllowedTools:
         async def load_skills():
             return [_skill("legacy", None), _skill("restricted", ["bash"])]
 
-        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent):
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
             await executor._aexecute("Task")
 
-        assert [tool.name for tool in executor.tools] == ["bash"]
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["bash"]
+        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
 
     @pytest.mark.anyio
     async def test_mixed_missing_allowed_tools_order_does_not_disable_explicit_restrictions(self, classes, base_config, mock_agent, msg):
@@ -580,10 +583,11 @@ class TestSkillAllowedTools:
         async def load_skills():
             return [_skill("restricted", ["bash"]), _skill("legacy", None)]
 
-        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent):
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
             await executor._aexecute("Task")
 
-        assert [tool.name for tool in executor.tools] == ["bash"]
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["bash"]
+        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
 
     @pytest.mark.anyio
     async def test_empty_allowed_tools_contributes_no_tools(self, classes, base_config, mock_agent, msg, caplog):
@@ -597,10 +601,11 @@ class TestSkillAllowedTools:
         async def load_skills():
             return [_skill("empty", []), _skill("reader", ["read_file"])]
 
-        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent), caplog.at_level("INFO"):
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock, caplog.at_level("INFO"):
             await executor._aexecute("Task")
 
-        assert [tool.name for tool in executor.tools] == ["read_file"]
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["read_file"]
+        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
         assert "declared empty allowed-tools" in caplog.text
 
     @pytest.mark.anyio
