@@ -684,6 +684,10 @@ def test_get_available_tools_includes_invoke_acp_agent_when_agents_configured(mo
     fake_config = SimpleNamespace(
         tools=[],
         models=[],
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=True,
+        ),
         tool_search=SimpleNamespace(enabled=False),
         get_model_config=lambda name: None,
     )
