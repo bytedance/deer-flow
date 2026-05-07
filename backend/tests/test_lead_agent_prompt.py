@@ -6,7 +6,12 @@ import anyio
 
 from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.config.app_config import AppConfig
+from deerflow.config.memory_config import MemoryConfig
+from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.skill_evolution_config import SkillEvolutionConfig
+from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
+from deerflow.config.tool_search_config import ToolSearchConfig
 from deerflow.skills.types import Skill, SkillCategory
 
 
@@ -137,8 +142,8 @@ def test_apply_prompt_template_threads_explicit_app_config_without_global_config
 
 
 def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_global_config(monkeypatch):
-    explicit_config = SimpleNamespace(
-        sandbox=SimpleNamespace(
+    explicit_config = AppConfig(
+        sandbox=SandboxConfig(
             use="deerflow.sandbox.local:LocalSandboxProvider",
             allow_host_bash=False,
             mounts=[],
@@ -151,10 +156,10 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
                 )
             }
         ),
-        skills=SimpleNamespace(container_path="/mnt/skills"),
-        skill_evolution=SimpleNamespace(enabled=False),
-        tool_search=SimpleNamespace(enabled=False),
-        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        skills=SkillsConfig(container_path="/mnt/skills"),
+        skill_evolution=SkillEvolutionConfig(enabled=False),
+        tool_search=ToolSearchConfig(enabled=False),
+        memory=MemoryConfig(enabled=False, injection_enabled=True, max_injection_tokens=2000),
         acp_agents={},
     )
 

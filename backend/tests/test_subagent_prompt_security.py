@@ -5,7 +5,7 @@ from deerflow.subagents import registry as registry_module
 
 
 def test_get_available_subagent_names_hides_bash_when_host_bash_disabled(monkeypatch) -> None:
-    monkeypatch.setattr(registry_module, "is_host_bash_allowed", lambda: False)
+    monkeypatch.setattr(registry_module, "is_host_bash_allowed", lambda config=None: False)
 
     names = registry_module.get_available_subagent_names()
 
@@ -13,7 +13,7 @@ def test_get_available_subagent_names_hides_bash_when_host_bash_disabled(monkeyp
 
 
 def test_get_available_subagent_names_keeps_bash_when_allowed(monkeypatch) -> None:
-    monkeypatch.setattr(registry_module, "is_host_bash_allowed", lambda: True)
+    monkeypatch.setattr(registry_module, "is_host_bash_allowed", lambda config=None: True)
 
     names = registry_module.get_available_subagent_names()
 
@@ -21,7 +21,7 @@ def test_get_available_subagent_names_keeps_bash_when_allowed(monkeypatch) -> No
 
 
 def test_build_subagent_section_hides_bash_examples_when_unavailable(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda *, app_config=None: ["general-purpose"])
 
     section = prompt_module._build_subagent_section(3)
 
@@ -34,7 +34,7 @@ def test_build_subagent_section_hides_bash_examples_when_unavailable(monkeypatch
 
 
 def test_build_subagent_section_includes_bash_when_available(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose", "bash"])
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda *, app_config=None: ["general-purpose", "bash"])
 
     section = prompt_module._build_subagent_section(3)
 
