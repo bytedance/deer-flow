@@ -871,9 +871,25 @@ skill_evolution:
 #
 # Postgres mode: put your connection URL in .env as DATABASE_URL,
 # then reference it here with $DATABASE_URL.
-# Install the driver first:
-#   Local:  uv sync --extra postgres
-#   Docker: UV_EXTRAS=postgres docker compose build
+#
+# Install the driver — Issue #2754 fix lands `UV_EXTRAS` in every code path:
+#   Local      `make dev` auto-detects from `database.backend: postgres` below
+#              and passes `--extra postgres` to `uv sync` on every restart, so
+#              the extra is no longer wiped. To opt in explicitly (or layer
+#              extras like `postgres,ollama`), set in project-root .env:
+#                  UV_EXTRAS=postgres
+#   Docker dev `make docker-start` reads `UV_EXTRAS` from project-root .env via
+#              `env_file`. Set:
+#                  UV_EXTRAS=postgres
+#              Multiple extras (`postgres,ollama`) supported here too — see
+#              docker/dev-entrypoint.sh.
+#   Docker img build-arg `UV_EXTRAS=postgres docker compose build` — single
+#              extra only at build time (backend/Dockerfile passes the value
+#              as one token to `--extra`).
+#
+# First-time bootstrap (before `make dev`):
+#   cd backend && uv sync --all-packages --extra postgres
+#   (--all-packages propagates the extra into workspace members — see PR #2584)
 #
 # NOTE: When both `checkpointer` and `database` are configured,
 # `checkpointer` takes precedence for LangGraph state persistence.
