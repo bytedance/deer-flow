@@ -249,6 +249,9 @@ async def start_run(
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
+    body_context = getattr(body, "context", None) or {}
+    model_name = body_context.get("model_name")
+
     try:
         record = await run_mgr.create_or_reject(
             thread_id,
@@ -257,6 +260,7 @@ async def start_run(
             metadata=body.metadata or {},
             kwargs={"input": body.input, "config": body.config},
             multitask_strategy=body.multitask_strategy,
+            model_name=model_name,
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
