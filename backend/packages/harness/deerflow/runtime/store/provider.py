@@ -26,7 +26,7 @@ from collections.abc import Iterator
 
 from langgraph.store.base import BaseStore
 
-from deerflow.config.app_config import get_app_config
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
 logger = logging.getLogger(__name__)
@@ -98,9 +98,26 @@ def _sync_store_cm(config) -> Iterator[BaseStore]:
 
 _store: BaseStore | None = None
 _store_ctx = None  # open context manager keeping the connection alive
+_explicit_stores: dict[int, BaseStore] = {}
+_explicit_store_contexts: dict[int, object] = {}
 
 
-def get_store() -> BaseStore:
+def _default_in_memory_store() -> BaseStore:
+    from langgraph.store.memory import InMemoryStore
+
+    logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
+    return InMemoryStore()
+
+
+def _build_store_from_app_config(app_config: AppConfig) -> tuple[BaseStore, object | None]:
+    if app_config.checkpointer is not None:
+        ctx = _sync_store_cm(app_config.checkpointer)
+        return ctx.__enter__(), ctx
+
+    return _default_in_memory_store(), None
+
+
+def get_store(app_config: AppConfig | None = None) -> BaseStore:
     """Return the global sync Store singleton, creating it on first call.
 
     Returns an :class:`~langgraph.store.memory.InMemoryStore` when no
@@ -111,6 +128,18 @@ def get_store() -> BaseStore:
         ValueError: If ``connection_string`` is missing for a backend that requires it.
     """
     global _store, _store_ctx
+
+    if app_config is not None:
+        cache_key = id(app_config)
+        cached = _explicit_stores.get(cache_key)
+        if cached is not None:
+            return cached
+
+        explicit_store, explicit_ctx = _build_store_from_app_config(app_config)
+        _explicit_stores[cache_key] = explicit_store
+        if explicit_ctx is not None:
+            _explicit_store_contexts[cache_key] = explicit_ctx
+        return explicit_store
 
     if _store is not None:
         return _store
@@ -130,10 +159,7 @@ def get_store() -> BaseStore:
         config = get_checkpointer_config()
 
     if config is None:
-        from langgraph.store.memory import InMemoryStore
-
-        logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
-        _store = InMemoryStore()
+        _store = _default_in_memory_store()
         return _store
 
     _store_ctx = _sync_store_cm(config)
@@ -156,6 +182,18 @@ def reset_store() -> None:
         _store_ctx = None
     _store = None
 
+    for cache_key, ctx in list(_explicit_store_contexts.items()):
+        try:
+            ctx.__exit__(None, None, None)
+        except Exception:
+            logger.warning("Error during explicit store cleanup", exc_info=True)
+        finally:
+            _explicit_store_contexts.pop(cache_key, None)
+            _explicit_stores.pop(cache_key, None)
+
+    _explicit_stores.clear()
+    _explicit_store_contexts.clear()
+
 
 # ---------------------------------------------------------------------------
 # Sync context manager
@@ -163,7 +201,7 @@ def reset_store() -> None:
 
 
 @contextlib.contextmanager
-def store_context() -> Iterator[BaseStore]:
+def store_context(app_config: AppConfig | None = None) -> Iterator[BaseStore]:
     """Sync context manager that yields a Store and cleans up on exit.
 
     Unlike :func:`get_store`, this does **not** cache the instance — each
@@ -176,13 +214,10 @@ def store_context() -> Iterator[BaseStore]:
     Yields an :class:`~langgraph.store.memory.InMemoryStore` when no
     checkpointer is configured in *config.yaml*.
     """
-    config = get_app_config()
-    if config.checkpointer is None:
-        from langgraph.store.memory import InMemoryStore
-
-        logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
-        yield InMemoryStore()
+    resolved_app_config = app_config or get_app_config()
+    if resolved_app_config.checkpointer is None:
+        yield _default_in_memory_store()
         return
 
-    with _sync_store_cm(config.checkpointer) as store:
+    with _sync_store_cm(resolved_app_config.checkpointer) as store:
         yield store

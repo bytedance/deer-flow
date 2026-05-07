@@ -927,6 +927,28 @@ class TestEnsureAgent:
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
 
+    def test_threads_explicit_app_config_to_dependencies(self, client):
+        """Client-owned AppConfig must flow into model/tool/prompt/checkpointer composition."""
+        mock_agent = MagicMock()
+        mock_checkpointer = MagicMock()
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model", return_value=MagicMock()) as mock_create_chat_model,
+            patch("deerflow.client.create_agent", return_value=mock_agent),
+            patch("deerflow.client._build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.tools.get_available_tools", return_value=[]) as mock_get_available_tools,
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=mock_checkpointer) as mock_get_checkpointer,
+        ):
+            client._ensure_agent(config)
+
+        assert mock_create_chat_model.call_args.kwargs["app_config"] is client._app_config
+        assert mock_build_middlewares.call_args.kwargs["app_config"] is client._app_config
+        assert mock_apply_prompt.call_args.kwargs["app_config"] is client._app_config
+        assert mock_get_available_tools.call_args.kwargs["app_config"] is client._app_config
+        assert mock_get_checkpointer.call_args.kwargs["app_config"] is client._app_config
+
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
         mock_checkpointer = MagicMock()

@@ -1,6 +1,7 @@
 """Unit tests for checkpointer config and singleton factory."""
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -102,6 +103,53 @@ class TestGetCheckpointer:
         reset_checkpointer()
         cp2 = get_checkpointer()
         assert cp1 is not cp2
+
+    def test_explicit_app_config_bypasses_global_config_lookup(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        explicit_config = SimpleNamespace(
+            checkpointer=CheckpointerConfig(type="memory"),
+            database=SimpleNamespace(backend="memory"),
+        )
+
+        with patch(
+            "deerflow.runtime.checkpointer.provider.get_app_config",
+            side_effect=AssertionError("ambient get_app_config() must not be used when app_config is explicit"),
+        ):
+            cp = get_checkpointer(app_config=explicit_config)
+
+        assert isinstance(cp, InMemorySaver)
+
+    def test_explicit_app_config_uses_unified_database_sqlite_backend(self):
+        explicit_config = SimpleNamespace(
+            checkpointer=None,
+            database=SimpleNamespace(backend="sqlite", checkpointer_sqlite_path="/tmp/explicit/deerflow.db"),
+        )
+
+        mock_saver_instance = MagicMock()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string = MagicMock(return_value=mock_cm)
+
+        mock_module = MagicMock()
+        mock_module.SqliteSaver = mock_saver_cls
+
+        with (
+            patch.dict(sys.modules, {"langgraph.checkpoint.sqlite": mock_module}),
+            patch(
+                "deerflow.runtime.checkpointer.provider.get_app_config",
+                side_effect=AssertionError("ambient get_app_config() must not be used when app_config is explicit"),
+            ),
+            patch("deerflow.runtime.checkpointer.provider.ensure_sqlite_parent_dir") as mock_ensure,
+        ):
+            cp = get_checkpointer(app_config=explicit_config)
+
+        assert cp is mock_saver_instance
+        mock_ensure.assert_called_once_with("/tmp/explicit/deerflow.db")
+        mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/explicit/deerflow.db")
 
     def test_sqlite_raises_when_package_missing(self):
         load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "/tmp/test.db"})

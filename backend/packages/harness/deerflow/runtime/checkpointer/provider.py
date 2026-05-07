@@ -25,7 +25,7 @@ from collections.abc import Iterator
 
 from langgraph.types import Checkpointer
 
-from deerflow.config.app_config import get_app_config
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.checkpointer_config import CheckpointerConfig
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
@@ -98,9 +98,78 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
 
 _checkpointer: Checkpointer | None = None
 _checkpointer_ctx = None  # open context manager keeping the connection alive
+_explicit_checkpointers: dict[int, Checkpointer] = {}
+_explicit_checkpointer_contexts: dict[int, object] = {}
 
 
-def get_checkpointer() -> Checkpointer:
+def _default_in_memory_checkpointer() -> Checkpointer:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    logger.info("Checkpointer: using InMemorySaver (in-process, not persistent)")
+    return InMemorySaver()
+
+
+def _persistent_database_backend(db_config) -> str | None:
+    backend = getattr(db_config, "backend", None)
+    if backend in {"sqlite", "postgres"}:
+        return backend
+    return None
+
+
+@contextlib.contextmanager
+def _sync_checkpointer_from_database_cm(db_config) -> Iterator[Checkpointer]:
+    """Context manager that creates a sync checkpointer from unified DatabaseConfig."""
+    backend = _persistent_database_backend(db_config)
+    if backend is None:
+        yield _default_in_memory_checkpointer()
+        return
+
+    if backend == "sqlite":
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+        except ImportError as exc:
+            raise ImportError(SQLITE_INSTALL) from exc
+
+        conn_str = db_config.checkpointer_sqlite_path
+        ensure_sqlite_parent_dir(conn_str)
+        with SqliteSaver.from_conn_string(conn_str) as saver:
+            saver.setup()
+            logger.info("Checkpointer: using SqliteSaver (%s)", conn_str)
+            yield saver
+        return
+
+    if backend == "postgres":
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+        except ImportError as exc:
+            raise ImportError(POSTGRES_INSTALL) from exc
+
+        if not db_config.postgres_url:
+            raise ValueError("database.postgres_url is required for the postgres backend")
+
+        with PostgresSaver.from_conn_string(db_config.postgres_url) as saver:
+            saver.setup()
+            logger.info("Checkpointer: using PostgresSaver")
+            yield saver
+        return
+
+    raise ValueError(f"Unknown database backend: {backend!r}")
+
+
+def _build_checkpointer_from_app_config(app_config: AppConfig) -> tuple[Checkpointer, object | None]:
+    if app_config.checkpointer is not None:
+        ctx = _sync_checkpointer_cm(app_config.checkpointer)
+        return ctx.__enter__(), ctx
+
+    db_config = getattr(app_config, "database", None)
+    if _persistent_database_backend(db_config) is not None:
+        ctx = _sync_checkpointer_from_database_cm(db_config)
+        return ctx.__enter__(), ctx
+
+    return _default_in_memory_checkpointer(), None
+
+
+def get_checkpointer(app_config: AppConfig | None = None) -> Checkpointer:
     """Return the global sync checkpointer singleton, creating it on first call.
 
     Returns an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
@@ -110,6 +179,18 @@ def get_checkpointer() -> Checkpointer:
         ValueError: If ``connection_string`` is missing for a backend that requires it.
     """
     global _checkpointer, _checkpointer_ctx
+
+    if app_config is not None:
+        cache_key = id(app_config)
+        cached = _explicit_checkpointers.get(cache_key)
+        if cached is not None:
+            return cached
+
+        explicit_checkpointer, explicit_ctx = _build_checkpointer_from_app_config(app_config)
+        _explicit_checkpointers[cache_key] = explicit_checkpointer
+        if explicit_ctx is not None:
+            _explicit_checkpointer_contexts[cache_key] = explicit_ctx
+        return explicit_checkpointer
 
     if _checkpointer is not None:
         return _checkpointer
@@ -121,28 +202,30 @@ def get_checkpointer() -> Checkpointer:
     from deerflow.config.checkpointer_config import get_checkpointer_config
 
     config = get_checkpointer_config()
+    global_app_config = _app_config
 
-    if config is None and _app_config is None:
+    if config is None and global_app_config is None:
         # Only load app config lazily when neither the app config nor an explicit
         # checkpointer config has been initialized yet. This keeps tests that
         # intentionally set the global checkpointer config isolated from any
         # ambient config.yaml on disk.
         try:
-            get_app_config()
+            global_app_config = get_app_config()
         except FileNotFoundError:
             # In test environments without config.yaml, this is expected.
             pass
         config = get_checkpointer_config()
-    if config is None:
-        from langgraph.checkpoint.memory import InMemorySaver
 
-        logger.info("Checkpointer: using InMemorySaver (in-process, not persistent)")
-        _checkpointer = InMemorySaver()
+    if config is not None:
+        _checkpointer_ctx = _sync_checkpointer_cm(config)
+        _checkpointer = _checkpointer_ctx.__enter__()
         return _checkpointer
 
-    _checkpointer_ctx = _sync_checkpointer_cm(config)
-    _checkpointer = _checkpointer_ctx.__enter__()
+    if global_app_config is not None:
+        _checkpointer, _checkpointer_ctx = _build_checkpointer_from_app_config(global_app_config)
+        return _checkpointer
 
+    _checkpointer = _default_in_memory_checkpointer()
     return _checkpointer
 
 
@@ -161,6 +244,18 @@ def reset_checkpointer() -> None:
         _checkpointer_ctx = None
     _checkpointer = None
 
+    for cache_key, ctx in list(_explicit_checkpointer_contexts.items()):
+        try:
+            ctx.__exit__(None, None, None)
+        except Exception:
+            logger.warning("Error during explicit checkpointer cleanup", exc_info=True)
+        finally:
+            _explicit_checkpointer_contexts.pop(cache_key, None)
+            _explicit_checkpointers.pop(cache_key, None)
+
+    _explicit_checkpointers.clear()
+    _explicit_checkpointer_contexts.clear()
+
 
 # ---------------------------------------------------------------------------
 # Sync context manager
@@ -168,7 +263,7 @@ def reset_checkpointer() -> None:
 
 
 @contextlib.contextmanager
-def checkpointer_context() -> Iterator[Checkpointer]:
+def checkpointer_context(app_config: AppConfig | None = None) -> Iterator[Checkpointer]:
     """Sync context manager that yields a checkpointer and cleans up on exit.
 
     Unlike :func:`get_checkpointer`, this does **not** cache the instance —
@@ -181,12 +276,16 @@ def checkpointer_context() -> Iterator[Checkpointer]:
     Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
     """
 
-    config = get_app_config()
-    if config.checkpointer is None:
-        from langgraph.checkpoint.memory import InMemorySaver
-
-        yield InMemorySaver()
+    resolved_app_config = app_config or get_app_config()
+    if resolved_app_config.checkpointer is not None:
+        with _sync_checkpointer_cm(resolved_app_config.checkpointer) as saver:
+            yield saver
         return
 
-    with _sync_checkpointer_cm(config.checkpointer) as saver:
-        yield saver
+    db_config = getattr(resolved_app_config, "database", None)
+    if _persistent_database_backend(db_config) is not None:
+        with _sync_checkpointer_from_database_cm(db_config) as saver:
+            yield saver
+        return
+
+    yield _default_in_memory_checkpointer()

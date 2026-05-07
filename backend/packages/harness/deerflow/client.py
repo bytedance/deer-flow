@@ -228,14 +228,21 @@ class DeerFlowClient:
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
 
         kwargs: dict[str, Any] = {
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
+            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=self._app_config),
             "tools": self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-            "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name, custom_middlewares=self._middlewares),
+            "middleware": _build_middlewares(
+                config,
+                model_name=model_name,
+                agent_name=self._agent_name,
+                custom_middlewares=self._middlewares,
+                app_config=self._app_config,
+            ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
+                app_config=self._app_config,
             ),
             "state_schema": ThreadState,
         }
@@ -243,7 +250,7 @@ class DeerFlowClient:
         if checkpointer is None:
             from deerflow.runtime.checkpointer import get_checkpointer
 
-            checkpointer = get_checkpointer()
+            checkpointer = get_checkpointer(app_config=self._app_config)
         if checkpointer is not None:
             kwargs["checkpointer"] = checkpointer
 
@@ -251,12 +258,15 @@ class DeerFlowClient:
         self._agent_config_key = key
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
-    @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool):
+    def _get_tools(self, *, model_name: str | None, subagent_enabled: bool):
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        return get_available_tools(
+            model_name=model_name,
+            subagent_enabled=subagent_enabled,
+            app_config=self._app_config,
+        )
 
     @staticmethod
     def _serialize_tool_calls(tool_calls) -> list[dict]:
@@ -398,7 +408,7 @@ class DeerFlowClient:
         if checkpointer is None:
             from deerflow.runtime.checkpointer.provider import get_checkpointer
 
-            checkpointer = get_checkpointer()
+            checkpointer = get_checkpointer(app_config=self._app_config)
 
         thread_info_map = {}
 
@@ -453,7 +463,7 @@ class DeerFlowClient:
         if checkpointer is None:
             from deerflow.runtime.checkpointer.provider import get_checkpointer
 
-            checkpointer = get_checkpointer()
+            checkpointer = get_checkpointer(app_config=self._app_config)
 
         config = {"configurable": {"thread_id": thread_id}}
         checkpoints = []
