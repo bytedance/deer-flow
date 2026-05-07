@@ -12,11 +12,15 @@ from deerflow.agents.middlewares.loop_detection_middleware import (
 )
 
 
-def _make_runtime(thread_id="test-thread"):
+def _make_runtime(thread_id="test-thread", run_id="test-run"):
     """Build a minimal Runtime mock with context."""
     runtime = MagicMock()
-    runtime.context = {"thread_id": thread_id}
+    runtime.context = {"thread_id": thread_id, "run_id": run_id}
     return runtime
+
+
+def _pending_key(thread_id="test-thread", run_id="test-run"):
+    return (thread_id, run_id)
 
 
 def _make_request(messages, runtime):
@@ -189,8 +193,8 @@ class TestLoopDetection:
         # left untouched so the tools node runs normally.
         assert result is None
         # ...but a warning is queued for the next model call.
-        assert mw._pending_warnings["test-thread"]
-        assert "LOOP DETECTED" in mw._pending_warnings["test-thread"][0]
+        assert mw._pending_warnings[_pending_key()]
+        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key()][0]
 
     def test_warn_injected_at_next_model_call(self):
         """``wrap_model_call`` appends a HumanMessage(loop_warning) to the
@@ -243,6 +247,88 @@ class TestLoopDetection:
         second = captured[1].messages
         assert not any(isinstance(m, HumanMessage) for m in second)
 
+    def test_warn_queue_scoped_by_run_id(self):
+        """A warning queued for one run must not be injected into another run."""
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
+        runtime_a = _make_runtime(run_id="run-A")
+        runtime_b = _make_runtime(run_id="run-B")
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call), runtime_a)
+
+        request_b = _make_request([AIMessage(content="hi")], runtime_b)
+        captured, handler = _capture_handler()
+        mw.wrap_model_call(request_b, handler)
+        assert not any(isinstance(m, HumanMessage) for m in captured[0].messages)
+        assert mw._pending_warnings.get(_pending_key(run_id="run-A"))
+
+        request_a = _make_request([AIMessage(content="hi")], runtime_a)
+        mw.wrap_model_call(request_a, handler)
+        assert any(isinstance(message, HumanMessage) and message.name == "loop_warning" for message in captured[1].messages)
+
+    def test_missing_run_id_uses_default_pending_scope(self):
+        """When runtime has no run_id, warning handling falls back to the default run scope."""
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
+        runtime = MagicMock()
+        runtime.context = {"thread_id": "test-thread"}
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert mw._pending_warnings.get(_pending_key(run_id="default"))
+
+        request = _make_request([AIMessage(content="hi")], runtime)
+        captured, handler = _capture_handler()
+        mw.wrap_model_call(request, handler)
+
+        loop_warnings = [message for message in captured[0].messages if isinstance(message, HumanMessage) and message.name == "loop_warning"]
+        assert len(loop_warnings) == 1
+        assert "LOOP DETECTED" in loop_warnings[0].content
+        assert not mw._pending_warnings.get(_pending_key(run_id="default"))
+
+    def test_before_agent_clears_stale_pending_warnings_for_thread(self):
+        """Starting a new run drops stale warnings from prior runs in the same thread."""
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
+        runtime_a = _make_runtime(run_id="run-A")
+        runtime_b = _make_runtime(run_id="run-B")
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call), runtime_a)
+
+        assert mw._pending_warnings.get(_pending_key(run_id="run-A"))
+        mw.before_agent({"messages": []}, runtime_b)
+        assert not mw._pending_warnings.get(_pending_key(run_id="run-A"))
+
+    def test_after_agent_clears_current_run_pending_warnings(self):
+        """Run cleanup should drop warnings that never reached wrap_model_call."""
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert mw._pending_warnings.get(_pending_key())
+        mw.after_agent({"messages": []}, runtime)
+        assert not mw._pending_warnings.get(_pending_key())
+
+    def test_multiple_pending_warnings_are_merged_into_one_message(self):
+        """Edge-case drains should produce one loop_warning prompt message."""
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        mw._pending_warnings[_pending_key()] = ["first warning", "second warning", "first warning"]
+        request = _make_request([AIMessage(content="hi")], runtime)
+        captured, handler = _capture_handler()
+
+        mw.wrap_model_call(request, handler)
+
+        loop_warnings = [message for message in captured[0].messages if isinstance(message, HumanMessage) and message.name == "loop_warning"]
+        assert len(loop_warnings) == 1
+        assert loop_warnings[0].content == "first warning\n\nsecond warning"
+
     def test_warn_only_queued_once_per_hash(self):
         """Same hash repeated past the threshold should warn only once."""
         mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
@@ -255,11 +341,11 @@ class TestLoopDetection:
 
         # Third — warning queued
         mw._apply(_make_state(tool_calls=call), runtime)
-        assert len(mw._pending_warnings["test-thread"]) == 1
+        assert len(mw._pending_warnings[_pending_key()]) == 1
 
         # Fourth — already warned for this hash, no additional enqueue.
         mw._apply(_make_state(tool_calls=call), runtime)
-        assert len(mw._pending_warnings["test-thread"]) == 1
+        assert len(mw._pending_warnings[_pending_key()]) == 1
 
     def test_hard_stop_at_limit(self):
         mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
@@ -317,7 +403,7 @@ class TestLoopDetection:
         mw.reset()
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is None
-        assert not mw._pending_warnings.get("test-thread")
+        assert not mw._pending_warnings.get(_pending_key())
 
     def test_non_ai_message_ignored(self):
         mw = LoopDetectionMiddleware()
@@ -346,14 +432,14 @@ class TestLoopDetection:
 
         # Second call on thread A — queues warning under thread-A only.
         mw._apply(_make_state(tool_calls=call), runtime_a)
-        assert mw._pending_warnings.get("thread-A")
-        assert "LOOP DETECTED" in mw._pending_warnings["thread-A"][0]
-        assert not mw._pending_warnings.get("thread-B")
+        assert mw._pending_warnings.get(_pending_key("thread-A"))
+        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key("thread-A")][0]
+        assert not mw._pending_warnings.get(_pending_key("thread-B"))
 
         # Second call on thread B — independent queue.
         mw._apply(_make_state(tool_calls=call), runtime_b)
-        assert mw._pending_warnings.get("thread-B")
-        assert "LOOP DETECTED" in mw._pending_warnings["thread-B"][0]
+        assert mw._pending_warnings.get(_pending_key("thread-B"))
+        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key("thread-B")][0]
 
     def test_lru_eviction(self):
         """Old threads should be evicted when max_tracked_threads is exceeded."""
@@ -572,7 +658,7 @@ class TestToolFrequencyDetection:
         # 5th call queues a per-tool-type frequency warning; state untouched.
         result = mw._apply(_make_state(tool_calls=[self._read_call("/file_4.py")]), runtime)
         assert result is None
-        queued = mw._pending_warnings.get("test-thread", [])
+        queued = mw._pending_warnings.get(_pending_key(), [])
         assert queued
         assert "read_file" in queued[0]
         assert "LOOP DETECTED" in queued[0]
@@ -586,12 +672,12 @@ class TestToolFrequencyDetection:
 
         # 3rd queues a frequency warning.
         mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
-        assert len(mw._pending_warnings["test-thread"]) == 1
+        assert len(mw._pending_warnings[_pending_key()]) == 1
 
         # 4th: same tool name, no additional enqueue.
         result = mw._apply(_make_state(tool_calls=[self._read_call("/file_3.py")]), runtime)
         assert result is None
-        assert len(mw._pending_warnings["test-thread"]) == 1
+        assert len(mw._pending_warnings[_pending_key()]) == 1
 
     def test_freq_hard_stop_at_limit(self):
         mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=6)
@@ -626,7 +712,7 @@ class TestToolFrequencyDetection:
         # 3rd read_file triggers — warning is queued (state unchanged).
         result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
         assert result is None
-        assert "read_file" in mw._pending_warnings["test-thread"][0]
+        assert "read_file" in mw._pending_warnings[_pending_key()][0]
 
     def test_freq_reset_clears_state(self):
         mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
@@ -661,7 +747,7 @@ class TestToolFrequencyDetection:
         # thread-B state should still be intact — 3rd call queues a warn.
         result = mw._apply(_make_state(tool_calls=[self._read_call("/b_2.py")]), runtime_b)
         assert result is None
-        assert "LOOP DETECTED" in mw._pending_warnings["thread-B"][0]
+        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key("thread-B")][0]
 
         # thread-A restarted from 0 — should not trigger
         result = mw._apply(_make_state(tool_calls=[self._read_call("/a_new.py")]), runtime_a)
@@ -684,8 +770,8 @@ class TestToolFrequencyDetection:
         # 3rd call on thread A — queues a warning (count=3 for thread A only).
         result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime_a)
         assert result is None
-        assert "LOOP DETECTED" in mw._pending_warnings["thread-A"][0]
-        assert not mw._pending_warnings.get("thread-B")
+        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key("thread-A")][0]
+        assert not mw._pending_warnings.get(_pending_key("thread-B"))
 
     def test_multi_tool_single_response_counted(self):
         """When a single response has multiple tool calls, each is counted."""
@@ -705,7 +791,7 @@ class TestToolFrequencyDetection:
         # Response 3: 1 more → count = 5 → queues warn.
         result = mw._apply(_make_state(tool_calls=[self._read_call("/e.py")]), runtime)
         assert result is None
-        assert "read_file" in mw._pending_warnings["test-thread"][0]
+        assert "read_file" in mw._pending_warnings[_pending_key()][0]
 
     def test_override_tool_uses_override_thresholds(self):
         """A tool in tool_freq_overrides uses its own thresholds, not the global ones."""

@@ -7,10 +7,11 @@ Detection strategy:
   1. After each model response, hash the tool calls (name + args).
   2. Track recent hashes in a sliding window.
   3. If the same hash appears >= warn_threshold times, queue a
-     "you are repeating yourself — wrap up" warning. The warning is
-     **injected at the next model call** (in ``wrap_model_call``) as a
-     ``HumanMessage`` appended to the message list, *after* all
-     ToolMessage responses to the previous AIMessage(tool_calls).
+     "you are repeating yourself — wrap up" warning for the current
+     thread/run. The warning is **injected at the next model call** (in
+     ``wrap_model_call``) as a ``HumanMessage`` appended to the message
+     list, *after* all ToolMessage responses to the previous
+     AIMessage(tool_calls).
   4. If it appears >= hard_limit times, strip all tool_calls from the
      response so the agent is forced to produce a final text answer.
 
@@ -217,10 +218,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self._warned: dict[str, set[str]] = defaultdict(set)
         self._tool_freq: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._tool_freq_warned: dict[str, set[str]] = defaultdict(set)
-        # Per-thread queue of warnings to inject at the next model call.
+        # Per-thread/run queue of warnings to inject at the next model call.
         # Populated by ``after_model`` (detection) and drained by
         # ``wrap_model_call`` (injection); see module docstring.
-        self._pending_warnings: dict[str, list[str]] = defaultdict(list)
+        self._pending_warnings: dict[tuple[str, str], list[str]] = defaultdict(list)
 
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
@@ -239,8 +240,19 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         """Extract thread_id from runtime context for per-thread tracking."""
         thread_id = runtime.context.get("thread_id") if runtime.context else None
         if thread_id:
-            return thread_id
+            return str(thread_id)
         return "default"
+
+    def _get_run_id(self, runtime: Runtime) -> str:
+        """Extract run_id from runtime context for per-run warning scoping."""
+        run_id = runtime.context.get("run_id") if runtime.context else None
+        if run_id:
+            return str(run_id)
+        return "default"
+
+    def _pending_key(self, runtime: Runtime) -> tuple[str, str]:
+        """Return the pending-warning key for the current thread/run."""
+        return self._get_thread_id(runtime), self._get_run_id(runtime)
 
     def _evict_if_needed(self) -> None:
         """Evict least recently used threads if over the limit.
@@ -252,7 +264,9 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._warned.pop(evicted_id, None)
             self._tool_freq.pop(evicted_id, None)
             self._tool_freq_warned.pop(evicted_id, None)
-            self._pending_warnings.pop(evicted_id, None)
+            for key in list(self._pending_warnings):
+                if key[0] == evicted_id:
+                    self._pending_warnings.pop(key, None)
             logger.debug("Evicted loop tracking for thread %s (LRU)", evicted_id)
 
     def _track_and_check(self, state: AgentState, runtime: Runtime) -> tuple[str | None, bool]:
@@ -426,11 +440,41 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # (would break OpenAI/Moonshot tool-call pairing because the
             # tools node has not produced ToolMessage responses yet). The
             # warning is delivered via ``wrap_model_call`` below.
-            thread_id = self._get_thread_id(runtime)
+            pending_key = self._pending_key(runtime)
             with self._lock:
-                self._pending_warnings[thread_id].append(warning)
+                self._pending_warnings[pending_key].append(warning)
             return None
 
+        return None
+
+    def _clear_other_run_pending_warnings(self, runtime: Runtime) -> None:
+        """Drop stale pending warnings for previous runs in this thread."""
+        thread_id, current_run_id = self._pending_key(runtime)
+        with self._lock:
+            for key in list(self._pending_warnings):
+                if key[0] == thread_id and key[1] != current_run_id:
+                    self._pending_warnings.pop(key, None)
+
+    def _clear_current_run_pending_warnings(self, runtime: Runtime) -> None:
+        """Drop pending warnings owned by the current thread/run."""
+        pending_key = self._pending_key(runtime)
+        with self._lock:
+            self._pending_warnings.pop(pending_key, None)
+
+    @staticmethod
+    def _format_warning_message(warnings: list[str]) -> str:
+        """Merge pending warnings into one prompt message."""
+        deduped = list(dict.fromkeys(warnings))
+        return "\n\n".join(deduped)
+
+    @override
+    def before_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        self._clear_other_run_pending_warnings(runtime)
+        return None
+
+    @override
+    async def abefore_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        self._clear_other_run_pending_warnings(runtime)
         return None
 
     @override
@@ -441,11 +485,21 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._apply(state, runtime)
 
+    @override
+    def after_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        self._clear_current_run_pending_warnings(runtime)
+        return None
+
+    @override
+    async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        self._clear_current_run_pending_warnings(runtime)
+        return None
+
     def _drain_pending_warnings(self, runtime: Runtime) -> list[str]:
-        """Pop and return all queued warnings for *runtime*'s thread."""
-        thread_id = self._get_thread_id(runtime)
+        """Pop and return all queued warnings for *runtime*'s thread/run."""
+        pending_key = self._pending_key(runtime)
         with self._lock:
-            warnings = self._pending_warnings.pop(thread_id, [])
+            warnings = self._pending_warnings.pop(pending_key, [])
         return warnings
 
     def _augment_request(self, request: ModelRequest) -> ModelRequest:
@@ -463,7 +517,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return request
         new_messages = [
             *request.messages,
-            *(HumanMessage(content=w, name="loop_warning") for w in warnings),
+            HumanMessage(content=self._format_warning_message(warnings), name="loop_warning"),
         ]
         return request.override(messages=new_messages)
 
@@ -491,7 +545,9 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._warned.pop(thread_id, None)
                 self._tool_freq.pop(thread_id, None)
                 self._tool_freq_warned.pop(thread_id, None)
-                self._pending_warnings.pop(thread_id, None)
+                for key in list(self._pending_warnings):
+                    if key[0] == thread_id:
+                        self._pending_warnings.pop(key, None)
             else:
                 self._history.clear()
                 self._warned.clear()
