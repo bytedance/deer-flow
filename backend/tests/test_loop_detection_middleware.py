@@ -648,6 +648,37 @@ class TestToolFrequencyDetection:
         assert result is not None
         assert "read_file" in result["messages"][0].content
 
+    def test_override_tool_uses_override_thresholds(self):
+        """A tool in tool_freq_overrides uses its own thresholds, not the global ones."""
+        mw = LoopDetectionMiddleware(
+            tool_freq_warn=5,
+            tool_freq_hard_limit=10,
+            tool_freq_overrides={"bash": (50, 100)},
+        )
+        runtime = _make_runtime()
+
+        # 10 bash calls — would hit global hard_limit=10, but bash override is 100
+        for i in range(10):
+            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
+            assert result is None, f"unexpected trigger on call {i + 1}"
+
+    def test_non_override_tool_falls_back_to_global(self):
+        """A tool NOT in tool_freq_overrides uses the global warn/hard_limit."""
+        mw = LoopDetectionMiddleware(
+            tool_freq_warn=3,
+            tool_freq_hard_limit=6,
+            tool_freq_overrides={"bash": (50, 100)},
+        )
+        runtime = _make_runtime()
+
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+
+        # 3rd read_file call hits global warn=3 (read_file has no override)
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
+        assert result is not None
+        assert "read_file" in result["messages"][0].content
+
     def test_hash_detection_takes_priority(self):
         """Hash-based hard stop fires before frequency check for identical calls."""
         mw = LoopDetectionMiddleware(
@@ -668,3 +699,48 @@ class TestToolFrequencyDetection:
         msg = result["messages"][0]
         assert isinstance(msg, AIMessage)
         assert _HARD_STOP_MSG in msg.content
+
+
+class TestFromConfig:
+    """Tests for LoopDetectionMiddleware.from_config — the sole validated construction path."""
+
+    @staticmethod
+    def _config(**kwargs):
+        from deerflow.config.loop_detection_config import LoopDetectionConfig
+
+        return LoopDetectionConfig(**kwargs)
+
+    def test_scalar_fields_mapped(self):
+        config = self._config(
+            warn_threshold=4,
+            hard_limit=8,
+            window_size=15,
+            max_tracked_threads=50,
+            tool_freq_warn=20,
+            tool_freq_hard_limit=40,
+        )
+        mw = LoopDetectionMiddleware.from_config(config)
+        assert mw.warn_threshold == 4
+        assert mw.hard_limit == 8
+        assert mw.window_size == 15
+        assert mw.max_tracked_threads == 50
+        assert mw.tool_freq_warn == 20
+        assert mw.tool_freq_hard_limit == 40
+
+    def test_overrides_converted_to_tuples(self):
+        config = self._config(tool_freq_overrides={"bash": {"warn": 50, "hard_limit": 100}})
+        mw = LoopDetectionMiddleware.from_config(config)
+        assert mw._tool_freq_overrides == {"bash": (50, 100)}
+
+    def test_empty_overrides(self):
+        mw = LoopDetectionMiddleware.from_config(self._config())
+        assert mw._tool_freq_overrides == {}
+
+    def test_constructed_middleware_detects_loops(self):
+        mw = LoopDetectionMiddleware.from_config(self._config(warn_threshold=2, hard_limit=4))
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+        mw._apply(_make_state(tool_calls=call), runtime)
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is not None
+        assert "LOOP DETECTED" in result["messages"][0].content

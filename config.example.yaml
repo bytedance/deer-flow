@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 8
+config_version: 9
 
 # ============================================================================
 # Logging
@@ -505,6 +505,29 @@ tools:
 
 tool_search:
   enabled: false
+
+# ============================================================================
+# Loop Detection Configuration
+# ============================================================================
+# Detect and interrupt repeated identical tool-call loops.
+# Frequency thresholds are safety limits for repeated use of the same tool type.
+
+loop_detection:
+  enabled: true
+  warn_threshold: 3
+  hard_limit: 5
+  window_size: 20
+  max_tracked_threads: 100
+  tool_freq_warn: 30
+  tool_freq_hard_limit: 50
+  # Per-tool overrides for tool_freq_warn / tool_freq_hard_limit. Values can be
+  # higher or lower than the global defaults. Commonly used to raise thresholds
+  # for high-frequency tools like bash in batch workflows (e.g. RNA-seq pipelines)
+  # without weakening protection on every other tool.
+  # tool_freq_overrides:
+  #   bash:
+  #     warn: 150
+  #     hard_limit: 300
 
 # ============================================================================
 # Sandbox Configuration
