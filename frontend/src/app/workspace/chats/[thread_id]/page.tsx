@@ -35,6 +35,12 @@ export default function ChatPage() {
   const [showFollowups, setShowFollowups] = useState(false);
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
+  // `isNewThread` tracks whether the backend has the thread yet — gates the
+  // SDK's history fetch (see issue #2746).  `isWelcomeMode` is the visual
+  // welcome layout (centered input, hero, quick actions); we flip it to false
+  // the moment the user submits so the UI animates immediately, even though
+  // `isNewThread` stays true until the backend actually creates the thread.
+  const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
@@ -44,6 +50,14 @@ export default function ChatPage() {
   useEffect(() => {
     mountedRef.current = true;
   }, []);
+
+  // Keep welcome layout in sync when navigating between threads (sidebar
+  // clicks, "new chat" button).  Submitting in /chats/new flips the layout
+  // via onSend below — `isNewThread` stays true until onStart, so this effect
+  // is harmless during the submit transition.
+  useEffect(() => {
+    setIsWelcomeMode(isNewThread);
+  }, [isNewThread]);
 
   const { showNotification } = useNotification();
 
@@ -58,9 +72,11 @@ export default function ChatPage() {
     threadId: isNewThread ? undefined : threadId,
     context: settings.context,
     isMock,
-    onSend: (_threadId) => {
-      setThreadId(_threadId);
-      setIsNewThread(false);
+    // onSend only animates the UI; do NOT flip `isNewThread` here — the
+    // LangGraph SDK eagerly fetches /history the moment it receives a
+    // thread id and assumes the thread exists on the backend (issue #2746).
+    onSend: () => {
+      setIsWelcomeMode(false);
     },
     onStart: (createdThreadId) => {
       setThreadId(createdThreadId);
@@ -111,7 +127,7 @@ export default function ChatPage() {
           <header
             className={cn(
               "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
-              isNewThread
+              isWelcomeMode
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
@@ -135,7 +151,7 @@ export default function ChatPage() {
           <main className="flex min-h-0 max-w-full grow flex-col">
             <div className="flex size-full justify-center">
               <MessageList
-                className={cn("size-full", !isNewThread && "pt-10")}
+                className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
                 paddingBottom={messageListPaddingBottom}
@@ -149,8 +165,8 @@ export default function ChatPage() {
               <div
                 className={cn(
                   "relative w-full",
-                  isNewThread && "-translate-y-[calc(50vh-96px)]",
-                  isNewThread
+                  isWelcomeMode && "-translate-y-[calc(50vh-96px)]",
+                  isWelcomeMode
                     ? "max-w-(--container-width-sm)"
                     : "max-w-(--container-width-md)",
                 )}
@@ -169,9 +185,9 @@ export default function ChatPage() {
                 {mountedRef.current ? (
                   <InputBox
                     className={cn("bg-background/5 w-full -translate-y-4")}
-                    isNewThread={isNewThread}
+                    isWelcomeMode={isWelcomeMode}
                     threadId={threadId}
-                    autoFocus={isNewThread}
+                    autoFocus={isWelcomeMode}
                     status={
                       thread.error
                         ? "error"
@@ -181,7 +197,7 @@ export default function ChatPage() {
                     }
                     context={settings.context}
                     extraHeader={
-                      isNewThread && <Welcome mode={settings.context.mode} />
+                      isWelcomeMode && <Welcome mode={settings.context.mode} />
                     }
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
