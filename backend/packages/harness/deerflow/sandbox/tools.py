@@ -1221,7 +1221,7 @@ def _truncate_ls_output(output: str, max_chars: int) -> str:
 
 
 @tool("bash", parse_docstring=True)
-def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
+def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], command: str, description: str = "") -> str:
     """Execute a bash command in a Linux environment.
 
 
@@ -1230,8 +1230,7 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
 
     Args:
-        description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        command: The bash command to execute. Always use absolute paths for files and directories.
+        description: Optional short explanation of why you are running this command.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1270,12 +1269,11 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
 
 
 @tool("ls", parse_docstring=True)
-def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path: str) -> str:
+def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], path: str, description: str = "") -> str:
     """List the contents of a directory up to 2 levels deep in tree format.
 
     Args:
-        description: Explain why you are listing this directory in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the directory to list.
+        description: Optional short explanation of why you are listing this directory.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1439,18 +1437,15 @@ def grep_tool(
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
-    description: str,
     path: str,
     start_line: int | None = None,
     end_line: int | None = None,
+    description: str = "",
 ) -> str:
     """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
 
     Args:
-        description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to read.
-        start_line: Optional starting line number (1-indexed, inclusive). Use with end_line to read a specific range.
-        end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
+        description: Optional short explanation of why you are reading this file.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1494,17 +1489,18 @@ def read_file_tool(
 @tool("write_file", parse_docstring=True)
 def write_file_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
-    description: str,
     path: str,
     content: str,
+    description: str = "",
     append: bool = False,
 ) -> str:
     """Write text content to a file.
 
     Args:
-        description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        path: The **absolute** path to the file to write to.
+        content: The content to write to the file.
+        description: Optional short explanation of why you are writing this file.
+        append: Append content to the end of the file. Defaults to False.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1544,7 +1540,7 @@ def str_replace_tool(
     If `replace_all` is False (default), the substring to replace must appear **exactly once** in the file.
 
     Args:
-        description: Explain why you are replacing the substring in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
+        description: Optional short explanation of why you are replacing the substring.
         path: The **absolute** path to the file to replace the substring in. ALWAYS PROVIDE THIS PARAMETER SECOND.
         old_str: The substring to replace. ALWAYS PROVIDE THIS PARAMETER THIRD.
         new_str: The new substring. ALWAYS PROVIDE THIS PARAMETER FOURTH.
