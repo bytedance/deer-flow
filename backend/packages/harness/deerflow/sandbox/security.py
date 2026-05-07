@@ -37,12 +37,6 @@ def is_host_bash_allowed(config: object | None = None) -> bool:
     if config is None:
         config = get_app_config()
 
-    # Some call sites naturally hold a narrowed subagents config instead of the
-    # full AppConfig.  Resolve the ambient AppConfig here so callers do not need
-    # ad-hoc ``hasattr(config, "sandbox")`` fallbacks.
-    if not hasattr(config, "sandbox"):
-        config = get_app_config()
-
     sandbox_cfg = getattr(config, "sandbox", None)
     if sandbox_cfg is None:
         return False
