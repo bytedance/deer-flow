@@ -185,7 +185,7 @@ export default function ChatPage() {
                 {mountedRef.current ? (
                   <InputBox
                     className={cn("bg-background/5 w-full -translate-y-4")}
-                    isNewThread={isWelcomeMode}
+                    isWelcomeMode={isWelcomeMode}
                     threadId={threadId}
                     autoFocus={isWelcomeMode}
                     status={
