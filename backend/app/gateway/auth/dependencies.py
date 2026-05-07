@@ -97,7 +97,7 @@ def get_current_user(
         return CurrentUser(
             username="admin",
             tenant_id=get_current_tenant_id(),
-            role="admin",
+            role="superadmin",
             auth_method="none",
         )
 
@@ -143,6 +143,6 @@ def get_current_user(
 
 def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     """Dependency that requires the current user to have the ``admin`` role."""
-    if user.role != "admin":
+    if user.role not in ("superadmin", "tenant_admin"):
         raise HTTPException(status_code=403, detail="Admin role required")
     return user

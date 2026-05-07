@@ -53,9 +53,9 @@ export function WorkspaceHeader({ className }: { className?: string }) {
                   <span className="truncate text-[11px] text-muted-foreground">
                     {user.email}
                   </span>
-                  {user.system_role === "admin" && (
+                  {(user.system_role === "superadmin" || user.system_role === "tenant_admin") && (
                     <span className="shrink-0 rounded bg-blue-100 px-1 py-px text-[9px] font-medium text-blue-700 dark:bg-blue-900 dark:text-blue-200">
-                      admin
+                      {user.system_role}
                     </span>
                   )}
                 </div>

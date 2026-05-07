@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.content_safety.provider import ContentSafetyProvider, ContentSafetyRequest
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
                 return msg
         return None
 
-    def _evaluate(self, text: str, thread_id: str | None, tenant_id: str = "default") -> dict | None:
+    def _evaluate(self, text: str, thread_id: str | None, tenant_id: str = "default", *, actor_user_id: str | None = None) -> dict | None:
         request = ContentSafetyRequest(text=text, role="user", thread_id=thread_id)
         try:
             decision = self.provider.evaluate(request)
@@ -62,7 +63,7 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
             logger.exception("Input guard provider error")
             return None
 
-        self._log_audit(text, decision, thread_id, "input", "user", tenant_id=tenant_id)
+        self._log_audit(text, decision, thread_id, "input", "user", tenant_id=tenant_id, actor_user_id=actor_user_id)
 
         if not decision.allowed and self.block_on_harmful:
             logger.warning("Input guard blocked user message: %s", decision.reasons)
@@ -74,7 +75,7 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
 
         return None
 
-    def _log_audit(self, text: str, decision, thread_id: str | None, direction: str, role: str, *, provider_name: str = "", tenant_id: str = "default") -> None:
+    def _log_audit(self, text: str, decision, thread_id: str | None, direction: str, role: str, *, provider_name: str = "", tenant_id: str = "default", actor_user_id: str | None = None) -> None:
         if self.audit_storage is None:
             return
         try:
@@ -84,6 +85,7 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 tenant_id=tenant_id,
                 thread_id=thread_id,
+                actor_user_id=actor_user_id,
                 direction=direction,
                 role=role,
                 original_text=text,
@@ -112,15 +114,16 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
             return None
 
         tenant_id = _get_tenant_from_runtime(runtime)
+        user_id = get_effective_user_id()
 
         if self.injection_provider is not None:
-            injection_result = self._check_injection(text, tenant_id)
+            injection_result = self._check_injection(text, tenant_id, actor_user_id=user_id)
             if injection_result is not None:
                 return injection_result
 
-        return self._evaluate(text, None, tenant_id)
+        return self._evaluate(text, None, tenant_id, actor_user_id=user_id)
 
-    def _check_injection(self, text: str, tenant_id: str = "default") -> dict | None:
+    def _check_injection(self, text: str, tenant_id: str = "default", *, actor_user_id: str | None = None) -> dict | None:
         request = ContentSafetyRequest(text=text, role="user")
         try:
             decision = self.injection_provider.evaluate(request)  # type: ignore[union-attr]
@@ -128,7 +131,7 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
             logger.exception("Prompt injection provider error")
             return None
 
-        self._log_audit(text, decision, None, "input", "user", provider_name=getattr(self.injection_provider, "name", ""), tenant_id=tenant_id)
+        self._log_audit(text, decision, None, "input", "user", provider_name=getattr(self.injection_provider, "name", ""), tenant_id=tenant_id, actor_user_id=actor_user_id)
 
         if not decision.allowed:
             logger.warning("Prompt injection blocked: %s", decision.reasons)
@@ -151,9 +154,10 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
             return None
 
         tenant_id = _get_tenant_from_runtime(runtime)
+        user_id = get_effective_user_id()
 
         if self.injection_provider is not None:
-            injection_result = await self._acheck_injection(text, tenant_id)
+            injection_result = await self._acheck_injection(text, tenant_id, actor_user_id=user_id)
             if injection_result is not None:
                 return injection_result
 
@@ -164,7 +168,7 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
             logger.exception("Input guard provider error (async)")
             return None
 
-        self._log_audit(text, decision, None, "input", "user", tenant_id=tenant_id)
+        self._log_audit(text, decision, None, "input", "user", tenant_id=tenant_id, actor_user_id=user_id)
 
         if not decision.allowed and self.block_on_harmful:
             logger.warning("Input guard blocked user message: %s", decision.reasons)
@@ -176,7 +180,7 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
 
         return None
 
-    async def _acheck_injection(self, text: str, tenant_id: str = "default") -> dict | None:
+    async def _acheck_injection(self, text: str, tenant_id: str = "default", *, actor_user_id: str | None = None) -> dict | None:
         request = ContentSafetyRequest(text=text, role="user")
         try:
             decision = await self.injection_provider.aevaluate(request)  # type: ignore[union-attr]
@@ -184,7 +188,7 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
             logger.exception("Prompt injection provider error (async)")
             return None
 
-        self._log_audit(text, decision, None, "input", "user", provider_name=getattr(self.injection_provider, "name", ""), tenant_id=tenant_id)
+        self._log_audit(text, decision, None, "input", "user", provider_name=getattr(self.injection_provider, "name", ""), tenant_id=tenant_id, actor_user_id=actor_user_id)
 
         if not decision.allowed:
             logger.warning("Prompt injection blocked: %s", decision.reasons)

@@ -28,7 +28,7 @@ class UserRow(Base):
     email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
     password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    # "admin" | "user" — kept as plain string to avoid ALTER TABLE pain
+    # "superadmin" | "tenant_admin" | "user" — kept as plain string to avoid ALTER TABLE pain
     # when new roles are introduced.
     system_role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
 

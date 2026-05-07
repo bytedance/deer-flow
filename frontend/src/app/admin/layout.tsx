@@ -16,7 +16,9 @@ export default async function AdminLayout({
     redirect(buildLoginUrl("/admin"));
   }
 
-  if (initialUser?.system_role !== "admin") {
+  const isAdmin = initialUser?.system_role === "superadmin" || initialUser?.system_role === "tenant_admin";
+
+  if (!isAdmin) {
     return (
       <div className="flex h-screen items-center justify-center">
         <p className="text-destructive">Access denied. Admin privileges required.</p>

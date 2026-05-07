@@ -234,12 +234,15 @@ def test_auth_config_token_expiry_used_in_login_response():
 
 
 def test_user_response_system_role_literal():
-    """UserResponse.system_role should only accept 'admin' or 'user'."""
+    """UserResponse.system_role should only accept 'superadmin', 'tenant_admin', or 'user'."""
     from app.gateway.auth.models import UserResponse
 
     # Valid roles
-    resp = UserResponse(id="1", email="a@b.com", system_role="admin")
-    assert resp.system_role == "admin"
+    resp = UserResponse(id="1", email="a@b.com", system_role="superadmin")
+    assert resp.system_role == "superadmin"
+
+    resp = UserResponse(id="1", email="a@b.com", system_role="tenant_admin")
+    assert resp.system_role == "tenant_admin"
 
     resp = UserResponse(id="1", email="a@b.com", system_role="user")
     assert resp.system_role == "user"
@@ -250,7 +253,7 @@ def test_user_response_rejects_invalid_role():
     from app.gateway.auth.models import UserResponse
 
     with pytest.raises(ValidationError):
-        UserResponse(id="1", email="a@b.com", system_role="superadmin")
+        UserResponse(id="1", email="a@b.com", system_role="admin")
 
 
 def test_admin_dependency_uses_request_state_user_from_cookie_auth():
@@ -269,7 +272,7 @@ def test_admin_dependency_uses_request_state_user_from_cookie_auth():
                 id=uuid4(),
                 email="admin-cookie@test.com",
                 password_hash="hash",
-                system_role="admin",
+                system_role="superadmin",
                 tenant_id="default",
             )
         )
@@ -277,7 +280,7 @@ def test_admin_dependency_uses_request_state_user_from_cookie_auth():
 
     current = get_current_user(request, credentials=None)
 
-    assert current.role == "admin"
+    assert current.role == "superadmin"
     assert current.tenant_id == "default"
 
 

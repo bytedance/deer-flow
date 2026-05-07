@@ -49,7 +49,7 @@ async def _run(email: str | None) -> int:
             # expose a "first admin" helper and we do not want to add
             # one just for this CLI.
             async with sf() as session:
-                stmt = select(UserRow).where(UserRow.system_role == "admin").limit(1)
+                stmt = select(UserRow).where(UserRow.system_role == "superadmin").limit(1)
                 row = (await session.execute(stmt)).scalar_one_or_none()
             if row is None:
                 user = None

@@ -5,7 +5,7 @@ import { z } from "zod";
 export const userSchema = z.object({
   id: z.string(),
   email: z.string().email(),
-  system_role: z.enum(["admin", "user"]),
+  system_role: z.enum(["superadmin", "tenant_admin", "user"]),
   needs_setup: z.boolean().optional().default(false),
   tenant_id: z.string().optional().default("default"),
   tenant_name: z.string().optional(),

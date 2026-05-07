@@ -110,7 +110,7 @@ class FakeProvider:
             1
             for users in self._users_by_tenant.values()
             for user in users
-            if user.system_role == "admin"
+            if user.system_role in ("superadmin", "tenant_admin")
         )
 
     async def delete_user(self, user_id: str) -> bool:
@@ -155,6 +155,7 @@ def _audit_entry(*, tenant_id: str, thread_id: str | None = None) -> AuditLogEnt
         timestamp="2026-05-07T10:00:00+00:00",
         tenant_id=tenant_id,
         thread_id=thread_id,
+        actor_user_id=None,
         direction="input",
         role="user",
         original_text="hello",
@@ -164,7 +165,7 @@ def _audit_entry(*, tenant_id: str, thread_id: str | None = None) -> AuditLogEnt
     )
 
 
-def _user(*, email: str, tenant_id: str, system_role: str = "admin") -> User:
+def _user(*, email: str, tenant_id: str, system_role: str = "superadmin") -> User:
     return User(
         id=uuid.uuid4(),
         email=email,
@@ -174,7 +175,7 @@ def _user(*, email: str, tenant_id: str, system_role: str = "admin") -> User:
     )
 
 
-def _make_client(*, tenant_id: str = "default", role: str = "admin") -> TestClient:
+def _make_client(*, tenant_id: str = "default", role: str = "superadmin") -> TestClient:
     from app.gateway.app import create_app
     from app.gateway.auth.dependencies import get_current_user, require_admin
 
@@ -283,7 +284,7 @@ class TestAdminStats:
             thread_counts={"acme": 2, "other": 8},
         )
 
-        response = _make_client(tenant_id="acme").get("/api/admin/stats")
+        response = _make_client(tenant_id="acme", role="tenant_admin").get("/api/admin/stats")
 
         assert response.status_code == 200
         data = response.json()
@@ -323,7 +324,7 @@ class TestListTenants:
         provider = FakeProvider(
             {
                 "default": [_user(email="root@example.com", tenant_id="default")],
-                "acme": [_user(email="admin@acme.com", tenant_id="acme")],
+                "acme": [_user(email="admin@acme.com", tenant_id="acme", system_role="tenant_admin")],
             }
         )
         _install_admin_fakes(
@@ -343,8 +344,8 @@ class TestListTenants:
     def test_returns_only_current_tenant_for_scoped_admin(self, monkeypatch: pytest.MonkeyPatch):
         provider = FakeProvider(
             {
-                "acme": [_user(email="admin@acme.com", tenant_id="acme")],
-                "other": [_user(email="admin@other.com", tenant_id="other")],
+                "acme": [_user(email="admin@acme.com", tenant_id="acme", system_role="tenant_admin")],
+                "other": [_user(email="admin@other.com", tenant_id="other", system_role="tenant_admin")],
             }
         )
         _install_admin_fakes(
@@ -358,7 +359,7 @@ class TestListTenants:
             thread_counts={"acme": 4, "other": 99},
         )
 
-        response = _make_client(tenant_id="acme").get("/api/admin/tenants")
+        response = _make_client(tenant_id="acme", role="tenant_admin").get("/api/admin/tenants")
 
         assert response.status_code == 200
         data = response.json()
@@ -398,7 +399,7 @@ class TestCreateTenant:
         assert data["name"] == "New Tenant"
 
     def test_scoped_admin_cannot_create_tenant(self):
-        response = _make_client(tenant_id="acme").post(
+        response = _make_client(tenant_id="acme", role="tenant_admin").post(
             "/api/admin/tenants",
             json={"tenant_id": "other", "name": "Other"},
             headers=_csrf_headers(),
@@ -449,13 +450,13 @@ class TestUpdateTenant:
 
         monkeypatch.setattr(admin_router, "_get_tenant_storage", lambda: storage)
 
-        own_response = _make_client(tenant_id="acme").put(
+        own_response = _make_client(tenant_id="acme", role="tenant_admin").put(
             "/api/admin/tenants/acme",
             json={"name": "Acme Updated"},
             headers=_csrf_headers(),
             cookies=_csrf_cookies(),
         )
-        cross_response = _make_client(tenant_id="acme").put(
+        cross_response = _make_client(tenant_id="acme", role="tenant_admin").put(
             "/api/admin/tenants/other",
             json={"name": "Other Updated"},
             headers=_csrf_headers(),
@@ -484,7 +485,7 @@ class TestDeleteTenant:
         assert response.json() == {"success": True}
 
     def test_scoped_admin_cannot_delete_tenant(self):
-        response = _make_client(tenant_id="acme").delete(
+        response = _make_client(tenant_id="acme", role="tenant_admin").delete(
             "/api/admin/tenants/acme",
             headers=_csrf_headers(),
             cookies=_csrf_cookies(),
@@ -497,7 +498,7 @@ class TestTenantUsers:
         provider = FakeProvider(
             {
                 "acme": [
-                    _user(email="admin@acme.com", tenant_id="acme"),
+                    _user(email="admin@acme.com", tenant_id="acme", system_role="tenant_admin"),
                     _user(email="user@acme.com", tenant_id="acme", system_role="user"),
                 ],
             }
@@ -512,12 +513,12 @@ class TestTenantUsers:
         assert len(response.json()) == 2
 
     def test_scoped_admin_cannot_list_other_tenant_users(self, monkeypatch: pytest.MonkeyPatch):
-        provider = FakeProvider({"other": [_user(email="admin@other.com", tenant_id="other")]})
+        provider = FakeProvider({"other": [_user(email="admin@other.com", tenant_id="other", system_role="tenant_admin")]})
         from app.gateway.routers import admin as admin_router
 
         monkeypatch.setattr(admin_router, "get_local_provider", lambda: provider)
 
-        response = _make_client(tenant_id="acme").get("/api/admin/tenants/other/users")
+        response = _make_client(tenant_id="acme", role="tenant_admin").get("/api/admin/tenants/other/users")
 
         assert response.status_code == 403
 
@@ -552,7 +553,7 @@ class TestAdminUsage:
             ],
         )
 
-        response = _make_client(tenant_id="acme").get("/api/admin/usage")
+        response = _make_client(tenant_id="acme", role="tenant_admin").get("/api/admin/usage")
 
         assert response.status_code == 200
         data = response.json()
@@ -568,12 +569,12 @@ class TestAuditLogs:
         storage.query.return_value = ([_audit_entry(tenant_id="acme")], 1)
         monkeypatch.setattr(admin_router, "_get_audit_storage", lambda: storage)
 
-        response = _make_client(tenant_id="acme").get("/api/admin/logs")
+        response = _make_client(tenant_id="acme", role="tenant_admin").get("/api/admin/logs")
 
         assert response.status_code == 200
         assert response.json()["entries"][0]["tenant_id"] == "acme"
         assert storage.query.call_args.kwargs["tenant_id"] == "acme"
 
     def test_rejects_cross_tenant_log_filter_for_scoped_admin(self):
-        response = _make_client(tenant_id="acme").get("/api/admin/logs?tenant_id=other")
+        response = _make_client(tenant_id="acme", role="tenant_admin").get("/api/admin/logs?tenant_id=other")
         assert response.status_code == 403

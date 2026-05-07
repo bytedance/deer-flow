@@ -52,7 +52,7 @@ describe("AdminSidebar", () => {
     mocks.useAuth.mockReturnValue({
       user: {
         email: "yanghai@shenguyun.com",
-        system_role: "admin",
+        system_role: "tenant_admin",
         tenant_id: "acme",
       },
       logout: vi.fn(),
@@ -61,7 +61,7 @@ describe("AdminSidebar", () => {
     const html = renderToStaticMarkup(React.createElement(AdminSidebar));
 
     expect(html).toContain("yanghai@shenguyun.com");
-    expect(html).toContain(">admin<");
+    expect(html).toContain(">tenant_admin<");
     expect(html).toContain("Current Tenant: acme");
     expect(html).toContain(">Current Tenant<");
     expect(html).toContain("Sign Out");

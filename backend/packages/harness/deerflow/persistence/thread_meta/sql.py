@@ -80,13 +80,15 @@ class ThreadMetaRepository(ThreadMetaStore):
         - ``require_existing=False`` (default, permissive):
           Returns True for: row missing (untracked legacy thread),
           ``row.user_id`` is None (shared / pre-auth data),
+          ``row.user_id`` is ``"default"`` (no-auth period data),
           or ``row.user_id == user_id``. Use for **read-style**
           decorators where treating an untracked thread as accessible
           preserves backward-compat.
 
         - ``require_existing=True`` (strict):
           Returns True **only** when the row exists AND
-          (``row.user_id == user_id`` OR ``row.user_id is None``).
+          (``row.user_id == user_id`` OR ``row.user_id is None``
+          OR ``row.user_id == "default"``).
           Use for **destructive / mutating** decorators (DELETE, PATCH,
           state-update) so a thread that has *already been deleted*
           cannot be re-targeted by any caller — closing the
@@ -97,7 +99,7 @@ class ThreadMetaRepository(ThreadMetaStore):
             row = await session.get(ThreadMetaRow, thread_id)
             if row is None:
                 return not require_existing
-            if row.user_id is None:
+            if row.user_id is None or row.user_id == "default":
                 return True
             return row.user_id == user_id
 

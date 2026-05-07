@@ -49,7 +49,7 @@ describe("AdminLogsPage", () => {
   test("hides the tenant filter for tenant-scoped admins", () => {
     mocks.useAuth.mockReturnValue({
       user: {
-        system_role: "admin",
+        system_role: "tenant_admin",
         tenant_id: "acme",
       },
     });
@@ -63,7 +63,7 @@ describe("AdminLogsPage", () => {
   test("keeps the tenant filter for the default system admin", () => {
     mocks.useAuth.mockReturnValue({
       user: {
-        system_role: "admin",
+        system_role: "superadmin",
         tenant_id: "default",
       },
     });

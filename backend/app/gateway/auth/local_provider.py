@@ -69,7 +69,7 @@ class LocalAuthProvider(AuthProvider):
         Args:
             email: User email address
             password: Plain text password (will be hashed)
-            system_role: Role to assign ("admin" or "user")
+            system_role: Role to assign ("superadmin", "tenant_admin", or "user")
             needs_setup: If True, user must complete setup on first login
             tenant_id: Tenant the user belongs to
 

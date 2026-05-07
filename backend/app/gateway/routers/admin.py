@@ -78,9 +78,9 @@ def _get_audit_storage() -> AuditLogStorage:
 
 
 def _is_system_admin(user: CurrentUser) -> bool:
-    """Return True when the admin should retain global platform scope."""
+    """Return True when the admin has superadmin privileges."""
 
-    return user.role == "admin" and user.tenant_id == "default"
+    return user.role == "superadmin"
 
 
 def _require_system_admin(user: CurrentUser) -> None:
@@ -342,13 +342,13 @@ async def delete_tenant_user(tenant_id: str, user_id: str, user: CurrentUser = D
         raise HTTPException(status_code=404, detail="User not found")
     if target.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="User not found in this tenant")
-    if target.system_role == "admin":
+    if target.system_role in ("superadmin", "tenant_admin"):
         if _is_system_admin(user):
             if await provider.count_admin_users() <= 1:
                 raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
         else:
             tenant_users = await provider.list_users(tenant_id, limit=1000)
-            tenant_admins = [tenant_user for tenant_user in tenant_users if tenant_user.system_role == "admin"]
+            tenant_admins = [tenant_user for tenant_user in tenant_users if tenant_user.system_role in ("superadmin", "tenant_admin")]
             if len(tenant_admins) <= 1:
                 raise HTTPException(status_code=400, detail="Cannot delete the last admin user in this tenant")
     await provider.delete_user(user_id)

@@ -118,7 +118,7 @@ class SQLiteUserRepository(UserRepository):
             return await session.scalar(stmt) or 0
 
     async def count_admin_users(self) -> int:
-        stmt = select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin")
+        stmt = select(func.count()).select_from(UserRow).where(UserRow.system_role.in_(["superadmin", "tenant_admin"]))
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 

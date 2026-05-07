@@ -45,7 +45,7 @@ describe("AdminTenantsPage", () => {
   test("hides the create-tenant controls for tenant-scoped admins", () => {
     mocks.useAuth.mockReturnValue({
       user: {
-        system_role: "admin",
+        system_role: "tenant_admin",
         tenant_id: "acme",
       },
     });
@@ -61,7 +61,7 @@ describe("AdminTenantsPage", () => {
   test("shows the create-tenant controls for the default system admin", () => {
     mocks.useAuth.mockReturnValue({
       user: {
-        system_role: "admin",
+        system_role: "superadmin",
         tenant_id: "default",
       },
     });

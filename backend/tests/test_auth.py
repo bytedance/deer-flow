@@ -331,7 +331,7 @@ def test_sqlite_round_trip_new_fields():
                 user = User(
                     email="setup@test.com",
                     password_hash="fakehash",
-                    system_role="admin",
+                    system_role="superadmin",
                     needs_setup=True,
                     token_version=3,
                 )

@@ -83,12 +83,12 @@ describe("WorkspaceHeader", () => {
     mocks.useAuth.mockReturnValue({
       user: {
         email: "admin@example.com",
-        system_role: "admin",
+        system_role: "superadmin",
       },
     });
 
     const html = renderToStaticMarkup(React.createElement(WorkspaceHeader));
 
-    expect(html).toContain(">admin<");
+    expect(html).toContain(">superadmin<");
   });
 });

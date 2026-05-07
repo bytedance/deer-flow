@@ -69,6 +69,7 @@ class PgUsageStorage:
                             id BIGSERIAL PRIMARY KEY,
                             tenant_id TEXT NOT NULL,
                             thread_id TEXT,
+                            user_id TEXT,
                             model_name TEXT NOT NULL,
                             input_tokens INTEGER NOT NULL DEFAULT 0,
                             output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -103,13 +104,14 @@ class PgUsageStorage:
                     cur.execute(
                         """
                         INSERT INTO token_usage
-                            (tenant_id, thread_id, model_name, input_tokens,
+                            (tenant_id, thread_id, user_id, model_name, input_tokens,
                              output_tokens, total_tokens, cost_usd, timestamp)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             record.tenant_id,
                             record.thread_id,
+                            record.user_id,
                             record.model_name,
                             record.input_tokens,
                             record.output_tokens,
@@ -150,7 +152,7 @@ class PgUsageStorage:
                 params.append(model_name)
 
             where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-            query = f"SELECT tenant_id, thread_id, model_name, input_tokens, output_tokens, total_tokens, cost_usd, timestamp::TEXT FROM token_usage{where} ORDER BY timestamp DESC"
+            query = f"SELECT tenant_id, thread_id, user_id, model_name, input_tokens, output_tokens, total_tokens, cost_usd, timestamp::TEXT FROM token_usage{where} ORDER BY timestamp DESC"
 
             with psycopg.connect(self._dsn) as conn:
                 with conn.cursor() as cur:
@@ -159,14 +161,15 @@ class PgUsageStorage:
 
             return [
                 UsageRecord(
-                    timestamp=row[7],
+                    timestamp=row[8],
                     tenant_id=row[0],
                     thread_id=row[1],
-                    model_name=row[2],
-                    input_tokens=row[3],
-                    output_tokens=row[4],
-                    total_tokens=row[5],
-                    cost_usd=float(row[6]),
+                    user_id=row[2],
+                    model_name=row[3],
+                    input_tokens=row[4],
+                    output_tokens=row[5],
+                    total_tokens=row[6],
+                    cost_usd=float(row[7]),
                 )
                 for row in rows
             ]

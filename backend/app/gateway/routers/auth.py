@@ -446,7 +446,7 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
         )
 
     try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False, tenant_id="default")
+        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="superadmin", needs_setup=False, tenant_id="default")
     except ValueError:
         # DB unique-constraint race: another concurrent request beat us.
         raise HTTPException(

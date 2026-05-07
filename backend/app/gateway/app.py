@@ -130,16 +130,56 @@ async def _ensure_admin_user(app: FastAPI) -> None:
         logger.info("=" * 60)
         return
 
+    # Migrate legacy "admin" roles to the three-role model
+    # - "admin" + default tenant → "superadmin"
+    # - "admin" + non-default tenant → "tenant_admin"
+    async with sf() as session:
+        from sqlalchemy import update as sa_update
+
+        result = await session.execute(
+            sa_update(UserRow)
+            .where(UserRow.system_role == "admin", UserRow.tenant_id == "default")
+            .values(system_role="superadmin")
+        )
+        if result.rowcount:
+            logger.info("Migrated %d default-tenant admin(s) to superadmin", result.rowcount)
+
+        result = await session.execute(
+            sa_update(UserRow)
+            .where(UserRow.system_role == "admin", UserRow.tenant_id != "default")
+            .values(system_role="tenant_admin")
+        )
+        if result.rowcount:
+            logger.info("Migrated %d non-default-tenant admin(s) to tenant_admin", result.rowcount)
+
+        await session.commit()
+
     # Admin already exists — run orphan thread migration for any
     # LangGraph thread metadata that pre-dates the auth module.
     async with sf() as session:
-        stmt = select(UserRow).where(UserRow.system_role == "admin").limit(1)
+        stmt = select(UserRow).where(UserRow.system_role == "superadmin").limit(1)
         row = (await session.execute(stmt)).scalar_one_or_none()
 
     if row is None:
         return  # Should not happen (admin_count > 0 above), but be safe.
 
     admin_id = str(row.id)
+
+    # Reassign thread metadata that was created during no-auth periods
+    # (_DefaultUser.id = "default") to the real superadmin.  Without this,
+    # check_access(require_existing=False) would still deny because the row
+    # exists but with a non-matching user_id.
+    try:
+        async with sf() as meta_session:
+            result = await meta_session.execute(
+                text("UPDATE threads_meta SET user_id = :admin WHERE user_id = 'default'"),
+                {"admin": admin_id},
+            )
+            if result.rowcount:
+                await meta_session.commit()
+                logger.info("Reassigned %d thread(s) from 'default' user to admin", result.rowcount)
+    except Exception:
+        logger.debug("Thread metadata user_id migration skipped (non-fatal)")
 
     # LangGraph store orphan migration — non-fatal.
     # This covers the "no-auth → with-auth" upgrade path for users
