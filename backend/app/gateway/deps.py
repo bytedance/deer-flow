@@ -90,6 +90,9 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
 
         # Run event store (has its own factory with config-driven backend selection)
         run_events_config = getattr(config, "run_events", None)
+        if run_events_config is not None and isinstance(run_events_config, dict):
+            from deerflow.config.run_events_config import RunEventsConfig
+            run_events_config = RunEventsConfig(**run_events_config)
         app.state.run_event_store = make_run_event_store(run_events_config)
 
         # RunManager with store backing for persistence

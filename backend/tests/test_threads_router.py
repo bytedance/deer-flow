@@ -348,6 +348,82 @@ def test_search_threads_normalizes_legacy_unix_seconds_to_iso() -> None:
         assert _ISO_TIMESTAMP_RE.match(item["updated_at"]), item
 
 
+def test_search_threads_exposes_display_name_as_title() -> None:
+    """Sidebar consumers read ``values.title``; thread_meta ``display_name``
+    must be surfaced there even when the row's ``values`` blob is empty.
+    """
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "named-thread"
+
+    async def _seed() -> None:
+        await app.state.thread_store.create(
+            thread_id,
+            user_id=None,
+            display_name="中文问候开场",
+            metadata={},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    items = response.json()
+    item = next(entry for entry in items if entry["thread_id"] == thread_id)
+    assert item["values"]["title"] == "中文问候开场"
+
+
+def test_search_threads_backfills_display_name_from_checkpoint_title() -> None:
+    """When a thread row exists without a title, ``/search`` should backfill
+    the checkpoint title into thread_meta so future searches don't regress to
+    ``Untitled``.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "checkpoint-title"
+
+    async def _seed() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        await app.state.thread_store.create(thread_id, user_id=None, metadata={})
+
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"]["title"] = "自动生成标题"
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            checkpoint,
+            {
+                "step": 1,
+                "source": "loop",
+                "writes": {},
+                "parents": {},
+                "created_at": "2026-05-07T00:00:00+00:00",
+            },
+            {},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    items = response.json()
+    item = next(entry for entry in items if entry["thread_id"] == thread_id)
+    assert item["values"]["title"] == "自动生成标题"
+
+    async def _read_backfilled_record() -> dict | None:
+        return await app.state.thread_store.get(thread_id, user_id=None)
+
+    record = asyncio.run(_read_backfilled_record())
+    assert record is not None
+    assert record["display_name"] == "自动生成标题"
+
+
 def test_memory_thread_meta_store_writes_iso_on_create() -> None:
     """``MemoryThreadMetaStore.create`` must emit ISO so newly created
     threads serialize correctly without depending on the router's

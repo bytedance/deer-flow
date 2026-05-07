@@ -276,6 +276,8 @@ def require_permission(
             # strict-deny rather than strict-allow — only an *existing*
             # row with a *different* user_id triggers 404.
             if owner_check:
+                import logging
+                _log = logging.getLogger(__name__)
                 thread_id = kwargs.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")
@@ -289,6 +291,10 @@ def require_permission(
                     require_existing=require_existing,
                 )
                 if not allowed:
+                    _log.warning(
+                        "require_permission: owner_check DENIED for thread_id=%s user_id=%s require_existing=%s",
+                        thread_id, str(auth.user.id), require_existing,
+                    )
                     raise HTTPException(
                         status_code=404,
                         detail=f"Thread {thread_id} not found",

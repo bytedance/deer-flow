@@ -95,10 +95,16 @@ class ThreadMetaRepository(ThreadMetaStore):
           delete-idempotence cross-user gap where the row vanishing
           made every other user appear to "own" it.
         """
+        import logging
+        _log = logging.getLogger(__name__)
         async with self._sf() as session:
             row = await session.get(ThreadMetaRow, thread_id)
             if row is None:
+                _log.info("check_access: thread_id=%s row NOT FOUND, require_existing=%s → %s",
+                          thread_id, require_existing, not require_existing)
                 return not require_existing
+            _log.info("check_access: thread_id=%s row.user_id=%r caller_user_id=%r require_existing=%s",
+                      thread_id, row.user_id, user_id, require_existing)
             if row.user_id is None or row.user_id == "default":
                 return True
             return row.user_id == user_id

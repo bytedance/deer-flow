@@ -367,31 +367,41 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     search skips Phase 2 for that thread — the Store converges to a full
     index over time without a one-shot migration job.
     """
-    store = get_store(request)
+    from app.gateway.deps import get_thread_store
+
+    thread_store = get_thread_store(request)
     checkpointer = get_checkpointer(request)
 
     # -----------------------------------------------------------------------
-    # Phase 1: Store
+    # Phase 1: ThreadMetaStore
     # -----------------------------------------------------------------------
     merged: dict[str, ThreadResponse] = {}
 
-    if store is not None:
-        try:
-            items = await store.asearch(_threads_ns(), limit=10_000)
-        except Exception:
+    try:
+        items = await thread_store.search(
+            metadata=body.metadata or None,
+            status=body.status,
+            limit=10_000,
+            offset=0,
+        )
+    except Exception:
             logger.warning("Store search failed — falling back to checkpointer only", exc_info=True)
             items = []
 
-        for item in items:
-            val = item.value
-            merged[val["thread_id"]] = ThreadResponse(
-                thread_id=val["thread_id"],
-                status=val.get("status", "idle"),
-                created_at=str(val.get("created_at", "")),
-                updated_at=str(val.get("updated_at", "")),
-                metadata=val.get("metadata", {}),
-                values=val.get("values", {}),
-            )
+    for val in items:
+        values = dict(val.get("values") or {})
+        display_name = val.get("display_name")
+        if display_name and not values.get("title"):
+            values["title"] = display_name
+
+        merged[val["thread_id"]] = ThreadResponse(
+            thread_id=val["thread_id"],
+            status=val.get("status", "idle"),
+            created_at=str(val.get("created_at", "")),
+            updated_at=str(val.get("updated_at", "")),
+            metadata=val.get("metadata", {}),
+            values=values,
+        )
 
     # -----------------------------------------------------------------------
     # Phase 2: Checkpointer supplement
@@ -404,7 +414,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
         async for checkpoint_tuple in checkpointer.alist(None):
             cfg = getattr(checkpoint_tuple, "config", {})
             thread_id = cfg.get("configurable", {}).get("thread_id")
-            if not thread_id or thread_id in merged:
+            if not thread_id:
                 continue
 
             # Skip sub-graph checkpoints (checkpoint_ns is non-empty for those)
@@ -419,15 +429,36 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             ckpt_tenant = ckpt_meta.get("tenant_id")
             if ckpt_tenant is not None and ckpt_tenant != current_tenant:
                 continue
-            # Strip LangGraph internal keys from the user-visible metadata dict
-            user_meta = {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")}
 
             # Extract state values (title) from the checkpoint's channel_values
             checkpoint_data = getattr(checkpoint_tuple, "checkpoint", {}) or {}
             channel_values = checkpoint_data.get("channel_values", {})
+            ckpt_title = channel_values.get("title")
+
+            # Enrich Phase 1 results with title when the thread metadata row
+            # lacks one. TitleMiddleware writes the title into the checkpoint
+            # after the first exchange, so we backfill it here when needed.
+            if thread_id in merged:
+                if ckpt_title:
+                    existing = merged[thread_id]
+                    existing_title = existing.values.get("title") if existing.values else None
+                    if not existing_title:
+                        existing.values["title"] = ckpt_title
+                        # Also write the title back to the canonical thread
+                        # metadata store so future searches can return it
+                        # directly without waiting for another checkpoint scan.
+                        try:
+                            await thread_store.update_display_name(thread_id, ckpt_title)
+                        except Exception:
+                            logger.debug("Failed to backfill title to thread_store for %s", thread_id)
+                continue
+
+            # Strip LangGraph internal keys from the user-visible metadata dict
+            user_meta = {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")}
+
             ckpt_values = {}
-            if title := channel_values.get("title"):
-                ckpt_values["title"] = title
+            if ckpt_title:
+                ckpt_values["title"] = ckpt_title
 
             thread_resp = ThreadResponse(
                 thread_id=thread_id,
@@ -440,11 +471,14 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             merged[thread_id] = thread_resp
 
             # Lazy migration — write to Store so the next search finds it there
-            if store is not None:
-                try:
-                    await _store_upsert(store, thread_id, metadata=user_meta, values=ckpt_values or None)
-                except Exception:
-                    logger.debug("Failed to migrate thread %s to store (non-fatal)", thread_id)
+            try:
+                await thread_store.create(
+                    thread_id,
+                    display_name=ckpt_title,
+                    metadata=user_meta,
+                )
+            except Exception:
+                logger.debug("Failed to migrate thread %s to thread_store (non-fatal)", thread_id)
     except Exception:
         logger.exception("Checkpointer scan failed during thread search")
         # Don't raise — return whatever was collected from Store + partial scan

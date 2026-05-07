@@ -324,7 +324,7 @@ export function MessageList({
               }
             }
             return (
-              <div className="w-full" key={group.id}>
+              <div className="w-full" key={`present-files-${group.id}`}>
                 {group.messages[0] && hasContent(group.messages[0]) && (
                   <MarkdownContent
                     content={extractContentFromMessage(group.messages[0])}
@@ -449,26 +449,27 @@ export function MessageList({
                 })}
               </div>
             );
+          } else if (group.type === "assistant:processing") {
+            return (
+              <div key={`processing-${group.id}`} className="w-full">
+                <MessageGroup
+                  messages={group.messages}
+                  isLoading={thread.isLoading}
+                  tokenDebugSteps={tokenDebugSteps.filter((step) =>
+                    group.messages.some(
+                      (message) => message.id === step.messageId,
+                    ),
+                  )}
+                  showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
+                />
+                {renderTokenUsage({
+                  messages: group.messages,
+                  turnUsageMessages,
+                  inlineDebug: false,
+                })}
+              </div>
+            );
           }
-          return (
-            <div key={"group-" + group.id} className="w-full">
-              <MessageGroup
-                messages={group.messages}
-                isLoading={thread.isLoading}
-                tokenDebugSteps={tokenDebugSteps.filter((step) =>
-                  group.messages.some(
-                    (message) => message.id === step.messageId,
-                  ),
-                )}
-                showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
-              />
-              {renderTokenUsage({
-                messages: group.messages,
-                turnUsageMessages,
-                inlineDebug: false,
-              })}
-            </div>
-          );
         })}
         {thread.isLoading && <StreamingIndicator className="my-4" />}
         <div style={{ height: `${paddingBottom}px` }} />
