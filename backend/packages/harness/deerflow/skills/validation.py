@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from deerflow.skills.parser import parse_allowed_tools
 from deerflow.skills.types import SKILL_MD_FILE
 
 # Allowed properties in SKILL.md frontmatter
@@ -83,5 +84,10 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
             return False, "Description cannot contain angle brackets (< or >)", None
         if len(description) > 1024:
             return False, f"Description is too long ({len(description)} characters). Maximum is 1024 characters.", None
+
+    try:
+        parse_allowed_tools(frontmatter.get("allowed-tools"), skill_md)
+    except ValueError as e:
+        return False, str(e).replace(str(skill_md), SKILL_MD_FILE), None
 
     return True, "Skill is valid!", name

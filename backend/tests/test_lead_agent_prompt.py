@@ -1,17 +1,20 @@
 import threading
 from types import SimpleNamespace
+from typing import cast
 
 import anyio
 
 from deerflow.agents.lead_agent import prompt as prompt_module
+from deerflow.config.app_config import AppConfig
 from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
-from deerflow.skills.types import Skill
+from deerflow.skills.types import Skill, SkillCategory
 
 
 def _set_skills_cache_state(*, skills=None, active=False, version=0):
     prompt_module._get_cached_skills_prompt_section.cache_clear()
     with prompt_module._enabled_skills_lock:
         prompt_module._enabled_skills_cache = skills
+        prompt_module._enabled_skills_by_config_cache.clear()
         prompt_module._enabled_skills_refresh_active = active
         prompt_module._enabled_skills_refresh_version = version
         prompt_module._enabled_skills_refresh_event.clear()
@@ -232,7 +235,7 @@ def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatc
             skill_dir=skill_dir,
             skill_file=skill_dir / "SKILL.md",
             relative_path=skill_dir.relative_to(tmp_path),
-            category="custom",
+            category=SkillCategory.CUSTOM,
             enabled=True,
         )
 
@@ -248,6 +251,58 @@ def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatc
         anyio.run(prompt_module.refresh_skills_system_prompt_cache_async)
 
         assert [skill.name for skill in prompt_module._get_enabled_skills()] == ["second-skill"]
+    finally:
+        _set_skills_cache_state()
+
+
+def test_explicit_config_enabled_skills_are_cached_by_config_identity(monkeypatch, tmp_path):
+    def make_skill(name: str) -> Skill:
+        skill_dir = tmp_path / name
+        return Skill(
+            name=name,
+            description=f"Description for {name}",
+            license="MIT",
+            skill_dir=skill_dir,
+            skill_file=skill_dir / "SKILL.md",
+            relative_path=skill_dir.relative_to(tmp_path),
+            category=SkillCategory.CUSTOM,
+            enabled=True,
+        )
+
+    config = cast(
+        AppConfig,
+        cast(
+            object,
+            SimpleNamespace(
+                skills=SimpleNamespace(container_path="/mnt/skills"),
+                skill_evolution=SimpleNamespace(enabled=False),
+            ),
+        ),
+    )
+    load_count = 0
+
+    def fake_get_or_new_skill_storage(**kwargs):
+        nonlocal load_count
+        assert kwargs == {"app_config": config}
+
+        def load_skills(*, enabled_only):
+            nonlocal load_count
+            load_count += 1
+            assert enabled_only is True
+            return [make_skill("cached-skill")]
+
+        return SimpleNamespace(load_skills=load_skills)
+
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", fake_get_or_new_skill_storage)
+    _set_skills_cache_state()
+
+    try:
+        first = prompt_module.get_skills_prompt_section(app_config=config)
+        second = prompt_module.get_skills_prompt_section(app_config=config)
+
+        assert "cached-skill" in first
+        assert "cached-skill" in second
+        assert load_count == 1
     finally:
         _set_skills_cache_state()
 
@@ -269,7 +324,7 @@ def test_clear_cache_does_not_spawn_parallel_refresh_workers(monkeypatch, tmp_pa
             skill_dir=skill_dir,
             skill_file=skill_dir / "SKILL.md",
             relative_path=skill_dir.relative_to(tmp_path),
-            category="custom",
+            category=SkillCategory.CUSTOM,
             enabled=True,
         )
 
