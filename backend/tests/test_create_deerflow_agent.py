@@ -192,6 +192,7 @@ def test_agent_features_defaults():
     assert f.vision is False
     assert f.auto_title is False
     assert f.guardrail is False
+    assert f.loop_detection is True
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +629,51 @@ def test_loop_detection_before_clarification(mock_create_agent):
     clar_idx = mw_types.index("ClarificationMiddleware")
     assert loop_idx < clar_idx
     assert loop_idx == clar_idx - 1
+
+
+# ---------------------------------------------------------------------------
+# 30b. loop_detection=False skips LoopDetectionMiddleware
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_loop_detection_disabled(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, loop_detection=False),
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "LoopDetectionMiddleware" not in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 30c. loop_detection=<custom AgentMiddleware> replaces the default
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_loop_detection_custom_middleware(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware as AM
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MyLoopDetection(AM):
+        pass
+
+    custom = MyLoopDetection()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, loop_detection=custom),
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    assert custom in middleware
+    mw_types = [type(m).__name__ for m in middleware]
+    # Default LoopDetectionMiddleware must not also appear.
+    assert "LoopDetectionMiddleware" not in mw_types
+    # Custom replacement still sits immediately before ClarificationMiddleware.
+    assert mw_types[-1] == "ClarificationMiddleware"
+    assert mw_types[-2] == "MyLoopDetection"
 
 
 # ---------------------------------------------------------------------------
