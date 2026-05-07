@@ -27,6 +27,58 @@ class CurrentUser:
     auth_method: str  # "jwt" or "api_key"
 
 
+def _current_user_from_request_state(request: Request) -> CurrentUser | None:
+    """Return the authenticated user already resolved by middleware.
+
+    The gateway's cookie/session auth path is enforced earlier by
+    ``AuthMiddleware`` which stamps a real ``User`` object onto
+    ``request.state.user``. Bearer/API-key auth may also populate the same
+    field as a plain dict in ``create_auth_middleware``.
+
+    Admin/cost dependencies should trust that resolved principal instead of
+    re-demanding an Authorization header and accidentally rejecting valid
+    cookie-authenticated browser requests.
+    """
+    state_user = getattr(getattr(request, "state", None), "user", None)
+    if state_user is None:
+        return None
+
+    if isinstance(state_user, dict):
+        username = str(
+            state_user.get("username")
+            or state_user.get("email")
+            or state_user.get("id")
+            or "unknown"
+        )
+        tenant_id = str(state_user.get("tenant_id", "default"))
+        role = str(state_user.get("role") or state_user.get("system_role") or "member")
+        auth_method = str(state_user.get("auth_method", "state"))
+        return CurrentUser(
+            username=username,
+            tenant_id=tenant_id,
+            role=role,
+            auth_method=auth_method,
+        )
+
+    username = str(
+        getattr(state_user, "id", None)
+        or getattr(state_user, "email", None)
+        or "unknown"
+    )
+    tenant_id = str(getattr(state_user, "tenant_id", "default"))
+    role = str(
+        getattr(state_user, "role", None)
+        or getattr(state_user, "system_role", "member")
+    )
+    auth_method = str(getattr(state_user, "auth_method", "cookie"))
+    return CurrentUser(
+        username=username,
+        tenant_id=tenant_id,
+        role=role,
+        auth_method=auth_method,
+    )
+
+
 def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security_scheme),
@@ -48,6 +100,10 @@ def get_current_user(
             role="admin",
             auth_method="none",
         )
+
+    current_from_state = _current_user_from_request_state(request)
+    if current_from_state is not None:
+        return current_from_state
 
     if credentials is None:
         raise HTTPException(status_code=401, detail="Missing authorization header")

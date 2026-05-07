@@ -460,6 +460,13 @@ export interface Translations {
     error: string;
     logs: string;
     auditLogs: string;
+    currentTenant: string;
+    currentScope: string;
+    globalScope: string;
+    tenantScope: string;
+    globalScopeView: string;
+    tenantScopedView: string;
+    tenantManagementRestricted: string;
     direction: string;
     all: string;
     input_dir: string;

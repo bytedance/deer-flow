@@ -8,7 +8,9 @@ and unhappy paths / edge cases for all auth boundaries.
 import os
 import secrets
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
 
 import jwt as pyjwt
 import pytest
@@ -18,6 +20,8 @@ from pydantic import ValidationError
 
 from app.gateway.auth.config import AuthConfig, set_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
+from app.gateway.auth.models import User
+from app.gateway.auth.dependencies import get_current_user
 from app.gateway.auth.jwt import decode_token
 from app.gateway.csrf_middleware import (
     CSRF_COOKIE_NAME,
@@ -247,6 +251,34 @@ def test_user_response_rejects_invalid_role():
 
     with pytest.raises(ValidationError):
         UserResponse(id="1", email="a@b.com", system_role="superadmin")
+
+
+def test_admin_dependency_uses_request_state_user_from_cookie_auth():
+    """Admin deps should honor the real authenticated user on request.state.
+
+    Cookie-based auth is validated by middleware before route dependencies
+    run. ``get_current_user`` must therefore accept the resolved user object
+    from ``request.state.user`` instead of demanding an Authorization header.
+    """
+    from deerflow.config.auth_config import load_auth_config_from_dict
+
+    load_auth_config_from_dict({"enabled": True, "jwt_secret": _TEST_SECRET})
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            user=User(
+                id=uuid4(),
+                email="admin-cookie@test.com",
+                password_hash="hash",
+                system_role="admin",
+                tenant_id="default",
+            )
+        )
+    )
+
+    current = get_current_user(request, credentials=None)
+
+    assert current.role == "admin"
+    assert current.tenant_id == "default"
 
 
 # ══════════════════════════════════════════════════════════════════════

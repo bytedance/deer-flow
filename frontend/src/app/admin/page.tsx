@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { AdminScopeBanner } from "@/components/admin/admin-scope-banner";
 import { CostChart } from "@/components/admin/cost-chart";
 import { StatsCard } from "@/components/admin/stats-card";
 import { TokenChart } from "@/components/admin/token-chart";
@@ -38,6 +39,7 @@ export default function AdminDashboardPage() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">{t.admin.dashboard}</h1>
+      <AdminScopeBanner />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatsCard

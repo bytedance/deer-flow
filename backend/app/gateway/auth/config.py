@@ -44,6 +44,9 @@ def get_auth_config() -> AuthConfig:
         load_dotenv()
         jwt_secret = os.environ.get("AUTH_JWT_SECRET")
         if not jwt_secret:
+            logger.warning(
+                "AUTH_JWT_SECRET is not set; falling back to a persisted or generated local development secret."
+            )
             jwt_secret = _load_or_generate_jwt_secret()
             os.environ["AUTH_JWT_SECRET"] = jwt_secret
         _auth_config = AuthConfig(jwt_secret=jwt_secret)

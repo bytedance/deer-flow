@@ -11,6 +11,7 @@ import {
   type SortingState,
 } from "@tanstack/react-table";
 
+import { AdminScopeBanner } from "@/components/admin/admin-scope-banner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { getAdminUsage } from "@/core/admin/api";
@@ -66,6 +67,7 @@ export default function AdminUsagePage() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">{t.admin.usageReports}</h1>
+      <AdminScopeBanner />
 
       {error && (
         <p className="text-sm text-destructive">{t.admin.error}: {error}</p>

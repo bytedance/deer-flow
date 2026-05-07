@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app.gateway.auth.dependencies import require_admin
+from app.gateway.auth.dependencies import CurrentUser, require_admin
 from app.gateway.auth.models import UserResponse
 from app.gateway.deps import get_checkpointer, get_local_provider
 from deerflow.config.tenant_storage import TenantConfig, TenantStorage
@@ -77,6 +77,63 @@ def _get_audit_storage() -> AuditLogStorage:
     return AuditLogStorage()
 
 
+def _is_system_admin(user: CurrentUser) -> bool:
+    """Return True when the admin should retain global platform scope."""
+
+    return user.role == "admin" and user.tenant_id == "default"
+
+
+def _require_system_admin(user: CurrentUser) -> None:
+    """Reject tenant-scoped admins from global tenant management actions."""
+
+    if not _is_system_admin(user):
+        raise HTTPException(status_code=403, detail="System admin privileges required")
+
+
+def _resolve_scope_tenant_id(user: CurrentUser, requested_tenant_id: str | None = None) -> str | None:
+    """Return the tenant scope for the current admin.
+
+    System admins can keep the requested tenant scope (or global ``None``).
+    Tenant-scoped admins are forced to their own tenant and cannot request
+    another tenant explicitly.
+    """
+
+    if _is_system_admin(user):
+        return requested_tenant_id
+
+    if requested_tenant_id is not None and requested_tenant_id != user.tenant_id:
+        raise HTTPException(status_code=403, detail="Cross-tenant access is not allowed")
+
+    return user.tenant_id
+
+
+def _filter_records_by_tenant(records: list, tenant_id: str | None) -> list:
+    """Filter usage-like records when a tenant scope is active."""
+
+    if tenant_id is None:
+        return records
+    return [record for record in records if getattr(record, "tenant_id", None) == tenant_id]
+
+
+def _filter_thread_counts_by_tenant(thread_counts: dict[str, int], tenant_id: str | None) -> dict[str, int]:
+    """Filter per-tenant thread counts when a tenant scope is active."""
+
+    if tenant_id is None:
+        return thread_counts
+    return {tenant_id: thread_counts.get(tenant_id, 0)}
+
+
+def _list_visible_tenants(ts: TenantStorage, user: CurrentUser) -> list[TenantConfig]:
+    """Return the tenant configs visible to the current admin."""
+
+    if _is_system_admin(user):
+        ts.ensure_default()
+        return ts.list_all()
+
+    tenant = ts.get(user.tenant_id)
+    return [tenant] if tenant is not None else []
+
+
 def _build_tenant_summary(
     tc: TenantConfig,
     today_records: list,
@@ -125,13 +182,16 @@ async def _discover_thread_counts(checkpointer) -> dict[str, int]:
 
 
 @router.get("/stats", response_model=AdminStatsResponse)
-async def get_admin_stats(request: Request, user=Depends(require_admin)) -> AdminStatsResponse:
+async def get_admin_stats(request: Request, user: CurrentUser = Depends(require_admin)) -> AdminStatsResponse:
     """Get system overview statistics (admin only)."""
     checkpointer = get_checkpointer(request)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    scope_tenant_id = _resolve_scope_tenant_id(user)
 
     today_records = _get_cross_tenant_records(start_date=today)
     month_records = _get_cross_tenant_records(start_date=datetime.now(timezone.utc).strftime("%Y-%m") + "-01")
+    today_records = _filter_records_by_tenant(today_records, scope_tenant_id)
+    month_records = _filter_records_by_tenant(month_records, scope_tenant_id)
 
     total_llm_calls_today = len(today_records)
     total_tokens_today = sum(r.total_tokens for r in today_records)
@@ -139,9 +199,9 @@ async def get_admin_stats(request: Request, user=Depends(require_admin)) -> Admi
     total_cost_month = sum(r.cost_usd for r in month_records)
 
     ts = _get_tenant_storage()
-    ts.ensure_default()
-    all_tenants = ts.list_all()
+    all_tenants = _list_visible_tenants(ts, user)
     thread_counts = await _discover_thread_counts(checkpointer)
+    thread_counts = _filter_thread_counts_by_tenant(thread_counts, scope_tenant_id)
     active_today: set[str] = {r.tenant_id for r in today_records}
 
     return AdminStatsResponse(
@@ -161,19 +221,22 @@ async def get_admin_stats(request: Request, user=Depends(require_admin)) -> Admi
 
 
 @router.get("/tenants", response_model=list[TenantSummary])
-async def list_tenants(request: Request, user=Depends(require_admin)) -> list[TenantSummary]:
+async def list_tenants(request: Request, user: CurrentUser = Depends(require_admin)) -> list[TenantSummary]:
     """List all registered tenants with usage data (admin only)."""
     checkpointer = get_checkpointer(request)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     month_start = datetime.now(timezone.utc).strftime("%Y-%m") + "-01"
+    scope_tenant_id = _resolve_scope_tenant_id(user)
 
     today_records = _get_cross_tenant_records(start_date=today)
     month_records = _get_cross_tenant_records(start_date=month_start)
+    today_records = _filter_records_by_tenant(today_records, scope_tenant_id)
+    month_records = _filter_records_by_tenant(month_records, scope_tenant_id)
     thread_counts = await _discover_thread_counts(checkpointer)
+    thread_counts = _filter_thread_counts_by_tenant(thread_counts, scope_tenant_id)
 
     ts = _get_tenant_storage()
-    ts.ensure_default()
-    all_tenants = ts.list_all()
+    all_tenants = _list_visible_tenants(ts, user)
 
     try:
         provider = get_local_provider()
@@ -196,8 +259,9 @@ async def list_tenants(request: Request, user=Depends(require_admin)) -> list[Te
 
 
 @router.post("/tenants", response_model=TenantSummary)
-def create_tenant(req: CreateTenantRequest, user=Depends(require_admin)) -> TenantSummary:
+def create_tenant(req: CreateTenantRequest, user: CurrentUser = Depends(require_admin)) -> TenantSummary:
     """Create a new tenant (admin only)."""
+    _require_system_admin(user)
     ts = _get_tenant_storage()
     try:
         tc = ts.create(TenantConfig(tenant_id=req.tenant_id, name=req.name))
@@ -207,8 +271,9 @@ def create_tenant(req: CreateTenantRequest, user=Depends(require_admin)) -> Tena
 
 
 @router.put("/tenants/{tenant_id}", response_model=TenantSummary)
-def update_tenant(tenant_id: str, req: UpdateTenantRequest, user=Depends(require_admin)) -> TenantSummary:
+def update_tenant(tenant_id: str, req: UpdateTenantRequest, user: CurrentUser = Depends(require_admin)) -> TenantSummary:
     """Update a tenant's configuration (admin only)."""
+    _resolve_scope_tenant_id(user, tenant_id)
     ts = _get_tenant_storage()
     fields: dict = {}
     if req.name is not None:
@@ -227,8 +292,9 @@ def update_tenant(tenant_id: str, req: UpdateTenantRequest, user=Depends(require
 
 
 @router.delete("/tenants/{tenant_id}")
-def delete_tenant(tenant_id: str, user=Depends(require_admin)) -> dict:
+def delete_tenant(tenant_id: str, user: CurrentUser = Depends(require_admin)) -> dict:
     """Delete a tenant (admin only)."""
+    _require_system_admin(user)
     if tenant_id == "default":
         raise HTTPException(status_code=400, detail="Cannot delete the default tenant")
     ts = _get_tenant_storage()
@@ -243,8 +309,9 @@ def delete_tenant(tenant_id: str, user=Depends(require_admin)) -> dict:
 
 
 @router.get("/tenants/{tenant_id}/users", response_model=list[UserResponse])
-async def list_tenant_users(tenant_id: str, user=Depends(require_admin)) -> list[UserResponse]:
+async def list_tenant_users(tenant_id: str, user: CurrentUser = Depends(require_admin)) -> list[UserResponse]:
     """List all users in a tenant (admin only)."""
+    tenant_id = _resolve_scope_tenant_id(user, tenant_id) or tenant_id
     try:
         provider = get_local_provider()
     except RuntimeError:
@@ -263,8 +330,9 @@ async def list_tenant_users(tenant_id: str, user=Depends(require_admin)) -> list
 
 
 @router.delete("/tenants/{tenant_id}/users/{user_id}")
-async def delete_tenant_user(tenant_id: str, user_id: str, user=Depends(require_admin)) -> dict:
+async def delete_tenant_user(tenant_id: str, user_id: str, user: CurrentUser = Depends(require_admin)) -> dict:
     """Remove a user from a tenant (admin only)."""
+    tenant_id = _resolve_scope_tenant_id(user, tenant_id) or tenant_id
     try:
         provider = get_local_provider()
     except RuntimeError:
@@ -274,8 +342,15 @@ async def delete_tenant_user(tenant_id: str, user_id: str, user=Depends(require_
         raise HTTPException(status_code=404, detail="User not found")
     if target.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="User not found in this tenant")
-    if target.system_role == "admin" and await provider.count_admin_users() <= 1:
-        raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
+    if target.system_role == "admin":
+        if _is_system_admin(user):
+            if await provider.count_admin_users() <= 1:
+                raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
+        else:
+            tenant_users = await provider.list_users(tenant_id, limit=1000)
+            tenant_admins = [tenant_user for tenant_user in tenant_users if tenant_user.system_role == "admin"]
+            if len(tenant_admins) <= 1:
+                raise HTTPException(status_code=400, detail="Cannot delete the last admin user in this tenant")
     await provider.delete_user(user_id)
     return {"success": True}
 
@@ -289,10 +364,12 @@ async def delete_tenant_user(tenant_id: str, user_id: str, user=Depends(require_
 def get_admin_usage(
     start_date: str | None = None,
     end_date: str | None = None,
-    user=Depends(require_admin),
+    user: CurrentUser = Depends(require_admin),
 ) -> list[dict]:
     """Get aggregated usage data for all tenants (admin only)."""
+    scope_tenant_id = _resolve_scope_tenant_id(user)
     records = _get_cross_tenant_records(start_date=start_date, end_date=end_date)
+    records = _filter_records_by_tenant(records, scope_tenant_id)
     return [r.to_dict() for r in records]
 
 
@@ -310,9 +387,10 @@ def get_admin_logs(
     end_date: str | None = Query(default=None, description="End date (ISO format)"),
     limit: int = Query(default=100, ge=1, le=1000, description="Max entries to return"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
-    user=Depends(require_admin),
+    user: CurrentUser = Depends(require_admin),
 ) -> AuditLogResponse:
     """Query content safety audit logs (admin only)."""
+    tenant_id = _resolve_scope_tenant_id(user, tenant_id)
     storage = _get_audit_storage()
     entries, total = storage.query(
         tenant_id=tenant_id,

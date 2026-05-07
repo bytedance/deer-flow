@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { AdminScopeBanner } from "@/components/admin/admin-scope-banner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -19,11 +20,15 @@ import {
   listTenants,
   updateTenant,
 } from "@/core/admin/api";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { isSystemAdminView } from "@/core/admin/scope";
 import type { TenantSummary, TenantUser } from "@/core/admin/types";
 import { useI18n } from "@/core/i18n/hooks";
 
 export default function AdminTenantsPage() {
   const { t } = useI18n();
+  const { user } = useAuth();
+  const isSystemAdmin = isSystemAdminView(user);
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [newName, setNewName] = useState("");
   const [newId, setNewId] = useState("");
@@ -69,6 +74,9 @@ export default function AdminTenantsPage() {
   };
 
   const handleToggleActive = async (tenant: TenantSummary) => {
+    if (!isSystemAdmin) {
+      return;
+    }
     try {
       await updateTenant(tenant.tenant_id, { is_active: !tenant.is_active });
       setError(null);
@@ -93,10 +101,12 @@ export default function AdminTenantsPage() {
     try {
       const fields: Record<string, unknown> = {};
       if (editName.trim()) fields.name = editName.trim();
-      const daily = parseFloat(editDailyQuota);
-      if (!isNaN(daily) && daily >= 0) fields.daily_quota_usd = daily;
-      const monthly = parseFloat(editMonthlyQuota);
-      if (!isNaN(monthly) && monthly >= 0) fields.monthly_quota_usd = monthly;
+      if (isSystemAdmin) {
+        const daily = parseFloat(editDailyQuota);
+        if (!isNaN(daily) && daily >= 0) fields.daily_quota_usd = daily;
+        const monthly = parseFloat(editMonthlyQuota);
+        if (!isNaN(monthly) && monthly >= 0) fields.monthly_quota_usd = monthly;
+      }
       await updateTenant(tenantId, fields);
       setEditingId(null);
       setError(null);
@@ -148,6 +158,7 @@ export default function AdminTenantsPage() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">{t.admin.tenants}</h1>
+      <AdminScopeBanner />
 
       {error && (
         <p className="text-sm text-destructive">
@@ -155,33 +166,39 @@ export default function AdminTenantsPage() {
         </p>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-medium">
-            {t.admin.createTenant}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="flex gap-2">
-          <Input
-            placeholder={t.admin.tenantIdPlaceholder}
-            value={newId}
-            onChange={(e) => setNewId(e.target.value)}
-            className="max-w-xs"
-          />
-          <Input
-            placeholder={t.admin.displayNamePlaceholder}
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            className="max-w-xs"
-          />
-          <Button
-            onClick={handleCreate}
-            disabled={!newId.trim() || !newName.trim()}
-          >
-            {t.admin.create}
-          </Button>
-        </CardContent>
-      </Card>
+      {isSystemAdmin ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm font-medium">
+              {t.admin.createTenant}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex gap-2">
+            <Input
+              placeholder={t.admin.tenantIdPlaceholder}
+              value={newId}
+              onChange={(e) => setNewId(e.target.value)}
+              className="max-w-xs"
+            />
+            <Input
+              placeholder={t.admin.displayNamePlaceholder}
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              className="max-w-xs"
+            />
+            <Button
+              onClick={handleCreate}
+              disabled={!newId.trim() || !newName.trim()}
+            >
+              {t.admin.create}
+            </Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          {t.admin.tenantManagementRestricted}
+        </p>
+      )}
 
       <div className="space-y-2">
         {tenants.map((tenant) => {
@@ -229,13 +246,15 @@ export default function AdminTenantsPage() {
                         <span className="text-sm text-muted-foreground">
                           ${tenant.cost_month.toFixed(2)}/mo
                         </span>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleToggleActive(tenant)}
-                        >
-                          {tenant.is_active ? t.admin.active : t.admin.inactive}
-                        </Button>
+                        {isSystemAdmin && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleToggleActive(tenant)}
+                          >
+                            {tenant.is_active ? t.admin.active : t.admin.inactive}
+                          </Button>
+                        )}
                         <Button
                           variant="outline"
                           size="sm"
@@ -250,7 +269,7 @@ export default function AdminTenantsPage() {
                         >
                           {t.admin.manageUsers}
                         </Button>
-                        {tenant.tenant_id !== "default" && (
+                        {isSystemAdmin && tenant.tenant_id !== "default" && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -264,7 +283,7 @@ export default function AdminTenantsPage() {
                   </div>
                 </div>
 
-                {isEditing && (
+                {isEditing && isSystemAdmin && (
                   <div className="flex gap-4 items-end">
                     <div className="space-y-1">
                       <label className="text-xs text-muted-foreground">
