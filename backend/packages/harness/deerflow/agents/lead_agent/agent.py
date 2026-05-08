@@ -258,12 +258,11 @@ def _build_middlewares(
     resolved_app_config = app_config or get_app_config()
     middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
 
-    # Inject memory + current date as <system-reminder> into the first HumanMessage.
-    # Keeps the system prompt fully static for maximum prefix-cache reuse.
-    if resolved_app_config.memory.injection_enabled:
-        from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    # Always inject current date (and optionally memory) as <system-reminder> into the
+    # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
-        middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)

@@ -1,9 +1,10 @@
 """Middleware to inject dynamic context (memory, current date) as a system-reminder.
 
 The system prompt is kept fully static for maximum prefix-cache reuse across users
-and sessions.  Per-user memory and the current date are injected once per conversation
-as a dedicated <system-reminder> HumanMessage inserted before the first user message
-(frozen-snapshot pattern).
+and sessions.  The current date is always injected.  Per-user memory is also injected
+when ``memory.injection_enabled`` is True in the app config.  Both are delivered once
+per conversation as a dedicated <system-reminder> HumanMessage inserted before the
+first user message (frozen-snapshot pattern).
 
 When a conversation spans midnight the middleware detects the date change and injects
 a lightweight date-update reminder as a separate HumanMessage before the current turn.
@@ -87,7 +88,9 @@ class DynamicContextMiddleware(AgentMiddleware):
     def _build_full_reminder(self) -> str:
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config)
+        # Memory injection is gated by injection_enabled; date is always included.
+        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
+        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
         lines: list[str] = ["<system-reminder>"]
