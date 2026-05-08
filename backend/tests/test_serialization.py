@@ -123,6 +123,25 @@ def test_serialize_messages_tuple():
     assert result == [{"key": "v2"}, {"langgraph_node": "agent"}]
 
 
+def test_serialize_messages_tuple_preserves_reasoning_only_chunk():
+    from langchain_core.messages import AIMessageChunk
+
+    from deerflow.runtime.serialization import serialize_messages_tuple
+
+    chunk = AIMessageChunk(
+        content="",
+        id="run-1",
+        additional_kwargs={"reasoning_content": "Thinking through the task."},
+    )
+    metadata = {"langgraph_node": "agent"}
+
+    result = serialize_messages_tuple((chunk, metadata))
+
+    assert result[0]["content"] == ""
+    assert result[0]["additional_kwargs"]["reasoning_content"] == "Thinking through the task."
+    assert result[1] == metadata
+
+
 def test_serialize_messages_tuple_non_dict_metadata():
     from deerflow.runtime.serialization import serialize_messages_tuple
 

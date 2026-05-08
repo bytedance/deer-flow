@@ -484,6 +484,7 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
+            streamMode: ["messages-tuple", "values"],
             streamSubgraphs: true,
             streamResumable: true,
             config: {

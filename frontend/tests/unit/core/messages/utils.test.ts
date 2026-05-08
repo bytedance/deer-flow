@@ -2,8 +2,10 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
+  extractReasoningContentFromMessage,
   getAssistantTurnUsageMessages,
   getMessageGroups,
+  hasReasoning,
 } from "@/core/messages/utils";
 
 test("aggregates token usage messages once per assistant turn", () => {
@@ -62,4 +64,27 @@ test("aggregates token usage messages once per assistant turn", () => {
       (groupMessages) => groupMessages?.map((message) => message.id) ?? null,
     ),
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
+});
+
+test("recognizes reasoning-only AI messages", () => {
+  const message = {
+    id: "reasoning-1",
+    type: "ai",
+    content: "",
+    additional_kwargs: {
+      reasoning_content: "I need to compare the options first.",
+    },
+  } as Message;
+
+  expect(hasReasoning(message)).toBe(true);
+  expect(extractReasoningContentFromMessage(message)).toBe(
+    "I need to compare the options first.",
+  );
+  expect(getMessageGroups([message])).toEqual([
+    {
+      id: "reasoning-1",
+      type: "assistant:processing",
+      messages: [message],
+    },
+  ]);
 });
