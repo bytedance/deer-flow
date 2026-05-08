@@ -14,6 +14,8 @@ from langgraph.config import get_config
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,10 +80,7 @@ def _clone_ai_message(
     content: Any | None = None,
 ) -> AIMessage:
     """Clone an AIMessage while replacing its tool_calls list and optional content."""
-    update: dict[str, Any] = {"tool_calls": tool_calls}
-    if content is not None:
-        update["content"] = content
-    return message.model_copy(update=update)
+    return clone_ai_message_with_tool_calls(message, tool_calls, content=content)
 
 
 @dataclass
