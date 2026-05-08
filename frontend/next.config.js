@@ -23,21 +23,11 @@ const config = {
   devIndicators: false,
   async rewrites() {
     const rewrites = [];
+    const fallback = [];
     const gatewayURL = getInternalServiceURL(
       "DEER_FLOW_INTERNAL_GATEWAY_BASE_URL",
       "http://127.0.0.1:8001",
     );
-
-    if (!process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
-      rewrites.push({
-        source: "/api/langgraph",
-        destination: `${gatewayURL}/api`,
-      });
-      rewrites.push({
-        source: "/api/langgraph/:path*",
-        destination: `${gatewayURL}/api/:path*`,
-      });
-    }
 
     if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
       rewrites.push({
@@ -57,20 +47,16 @@ const config = {
         destination: `${gatewayURL}/api/skills/:path*`,
       });
 
-      // Catch-all for remaining gateway API routes (models, threads, memory,
-      // mcp, artifacts, uploads, suggestions, runs, etc.) that don't have
-      // their own NEXT_PUBLIC_* env var toggle.
-      //
-      // NOTE: this must come AFTER the /api/langgraph rewrite above so that
-      // LangGraph-compatible routes keep their public prefix while Gateway
-      // receives its native /api/* paths.
-      rewrites.push({
+      fallback.push({
         source: "/api/:path*",
         destination: `${gatewayURL}/api/:path*`,
       });
     }
 
-    return rewrites;
+    return {
+      beforeFiles: rewrites,
+      fallback,
+    };
   },
 };
 
