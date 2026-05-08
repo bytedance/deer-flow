@@ -29,6 +29,8 @@ set -e
 REPO_ROOT="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd -P)"
 cd "$REPO_ROOT"
 
+source "$REPO_ROOT/scripts/lib/uv-extras.sh"
+
 # ── Load .env ────────────────────────────────────────────────────────────────
 
 if [ -f "$REPO_ROOT/.env" ]; then
@@ -159,7 +161,13 @@ fi
 
 if ! $SKIP_INSTALL; then
     echo "Syncing dependencies..."
-    (cd backend && uv sync --quiet) || { echo "✗ Backend dependency install failed"; exit 1; }
+    UV_EXTRAS_VALUE="$(detect_uv_extras)"
+    if [ -n "$UV_EXTRAS_VALUE" ]; then
+        echo "→ Enabling backend uv extras: $UV_EXTRAS_VALUE"
+        (cd backend && uv sync --quiet --extra "$UV_EXTRAS_VALUE") || { echo "✗ Backend dependency install failed"; exit 1; }
+    else
+        (cd backend && uv sync --quiet) || { echo "✗ Backend dependency install failed"; exit 1; }
+    fi
     (cd frontend && pnpm install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
     echo "✓ Dependencies synced"
 else
