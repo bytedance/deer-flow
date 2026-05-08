@@ -173,7 +173,7 @@ def _assemble_from_features(
       9.   MemoryMiddleware (memory feature)
       10.  ViewImageMiddleware (vision feature)
       11.  SubagentLimitMiddleware (subagent feature)
-      12.  LoopDetectionMiddleware (always)
+      12.  LoopDetectionMiddleware (loop_detection feature)
       13.  ClarificationMiddleware (always last)
 
     Two-phase ordering:
@@ -272,10 +272,15 @@ def _assemble_from_features(
 
         extra_tools.append(task_tool)
 
-    # --- [12] LoopDetection (always) ---
-    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+    # --- [12] LoopDetection ---
+    if feat.loop_detection is not False:
+        if isinstance(feat.loop_detection, AgentMiddleware):
+            chain.append(feat.loop_detection)
+        else:
+            from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+            from deerflow.config.loop_detection_config import LoopDetectionConfig
 
-    chain.append(LoopDetectionMiddleware())
+            chain.append(LoopDetectionMiddleware.from_config(LoopDetectionConfig()))
 
     # --- [13] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())

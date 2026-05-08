@@ -6,11 +6,9 @@ import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
-from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langchain.tools import InjectedToolCallId, tool
 from langgraph.config import get_stream_writer
-from langgraph.typing import ContextT
 
-from deerflow.agents.thread_state import ThreadState
 from deerflow.config import get_app_config
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -21,6 +19,7 @@ from deerflow.subagents.executor import (
     get_background_task_result,
     request_cancel_background_task,
 )
+from deerflow.tools.types import Runtime
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -50,7 +49,7 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
 
 @tool("task", parse_docstring=True)
 async def task_tool(
-    runtime: ToolRuntime[ContextT, ThreadState],
+    runtime: Runtime,
     description: str,
     prompt: str,
     subagent_type: str,

@@ -106,7 +106,7 @@ export function InputBox({
   status = "ready",
   context,
   extraHeader,
-  isNewThread,
+  isWelcomeMode,
   threadId,
   initialValue,
   onContextChange,
@@ -126,7 +126,12 @@ export function InputBox({
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
   };
   extraHeader?: React.ReactNode;
-  isNewThread?: boolean;
+  /**
+   * Whether to render the input in welcome layout (vertically centered,
+   * with hero + quick action suggestions).  This is purely a visual flag,
+   * decoupled from "the backend has created the thread" — see issue #2746.
+   */
+  isWelcomeMode?: boolean;
   threadId: string;
   initialValue?: string;
   onContextChange?: (
@@ -341,7 +346,7 @@ export function InputBox({
 
   const showFollowups =
     !disabled &&
-    !isNewThread &&
+    !isWelcomeMode &&
     !followupsHidden &&
     (followupsLoading || followups.length > 0);
 
@@ -846,12 +851,12 @@ export function InputBox({
             />
           </PromptInputTools>
         </PromptInputFooter>
-        {!isNewThread && (
+        {!isWelcomeMode && (
           <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
         )}
       </PromptInput>
 
-      {isNewThread && searchParams.get("mode") !== "skill" && (
+      {isWelcomeMode && searchParams.get("mode") !== "skill" && (
         <div className="flex items-center justify-center pt-2">
           <SuggestionList />
         </div>

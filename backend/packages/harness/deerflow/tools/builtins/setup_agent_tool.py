@@ -3,11 +3,12 @@ import logging
 import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
-from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
 from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.paths import get_paths
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 def setup_agent(
     soul: str,
     description: str,
-    runtime: ToolRuntime,
+    runtime: Runtime,
     skills: list[str] | None = None,
 ) -> Command:
     """Setup the custom DeerFlow agent.
@@ -34,7 +35,14 @@ def setup_agent(
     try:
         agent_name = validate_agent_name(agent_name)
         paths = get_paths()
-        agent_dir = paths.agent_dir(agent_name) if agent_name else paths.base_dir
+        if agent_name:
+            # Custom agents are persisted under the current user's bucket so
+            # different users do not see each other's agents.
+            user_id = get_effective_user_id()
+            agent_dir = paths.user_agent_dir(user_id, agent_name)
+        else:
+            # Default agent (no agent_name): SOUL.md lives at the global base dir.
+            agent_dir = paths.base_dir
         is_new_dir = not agent_dir.exists()
         agent_dir.mkdir(parents=True, exist_ok=True)
 

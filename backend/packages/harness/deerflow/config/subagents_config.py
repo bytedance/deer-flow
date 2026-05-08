@@ -179,9 +179,3 @@ def load_subagents_config_from_dict(config_dict: dict) -> None:
             overrides_summary or "none",
             custom_agents_names or "none",
         )
-    else:
-        logger.info(
-            "Subagents config loaded: default timeout=%ss, default max_turns=%s, no per-agent overrides",
-            _subagents_config.timeout_seconds,
-            _subagents_config.max_turns,
-        )

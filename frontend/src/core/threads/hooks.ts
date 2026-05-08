@@ -286,6 +286,13 @@ export function useThreadStream({
   const summarizedRef = useRef<Set<string>>(null);
   // Track message count before sending so we know when server has responded
   const prevMsgCountRef = useRef(thread.messages.length);
+  // Track human message count before sending to prevent clearing optimistic
+  // messages before the server's human message arrives (e.g. when AI messages
+  // from "messages-tuple" events arrive before the input human message from
+  // "values" events).
+  const prevHumanMsgCountRef = useRef(
+    thread.messages.filter((m) => m.type === "human").length,
+  );
 
   summarizedRef.current ??= new Set<string>();
 
@@ -294,14 +301,28 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
+    prevMsgCountRef.current = thread.messages.length;
+    prevHumanMsgCountRef.current = thread.messages.filter(
+      (m) => m.type === "human",
+    ).length;
   }, [threadId]);
 
-  // Clear optimistic when server messages arrive (count increases)
+  // Clear optimistic when server messages arrive.
+  // For messages with a human optimistic message, wait until the server's
+  // human message has arrived to avoid clearing before the input message
+  // appears in the stream (the input message may arrive via "values" events
+  // after individual "messages-tuple" events for AI messages).
   useEffect(() => {
-    if (
-      optimisticMessages.length > 0 &&
-      thread.messages.length > prevMsgCountRef.current
-    ) {
+    if (optimisticMessages.length === 0) return;
+
+    const hasHumanOptimistic = optimisticMessages.some(
+      (m) => m.type === "human",
+    );
+    const newHumanMsgArrived =
+      thread.messages.filter((m) => m.type === "human").length >
+      prevHumanMsgCountRef.current;
+
+    if (!hasHumanOptimistic || newHumanMsgArrived) {
       setOptimisticMessages([]);
     }
   }, [thread.messages.length, optimisticMessages.length]);
@@ -322,6 +343,9 @@ export function useThreadStream({
 
       // Capture current count before showing optimistic messages
       prevMsgCountRef.current = thread.messages.length;
+      prevHumanMsgCountRef.current = thread.messages.filter(
+        (m) => m.type === "human",
+      ).length;
 
       // Build optimistic files list with uploading status
       const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
