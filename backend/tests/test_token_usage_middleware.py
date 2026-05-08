@@ -49,7 +49,8 @@ class TestTokenUsageMiddleware:
         assert "input_token_details={'audio': 10, 'cache_creation': 200, 'cache_read': 100}" in caplog.text
         assert "output_token_details={'audio': 10, 'reasoning': 200}" in caplog.text
 
-    def test_logs_anthropic_cache_details_from_response_metadata(self, caplog):
+    def test_logs_basic_tokens_when_no_detail_fields_in_usage_metadata(self, caplog):
+        """When usage_metadata has only totals (no input_token_details), log just the counts."""
         middleware = TokenUsageMiddleware()
         message = AIMessage(
             content="Here is the final answer.",
@@ -58,14 +59,6 @@ class TestTokenUsageMiddleware:
                 "output_tokens": 240,
                 "total_tokens": 590,
             },
-            response_metadata={
-                "usage": {
-                    "input_tokens": 350,
-                    "output_tokens": 240,
-                    "cache_creation_input_tokens": 200,
-                    "cache_read_input_tokens": 100,
-                }
-            },
         )
 
         with caplog.at_level(
@@ -76,9 +69,10 @@ class TestTokenUsageMiddleware:
 
         assert result is not None
         assert "LLM token usage: input=350 output=240 total=590" in caplog.text
-        assert "input_token_details={'cache_creation': 200, 'cache_read': 100}" in caplog.text
+        assert "input_token_details" not in caplog.text
 
-    def test_logs_raw_token_usage_when_usage_metadata_is_missing(self, caplog):
+    def test_no_log_when_usage_metadata_is_missing(self, caplog):
+        """When usage_metadata is absent, no token usage line is logged."""
         middleware = TokenUsageMiddleware()
         message = AIMessage(
             content="Here is the final answer.",
@@ -87,8 +81,6 @@ class TestTokenUsageMiddleware:
                     "input_tokens": 350,
                     "output_tokens": 240,
                     "total_tokens": 590,
-                    "cache_creation_input_tokens": 200,
-                    "cache_read_input_tokens": 100,
                 }
             },
         )
@@ -100,8 +92,7 @@ class TestTokenUsageMiddleware:
             result = middleware.after_model({"messages": [message]}, _make_runtime())
 
         assert result is not None
-        assert "LLM token usage: input=350 output=240 total=590" in caplog.text
-        assert "input_token_details={'cache_creation': 200, 'cache_read': 100}" in caplog.text
+        assert "LLM token usage" not in caplog.text
 
     def test_annotates_todo_updates_with_structured_actions(self):
         middleware = TokenUsageMiddleware()

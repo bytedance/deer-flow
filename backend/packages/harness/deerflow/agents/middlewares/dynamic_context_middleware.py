@@ -104,11 +104,13 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     def _build_date_update_reminder(self) -> str:
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
-        return "\n".join([
-            "<system-reminder>",
-            f"<current_date>{current_date}</current_date>",
-            "</system-reminder>",
-        ])
+        return "\n".join(
+            [
+                "<system-reminder>",
+                f"<current_date>{current_date}</current_date>",
+                "</system-reminder>",
+            ]
+        )
 
     @staticmethod
     def _make_reminder_and_user_messages(original: HumanMessage, reminder_content: str) -> tuple[HumanMessage, HumanMessage]:
