@@ -4,14 +4,11 @@ DeerFlow tools annotate their runtime parameter as ``Runtime``
 (``deerflow.tools.types.Runtime`` = ``ToolRuntime[dict[str, Any], ThreadState]``)
 so the LangChain tool framework injects the runtime automatically.
 When the inner ``Runtime.context`` field is left as the unbound ``ContextT``
-TypeVar (default ``None``), Pydantic's ``model_dump()`` on the args schema emits
-
-    PydanticSerializationUnexpectedValue(Expected `none` -- field_name='context',
-    input_value={'thread_id': ..., 'sandbox_id': 'local'}, input_type=dict)
-
-because the actual context DeerFlow installs is a dict. Using the ``Runtime``
-alias (which binds the context to ``dict[str, Any]``) keeps Pydantic's
-serialization expectations aligned with reality.
+TypeVar (default ``None``), Pydantic's ``model_dump()`` on the auto-generated
+args schema emits a ``PydanticSerializationUnexpectedValue`` warning on every
+tool call because the actual context DeerFlow installs is a dict. Using the
+``Runtime`` alias (which binds the context to ``dict[str, Any]``) keeps
+Pydantic's serialization expectations aligned with reality.
 """
 
 from __future__ import annotations
@@ -50,24 +47,27 @@ def _make_runtime(context: dict) -> ToolRuntime:
     )
 
 
+_TOOL_CASES = [
+    (bash_tool, {"description": "list", "command": "ls"}),
+    (ls_tool, {"description": "list", "path": "/tmp"}),
+    (glob_tool, {"description": "find", "pattern": "*.py", "path": "/tmp"}),
+    (grep_tool, {"description": "search", "pattern": "x", "path": "/tmp"}),
+    (read_file_tool, {"description": "read", "path": "/tmp/x"}),
+    (write_file_tool, {"description": "write", "path": "/tmp/x", "content": "hi"}),
+    (str_replace_tool, {"description": "replace", "path": "/tmp/x", "old_str": "a", "new_str": "b"}),
+    (present_file_tool, {"filepaths": ["/tmp/x"], "tool_call_id": "call-1"}),
+    (view_image_tool, {"image_path": "/tmp/img.png", "tool_call_id": "call-1"}),
+    (task_tool, {"description": "do", "prompt": "go", "subagent_type": "general-purpose", "tool_call_id": "call-1"}),
+    (skill_manage_tool, {"action": "list", "name": "demo"}),
+    (setup_agent, {"soul": "s", "description": "d"}),
+    (update_agent, {}),
+]
+
+
 @pytest.mark.parametrize(
     ("tool_obj", "extra_args"),
-    [
-        (bash_tool, {"description": "list", "command": "ls"}),
-        (ls_tool, {"description": "list", "path": "/tmp"}),
-        (glob_tool, {"description": "find", "pattern": "*.py", "path": "/tmp"}),
-        (grep_tool, {"description": "search", "pattern": "x", "path": "/tmp"}),
-        (read_file_tool, {"description": "read", "path": "/tmp/x"}),
-        (write_file_tool, {"description": "write", "path": "/tmp/x", "content": "hi"}),
-        (str_replace_tool, {"description": "replace", "path": "/tmp/x", "old_str": "a", "new_str": "b"}),
-        (present_file_tool, {"filepaths": ["/tmp/x"], "tool_call_id": "call-1"}),
-        (view_image_tool, {"image_path": "/tmp/img.png", "tool_call_id": "call-1"}),
-        (task_tool, {"description": "do", "prompt": "go", "subagent_type": "general-purpose", "tool_call_id": "call-1"}),
-        (skill_manage_tool, {"action": "list", "name": "demo"}),
-        (setup_agent, {"soul": "s", "description": "d"}),
-        (update_agent, {}),
-    ],
-    ids=lambda v: getattr(v, "name", None) or str(v),
+    _TOOL_CASES,
+    ids=[case[0].name for case in _TOOL_CASES],
 )
 def test_tool_args_schema_does_not_emit_pydantic_context_warning(tool_obj, extra_args) -> None:
     """``model_dump()`` of the auto-generated args_schema must not warn about ``context``.
@@ -87,5 +87,5 @@ def test_tool_args_schema_does_not_emit_pydantic_context_warning(tool_obj, extra
         validated = schema.model_validate(payload)
         validated.model_dump()
 
-    pydantic_warnings = [w for w in caught if "PydanticSerializationUnexpectedValue" in str(w.message) and "context" in str(w.message)]
+    pydantic_warnings = [w for w in caught if "PydanticSerializationUnexpectedValue" in str(w.message)]
     assert not pydantic_warnings, f"{tool_obj.name} args_schema.model_dump() emitted Pydantic context serialization warnings: {[str(w.message) for w in pydantic_warnings]}"
