@@ -75,6 +75,11 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
     assert result["model"] is not None
 
 
+def test_create_summarization_middleware_returns_none_when_app_config_unavailable(monkeypatch):
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: (_ for _ in ()).throw(RuntimeError("not loaded")))
+    assert lead_agent_module._create_summarization_middleware() is None
+
+
 def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_read(monkeypatch):
     app_config = _make_app_config([_make_model("context-model", supports_thinking=False)])
 

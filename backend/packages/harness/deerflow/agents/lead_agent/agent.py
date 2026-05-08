@@ -52,7 +52,11 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
 
 def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
-    resolved_app_config = app_config or get_app_config()
+    try:
+        resolved_app_config = app_config or get_app_config()
+    except Exception as exc:
+        logger.warning("Skipping summarization middleware; app config unavailable: %s", exc)
+        return None
     config = resolved_app_config.summarization
 
     if not config.enabled:

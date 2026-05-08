@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import replace
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langgraph.config import get_stream_writer
@@ -24,6 +24,7 @@ from deerflow.subagents.executor import (
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.runtime.runs.worker import DeerFlowRuntimeContext
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +32,10 @@ logger = logging.getLogger(__name__)
 def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
     context = getattr(runtime, "context", None)
     if isinstance(context, dict):
-        app_config = context.get("app_config")
+        typed_context: DeerFlowRuntimeContext = context  # pyright: ignore[reportAssignmentType]
+        app_config = typed_context.get("app_config")
         if app_config is not None:
-            return cast("AppConfig", app_config)
+            return app_config
     return None
 
 
