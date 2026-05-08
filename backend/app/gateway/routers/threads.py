@@ -218,6 +218,33 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     except Exception:
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
+    # Remove run records associated with this thread (best-effort)
+    try:
+        from app.gateway.deps import get_run_store
+
+        run_store = get_run_store(request)
+        if hasattr(run_store, "delete_by_thread"):
+            await run_store.delete_by_thread(thread_id)
+    except Exception:
+        logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove run event records associated with this thread (best-effort)
+    try:
+        from app.gateway.deps import get_run_event_store
+
+        event_store = get_run_event_store(request)
+        await event_store.delete_by_thread(thread_id)
+    except Exception:
+        logger.debug("Could not delete run events for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove feedback records associated with this thread (best-effort)
+    try:
+        feedback_repo = getattr(request.app.state, "feedback_repo", None)
+        if feedback_repo is not None and hasattr(feedback_repo, "delete_by_thread"):
+            await feedback_repo.delete_by_thread(thread_id)
+    except Exception:
+        logger.debug("Could not delete feedback for thread %s (not critical)", sanitize_log_param(thread_id))
+
     return response
 
 
