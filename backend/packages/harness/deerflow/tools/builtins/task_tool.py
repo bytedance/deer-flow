@@ -54,7 +54,6 @@ async def task_tool(
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
-    max_turns: int | None = None,
 ) -> str:
     """Delegate a task to a specialized subagent that runs in its own context.
 
@@ -90,7 +89,6 @@ async def task_tool(
         description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
         prompt: The task description for the subagent. Be specific and clear about what needs to be done. ALWAYS PROVIDE THIS PARAMETER SECOND.
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
-        max_turns: Optional maximum number of agent turns. Defaults to subagent's configured max.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
@@ -111,9 +109,6 @@ async def task_tool(
     # Skills are loaded by SubagentExecutor per-session (aligned with Codex's pattern:
     # each subagent loads its own skills based on config, injected as conversation items).
     # No longer appended to system_prompt here.
-
-    if max_turns is not None:
-        overrides["max_turns"] = max_turns
 
     # Extract parent context from runtime
     sandbox_state = None
