@@ -819,10 +819,14 @@ class TestToolFrequencyDetection:
         for i in range(2):
             mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
 
-        # 3rd read_file call hits global warn=3 (read_file has no override)
+        # 3rd read_file call hits global warn=3 (read_file has no override).
+        # Warning delivery is deferred to wrap_model_call so the just-emitted
+        # AIMessage(tool_calls=...) is not mutated before ToolMessages exist.
         result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
-        assert result is not None
-        assert "read_file" in result["messages"][0].content
+        assert result is None
+        queued = mw._pending_warnings.get(_pending_key(), [])
+        assert queued
+        assert "read_file" in queued[0]
 
     def test_hash_detection_takes_priority(self):
         """Hash-based hard stop fires before frequency check for identical calls."""
@@ -881,11 +885,13 @@ class TestFromConfig:
         mw = LoopDetectionMiddleware.from_config(self._config())
         assert mw._tool_freq_overrides == {}
 
-    def test_constructed_middleware_detects_loops(self):
+    def test_constructed_middleware_queues_loop_warning(self):
         mw = LoopDetectionMiddleware.from_config(self._config(warn_threshold=2, hard_limit=4))
         runtime = _make_runtime()
         call = [_bash_call("ls")]
         mw._apply(_make_state(tool_calls=call), runtime)
         result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is not None
-        assert "LOOP DETECTED" in result["messages"][0].content
+        assert result is None
+        queued = mw._pending_warnings.get(_pending_key(), [])
+        assert queued
+        assert "LOOP DETECTED" in queued[0]
