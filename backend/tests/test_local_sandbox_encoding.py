@@ -105,6 +105,7 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
                 "capture_output": True,
                 "text": True,
                 "timeout": 600,
+                "env": None,
             },
         )
     ]
@@ -118,6 +119,7 @@ def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
         return SimpleNamespace(stdout="ok", stderr="", returncode=0)
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
     monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
 
@@ -132,9 +134,31 @@ def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
                 "capture_output": True,
                 "text": True,
                 "timeout": 600,
+                "env": {
+                    "PATH": r"C:\Program Files\Git\bin",
+                    "MSYS_NO_PATHCONV": "1",
+                    "MSYS2_ARG_CONV_EXCL": "*",
+                },
             },
         )
     ]
+
+
+def test_execute_command_does_not_set_msys_env_for_non_msys_posix_shell_on_windows(monkeypatch):
+    calls: list[tuple[object, dict]] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args[0], kwargs))
+        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\tools\busybox\sh.exe"))
+    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+
+    output = LocalSandbox("t").execute_command("echo /mnt/skills/demo")
+
+    assert output == "ok"
+    assert calls[0][1]["env"] is None
 
 
 def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
@@ -159,6 +183,7 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
                 "capture_output": True,
                 "text": True,
                 "timeout": 600,
+                "env": None,
             },
         )
     ]
