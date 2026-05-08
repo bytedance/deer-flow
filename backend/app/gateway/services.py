@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.utils import sanitize_log_param
+from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -251,6 +252,20 @@ async def start_run(
 
     body_context = getattr(body, "context", None) or {}
     model_name = body_context.get("model_name")
+
+    # Truncate to 128 chars to match DB column constraint (model.py:23).
+    if model_name and len(model_name) > 128:
+        model_name = model_name[:128]
+
+    # Validate model against the allowlist when a model_name is provided.
+    if model_name:
+        app_config = get_app_config()
+        resolved = app_config.get_model_config(model_name)
+        if resolved is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name!r} is not in the configured model allowlist",
+            )
 
     try:
         record = await run_mgr.create_or_reject(
