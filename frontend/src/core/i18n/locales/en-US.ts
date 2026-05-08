@@ -207,7 +207,7 @@ export const enUS: Translations = {
     nameStepApiDisabledError:
       "Custom agent management is not enabled on this server. Please contact your administrator.",
     nameStepBootstrapMessage:
-      "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
+      "The new custom agent name is {name}. Help me design its purpose, behavior, and SOUL.md before saving it.",
     save: "Save agent",
     saving: "Saving agent...",
     saveRequested:
