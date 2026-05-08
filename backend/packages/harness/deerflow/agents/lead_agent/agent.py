@@ -50,14 +50,9 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     return default_model_name
 
 
-def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
+def _create_summarization_middleware(*, app_config: AppConfig) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
-    try:
-        resolved_app_config = app_config or get_app_config()
-    except Exception as exc:
-        logger.warning("Skipping summarization middleware; app config unavailable: %s", exc)
-        return None
-    config = resolved_app_config.summarization
+    config = app_config.summarization
 
     if not config.enabled:
         return None
@@ -78,9 +73,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     # as middleware rather than lead_agent (SummarizationMiddleware is a
     # LangChain built-in, so we tag the model at creation time).
     if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=resolved_app_config)
+        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=app_config)
     else:
-        model = create_chat_model(thinking_enabled=False, app_config=resolved_app_config)
+        model = create_chat_model(thinking_enabled=False, app_config=app_config)
     model = model.with_config(tags=["middleware:summarize"])
 
     # Prepare kwargs
@@ -97,13 +92,13 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
         kwargs["summary_prompt"] = config.summary_prompt
 
     hooks: list[BeforeSummarizationHook] = []
-    if resolved_app_config.memory.enabled:
+    if app_config.memory.enabled:
         hooks.append(memory_flush_hook)
 
     # The logic below relies on two assumptions holding true: this factory is
     # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
     # config is not expected to change after startup.
-    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
+    skills_container_path = app_config.skills.container_path or "/mnt/skills"
 
     return DeerFlowSummarizationMiddleware(
         **kwargs,

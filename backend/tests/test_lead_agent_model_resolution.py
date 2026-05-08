@@ -75,9 +75,11 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
     assert result["model"] is not None
 
 
-def test_create_summarization_middleware_returns_none_when_app_config_unavailable(monkeypatch):
-    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: (_ for _ in ()).throw(RuntimeError("not loaded")))
-    assert lead_agent_module._create_summarization_middleware() is None
+def test_create_summarization_middleware_requires_explicit_app_config():
+    create_summarization_middleware = getattr(lead_agent_module, "_create_summarization_middleware")
+
+    with pytest.raises(TypeError):
+        create_summarization_middleware()
 
 
 def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_read(monkeypatch):
@@ -435,10 +437,10 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     fake_model.with_config.assert_called_once_with(tags=["middleware:summarize"])
 
 
-def test_create_summarization_middleware_threads_resolved_app_config_to_model(monkeypatch):
-    fallback_app_config = _make_app_config([_make_model("fallback-model", supports_thinking=False)])
-    fallback_app_config.summarization = SummarizationConfig(enabled=True, model_name="fallback-model")
-    fallback_app_config.memory = MemoryConfig(enabled=False)
+def test_create_summarization_middleware_threads_explicit_app_config_to_model(monkeypatch):
+    app_config = _make_app_config([_make_model("explicit-model", supports_thinking=False)])
+    app_config.summarization = SummarizationConfig(enabled=True, model_name="explicit-model")
+    app_config.memory = MemoryConfig(enabled=False)
 
     from unittest.mock import MagicMock
 
@@ -450,13 +452,16 @@ def test_create_summarization_middleware_threads_resolved_app_config_to_model(mo
         captured["app_config"] = app_config
         return fake_model
 
-    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: fallback_app_config)
+    def _raise_get_app_config():
+        raise AssertionError("ambient get_app_config() must not be used by summarization middleware")
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", _raise_get_app_config)
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
     monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
 
-    lead_agent_module._create_summarization_middleware()
+    lead_agent_module._create_summarization_middleware(app_config=app_config)
 
-    assert captured["app_config"] is fallback_app_config
+    assert captured["app_config"] is app_config
 
 
 def test_memory_middleware_uses_explicit_memory_config_without_global_read(monkeypatch):
