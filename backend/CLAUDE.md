@@ -266,7 +266,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
    - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
-   - `task` - Delegate to subagent (description, prompt, subagent_type, max_turns)
+   - `task` - Delegate to subagent (description, prompt, subagent_type)
 
 **Community tools** (`packages/harness/deerflow/community/`):
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)
