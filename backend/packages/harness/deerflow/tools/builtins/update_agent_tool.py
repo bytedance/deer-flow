@@ -22,13 +22,13 @@ from typing import Any
 import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
-from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ def _cleanup_temps(temps: list[Path]) -> None:
 
 @tool
 def update_agent(
-    runtime: ToolRuntime,
+    runtime: Runtime,
     soul: str | None = None,
     description: str | None = None,
     skills: list[str] | None = None,
