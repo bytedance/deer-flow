@@ -165,9 +165,9 @@ start() {
 
     sandbox_mode="$(detect_sandbox_mode)"
 
-    services="frontend gateway nginx"
+    services="frontend gateway nginx searxng"
     if [ "$sandbox_mode" = "provisioner" ]; then
-        services="frontend gateway provisioner nginx"
+        services="frontend gateway provisioner nginx searxng"
     fi
 
     echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
@@ -240,7 +240,7 @@ start() {
 # View Docker development logs
 logs() {
     local service=""
-    
+
     case "$1" in
         --frontend)
             service="frontend"
@@ -258,16 +258,20 @@ logs() {
             service="provisioner"
             echo -e "${BLUE}Viewing provisioner logs...${NC}"
             ;;
+        --searxng)
+            service="searxng"
+            echo -e "${BLUE}Viewing SearXNG logs...${NC}"
+            ;;
         "")
             echo -e "${BLUE}Viewing all logs...${NC}"
             ;;
         *)
             echo -e "${YELLOW}Unknown option: $1${NC}"
-            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--provisioner]"
+            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--provisioner|--searxng]"
             exit 1
             ;;
     esac
-    
+
     cd "$DOCKER_DIR" && $COMPOSE_CMD logs -f $service
 }
 
@@ -316,6 +320,7 @@ help() {
     echo "                  --gateway    View gateway logs only"
     echo "                  --nginx      View nginx logs only"
     echo "                  --provisioner View provisioner logs only"
+    echo "                  --searxng    View SearXNG logs only"
     echo "  stop          - Stop Docker development services"
     echo "  help          - Show this help message"
     echo ""

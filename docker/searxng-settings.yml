@@ -1,0 +1,37 @@
+use_default_settings: true
+
+server:
+  secret_key: "change-me"
+  limiter: false
+  image_proxy: true
+
+search:
+  formats:
+    - html
+    - json  # Enable JSON format for API access
+
+engines:
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: arxiv
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: reddit
+    disabled: false
+  - name: hackernews
+    disabled: false

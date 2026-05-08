@@ -64,6 +64,11 @@ FROM builder AS dev
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
+# Install Playwright browsers (Chromium for PDF generation)
+# Run apt-get update first so playwright's --with-deps uses fresh package lists
+# (stale Docker layer cache can cause GPG signature failures otherwise)
+RUN apt-get update && sh -c "cd backend && uv run playwright install --with-deps chromium"
+
 EXPOSE 8001 2024
 
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]
@@ -93,6 +98,9 @@ WORKDIR /app
 
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend
+
+# Install Playwright browsers (Chromium for PDF generation)
+RUN apt-get update && sh -c "cd backend && uv run playwright install --with-deps chromium"
 
 # Expose ports (gateway: 8001, langgraph: 2024)
 EXPOSE 8001 2024
