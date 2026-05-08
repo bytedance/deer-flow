@@ -1,5 +1,5 @@
 import re
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -431,3 +431,111 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     assert entries, "expected at least one history entry"
     for entry in entries:
         assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
+
+
+# ── DELETE endpoint: DB record cleanup ───────────────────────────────────────
+
+
+def _build_thread_app_with_db_stores(
+    *,
+    run_store=None,
+    event_store=None,
+    feedback_repo=None,
+):
+    """Build a test app with optional DB store mocks attached to app.state."""
+    app = make_authed_test_app()  # already sets thread_store mock that always grants access
+    if run_store is not None:
+        app.state.run_store = run_store
+    if event_store is not None:
+        app.state.run_event_store = event_store
+    if feedback_repo is not None:
+        app.state.feedback_repo = feedback_repo
+    app.include_router(threads.router)
+    return app
+
+
+def test_delete_thread_route_calls_run_store_delete_by_thread(tmp_path):
+    """DELETE /api/threads/{id} calls run_store.delete_by_thread with the thread_id."""
+    paths = Paths(tmp_path)
+    run_store = MagicMock()
+    run_store.delete_by_thread = AsyncMock(return_value=3)
+
+    app = _build_thread_app_with_db_stores(run_store=run_store)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-db-run")
+
+    assert response.status_code == 200
+    run_store.delete_by_thread.assert_called_once_with("thread-db-run")
+
+
+def test_delete_thread_route_calls_event_store_delete_by_thread(tmp_path):
+    """DELETE /api/threads/{id} calls event_store.delete_by_thread with the thread_id."""
+    paths = Paths(tmp_path)
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=5)
+
+    app = _build_thread_app_with_db_stores(event_store=event_store)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-db-events")
+
+    assert response.status_code == 200
+    event_store.delete_by_thread.assert_called_once_with("thread-db-events")
+
+
+def test_delete_thread_route_calls_feedback_repo_delete_by_thread(tmp_path):
+    """DELETE /api/threads/{id} calls feedback_repo.delete_by_thread with the thread_id."""
+    paths = Paths(tmp_path)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=2)
+
+    app = _build_thread_app_with_db_stores(feedback_repo=feedback_repo)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-db-feedback")
+
+    assert response.status_code == 200
+    feedback_repo.delete_by_thread.assert_called_once_with("thread-db-feedback")
+
+
+def test_delete_thread_route_cleans_all_db_stores(tmp_path):
+    """DELETE /api/threads/{id} invokes cleanup on all DB stores in one request."""
+    paths = Paths(tmp_path)
+    run_store = MagicMock()
+    run_store.delete_by_thread = AsyncMock(return_value=2)
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=4)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=1)
+
+    app = _build_thread_app_with_db_stores(
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-full-cleanup")
+
+    assert response.status_code == 200
+    run_store.delete_by_thread.assert_called_once_with("thread-full-cleanup")
+    event_store.delete_by_thread.assert_called_once_with("thread-full-cleanup")
+    feedback_repo.delete_by_thread.assert_called_once_with("thread-full-cleanup")
+
+
+def test_delete_thread_route_succeeds_when_db_stores_absent(tmp_path):
+    """DELETE /api/threads/{id} succeeds gracefully when no DB stores are configured."""
+    paths = Paths(tmp_path)
+    app = _build_thread_app_with_db_stores()  # no DB stores set
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-no-db")
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True

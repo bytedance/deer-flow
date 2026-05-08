@@ -1,11 +1,40 @@
 """Tests for RunRepository (SQLAlchemy-backed RunStore).
 
 Uses a temp SQLite DB to test ORM-backed CRUD operations.
+PostgreSQL tests are gated behind the ``PG_TEST_URL`` environment variable and
+are skipped automatically when it is not set.
 """
+
+import os
 
 import pytest
 
 from deerflow.persistence.run import RunRepository
+
+_PG_URL = os.getenv("PG_TEST_URL")
+
+_BACKENDS = [
+    pytest.param("sqlite", id="sqlite"),
+    pytest.param(
+        "postgres",
+        id="postgres",
+        marks=pytest.mark.skipif(
+            not _PG_URL,
+            reason="PG_TEST_URL not set; skipping PostgreSQL tests",
+        ),
+    ),
+]
+
+
+async def _make_repo_for(backend: str, tmp_path):
+    from deerflow.persistence.engine import get_session_factory, init_engine
+
+    if backend == "sqlite":
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    else:
+        await init_engine("postgres", url=_PG_URL)
+    return RunRepository(get_session_factory())
 
 
 async def _make_repo(tmp_path):
@@ -194,3 +223,102 @@ class TestRunRepository:
         rows = await repo.list_by_thread("t1", user_id=None)
         assert len(rows) == 2
         await _cleanup()
+
+
+# ---------------------------------------------------------------------------
+# MemoryRunStore.delete_by_thread
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryRunStoreDeleteByThread:
+    """Unit tests for the in-memory RunStore implementation of delete_by_thread."""
+
+    @pytest.mark.anyio
+    async def test_removes_all_runs_for_thread(self):
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        store = MemoryRunStore()
+        await store.put("r1", thread_id="t1")
+        await store.put("r2", thread_id="t1")
+        await store.put("r3", thread_id="t2")
+        count = await store.delete_by_thread("t1")
+        assert count == 2
+        assert await store.get("r1") is None
+        assert await store.get("r2") is None
+        assert await store.get("r3") is not None  # different thread, untouched
+
+    @pytest.mark.anyio
+    async def test_returns_zero_for_missing_thread(self):
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        store = MemoryRunStore()
+        assert await store.delete_by_thread("nope") == 0
+
+    @pytest.mark.anyio
+    async def test_second_call_returns_zero(self):
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        store = MemoryRunStore()
+        await store.put("r1", thread_id="t1")
+        assert await store.delete_by_thread("t1") == 1
+        assert await store.delete_by_thread("t1") == 0  # idempotent
+
+
+# ---------------------------------------------------------------------------
+# RunRepository.delete_by_thread  (SQLite + optional PostgreSQL)
+# ---------------------------------------------------------------------------
+
+
+class TestRunRepositoryDeleteByThread:
+    """Tests for RunRepository.delete_by_thread across DB backends."""
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("backend", _BACKENDS)
+    async def test_removes_all_runs_for_thread(self, tmp_path, backend):
+        from deerflow.persistence.engine import close_engine
+
+        repo = await _make_repo_for(backend, tmp_path)
+        await repo.put("r1", thread_id="t1")
+        await repo.put("r2", thread_id="t1")
+        await repo.put("r3", thread_id="t2")
+        count = await repo.delete_by_thread("t1")
+        assert count == 2
+        assert await repo.get("r1") is None
+        assert await repo.get("r2") is None
+        assert await repo.get("r3") is not None  # different thread, untouched
+        await close_engine()
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("backend", _BACKENDS)
+    async def test_returns_zero_for_missing_thread(self, tmp_path, backend):
+        from deerflow.persistence.engine import close_engine
+
+        repo = await _make_repo_for(backend, tmp_path)
+        count = await repo.delete_by_thread("nope")
+        assert count == 0
+        await close_engine()
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("backend", _BACKENDS)
+    async def test_respects_user_isolation(self, tmp_path, backend):
+        from deerflow.persistence.engine import close_engine
+
+        repo = await _make_repo_for(backend, tmp_path)
+        await repo.put("r1", thread_id="t1", user_id="alice")
+        await repo.put("r2", thread_id="t1", user_id="bob")
+        count = await repo.delete_by_thread("t1", user_id="alice")
+        assert count == 1
+        assert await repo.get("r1") is None  # alice's run deleted
+        assert await repo.get("r2", user_id="bob") is not None  # bob's run intact
+        await close_engine()
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("backend", _BACKENDS)
+    async def test_second_call_returns_zero(self, tmp_path, backend):
+        from deerflow.persistence.engine import close_engine
+
+        repo = await _make_repo_for(backend, tmp_path)
+        await repo.put("r1", thread_id="t1")
+        assert await repo.delete_by_thread("t1") == 1
+        assert await repo.delete_by_thread("t1") == 0  # idempotent
+        await close_engine()
