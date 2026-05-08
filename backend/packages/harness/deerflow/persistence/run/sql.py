@@ -28,6 +28,8 @@ class RunRepository(RunStore):
         """Normalize model_name for storage: strip whitespace, truncate to 128 chars."""
         if model_name is None:
             return None
+        if not isinstance(model_name, str):
+            model_name = str(model_name)
         normalized = model_name.strip()
         if len(normalized) > 128:
             normalized = normalized[:128]
