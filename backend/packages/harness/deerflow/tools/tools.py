@@ -143,12 +143,7 @@ def get_available_tools(
     try:
         from deerflow.tools.builtins.invoke_acp_agent_tool import build_invoke_acp_agent_tool
 
-        if app_config is None:
-            from deerflow.config.acp_config import get_acp_agents
-
-            acp_agents = get_acp_agents()
-        else:
-            acp_agents = getattr(config, "acp_agents", {}) or {}
+        acp_agents = getattr(config, "acp_agents", {}) or {}
         if acp_agents:
             acp_tools.append(build_invoke_acp_agent_tool(acp_agents))
             logger.info(f"Including invoke_acp_agent tool ({len(acp_agents)} agent(s): {list(acp_agents.keys())})")
