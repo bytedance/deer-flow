@@ -87,5 +87,5 @@ def test_tool_args_schema_does_not_emit_pydantic_context_warning(tool_obj, extra
         validated = schema.model_validate(payload)
         validated.model_dump()
 
-    pydantic_warnings = [w for w in caught if "PydanticSerializationUnexpectedValue" in str(w.message) and "field_name='context'" in str(w.message)]
+    pydantic_warnings = [w for w in caught if "PydanticSerializationUnexpectedValue" in str(w.message) and "context" in str(w.message)]
     assert not pydantic_warnings, f"{tool_obj.name} args_schema.model_dump() emitted Pydantic context serialization warnings: {[str(w.message) for w in pydantic_warnings]}"
