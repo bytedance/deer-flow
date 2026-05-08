@@ -310,7 +310,7 @@ export const enUS: Translations = {
     unavailable:
       "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
     unavailableShort: "No usage returned",
-    note: "Shown from provider-returned usage_metadata. Totals are best-effort conversation totals and may differ from provider billing pages.",
+    note: "Header totals use persisted thread usage when available. Per-turn and debug usage come from visible messages. Totals may differ from provider billing pages.",
     presets: {
       off: "Off",
       summary: "Summary",
