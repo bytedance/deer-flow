@@ -57,7 +57,7 @@ class RemoteSandboxBackend(SandboxBackend):
 
     def create(
         self,
-        thread_id: str,
+        thread_id: str | None,
         sandbox_id: str,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
     ) -> SandboxInfo:
@@ -130,7 +130,7 @@ class RemoteSandboxBackend(SandboxBackend):
             logger.warning("Provisioner list_running failed: %s", exc)
             return []
 
-    def _provisioner_create(self, thread_id: str, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
+    def _provisioner_create(self, thread_id: str | None, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
         try:
             resp = requests.post(
