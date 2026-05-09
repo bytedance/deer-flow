@@ -144,7 +144,7 @@ export function InputBox({
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
-  onSubmit?: (message: PromptInputMessage) => void;
+  onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
 }) {
   const { t } = useI18n();
@@ -276,11 +276,14 @@ export function InputBox({
             selectedModel?.supports_thinking ?? false,
           ),
         });
-        setTimeout(() => onSubmit?.(message), 0);
-        return;
+        return new Promise<void>((resolve, reject) => {
+          setTimeout(() => {
+            Promise.resolve(onSubmit?.(message)).then(resolve).catch(reject);
+          }, 0);
+        });
       }
 
-      onSubmit?.(message);
+      return onSubmit?.(message);
     },
     [
       context,
