@@ -106,13 +106,13 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
         return
 
     if db_config.backend == "postgres":
+        if not db_config.postgres_url:
+            raise ValueError("database.postgres_url is required for the postgres backend")
+
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         except ImportError as exc:
             raise ImportError(POSTGRES_INSTALL) from exc
-
-        if not db_config.postgres_url:
-            raise ValueError("database.postgres_url is required for the postgres backend")
 
         async with AsyncPostgresSaver.from_conn_string(db_config.postgres_url) as saver:
             await saver.setup()
@@ -149,7 +149,8 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
 
     # Unified database config
     db_config = getattr(app_config, "database", None)
-    if db_config is not None and db_config.backend != "memory":
+    db_backend = getattr(db_config, "backend", None)
+    if db_backend in ("sqlite", "postgres"):
         async with _async_checkpointer_from_database(db_config) as saver:
             yield saver
             return

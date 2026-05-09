@@ -187,6 +187,7 @@ class AppConfig(BaseModel):
         from deerflow.config.checkpointer_config import get_checkpointer_config
 
         previous_checkpointer_config = get_checkpointer_config()
+        previous_database_config = _app_config.database if _app_config is not None else None
 
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
@@ -199,8 +200,8 @@ class AppConfig(BaseModel):
         load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
         load_acp_config_from_dict({name: agent.model_dump() for name, agent in acp_agents.items()})
 
-        if previous_checkpointer_config != config.checkpointer:
-            # These runtime singletons derive their backend from checkpointer config.
+        if previous_checkpointer_config != config.checkpointer or previous_database_config != config.database:
+            # These runtime singletons derive their backend from checkpointer/database config.
             # Keep imports local to avoid cycles: both providers import get_app_config.
             from deerflow.runtime.checkpointer import reset_checkpointer
             from deerflow.runtime.store import reset_store
