@@ -1,5 +1,6 @@
 """Tests for AioSandboxProvider mount helpers."""
 
+import asyncio
 import importlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -211,3 +212,105 @@ async def test_discover_or_create_with_lock_async_offloads_lock_file_open_and_cl
     assert sandbox_id == "sandbox-async-lock"
     assert aio_mod._open_lock_file in to_thread_calls
     assert any(getattr(func, "__name__", "") == "close" for func in to_thread_calls)
+
+
+@pytest.mark.anyio
+async def test_acquire_thread_lock_async_uses_dedicated_executor(monkeypatch):
+    """Per-thread lock waits should not consume the default asyncio.to_thread pool."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    lock = aio_mod.threading.Lock()
+
+    async def fail_to_thread(*_args, **_kwargs):
+        raise AssertionError("thread-lock acquisition must not use asyncio.to_thread")
+
+    monkeypatch.setattr(aio_mod.asyncio, "to_thread", fail_to_thread)
+
+    await aio_mod._acquire_thread_lock_async(lock)
+    try:
+        assert not lock.acquire(blocking=False)
+    finally:
+        lock.release()
+
+
+@pytest.mark.anyio
+async def test_acquire_async_cancellation_does_not_leak_thread_lock(tmp_path):
+    """Cancelled async lock waiters must not leave the per-thread lock held."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    thread_id = "thread-cancel-lock"
+    thread_lock = provider._get_thread_lock(thread_id)
+    thread_lock.acquire()
+
+    task = asyncio.create_task(provider.acquire_async(thread_id))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    thread_lock.release()
+    deadline = asyncio.get_running_loop().time() + 1
+    while asyncio.get_running_loop().time() < deadline:
+        acquired = thread_lock.acquire(blocking=False)
+        if acquired:
+            thread_lock.release()
+            return
+        await asyncio.sleep(0.01)
+
+    pytest.fail("provider thread lock was leaked after cancelling acquire_async")
+
+
+@pytest.mark.anyio
+async def test_acquire_async_cancelled_waiter_does_not_block_successor(tmp_path, monkeypatch):
+    """A cancelled waiter must not prevent the next live waiter from acquiring."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    async def fake_acquire_internal_async(thread_id: str | None) -> str:
+        assert thread_id == "thread-successor-lock"
+        await asyncio.sleep(0)
+        return "sandbox-successor"
+
+    monkeypatch.setattr(provider, "_acquire_internal_async", fake_acquire_internal_async)
+
+    thread_id = "thread-successor-lock"
+    thread_lock = provider._get_thread_lock(thread_id)
+    thread_lock.acquire()
+
+    cancelled_waiter = asyncio.create_task(provider.acquire_async(thread_id))
+    await asyncio.sleep(0.05)
+    cancelled_waiter.cancel()
+    try:
+        await cancelled_waiter
+    except asyncio.CancelledError:
+        pass
+
+    live_waiter = asyncio.create_task(provider.acquire_async(thread_id))
+    thread_lock.release()
+
+    assert await asyncio.wait_for(live_waiter, timeout=1) == "sandbox-successor"
+
+    deadline = asyncio.get_running_loop().time() + 1
+    while asyncio.get_running_loop().time() < deadline:
+        acquired = thread_lock.acquire(blocking=False)
+        if acquired:
+            thread_lock.release()
+            return
+        await asyncio.sleep(0.01)
+
+    pytest.fail("provider thread lock was not released after successor acquire_async")
