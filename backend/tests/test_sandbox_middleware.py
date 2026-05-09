@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from langchain.agents.middleware import AgentMiddleware
 from langchain.tools import ToolRuntime
 from langgraph.runtime import Runtime
 
@@ -112,6 +113,35 @@ async def test_abefore_agent_uses_async_provider_acquire() -> None:
 
     assert result == {"sandbox": {"sandbox_id": "async-sandbox"}}
     assert provider.thread_ids == ["thread-2"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("middleware", "state", "runtime"),
+    [
+        (SandboxMiddleware(lazy_init=True), {}, Runtime(context={"thread_id": "thread-lazy"})),
+        (SandboxMiddleware(lazy_init=False), {}, Runtime(context={})),
+        (SandboxMiddleware(lazy_init=False), {"sandbox": {"sandbox_id": "existing"}}, Runtime(context={"thread_id": "thread-existing"})),
+    ],
+)
+async def test_abefore_agent_delegates_to_super_when_not_acquiring(
+    monkeypatch: pytest.MonkeyPatch,
+    middleware: SandboxMiddleware,
+    state: dict,
+    runtime: Runtime,
+) -> None:
+    calls: list[tuple[dict, Runtime]] = []
+
+    async def fake_super_abefore_agent(self, state_arg, runtime_arg):
+        calls.append((state_arg, runtime_arg))
+        return {"delegated": True}
+
+    monkeypatch.setattr(AgentMiddleware, "abefore_agent", fake_super_abefore_agent)
+
+    result = await middleware.abefore_agent(state, runtime)
+
+    assert result == {"delegated": True}
+    assert calls == [(state, runtime)]
 
 
 @pytest.mark.anyio
