@@ -817,15 +817,17 @@ def test_cleanup_scheduled_on_cancellation(monkeypatch):
         lambda task_id: cleanup_calls.append(task_id),
     )
 
-    with pytest.raises(asyncio.CancelledError):
-        _run_task_tool(
-            runtime=_make_runtime(),
-            description="执行任务",
-            prompt="cancel task",
-            subagent_type="general-purpose",
-            tool_call_id="tc-cancelled-cleanup",
-        )
+    result = _run_task_tool(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="cancel task",
+        subagent_type="general-purpose",
+        tool_call_id="tc-cancelled-cleanup",
+    )
 
+    # CancelledError is NOT re-raised to avoid cascading cancellation
+    # through ToolNode's asyncio.gather. Instead, a string is returned.
+    assert "cancelled" in result.lower()
     assert cleanup_calls == []
     assert len(scheduled_cleanup_coros) == 1
 
@@ -872,14 +874,16 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
         lambda task_id: cleanup_calls.append(task_id),
     )
 
-    with pytest.raises(asyncio.CancelledError):
-        _run_task_tool(
-            runtime=_make_runtime(),
-            description="执行任务",
-            prompt="cancel task",
-            subagent_type="general-purpose",
-            tool_call_id="tc-cancelled-timeout",
-        )
+    result = _run_task_tool(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="cancel task",
+        subagent_type="general-purpose",
+        tool_call_id="tc-cancelled-timeout",
+    )
+
+    # CancelledError is NOT re-raised; a string result is returned instead.
+    assert "cancelled" in result.lower()
 
     async def bounded_sleep(_seconds: float) -> None:
         return None
@@ -932,15 +936,16 @@ def test_cancellation_calls_request_cancel(monkeypatch):
         lambda task_id: None,
     )
 
-    with pytest.raises(asyncio.CancelledError):
-        _run_task_tool(
-            runtime=_make_runtime(),
-            description="执行任务",
-            prompt="cancel me",
-            subagent_type="general-purpose",
-            tool_call_id="tc-cancel-request",
-        )
+    result = _run_task_tool(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="cancel me",
+        subagent_type="general-purpose",
+        tool_call_id="tc-cancel-request",
+    )
 
+    # CancelledError is NOT re-raised; request_cancel is still called
+    assert "cancelled" in result.lower()
     assert cancel_requests == ["tc-cancel-request"]
 
 

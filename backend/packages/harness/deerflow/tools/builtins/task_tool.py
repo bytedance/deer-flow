@@ -299,4 +299,11 @@ async def task_tool(
 
         logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled task {task_id}")
         asyncio.create_task(cleanup_when_done()).add_done_callback(log_cleanup_failure)
-        raise
+        # Return a string result instead of re-raising CancelledError.
+        # Re-raising would propagate through ToolNode's asyncio.gather and
+        # cancel ALL parallel sibling tool calls, leaving their tool_call_ids
+        # without ToolMessages — causing "insufficient tool messages" errors
+        # on the next LLM call. Returning normally lets ToolNode produce a
+        # ToolMessage for this call while other parallel tools finish undisturbed.
+        writer({"type": "task_cancelled", "task_id": task_id, "error": "Parent run cancelled"})
+        return "Task cancelled: parent run was interrupted. Partial results may have been produced."
