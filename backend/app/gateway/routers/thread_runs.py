@@ -178,10 +178,27 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
 @require_permission("runs", "read", owner_check=True)
 async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
-    """List all runs for a thread."""
-    run_mgr = get_run_manager(request)
-    records = await run_mgr.list_by_thread(thread_id)
-    return [_record_to_response(r) for r in records]
+    """List all runs for a thread.
+
+    Queries the persistent RunStore so that run history survives process
+    restarts (RunManager only tracks in-memory runs for the current session).
+    """
+    run_store = get_run_store(request)
+    records = await run_store.list_by_thread(thread_id)
+    return [
+        RunResponse(
+            run_id=r["run_id"],
+            thread_id=r.get("thread_id", thread_id),
+            assistant_id=r.get("assistant_id"),
+            status=r.get("status", ""),
+            metadata=r.get("metadata", {}),
+            kwargs=r.get("kwargs", {}),
+            multitask_strategy=r.get("multitask_strategy", "reject"),
+            created_at=r.get("created_at", ""),
+            updated_at=r.get("updated_at", ""),
+        )
+        for r in records
+    ]
 
 
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)
