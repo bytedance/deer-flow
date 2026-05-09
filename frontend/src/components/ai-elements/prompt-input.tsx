@@ -1187,6 +1187,7 @@ export const PromptInputSpeechButton = ({
   language,
   textareaRef,
   onTranscriptionChange,
+  disabled: externalDisabled,
   ...props
 }: PromptInputSpeechButtonProps) => {
   const controller = useOptionalPromptInputController();
@@ -1288,26 +1289,32 @@ export const PromptInputSpeechButton = ({
 
   const toggleListening = useCallback(() => {
     if (!recognition) {
+      console.warn("[SpeechButton] recognition not initialized");
       return;
     }
 
     if (isListening) {
       recognition.stop();
     } else {
-      recognition.start();
+      try {
+        recognition.start();
+      } catch (err) {
+        console.error("[SpeechButton] recognition.start() failed:", err);
+        setIsListening(false);
+      }
     }
   }, [recognition, isListening]);
 
   return (
     <PromptInputButton
+      {...props}
       className={cn(
         "relative transition-all duration-200",
         isListening && "bg-accent text-accent-foreground animate-pulse",
         className,
       )}
-      disabled={!recognition}
+      disabled={externalDisabled || !recognition}
       onClick={toggleListening}
-      {...props}
     >
       <MicIcon className="size-4" />
     </PromptInputButton>
