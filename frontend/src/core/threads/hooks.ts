@@ -17,6 +17,7 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
+import { fetchThreadTokenUsage } from "./api";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
@@ -770,23 +771,7 @@ export function useThreadTokenUsage(
       if (!threadId) {
         return null;
       }
-      const response = await fetch(
-        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/token-usage`,
-        {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          credentials: "include",
-        },
-      );
-      if (!response.ok) {
-        if (response.status === 403 || response.status === 404) {
-          return null;
-        }
-        throw new Error("Failed to load thread token usage.");
-      }
-      return (await response.json()) as ThreadTokenUsageResponse;
+      return fetchThreadTokenUsage(threadId);
     },
     enabled: enabled && Boolean(threadId),
     retry: false,
