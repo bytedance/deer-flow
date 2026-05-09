@@ -199,7 +199,7 @@ export default function NewAgentPage() {
     await sendMessage(threadId, {
       text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
       files: [],
-    });
+    }, { agent_name: trimmed });
   }, [
     nameInput,
     sendMessage,
