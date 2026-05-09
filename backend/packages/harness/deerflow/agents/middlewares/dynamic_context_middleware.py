@@ -53,6 +53,11 @@ def _extract_date(content: str) -> str | None:
     return m.group(1) if m else None
 
 
+def is_dynamic_context_reminder(message: object) -> bool:
+    """Return whether *message* is a hidden dynamic-context reminder."""
+    return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY))
+
+
 def _last_injected_date(messages: list) -> str | None:
     """Scan messages in reverse and return the most recently injected date.
 
@@ -61,7 +66,7 @@ def _last_injected_date(messages: list) -> str | None:
     are not mistakenly treated as injected reminders.
     """
     for msg in reversed(messages):
-        if isinstance(msg, HumanMessage) and msg.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY):
+        if is_dynamic_context_reminder(msg):
             content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
             return _extract_date(content_str)
     return None
