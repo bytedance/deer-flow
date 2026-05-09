@@ -41,6 +41,7 @@ import {
   MessageTokenUsageDebugList,
   MessageTokenUsageList,
 } from "./message-token-usage";
+import { RetrievalSources } from "./retrieval-sources";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
 
@@ -293,6 +294,9 @@ export function MessageList({
                   messages: group.messages,
                   turnUsageMessages,
                 })}
+                {group.type === "assistant" && (
+                  <RetrievalSources messages={messages} />
+                )}
                 {group.type === "assistant" &&
                   renderAssistantCopyButton(group.messages)}
               </div>

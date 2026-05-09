@@ -1,10 +1,15 @@
+import type { KnowledgeBaseSelection } from "../threads";
+
 import {
   DEFAULT_LOCAL_SETTINGS,
   LOCAL_SETTINGS_KEY,
+  THREAD_KB_KEY_PREFIX,
   THREAD_MODEL_KEY_PREFIX,
   getLocalSettings,
+  getThreadKBSelection,
   getThreadModelName,
   saveLocalSettings,
+  saveThreadKBSelection,
   saveThreadModelName,
   type LocalSettings,
 } from "./local";
@@ -18,6 +23,7 @@ export type LocalSettingsSetter = <K extends keyof LocalSettings>(
 
 const listeners = new Set<Listener>();
 const threadModelNames = new Map<string, string | undefined>();
+const threadKBSelections = new Map<string, KnowledgeBaseSelection | undefined>();
 
 let baseSettings: LocalSettings = DEFAULT_LOCAL_SETTINGS;
 let baseSettingsLoaded = false;
@@ -71,6 +77,7 @@ function handleStorage(event: StorageEvent) {
   if (event.key === null) {
     baseSettings = getLocalSettings();
     threadModelNames.clear();
+    threadKBSelections.clear();
     emitChange();
     return;
   }
@@ -82,6 +89,11 @@ function handleStorage(event: StorageEvent) {
   }
 
   if (!event.key.startsWith(THREAD_MODEL_KEY_PREFIX)) {
+    if (event.key.startsWith(THREAD_KB_KEY_PREFIX)) {
+      const threadId = event.key.slice(THREAD_KB_KEY_PREFIX.length);
+      threadKBSelections.set(threadId, getThreadKBSelection(threadId));
+      emitChange();
+    }
     return;
   }
 
@@ -115,6 +127,18 @@ export function getThreadModelSnapshot(threadId: string): string | undefined {
   return threadModelNames.get(threadId);
 }
 
+export function getThreadKBSnapshot(
+  threadId: string,
+): KnowledgeBaseSelection | undefined {
+  ensureBaseSettingsLoaded();
+
+  if (!threadKBSelections.has(threadId)) {
+    threadKBSelections.set(threadId, getThreadKBSelection(threadId));
+  }
+
+  return threadKBSelections.get(threadId);
+}
+
 export const updateLocalSettings: LocalSettingsSetter = (key, value) => {
   ensureBaseSettingsLoaded();
   ensureStorageListenerRegistered();
@@ -144,6 +168,16 @@ export function updateThreadSettings<K extends keyof LocalSettings>(
     const threadModelName = contextValue.model_name;
     threadModelNames.set(threadId, threadModelName);
     saveThreadModelName(threadId, threadModelName);
+  }
+
+  if (
+    key === "context" &&
+    Object.prototype.hasOwnProperty.call(value, "knowledge_base_selection")
+  ) {
+    const contextValue = value as Partial<LocalSettings["context"]>;
+    const kbSelection = contextValue.knowledge_base_selection;
+    threadKBSelections.set(threadId, kbSelection);
+    saveThreadKBSelection(threadId, kbSelection);
   }
 
   emitChange();

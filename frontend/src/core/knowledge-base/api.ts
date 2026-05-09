@@ -1,0 +1,228 @@
+import { fetchGateway } from "../api";
+import { getBackendBaseURL } from "../config";
+
+import type {
+  CreateDocumentRequest,
+  CreateKBRequest,
+  KnowledgeBase,
+  KnowledgeBaseDocument,
+  SearchResponse,
+  UpdateDocumentRequest,
+  UpdateKBRequest,
+} from "./types";
+
+export async function listKnowledgeBases(): Promise<KnowledgeBase[]> {
+  const response = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases`,
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Failed to list knowledge bases: ${response.statusText}`,
+    );
+  }
+  return response.json() as Promise<KnowledgeBase[]>;
+}
+
+export async function getKnowledgeBase(id: string): Promise<KnowledgeBase> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${id}`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to get knowledge base: ${res.statusText}`);
+  }
+  return res.json() as Promise<KnowledgeBase>;
+}
+
+export async function createKnowledgeBase(
+  request: CreateKBRequest,
+): Promise<KnowledgeBase> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to create knowledge base: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<KnowledgeBase>;
+}
+
+export async function updateKnowledgeBase(
+  id: string,
+  request: UpdateKBRequest,
+): Promise<KnowledgeBase> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${id}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to update knowledge base: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<KnowledgeBase>;
+}
+
+export async function deleteKnowledgeBase(id: string): Promise<void> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${id}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to delete knowledge base: ${res.statusText}`);
+  }
+}
+
+export async function listDocuments(
+  kbId: string,
+): Promise<KnowledgeBaseDocument[]> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/documents`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to list documents: ${res.statusText}`);
+  }
+  return res.json() as Promise<KnowledgeBaseDocument[]>;
+}
+
+export async function getDocument(
+  kbId: string,
+  docId: string,
+): Promise<KnowledgeBaseDocument> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/documents/${docId}`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to get document: ${res.statusText}`);
+  }
+  return res.json() as Promise<KnowledgeBaseDocument>;
+}
+
+export async function createDocument(
+  kbId: string,
+  request: CreateDocumentRequest,
+): Promise<KnowledgeBaseDocument> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/documents`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to create document: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<KnowledgeBaseDocument>;
+}
+
+export async function updateDocument(
+  kbId: string,
+  docId: string,
+  request: UpdateDocumentRequest,
+): Promise<KnowledgeBaseDocument> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/documents/${docId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to update document: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<KnowledgeBaseDocument>;
+}
+
+export async function deleteDocument(
+  kbId: string,
+  docId: string,
+): Promise<void> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/documents/${docId}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to delete document: ${res.statusText}`);
+  }
+}
+
+export async function reindexDocument(
+  kbId: string,
+  docId: string,
+): Promise<void> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/documents/${docId}/reindex`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to reindex document: ${res.statusText}`);
+  }
+}
+
+export async function searchKnowledgeBase(
+  kbId: string,
+  query: string,
+  topK = 5,
+): Promise<SearchResponse> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/search`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, top_k: topK }),
+    },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to search knowledge base: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<SearchResponse>;
+}
+
+export async function uploadDocument(
+  kbId: string,
+  file: File,
+  title?: string,
+): Promise<KnowledgeBaseDocument> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (title) {
+    formData.append("title", title);
+  }
+
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/documents/upload`,
+    {
+      method: "POST",
+      body: formData,
+    },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to upload document: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<KnowledgeBaseDocument>;
+}

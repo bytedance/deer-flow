@@ -83,6 +83,27 @@ export const enUS: Translations = {
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
+    inputSource: "Input source",
+    textInput: "Text input",
+    textInputDescription: "Type your question, task, or additional context.",
+    microphoneInput: "Microphone input",
+    microphoneInputDescription:
+      "Use browser speech recognition to turn your voice into text.",
+    audioFileInput: "Audio file input",
+    audioFileInputDescription:
+      "Upload an audio file and turn it into editable text before sending.",
+    audioFilePlaceholder:
+      "Choose an audio file to transcribe into editable text.",
+    audioFileTranscribing: "Transcribing audio file...",
+    audioFileRetry: "Retry transcription",
+    audioFileTranscriptionFailed:
+      "Audio transcription failed. Retry or remove the file.",
+    microphonePlaceholder:
+      "Click the microphone and start speaking. We'll turn it into editable text.",
+    microphoneUnsupported:
+      "This browser doesn't support microphone speech recognition. Switch back to text input.",
+    microphoneUnsupportedPlaceholder:
+      "This browser doesn't support microphone speech recognition. Switch back to text input.",
     mode: "Mode",
     flashMode: "Flash",
     flashModeDescription: "Fast and efficient, but may not be accurate",
@@ -115,6 +136,7 @@ export const enUS: Translations = {
       "You already have text in the input. Choose how to send it.",
     followupConfirmAppend: "Append & send",
     followupConfirmReplace: "Replace & send",
+    knowledgeBase: "Knowledge Base",
     suggestions: [
       {
         suggestion: "Write",
@@ -173,6 +195,7 @@ export const enUS: Translations = {
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
+    knowledgeBases: "Knowledge Bases",
   },
 
   // Agents
@@ -222,6 +245,66 @@ export const enUS: Translations = {
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",
+  },
+
+  // Knowledge Base
+  knowledgeBase: {
+    title: "Knowledge Bases",
+    description:
+      "Create and manage knowledge bases for AI-powered retrieval in conversations.",
+    newKnowledgeBase: "New Knowledge Base",
+    emptyTitle: "No knowledge bases yet",
+    emptyDescription:
+      "Create your first knowledge base to enhance AI responses with custom knowledge.",
+    name: "Name",
+    namePlaceholder: "e.g. Product Documentation",
+    descriptionLabel: "Description",
+    descriptionPlaceholder: "What this knowledge base contains...",
+    visibility: "Visibility",
+    visibilityPrivate: "Private",
+    visibilityShared: "Shared",
+    status: "Status",
+    statusActive: "Active",
+    statusIndexing: "Indexing",
+    statusError: "Error",
+    documents: "Documents",
+    chunks: "Chunks",
+    lastIndexed: "Last indexed",
+    never: "Never",
+    create: "Create",
+    creating: "Creating...",
+    save: "Save",
+    saving: "Saving...",
+    delete: "Delete",
+    deleteConfirm:
+      "Are you sure you want to delete this knowledge base? All documents will be permanently removed.",
+    deleteSuccess: "Knowledge base deleted",
+    documentCount: "documents",
+    addDocument: "Add Document",
+    documentTitle: "Title",
+    documentTitlePlaceholder: "Document title",
+    documentContent: "Content",
+    documentContentPlaceholder: "Paste or type document content...",
+    documentFormat: "Format",
+    documentSource: "Source",
+    documentSourcePlaceholder: "e.g. https://docs.example.com/page",
+    reindex: "Reindex",
+    reindexing: "Reindexing...",
+    editDocument: "Edit document",
+    deleteDocument: "Delete document",
+    deleteDocumentConfirm:
+      "Are you sure you want to delete this document? This action cannot be undone.",
+    searchPlaceholder: "Search knowledge base...",
+    searchButton: "Search",
+    searching: "Searching...",
+    noResults: "No results found",
+    searchResults: "Search Results",
+    uploadFile: "Upload File",
+    uploadFilePlaceholder: "PDF, DOCX, Markdown, or plain text (max 20 MB)",
+    uploading: "Uploading...",
+    uploadSuccess: "File uploaded successfully",
+    textInput: "Text Input",
+    fileUpload: "File Upload",
   },
 
   // Breadcrumb

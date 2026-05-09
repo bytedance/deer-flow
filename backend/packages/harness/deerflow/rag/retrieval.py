@@ -4,13 +4,74 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 from deerflow.config.rag_config import get_rag_config
 from deerflow.rag.embeddings import get_embedding_provider
 from deerflow.rag.vector_store import SearchResult, get_vector_store
 
 logger = logging.getLogger(__name__)
+
+
+def rerank(query: str, results: list[SearchResult]) -> list[SearchResult]:
+    """Rerank search results using a cross-encoder model.
+
+    Returns a new list sorted by cross-encoder scores. Falls back to the
+    original list (unchanged) if sentence-transformers is unavailable.
+    """
+    if not results:
+        return results
+
+    try:
+        from sentence_transformers import CrossEncoder
+
+        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        pairs = [(query, r.content) for r in results]
+        scores = model.predict(pairs)
+        reranked = []
+        for i, r in enumerate(results):
+            reranked.append(SearchResult(
+                chunk_id=r.chunk_id,
+                content=r.content,
+                metadata=r.metadata,
+                score=float(scores[i]),
+            ))
+        reranked.sort(key=lambda r: r.score, reverse=True)
+        return reranked
+    except ImportError:
+        logger.warning("sentence-transformers not available, skipping rerank")
+        return results
+    except Exception as e:
+        logger.warning("Reranking failed: %s", e)
+        return results
+
+
+def normalize_scores(results: list[SearchResult]) -> list[SearchResult]:
+    """Normalize scores to [0, 1] using min-max scaling.
+
+    Returns a new list with normalized scores. If all scores are equal,
+    all normalized scores are set to 1.0.
+    """
+    if not results:
+        return results
+
+    scores = [r.score for r in results]
+    min_score = min(scores)
+    max_score = max(scores)
+    score_range = max_score - min_score
+
+    normalized = []
+    for r in results:
+        if score_range == 0:
+            norm_score = 1.0
+        else:
+            norm_score = (r.score - min_score) / score_range
+        normalized.append(SearchResult(
+            chunk_id=r.chunk_id,
+            content=r.content,
+            metadata=r.metadata,
+            score=norm_score,
+        ))
+    return normalized
 
 
 @dataclass
@@ -66,18 +127,5 @@ class DocumentRetriever:
         if not result.results:
             return result
 
-        try:
-            from sentence_transformers import CrossEncoder
-
-            model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-            pairs = [(query, r.content) for r in result.results]
-            scores = model.predict(pairs)
-            for i, r in enumerate(result.results):
-                r.score = float(scores[i])
-            result.results.sort(key=lambda r: r.score, reverse=True)
-        except ImportError:
-            logger.warning("sentence-transformers not available, skipping rerank")
-        except Exception as e:
-            logger.warning("Reranking failed: %s", e)
-
+        result.results = rerank(query, result.results)
         return result

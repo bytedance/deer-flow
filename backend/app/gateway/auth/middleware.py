@@ -15,7 +15,6 @@ from app.gateway.auth.api_key_handler import verify_and_track_api_key
 from app.gateway.auth.jwt_handler import decode_token
 from deerflow.config.auth_config import get_auth_config
 from deerflow.config.tenant import reset_tenant_id, set_current_tenant_id, validate_tenant_id
-from deerflow.config.tenant_storage import TenantStorage
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +48,14 @@ def _json_error(status_code: int, detail: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"detail": detail})
 
 
-def _check_tenant_active(tenant_id: str, request_path: str) -> JSONResponse | None:
+async def _check_tenant_active(tenant_id: str, request: Request) -> JSONResponse | None:
     """Return a 403 response if the tenant does not exist or is disabled, unless this is an admin path."""
-    if _is_admin_path(request_path):
+    if _is_admin_path(request.url.path):
         return None
-    ts = TenantStorage()
-    tc = ts.get(tenant_id)
+    ts = getattr(request.app.state, "tenant_store", None)
+    if ts is None:
+        return None
+    tc = await ts.get(tenant_id)
     if tc is None:
         return JSONResponse(
             status_code=403,
@@ -88,7 +89,7 @@ def create_auth_middleware():
                 validate_tenant_id(tenant_id)
             except ValueError as e:
                 return _json_error(400, str(e))
-            error = _check_tenant_active(tenant_id, request.url.path)
+            error = await _check_tenant_active(tenant_id, request)
             if error is not None:
                 return error
             token = set_current_tenant_id(tenant_id)
@@ -103,7 +104,7 @@ def create_auth_middleware():
                 validate_tenant_id(tenant_id)
             except ValueError as e:
                 return _json_error(400, str(e))
-            error = _check_tenant_active(tenant_id, request.url.path)
+            error = await _check_tenant_active(tenant_id, request)
             if error is not None:
                 return error
             token = set_current_tenant_id(tenant_id)
@@ -134,7 +135,7 @@ def create_auth_middleware():
                     validate_tenant_id(tenant_id)
                 except ValueError as e:
                     return _json_error(400, str(e))
-                error = _check_tenant_active(tenant_id, request.url.path)
+                error = await _check_tenant_active(tenant_id, request)
                 if error is not None:
                     return error
                 ctx_token = set_current_tenant_id(tenant_id)
@@ -164,7 +165,7 @@ def create_auth_middleware():
             except ValueError as e:
                 return _json_error(400, str(e))
 
-            error = _check_tenant_active(tenant_id, request.url.path)
+            error = await _check_tenant_active(tenant_id, request)
             if error is not None:
                 return error
 
@@ -198,7 +199,7 @@ def create_auth_middleware():
                 validate_tenant_id(tenant_id)
             except ValueError as e:
                 return _json_error(400, str(e))
-            error = _check_tenant_active(tenant_id, request.url.path)
+            error = await _check_tenant_active(tenant_id, request)
             if error is not None:
                 return error
             token = set_current_tenant_id(tenant_id)

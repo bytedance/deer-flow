@@ -32,6 +32,7 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.config.tenant import get_current_tenant_id
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,8 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "max_concurrent_subagents",
         "agent_name",
         "is_bootstrap",
+        "knowledge_base_selection",
+        "tenant_id",
     }
 )
 
@@ -320,6 +323,12 @@ async def start_run(
             if key in context:
                 configurable.setdefault(key, context[key])
     merge_run_context_overrides(config, getattr(body, "context", None))
+
+    # Ensure tenant_id and user_id are always present in runtime context
+    # so middlewares (e.g. RagMiddleware) can resolve tenant-scoped resources.
+    runtime_context = config.setdefault("context", {})
+    runtime_context.setdefault("tenant_id", get_current_tenant_id())
+    runtime_context.setdefault("user_id", get_effective_user_id())
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 

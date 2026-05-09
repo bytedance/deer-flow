@@ -2,11 +2,13 @@ import { useCallback, useMemo, useSyncExternalStore } from "react";
 
 import {
   DEFAULT_LOCAL_SETTINGS,
+  applyThreadKBOverride,
   applyThreadModelOverride,
   type LocalSettings,
 } from "./local";
 import {
   getBaseSettingsSnapshot,
+  getThreadKBSnapshot,
   getThreadModelSnapshot,
   subscribe,
   updateLocalSettings,
@@ -43,9 +45,19 @@ export function useThreadSettings(
     () => undefined,
   );
 
+  const threadKBSelection = useSyncExternalStore(
+    subscribe,
+    () => getThreadKBSnapshot(threadId),
+    () => undefined,
+  );
+
   const settings = useMemo(
-    () => applyThreadModelOverride(baseSettings, threadModelName),
-    [baseSettings, threadModelName],
+    () =>
+      applyThreadKBOverride(
+        applyThreadModelOverride(baseSettings, threadModelName),
+        threadKBSelection,
+      ),
+    [baseSettings, threadModelName, threadKBSelection],
   );
 
   const setSettings = useCallback<LocalSettingsSetter>(

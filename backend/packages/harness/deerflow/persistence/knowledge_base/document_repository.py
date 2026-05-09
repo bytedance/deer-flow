@@ -1,0 +1,218 @@
+"""Document repository — CRUD for KnowledgeBaseDocumentRow."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+from uuid import uuid4
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from deerflow.persistence.knowledge_base.model import KnowledgeBaseDocumentRow
+
+
+class DocumentRepository:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._sf = session_factory
+
+    @staticmethod
+    def _row_to_dict(row: KnowledgeBaseDocumentRow) -> dict[str, Any]:
+        d = row.to_dict()
+        for key in ("created_at", "updated_at", "deleted_at", "last_indexed_at"):
+            val = d.get(key)
+            if isinstance(val, datetime):
+                d[key] = val.isoformat()
+        return d
+
+    async def create(
+        self,
+        *,
+        knowledge_base_id: str,
+        tenant_id: str,
+        owner_user_id: str,
+        title: str,
+        content: str,
+        content_hash: str,
+        content_format: str = "markdown",
+        source_name: str | None = None,
+        metadata_json: dict | None = None,
+    ) -> dict[str, Any]:
+        doc_id = uuid4().hex
+        now = datetime.now(UTC)
+        row = KnowledgeBaseDocumentRow(
+            id=doc_id,
+            knowledge_base_id=knowledge_base_id,
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            title=title,
+            content=content,
+            content_format=content_format,
+            source_name=source_name,
+            content_hash=content_hash,
+            content_length=len(content),
+            metadata_json=metadata_json or {},
+            created_at=now,
+            updated_at=now,
+        )
+        async with self._sf() as session:
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return self._row_to_dict(row)
+
+    async def get(
+        self,
+        doc_id: str,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+    ) -> dict[str, Any] | None:
+        async with self._sf() as session:
+            stmt = (
+                select(KnowledgeBaseDocumentRow)
+                .where(
+                    KnowledgeBaseDocumentRow.id == doc_id,
+                    KnowledgeBaseDocumentRow.tenant_id == tenant_id,
+                    KnowledgeBaseDocumentRow.owner_user_id == owner_user_id,
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return self._row_to_dict(row) if row else None
+
+    async def list_by_kb(
+        self,
+        knowledge_base_id: str,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        async with self._sf() as session:
+            stmt = (
+                select(KnowledgeBaseDocumentRow)
+                .where(
+                    KnowledgeBaseDocumentRow.knowledge_base_id == knowledge_base_id,
+                    KnowledgeBaseDocumentRow.tenant_id == tenant_id,
+                    KnowledgeBaseDocumentRow.owner_user_id == owner_user_id,
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+                .order_by(KnowledgeBaseDocumentRow.updated_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def update(
+        self,
+        doc_id: str,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+        **fields: Any,
+    ) -> dict[str, Any] | None:
+        allowed = {"title", "content", "content_format", "content_hash", "content_length", "version", "source_name", "metadata_json"}
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return await self.get(doc_id, tenant_id=tenant_id, owner_user_id=owner_user_id)
+        updates["updated_at"] = datetime.now(UTC)
+        async with self._sf() as session:
+            stmt = (
+                update(KnowledgeBaseDocumentRow)
+                .where(
+                    KnowledgeBaseDocumentRow.id == doc_id,
+                    KnowledgeBaseDocumentRow.tenant_id == tenant_id,
+                    KnowledgeBaseDocumentRow.owner_user_id == owner_user_id,
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+                .values(**updates)
+            )
+            await session.execute(stmt)
+            await session.commit()
+        return await self.get(doc_id, tenant_id=tenant_id, owner_user_id=owner_user_id)
+
+    async def soft_delete(
+        self,
+        doc_id: str,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+    ) -> bool:
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            stmt = (
+                update(KnowledgeBaseDocumentRow)
+                .where(
+                    KnowledgeBaseDocumentRow.id == doc_id,
+                    KnowledgeBaseDocumentRow.tenant_id == tenant_id,
+                    KnowledgeBaseDocumentRow.owner_user_id == owner_user_id,
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+                .values(deleted_at=now, updated_at=now)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount > 0
+
+    async def soft_delete_by_kb(
+        self,
+        knowledge_base_id: str,
+        *,
+        tenant_id: str,
+        owner_user_id: str,
+    ) -> int:
+        """Soft-delete all documents in a knowledge base."""
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            stmt = (
+                update(KnowledgeBaseDocumentRow)
+                .where(
+                    KnowledgeBaseDocumentRow.knowledge_base_id == knowledge_base_id,
+                    KnowledgeBaseDocumentRow.tenant_id == tenant_id,
+                    KnowledgeBaseDocumentRow.owner_user_id == owner_user_id,
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+                .values(deleted_at=now, updated_at=now)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount
+
+    async def update_index_status(
+        self,
+        doc_id: str,
+        *,
+        index_status: str,
+        index_error: str | None = None,
+        index_job_id: str | None = None,
+        chunk_ids: list | None = None,
+        chunk_count: int | None = None,
+        last_indexed_at: datetime | None = None,
+    ) -> None:
+        updates: dict[str, Any] = {"index_status": index_status, "updated_at": datetime.now(UTC)}
+        if index_error is not None:
+            updates["index_error"] = index_error
+        if index_job_id is not None:
+            updates["index_job_id"] = index_job_id
+        if chunk_ids is not None:
+            updates["chunk_ids"] = chunk_ids
+        if chunk_count is not None:
+            updates["chunk_count"] = chunk_count
+        if last_indexed_at is not None:
+            updates["last_indexed_at"] = last_indexed_at
+        async with self._sf() as session:
+            stmt = update(KnowledgeBaseDocumentRow).where(KnowledgeBaseDocumentRow.id == doc_id).values(**updates)
+            await session.execute(stmt)
+            await session.commit()
+
+    async def get_by_id_internal(self, doc_id: str) -> dict[str, Any] | None:
+        """Get document without owner filter — for internal service use."""
+        async with self._sf() as session:
+            stmt = select(KnowledgeBaseDocumentRow).where(KnowledgeBaseDocumentRow.id == doc_id, KnowledgeBaseDocumentRow.deleted_at.is_(None))
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return self._row_to_dict(row) if row else None

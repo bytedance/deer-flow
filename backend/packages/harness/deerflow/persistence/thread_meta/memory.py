@@ -46,13 +46,20 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        tenant_id: str | None = None,
     ) -> dict:
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.create")
+
+        if tenant_id is None:
+            from deerflow.config.tenant import get_current_tenant_id
+            tenant_id = get_current_tenant_id()
+
         now = now_iso()
         record: dict[str, Any] = {
             "thread_id": thread_id,
             "assistant_id": assistant_id,
             "user_id": resolved_user_id,
+            "tenant_id": tenant_id,
             "display_name": display_name,
             "status": "idle",
             "metadata": metadata or {},
@@ -132,6 +139,15 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         if record is None:
             return
         await self._store.adelete(THREADS_NS, thread_id)
+
+    async def count_by_tenant(self) -> dict[str, int]:
+        """Return per-tenant thread counts from in-memory store."""
+        counts: dict[str, int] = {}
+        items = await self._store.asearch(THREADS_NS, limit=10000)
+        for item in items:
+            tid = item.value.get("tenant_id", "default")
+            counts[tid] = counts.get(tid, 0) + 1
+        return counts
 
     @staticmethod
     def _item_to_dict(item) -> dict[str, Any]:

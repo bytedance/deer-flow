@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
+from deerflow.config.audio_input_config import AudioInputConfig, load_audio_input_config_from_dict
 from deerflow.config.auth_config import AuthConfig, load_auth_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
@@ -110,6 +111,7 @@ class AppConfig(BaseModel):
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig, description="API rate limiting configuration")
     content_safety: ContentSafetyConfig = Field(default_factory=ContentSafetyConfig, description="Content safety moderation configuration")
     cost: CostConfig = Field(default_factory=CostConfig, description="Cost management and budget control configuration")
+    audio_input: AudioInputConfig = Field(default_factory=AudioInputConfig, description="Chat audio input and transcription configuration")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
@@ -197,10 +199,13 @@ class AppConfig(BaseModel):
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
+        load_rag_config_from_dict(config.rag.model_dump())
         load_agents_api_config_from_dict(config.agents_api.model_dump())
         load_subagents_config_from_dict(config.subagents.model_dump())
         load_tool_search_config_from_dict(config.tool_search.model_dump())
+        load_cost_config_from_dict(config.cost.model_dump())
         load_guardrails_config_from_dict(config.guardrails.model_dump())
+        load_audio_input_config_from_dict(config.audio_input.model_dump())
         load_checkpointer_config_from_dict(config.checkpointer.model_dump() if config.checkpointer is not None else None)
         load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
         load_acp_config_from_dict({name: agent.model_dump() for name, agent in acp_agents.items()})

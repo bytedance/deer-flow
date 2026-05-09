@@ -432,3 +432,35 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
 
   return files;
 }
+
+const RETRIEVAL_TRACE_RE =
+  /<retrieval_trace>([\s\S]*?)<\/retrieval_trace>/;
+
+export interface RetrievalSource {
+  kb_id: string;
+  kb_name: string;
+  doc_title: string;
+  score: number;
+}
+
+export function extractRetrievalTrace(
+  messages: Message[],
+): RetrievalSource[] | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.type !== "system" && msg?.type !== "ai") continue;
+    const content =
+      typeof msg.content === "string" ? msg.content : "";
+    const match = RETRIEVAL_TRACE_RE.exec(content);
+    if (!match?.[1]) continue;
+    try {
+      const parsed = JSON.parse(match[1]) as { sources?: RetrievalSource[] };
+      if (parsed.sources && parsed.sources.length > 0) {
+        return parsed.sources;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}

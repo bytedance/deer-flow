@@ -10,21 +10,30 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
-from langgraph.types import Checkpointer
 
 from deerflow.config.app_config import AppConfig
-from deerflow.persistence.feedback import FeedbackRepository
-from deerflow.runtime import RunContext, RunManager, StreamBridge
-from deerflow.runtime.events.store.base import RunEventStore
-from deerflow.runtime.runs.store.base import RunStore
+
+from deerflow.runtime import RunContext
 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.feedback import FeedbackRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
+    from deerflow.runtime import RunManager, StreamBridge
+    from deerflow.runtime.events.store.base import RunEventStore
+    from deerflow.runtime.runs.store.base import RunStore
+    from langgraph.types import Checkpointer
+else:
+    FeedbackRepository = Any
+    RunManager = Any
+    RunEventStore = Any
+    RunStore = Any
+    StreamBridge = Any
+    Checkpointer = Any
 
 
 T = TypeVar("T")
@@ -88,6 +97,29 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
 
+        # Tenant repository (DB-backed, replaces JSON TenantStorage)
+        if sf is not None:
+            from deerflow.persistence.tenant import TenantRepository
+
+            app.state.tenant_store = TenantRepository(sf)
+        else:
+            app.state.tenant_store = None
+
+        # Knowledge base service
+        if sf is not None:
+            from deerflow.knowledge_base.service import KnowledgeBaseService
+            from deerflow.persistence.knowledge_base.document_repository import DocumentRepository
+            from deerflow.persistence.knowledge_base.index_job_repository import IndexJobRepository
+            from deerflow.persistence.knowledge_base.repository import KnowledgeBaseRepository
+
+            app.state.kb_service = KnowledgeBaseService(
+                kb_repo=KnowledgeBaseRepository(sf),
+                doc_repo=DocumentRepository(sf),
+                job_repo=IndexJobRepository(sf),
+            )
+        else:
+            app.state.kb_service = None
+
         # Run event store (has its own factory with config-driven backend selection)
         run_events_config = getattr(config, "run_events", None)
         if run_events_config is not None and isinstance(run_events_config, dict):
@@ -96,7 +128,9 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.run_event_store = make_run_event_store(run_events_config)
 
         # RunManager with store backing for persistence
-        app.state.run_manager = RunManager(store=app.state.run_store)
+        from deerflow.runtime import RunManager as _RunManager
+
+        app.state.run_manager = _RunManager(store=app.state.run_store)
 
         try:
             yield
@@ -142,6 +176,16 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     val = getattr(request.app.state, "thread_store", None)
     if val is None:
         raise HTTPException(status_code=503, detail="Thread metadata store not available")
+    return val
+
+
+def get_tenant_store(request: Request):
+    """Return the DB-backed tenant repository."""
+    from deerflow.persistence.tenant import TenantRepository
+
+    val: TenantRepository | None = getattr(request.app.state, "tenant_store", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Tenant store not available")
     return val
 
 

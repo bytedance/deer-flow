@@ -121,9 +121,10 @@ def get_embedding_provider() -> EmbeddingProvider:
 
     provider_name, model = raw.split(":", 1)
     api_key = config.embedding_api_key
+    base_url = config.embedding_base_url or None
 
     if provider_name == "openai":
-        return OpenAIEmbeddingProvider(model=model, api_key=api_key)
+        return OpenAIEmbeddingProvider(model=model, api_key=api_key, base_url=base_url)
     if provider_name == "local":
         return LocalEmbeddingProvider(model_name=model)
 

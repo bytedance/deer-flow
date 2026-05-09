@@ -9,8 +9,8 @@ from pydantic import BaseModel, Field
 
 from app.gateway.auth.dependencies import CurrentUser, require_admin
 from app.gateway.auth.models import UserResponse
-from app.gateway.deps import get_checkpointer, get_local_provider
-from deerflow.config.tenant_storage import TenantConfig, TenantStorage
+from app.gateway.deps import get_local_provider, get_tenant_store, get_thread_store
+from deerflow.config.tenant_storage import TenantConfig
 from deerflow.content_safety.log_storage import AuditLogEntry, AuditLogStorage
 from deerflow.cost.storage import UsageStorage
 
@@ -57,10 +57,6 @@ class AuditLogResponse(BaseModel):
     total: int
     limit: int
     offset: int
-
-
-def _get_tenant_storage() -> TenantStorage:
-    return TenantStorage()
 
 
 def _get_cross_tenant_records(
@@ -123,14 +119,14 @@ def _filter_thread_counts_by_tenant(thread_counts: dict[str, int], tenant_id: st
     return {tenant_id: thread_counts.get(tenant_id, 0)}
 
 
-def _list_visible_tenants(ts: TenantStorage, user: CurrentUser) -> list[TenantConfig]:
+async def _list_visible_tenants(ts, user: CurrentUser) -> list[TenantConfig]:
     """Return the tenant configs visible to the current admin."""
 
     if _is_system_admin(user):
-        ts.ensure_default()
-        return ts.list_all()
+        await ts.ensure_default()
+        return await ts.list_all()
 
-    tenant = ts.get(user.tenant_id)
+    tenant = await ts.get(user.tenant_id)
     return [tenant] if tenant is not None else []
 
 
@@ -158,22 +154,13 @@ def _build_tenant_summary(
     )
 
 
-async def _discover_thread_counts(checkpointer) -> dict[str, int]:
-    """Scan checkpointer for per-tenant thread counts."""
-    counts: dict[str, int] = {}
-    if checkpointer is None:
-        return counts
+async def _get_thread_counts(request: Request) -> dict[str, int]:
+    """Get per-tenant thread counts from thread metadata store."""
+    thread_store = get_thread_store(request)
     try:
-        async for ckpt in checkpointer.alist(None):
-            cfg = getattr(ckpt, "config", {})
-            if cfg.get("configurable", {}).get("checkpoint_ns", ""):
-                continue
-            meta = getattr(ckpt, "metadata", {}) or {}
-            tid = meta.get("tenant_id", "default")
-            counts[tid] = counts.get(tid, 0) + 1
+        return await thread_store.count_by_tenant()
     except Exception:
-        pass
-    return counts
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +171,6 @@ async def _discover_thread_counts(checkpointer) -> dict[str, int]:
 @router.get("/stats", response_model=AdminStatsResponse)
 async def get_admin_stats(request: Request, user: CurrentUser = Depends(require_admin)) -> AdminStatsResponse:
     """Get system overview statistics (admin only)."""
-    checkpointer = get_checkpointer(request)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     scope_tenant_id = _resolve_scope_tenant_id(user)
 
@@ -198,9 +184,9 @@ async def get_admin_stats(request: Request, user: CurrentUser = Depends(require_
     total_cost_today = sum(r.cost_usd for r in today_records)
     total_cost_month = sum(r.cost_usd for r in month_records)
 
-    ts = _get_tenant_storage()
-    all_tenants = _list_visible_tenants(ts, user)
-    thread_counts = await _discover_thread_counts(checkpointer)
+    ts = get_tenant_store(request)
+    all_tenants = await _list_visible_tenants(ts, user)
+    thread_counts = await _get_thread_counts(request)
     thread_counts = _filter_thread_counts_by_tenant(thread_counts, scope_tenant_id)
     active_today: set[str] = {r.tenant_id for r in today_records}
 
@@ -223,7 +209,6 @@ async def get_admin_stats(request: Request, user: CurrentUser = Depends(require_
 @router.get("/tenants", response_model=list[TenantSummary])
 async def list_tenants(request: Request, user: CurrentUser = Depends(require_admin)) -> list[TenantSummary]:
     """List all registered tenants with usage data (admin only)."""
-    checkpointer = get_checkpointer(request)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     month_start = datetime.now(timezone.utc).strftime("%Y-%m") + "-01"
     scope_tenant_id = _resolve_scope_tenant_id(user)
@@ -232,15 +217,15 @@ async def list_tenants(request: Request, user: CurrentUser = Depends(require_adm
     month_records = _get_cross_tenant_records(start_date=month_start)
     today_records = _filter_records_by_tenant(today_records, scope_tenant_id)
     month_records = _filter_records_by_tenant(month_records, scope_tenant_id)
-    thread_counts = await _discover_thread_counts(checkpointer)
+    thread_counts = await _get_thread_counts(request)
     thread_counts = _filter_thread_counts_by_tenant(thread_counts, scope_tenant_id)
 
-    ts = _get_tenant_storage()
-    all_tenants = _list_visible_tenants(ts, user)
+    ts = get_tenant_store(request)
+    all_tenants = await _list_visible_tenants(ts, user)
 
     try:
         provider = get_local_provider()
-    except RuntimeError:
+    except Exception:
         provider = None
 
     result: list[TenantSummary] = []
@@ -259,22 +244,22 @@ async def list_tenants(request: Request, user: CurrentUser = Depends(require_adm
 
 
 @router.post("/tenants", response_model=TenantSummary)
-def create_tenant(req: CreateTenantRequest, user: CurrentUser = Depends(require_admin)) -> TenantSummary:
+async def create_tenant(request: Request, req: CreateTenantRequest, user: CurrentUser = Depends(require_admin)) -> TenantSummary:
     """Create a new tenant (admin only)."""
     _require_system_admin(user)
-    ts = _get_tenant_storage()
+    ts = get_tenant_store(request)
     try:
-        tc = ts.create(TenantConfig(tenant_id=req.tenant_id, name=req.name))
+        tc = await ts.create(TenantConfig(tenant_id=req.tenant_id, name=req.name))
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return _build_tenant_summary(tc, [], [])
 
 
 @router.put("/tenants/{tenant_id}", response_model=TenantSummary)
-def update_tenant(tenant_id: str, req: UpdateTenantRequest, user: CurrentUser = Depends(require_admin)) -> TenantSummary:
+async def update_tenant(request: Request, tenant_id: str, req: UpdateTenantRequest, user: CurrentUser = Depends(require_admin)) -> TenantSummary:
     """Update a tenant's configuration (admin only)."""
     _resolve_scope_tenant_id(user, tenant_id)
-    ts = _get_tenant_storage()
+    ts = get_tenant_store(request)
     fields: dict = {}
     if req.name is not None:
         fields["name"] = req.name
@@ -285,20 +270,20 @@ def update_tenant(tenant_id: str, req: UpdateTenantRequest, user: CurrentUser = 
     if req.monthly_quota_usd is not None:
         fields["monthly_quota_usd"] = req.monthly_quota_usd
 
-    tc = ts.update(tenant_id, **fields)
+    tc = await ts.update(tenant_id, **fields)
     if tc is None:
         raise HTTPException(status_code=404, detail=f"Tenant {tenant_id!r} not found")
     return _build_tenant_summary(tc, [], [])
 
 
 @router.delete("/tenants/{tenant_id}")
-def delete_tenant(tenant_id: str, user: CurrentUser = Depends(require_admin)) -> dict:
+async def delete_tenant(request: Request, tenant_id: str, user: CurrentUser = Depends(require_admin)) -> dict:
     """Delete a tenant (admin only)."""
     _require_system_admin(user)
     if tenant_id == "default":
         raise HTTPException(status_code=400, detail="Cannot delete the default tenant")
-    ts = _get_tenant_storage()
-    if not ts.delete(tenant_id):
+    ts = get_tenant_store(request)
+    if not await ts.delete(tenant_id):
         raise HTTPException(status_code=404, detail=f"Tenant {tenant_id!r} not found")
     return {"success": True}
 

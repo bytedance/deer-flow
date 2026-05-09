@@ -18,6 +18,11 @@ class RagConfig(BaseModel):
         default="",
         description="API key for the embedding provider. Supports $ENV_VAR resolution.",
     )
+    embedding_base_url: str = Field(
+        default="",
+        description="Custom base URL for the embedding API (e.g. 'https://api.openai-proxy.com/v1'). "
+        "Empty = use provider default.",
+    )
     vector_store_backend: str = Field(
         default="chroma",
         description="Vector store backend: 'chroma' or 'pgvector'",
@@ -81,6 +86,29 @@ class RagConfig(BaseModel):
         ge=100,
         le=8000,
         description="Maximum tokens for chunk injection into system prompt",
+    )
+    max_selected_kbs: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum number of knowledge bases that can be selected per session",
+    )
+    per_kb_timeout_ms: int = Field(
+        default=1500,
+        ge=100,
+        le=10000,
+        description="Timeout in milliseconds for each knowledge base retrieval",
+    )
+    max_chunks_per_document: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum chunks from a single document to include in results",
+    )
+    allow_no_auth_kb: bool = Field(
+        default=False,
+        description="Allow knowledge base access when user is unauthenticated (user_id='default'). "
+        "Set to True only for development/demo environments.",
     )
 
 

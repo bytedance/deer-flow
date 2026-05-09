@@ -367,6 +367,45 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
+            # Record usage to UsageStorage for admin dashboard visibility
+            try:
+                completion_data = journal.get_completion_data()
+                total_tokens = completion_data.get("total_tokens", 0)
+                if total_tokens > 0:
+                    from datetime import datetime, timezone
+
+                    from deerflow.config.cost_config import get_cost_config
+                    from deerflow.config.tenant import get_current_tenant_id
+                    from deerflow.cost.calculator import CostCalculator
+                    from deerflow.cost.storage import UsageRecord, UsageStorage
+
+                    cost_cfg = get_cost_config()
+                    if cost_cfg.enabled:
+                        model_name = config.get("configurable", {}).get("model_name") or "unknown"
+                        input_tokens = completion_data.get("total_input_tokens", 0)
+                        output_tokens = completion_data.get("total_output_tokens", 0)
+
+                        calculator = CostCalculator(cost_cfg.model_pricing)
+                        cost_usd = calculator.calculate(model_name, input_tokens, output_tokens)
+
+                        tenant_id = get_current_tenant_id()
+                        user_id = config.get("configurable", {}).get("user_id")
+
+                        storage = UsageStorage()
+                        storage.add_record(UsageRecord(
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            tenant_id=tenant_id,
+                            thread_id=thread_id,
+                            model_name=model_name,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            total_tokens=total_tokens,
+                            cost_usd=cost_usd,
+                            user_id=user_id,
+                        ))
+            except Exception:
+                logger.debug("Failed to record usage for run %s (non-fatal)", run_id, exc_info=True)
+
         # Sync title from checkpoint to threads_meta.display_name
         if checkpointer is not None and thread_store is not None:
             try:

@@ -9,6 +9,11 @@ export interface AgentThreadState extends Record<string, unknown> {
   todos?: Todo[];
 }
 
+export interface KnowledgeBaseSelection {
+  enabled: boolean;
+  selected_ids: string[];
+}
+
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;
   model_name: string | undefined;
@@ -17,6 +22,7 @@ export interface AgentThreadContext extends Record<string, unknown> {
   subagent_enabled: boolean;
   reasoning_effort?: "minimal" | "low" | "medium" | "high";
   agent_name?: string;
+  knowledge_base_selection?: KnowledgeBaseSelection;
 }
 
 export interface AgentThread extends Thread<AgentThreadState> {

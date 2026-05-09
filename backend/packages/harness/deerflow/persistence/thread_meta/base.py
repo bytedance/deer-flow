@@ -29,6 +29,7 @@ class ThreadMetaStore(abc.ABC):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        tenant_id: str | None = None,
     ) -> dict:
         pass
 
@@ -74,3 +75,7 @@ class ThreadMetaStore(abc.ABC):
     @abc.abstractmethod
     async def delete(self, thread_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
         pass
+
+    async def count_by_tenant(self) -> dict[str, int]:
+        """Return per-tenant thread counts. Default returns empty dict."""
+        return {}

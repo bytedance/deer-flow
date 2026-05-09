@@ -4,6 +4,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app.gateway.auth_middleware import AuthMiddleware, _is_public
+from deerflow.config.auth_config import load_auth_config_from_dict, reset_auth_config
 
 # ── _is_public unit tests ─────────────────────────────────────────────────
 
@@ -86,9 +87,11 @@ def test_unknown_api_path_is_protected():
 # ── Middleware integration tests ──────────────────────────────────────────
 
 
-def _make_app():
+def _make_fail_closed_app():
     """Create a minimal FastAPI app with AuthMiddleware for testing."""
     from fastapi import FastAPI
+
+    load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret"})
 
     app = FastAPI()
     app.add_middleware(AuthMiddleware)
@@ -134,7 +137,7 @@ def _make_app():
 
 @pytest.fixture
 def client():
-    return TestClient(_make_app())
+    return TestClient(_make_fail_closed_app())
 
 
 def test_public_path_no_cookie(client):
@@ -177,7 +180,7 @@ def test_protected_post_no_cookie_returns_401(client):
 def test_protected_post_with_internal_auth_header_passes():
     from app.gateway.internal_auth import create_internal_auth_headers
 
-    app = _make_app()
+    app = _make_fail_closed_app()
     client = TestClient(app)
 
     res = client.post(
@@ -237,8 +240,6 @@ def test_unknown_endpoint_with_junk_cookie_rejected(client):
 
 """Tests for AuthMiddleware — whitelist, disabled mode, JWT, API Key, tenant context."""
 
-from unittest.mock import patch
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -250,9 +251,14 @@ from deerflow.config.tenant import get_current_tenant_id
 from deerflow.config.tenant_storage import TenantConfig
 
 
-def _mock_tenant_get(tenant_id):
-    """Return a valid active TenantConfig for any tenant_id used in tests."""
-    return TenantConfig(tenant_id=tenant_id, name=tenant_id, is_active=True)
+class _FakeTenantStore:
+    """Async fake that mimics TenantRepository for middleware tests."""
+
+    def __init__(self, get_fn=None):
+        self._get_fn = get_fn or (lambda tid: TenantConfig(tenant_id=tid, name=tid, is_active=True))
+
+    async def get(self, tenant_id: str):
+        return self._get_fn(tenant_id)
 
 
 @pytest.fixture(autouse=True)
@@ -262,8 +268,9 @@ def _reset_configs():
     reset_auth_config()
 
 
-def _make_app() -> FastAPI:
+def _make_app(tenant_store=None) -> FastAPI:
     app = FastAPI()
+    app.state.tenant_store = tenant_store or _FakeTenantStore()
     app.middleware("http")(create_auth_middleware())
 
     @app.get("/health")
@@ -311,25 +318,22 @@ class TestWhitelist:
 class TestDisabledMode:
     def test_no_header_defaults_tenant(self):
         load_auth_config_from_dict({"enabled": False})
-        with patch("app.gateway.auth.middleware.TenantStorage.get", side_effect=_mock_tenant_get):
-            client = TestClient(_make_app())
-            resp = client.get("/api/protected")
+        client = TestClient(_make_app())
+        resp = client.get("/api/protected")
         assert resp.status_code == 200
         assert resp.json()["tenant"] == "default"
 
     def test_header_sets_tenant(self):
         load_auth_config_from_dict({"enabled": False})
-        with patch("app.gateway.auth.middleware.TenantStorage.get", side_effect=_mock_tenant_get):
-            client = TestClient(_make_app())
-            resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "myorg"})
+        client = TestClient(_make_app())
+        resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "myorg"})
         assert resp.status_code == 200
         assert resp.json()["tenant"] == "myorg"
 
     def test_invalid_tenant_header_raises_400(self):
         load_auth_config_from_dict({"enabled": False})
-        with patch("app.gateway.auth.middleware.TenantStorage.get", side_effect=_mock_tenant_get):
-            client = TestClient(_make_app())
-            resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "../etc"})
+        client = TestClient(_make_app())
+        resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "../etc"})
         assert resp.status_code == 400
 
 
@@ -343,9 +347,8 @@ class TestJwtAuth:
     def test_valid_jwt_sets_tenant(self):
         load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret"})
         token = create_access_token(tenant_id="acme", username="admin", role="admin")
-        with patch("app.gateway.auth.middleware.TenantStorage.get", side_effect=_mock_tenant_get):
-            client = TestClient(_make_app())
-            resp = client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        client = TestClient(_make_app())
+        resp = client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         assert resp.json()["tenant"] == "acme"
 
@@ -380,15 +383,14 @@ class TestApiKeyAuth:
 
         load_auth_config_from_dict({"enabled": True, "jwt_secret": "s"})
         result = create_api_key(name="test-key")
-        with patch("app.gateway.auth.middleware.TenantStorage.get", side_effect=_mock_tenant_get):
-            client = TestClient(_make_app())
-            resp = client.get(
-                "/api/protected",
-                headers={
-                    "Authorization": f"Bearer {result['raw_key']}",
-                    "X-DeerFlow-Tenant": "default",
-                },
-            )
+        client = TestClient(_make_app())
+        resp = client.get(
+            "/api/protected",
+            headers={
+                "Authorization": f"Bearer {result['raw_key']}",
+                "X-DeerFlow-Tenant": "default",
+            },
+        )
         assert resp.status_code == 200
 
     def test_invalid_api_key_returns_401(self, tmp_path, monkeypatch):
@@ -405,24 +407,24 @@ class TestApiKeyAuth:
 class TestTenantEnforcement:
     def test_nonexistent_tenant_returns_403(self):
         load_auth_config_from_dict({"enabled": False})
-        with patch("app.gateway.auth.middleware.TenantStorage.get", return_value=None):
-            client = TestClient(_make_app())
-            resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "ghost"})
+        store = _FakeTenantStore(get_fn=lambda tid: None)
+        client = TestClient(_make_app(tenant_store=store))
+        resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "ghost"})
         assert resp.status_code == 403
         assert resp.json()["code"] == "tenant_not_found"
 
     def test_disabled_tenant_returns_403(self):
         load_auth_config_from_dict({"enabled": False})
         tc = TenantConfig(tenant_id="disabled-org", name="Disabled", is_active=False)
-        with patch("app.gateway.auth.middleware.TenantStorage.get", return_value=tc):
-            client = TestClient(_make_app())
-            resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "disabled-org"})
+        store = _FakeTenantStore(get_fn=lambda tid: tc)
+        client = TestClient(_make_app(tenant_store=store))
+        resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "disabled-org"})
         assert resp.status_code == 403
         assert resp.json()["code"] == "tenant_disabled"
 
     def test_admin_paths_skip_enforcement(self):
         load_auth_config_from_dict({"enabled": False})
-        with patch("app.gateway.auth.middleware.TenantStorage.get", return_value=None):
-            client = TestClient(_make_app())
-            resp = client.get("/api/admin/tenants", headers={"X-DeerFlow-Tenant": "ghost"})
+        store = _FakeTenantStore(get_fn=lambda tid: None)
+        client = TestClient(_make_app(tenant_store=store))
+        resp = client.get("/api/admin/tenants", headers={"X-DeerFlow-Tenant": "ghost"})
         assert resp.status_code == 200

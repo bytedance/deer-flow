@@ -11,6 +11,7 @@ import React, {
 } from "react";
 
 import { type User, buildLoginUrl } from "./types";
+import { setCurrentTenantId } from "@/core/tenant/store";
 
 // Re-export for consumers
 export type { User };
@@ -49,6 +50,13 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
   const isAuthenticated = user !== null;
 
+  // Sync tenant store when initialUser is available on mount
+  useEffect(() => {
+    if (initialUser?.tenant_id) {
+      setCurrentTenantId(initialUser.tenant_id);
+    }
+  }, [initialUser]);
+
   /**
    * Fetch current user from FastAPI
    * Used when initialUser might be stale (e.g., after tab was inactive)
@@ -63,6 +71,9 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       if (res.ok) {
         const data = await res.json();
         setUser(data);
+        if (data.tenant_id) {
+          setCurrentTenantId(data.tenant_id);
+        }
       } else if (res.status === 401) {
         // Session expired or invalid
         setUser(null);

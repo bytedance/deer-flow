@@ -24,6 +24,7 @@ dependencies = [
     "bcrypt>=4.0.0",
     "pyjwt>=2.9.0",
     "email-validator>=2.0.0",
+    "chromadb>=1.5.9",
 ]
 
 [project.optional-dependencies]

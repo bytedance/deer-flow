@@ -1,5 +1,8 @@
 import type { TokenUsageInlineMode } from "../messages/usage-model";
-import type { AgentThreadContext } from "../threads";
+import type {
+  AgentThreadContext,
+  KnowledgeBaseSelection,
+} from "../threads";
 
 export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   notification: {
@@ -18,6 +21,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
 
 export const LOCAL_SETTINGS_KEY = "deerflow.local-settings";
 export const THREAD_MODEL_KEY_PREFIX = "deerflow.thread-model.";
+export const THREAD_KB_KEY_PREFIX = "deerflow.thread-kb.";
 
 function isBrowser(): boolean {
   return typeof window !== "undefined";
@@ -43,6 +47,7 @@ export interface LocalSettings {
     model_name?: string | undefined;
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
+    knowledge_base_selection?: KnowledgeBaseSelection;
   };
 }
 
@@ -102,6 +107,56 @@ export function applyThreadModelOverride(
     context: {
       ...settings.context,
       model_name: threadModelName,
+    },
+  };
+}
+
+function getThreadKBStorageKey(threadId: string): string {
+  return `${THREAD_KB_KEY_PREFIX}${threadId}`;
+}
+
+export function getThreadKBSelection(
+  threadId: string,
+): KnowledgeBaseSelection | undefined {
+  if (!isBrowser()) {
+    return undefined;
+  }
+  const json = localStorage.getItem(getThreadKBStorageKey(threadId));
+  if (!json) return undefined;
+  try {
+    return JSON.parse(json) as KnowledgeBaseSelection;
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveThreadKBSelection(
+  threadId: string,
+  selection: KnowledgeBaseSelection | undefined,
+) {
+  if (!isBrowser()) {
+    return;
+  }
+  const key = getThreadKBStorageKey(threadId);
+  if (!selection?.enabled) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, JSON.stringify(selection));
+}
+
+export function applyThreadKBOverride(
+  settings: LocalSettings,
+  kbSelection: KnowledgeBaseSelection | undefined,
+): LocalSettings {
+  if (!kbSelection) {
+    return settings;
+  }
+  return {
+    ...settings,
+    context: {
+      ...settings.context,
+      knowledge_base_selection: kbSelection,
     },
   };
 }

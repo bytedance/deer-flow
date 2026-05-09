@@ -67,6 +67,20 @@ export interface Translations {
     placeholder: string;
     createSkillPrompt: string;
     addAttachments: string;
+    inputSource: string;
+    textInput: string;
+    textInputDescription: string;
+    microphoneInput: string;
+    microphoneInputDescription: string;
+    audioFileInput: string;
+    audioFileInputDescription: string;
+    audioFilePlaceholder: string;
+    audioFileTranscribing: string;
+    audioFileRetry: string;
+    audioFileTranscriptionFailed: string;
+    microphonePlaceholder: string;
+    microphoneUnsupported: string;
+    microphoneUnsupportedPlaceholder: string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;
@@ -93,6 +107,7 @@ export interface Translations {
     followupConfirmDescription: string;
     followupConfirmAppend: string;
     followupConfirmReplace: string;
+    knowledgeBase: string;
     suggestions: {
       suggestion: string;
       prompt: string;
@@ -117,6 +132,7 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    knowledgeBases: string;
   };
 
   // Agents
@@ -153,6 +169,62 @@ export interface Translations {
     agentCreated: string;
     startChatting: string;
     backToGallery: string;
+  };
+
+  // Knowledge Base
+  knowledgeBase: {
+    title: string;
+    description: string;
+    newKnowledgeBase: string;
+    emptyTitle: string;
+    emptyDescription: string;
+    name: string;
+    namePlaceholder: string;
+    descriptionLabel: string;
+    descriptionPlaceholder: string;
+    visibility: string;
+    visibilityPrivate: string;
+    visibilityShared: string;
+    status: string;
+    statusActive: string;
+    statusIndexing: string;
+    statusError: string;
+    documents: string;
+    chunks: string;
+    lastIndexed: string;
+    never: string;
+    create: string;
+    creating: string;
+    save: string;
+    saving: string;
+    delete: string;
+    deleteConfirm: string;
+    deleteSuccess: string;
+    documentCount: string;
+    addDocument: string;
+    documentTitle: string;
+    documentTitlePlaceholder: string;
+    documentContent: string;
+    documentContentPlaceholder: string;
+    documentFormat: string;
+    documentSource: string;
+    documentSourcePlaceholder: string;
+    reindex: string;
+    reindexing: string;
+    editDocument: string;
+    deleteDocument: string;
+    deleteDocumentConfirm: string;
+    searchPlaceholder: string;
+    searchButton: string;
+    searching: string;
+    noResults: string;
+    searchResults: string;
+    uploadFile: string;
+    uploadFilePlaceholder: string;
+    uploading: string;
+    uploadSuccess: string;
+    textInput: string;
+    fileUpload: string;
   };
 
   // Breadcrumb

@@ -10,6 +10,7 @@ import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
+import { setCurrentTenantId } from "@/core/tenant/store";
 
 /**
  * Validate next parameter
@@ -116,6 +117,15 @@ export default function LoginPage() {
         const authError = parseAuthError(data);
         setError(authError.message);
         return;
+      }
+
+      // Sync tenant store from the authenticated user's profile
+      const meRes = await fetch("/api/v1/auth/me", { credentials: "include" });
+      if (meRes.ok) {
+        const userData = await meRes.json();
+        if (userData.tenant_id) {
+          setCurrentTenantId(userData.tenant_id);
+        }
       }
 
       // Both login and register set a cookie — redirect to workspace

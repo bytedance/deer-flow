@@ -345,6 +345,13 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token), `dingtalk` (client_id, client_secret, optional `card_template_id` for AI Card streaming)
 
 
+### RAG Knowledge Base Access
+
+- `deerflow.rag.tools:search_knowledge_base` now resolves both session-selected KBs and explicit `collection` requests through `KnowledgeBaseRepository` before retrieval.
+- Explicit `collection` names are no longer trusted as raw vector-store handles; retrieval is allowed only when the collection belongs to an active knowledge base owned by the current `tenant_id` and `user_id`.
+- In no-auth mode, KB access remains blocked unless `rag.allow_no_auth_kb` is explicitly enabled.
+- Tool failures return a generic error message while detailed diagnostics stay in server logs.
+
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 
 **Components**:

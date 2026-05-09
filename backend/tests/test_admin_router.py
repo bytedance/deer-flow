@@ -45,7 +45,7 @@ class FakeTenantStorage:
     def __init__(self, tenants: list[TenantConfig]):
         self._tenants = {tenant.tenant_id: tenant for tenant in tenants}
 
-    def ensure_default(self) -> TenantConfig:
+    async def ensure_default(self) -> TenantConfig:
         tenant = self._tenants.get("default")
         if tenant is None:
             tenant = TenantConfig(
@@ -56,19 +56,19 @@ class FakeTenantStorage:
             self._tenants["default"] = tenant
         return tenant
 
-    def list_all(self) -> list[TenantConfig]:
+    async def list_all(self) -> list[TenantConfig]:
         return list(self._tenants.values())
 
-    def get(self, tenant_id: str) -> TenantConfig | None:
+    async def get(self, tenant_id: str) -> TenantConfig | None:
         return self._tenants.get(tenant_id)
 
-    def create(self, config: TenantConfig) -> TenantConfig:
+    async def create(self, config: TenantConfig) -> TenantConfig:
         if config.tenant_id in self._tenants:
             raise ValueError(f"Tenant {config.tenant_id!r} already exists")
         self._tenants[config.tenant_id] = config
         return config
 
-    def update(self, tenant_id: str, **fields) -> TenantConfig | None:
+    async def update(self, tenant_id: str, **fields) -> TenantConfig | None:
         tenant = self._tenants.get(tenant_id)
         if tenant is None:
             return None
@@ -83,7 +83,7 @@ class FakeTenantStorage:
         self._tenants[tenant_id] = updated
         return updated
 
-    def delete(self, tenant_id: str) -> bool:
+    async def delete(self, tenant_id: str) -> bool:
         return self._tenants.pop(tenant_id, None) is not None
 
 
@@ -230,8 +230,8 @@ def _install_admin_fakes(
     )
     monkeypatch.setattr(
         admin_router,
-        "_get_tenant_storage",
-        lambda: FakeTenantStorage(list(tenants or [_tenant("default", "Default Tenant")])),
+        "get_tenant_store",
+        lambda _request: FakeTenantStorage(list(tenants or [_tenant("default", "Default Tenant")])),
     )
     monkeypatch.setattr(
         admin_router,
@@ -239,10 +239,10 @@ def _install_admin_fakes(
         lambda: provider or FakeProvider(),
     )
 
-    async def _fake_discover_thread_counts(_checkpointer):
+    async def _fake_get_thread_counts(_request):
         return dict(thread_counts or {})
 
-    monkeypatch.setattr(admin_router, "_discover_thread_counts", _fake_discover_thread_counts)
+    monkeypatch.setattr(admin_router, "_get_thread_counts", _fake_get_thread_counts)
 
 
 class TestAdminStats:
@@ -384,7 +384,7 @@ class TestCreateTenant:
         storage = FakeTenantStorage([_tenant("default", "Default Tenant")])
         from app.gateway.routers import admin as admin_router
 
-        monkeypatch.setattr(admin_router, "_get_tenant_storage", lambda: storage)
+        monkeypatch.setattr(admin_router, "get_tenant_store", lambda _request: storage)
 
         response = _make_client().post(
             "/api/admin/tenants",
@@ -432,7 +432,7 @@ class TestUpdateTenant:
         storage = FakeTenantStorage([_tenant("default", "Default Tenant"), _tenant("acme", "Acme")])
         from app.gateway.routers import admin as admin_router
 
-        monkeypatch.setattr(admin_router, "_get_tenant_storage", lambda: storage)
+        monkeypatch.setattr(admin_router, "get_tenant_store", lambda _request: storage)
 
         response = _make_client().put(
             "/api/admin/tenants/acme",
@@ -448,7 +448,7 @@ class TestUpdateTenant:
         storage = FakeTenantStorage([_tenant("acme", "Acme"), _tenant("other", "Other")])
         from app.gateway.routers import admin as admin_router
 
-        monkeypatch.setattr(admin_router, "_get_tenant_storage", lambda: storage)
+        monkeypatch.setattr(admin_router, "get_tenant_store", lambda _request: storage)
 
         own_response = _make_client(tenant_id="acme", role="tenant_admin").put(
             "/api/admin/tenants/acme",
@@ -473,7 +473,7 @@ class TestDeleteTenant:
         storage = FakeTenantStorage([_tenant("default", "Default Tenant"), _tenant("acme", "Acme")])
         from app.gateway.routers import admin as admin_router
 
-        monkeypatch.setattr(admin_router, "_get_tenant_storage", lambda: storage)
+        monkeypatch.setattr(admin_router, "get_tenant_store", lambda _request: storage)
 
         response = _make_client().delete(
             "/api/admin/tenants/acme",

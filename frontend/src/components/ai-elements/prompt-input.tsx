@@ -63,6 +63,7 @@ import {
   Fragment,
   type HTMLAttributes,
   type KeyboardEventHandler,
+  type MouseEventHandler,
   type PropsWithChildren,
   type ReactNode,
   type RefObject,
@@ -1161,23 +1162,49 @@ declare global {
 export type PromptInputSpeechButtonProps = ComponentProps<
   typeof PromptInputButton
 > & {
+  language?: string;
   textareaRef?: RefObject<HTMLTextAreaElement | null>;
   onTranscriptionChange?: (text: string) => void;
 };
 
+export function appendTranscriptionToInput(
+  currentValue: string,
+  transcript: string,
+): string {
+  const normalizedTranscript = transcript.trim();
+
+  if (!normalizedTranscript) {
+    return currentValue;
+  }
+
+  return currentValue
+    ? `${currentValue} ${normalizedTranscript}`
+    : normalizedTranscript;
+}
+
 export const PromptInputSpeechButton = ({
   className,
+  language,
   textareaRef,
   onTranscriptionChange,
   ...props
 }: PromptInputSpeechButtonProps) => {
+  const controller = useOptionalPromptInputController();
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState<SpeechRecognition | null>(
     null,
   );
   const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const callbacksRef = useRef({ textareaRef, onTranscriptionChange });
-  callbacksRef.current = { textareaRef, onTranscriptionChange };
+  const callbacksRef = useRef({
+    controller,
+    textareaRef,
+    onTranscriptionChange,
+  });
+  callbacksRef.current = {
+    controller,
+    textareaRef,
+    onTranscriptionChange,
+  };
 
   useEffect(() => {
     if (
@@ -1190,7 +1217,9 @@ export const PromptInputSpeechButton = ({
 
       speechRecognition.continuous = true;
       speechRecognition.interimResults = true;
-      speechRecognition.lang = "en-US";
+      speechRecognition.lang =
+        language ??
+        (typeof navigator !== "undefined" ? navigator.language : "en-US");
 
       speechRecognition.onstart = () => {
         setIsListening(true);
@@ -1213,16 +1242,31 @@ export const PromptInputSpeechButton = ({
         const currentTextareaRef = callbacksRef.current.textareaRef;
         const currentOnTranscriptionChange =
           callbacksRef.current.onTranscriptionChange;
+        const currentController = callbacksRef.current.controller;
+        const currentValue =
+          currentController?.textInput.value ??
+          currentTextareaRef?.current?.value ??
+          "";
+        const nextValue = appendTranscriptionToInput(
+          currentValue,
+          finalTranscript,
+        );
 
-        if (finalTranscript && currentTextareaRef?.current) {
+        if (nextValue === currentValue) {
+          return;
+        }
+
+        if (currentController) {
+          currentController.textInput.setInput(nextValue);
+          currentOnTranscriptionChange?.(nextValue);
+          return;
+        }
+
+        if (currentTextareaRef?.current) {
           const textarea = currentTextareaRef.current;
-          const currentValue = textarea.value;
-          const newValue =
-            currentValue + (currentValue ? " " : "") + finalTranscript;
-
-          textarea.value = newValue;
+          textarea.value = nextValue;
           textarea.dispatchEvent(new Event("input", { bubbles: true }));
-          currentOnTranscriptionChange?.(newValue);
+          currentOnTranscriptionChange?.(nextValue);
         }
       };
 
@@ -1240,7 +1284,7 @@ export const PromptInputSpeechButton = ({
         recognitionRef.current.stop();
       }
     };
-  }, []);
+  }, [language]);
 
   const toggleListening = useCallback(() => {
     if (!recognition) {

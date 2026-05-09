@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.thread_meta.base import ThreadMetaStore
@@ -35,15 +35,23 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        tenant_id: str | None = None,
     ) -> dict:
         # Auto-resolve user_id from contextvar when AUTO; explicit None
         # creates an orphan row (used by migration scripts).
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.create")
+
+        # Resolve tenant_id: explicit param > current tenant context > "default"
+        if tenant_id is None:
+            from deerflow.config.tenant import get_current_tenant_id
+            tenant_id = get_current_tenant_id()
+
         now = datetime.now(UTC)
         row = ThreadMetaRow(
             thread_id=thread_id,
             assistant_id=assistant_id,
             user_id=resolved_user_id,
+            tenant_id=tenant_id,
             display_name=display_name,
             metadata_json=metadata or {},
             created_at=now,
@@ -223,3 +231,13 @@ class ThreadMetaRepository(ThreadMetaStore):
                 return
             await session.delete(row)
             await session.commit()
+
+    async def count_by_tenant(self) -> dict[str, int]:
+        """Return per-tenant thread counts from threads_meta."""
+        stmt = (
+            select(ThreadMetaRow.tenant_id, func.count())
+            .group_by(ThreadMetaRow.tenant_id)
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return {tid: count for tid, count in result.all()}

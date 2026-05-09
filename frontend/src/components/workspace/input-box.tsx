@@ -4,7 +4,9 @@ import type { ChatStatus } from "ai";
 import {
   CheckIcon,
   GraduationCapIcon,
+  KeyboardIcon,
   LightbulbIcon,
+  MicIcon,
   PaperclipIcon,
   PlusIcon,
   SparklesIcon,
@@ -21,8 +23,10 @@ import {
   useState,
   type ComponentProps,
 } from "react";
+import { toast } from "sonner";
 
 import {
+  appendTranscriptionToInput,
   PromptInput,
   PromptInputActionMenu,
   PromptInputActionMenuContent,
@@ -33,6 +37,7 @@ import {
   PromptInputBody,
   PromptInputButton,
   PromptInputFooter,
+  PromptInputSpeechButton,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
@@ -56,11 +61,20 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { fetchGateway } from "@/core/api";
+import type { AudioInputConfigResponse } from "@/core/audio/api";
+import {
+  useAudioInputConfig,
+  useAudioTranscription,
+} from "@/core/audio/hooks";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
-import type { AgentThreadContext } from "@/core/threads";
+import type { AgentThreadContext, KnowledgeBaseSelection } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import {
+  promptInputFilePartToFile,
+  type PromptInputFilePart,
+} from "@/core/uploads";
 import { cn } from "@/lib/utils";
 
 import {
@@ -80,11 +94,138 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { KnowledgeBaseSelector } from "./knowledge-base-selector";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
+const AUDIO_FILE_ACCEPT = "audio/*";
+const DEFAULT_AUDIO_LOCALES = ["zh-CN", "en-US"] as const;
+const DEFAULT_AUDIO_LOCALE = "en-US";
+
+export type InputSource = "text" | "microphone" | "audio-file";
+
+type InputSourceLabels = Record<InputSource, string>;
+type AudioPromptInputFile = PromptInputFilePart & { id: string };
+type AudioInputAvailability = Pick<
+  AudioInputConfigResponse,
+  | "enabled"
+  | "microphone_enabled"
+  | "file_transcription_enabled"
+  | "default_locale"
+  | "supported_locales"
+>;
+
+export function getInputSourceLabel(
+  inputSource: InputSource,
+  labels: InputSourceLabels,
+): string {
+  return labels[inputSource];
+}
+
+export function isAudioPromptInputFile(
+  filePart: Pick<PromptInputFilePart, "file" | "mediaType">,
+): boolean {
+  const mediaType =
+    (typeof filePart.mediaType === "string" && filePart.mediaType) ||
+    (filePart.file instanceof File ? filePart.file.type : "");
+  return mediaType.startsWith("audio/");
+}
+
+export function getNextPendingAudioAttachment<T extends AudioPromptInputFile>(
+  files: T[],
+  attemptedIds: Set<string>,
+): T | undefined {
+  return files.find(
+    (file) => isAudioPromptInputFile(file) && !attemptedIds.has(file.id),
+  );
+}
+
+export function getAvailableInputSources(
+  audioInputConfig?: AudioInputAvailability | null,
+): InputSource[] {
+  const sources: InputSource[] = ["text"];
+  if (audioInputConfig?.enabled && audioInputConfig.file_transcription_enabled) {
+    sources.push("audio-file");
+  }
+  if (audioInputConfig?.enabled && audioInputConfig.microphone_enabled) {
+    sources.push("microphone");
+  }
+  return sources;
+}
+
+export function getSafeInputSource(
+  inputSource: InputSource,
+  availableInputSources: readonly InputSource[],
+): InputSource {
+  return availableInputSources.includes(inputSource)
+    ? inputSource
+    : (availableInputSources[0] ?? "text");
+}
+
+export function resolveAudioLocale(
+  locale: string | undefined,
+  supportedLocales: readonly string[] = DEFAULT_AUDIO_LOCALES,
+  fallbackLocale = DEFAULT_AUDIO_LOCALE,
+): string {
+  const normalizedSupportedLocales =
+    supportedLocales.length > 0 ? [...supportedLocales] : [fallbackLocale];
+
+  if (locale) {
+    const lowerLocale = locale.toLowerCase();
+    const exactMatch = normalizedSupportedLocales.find(
+      (candidate) => candidate.toLowerCase() === lowerLocale,
+    );
+    if (exactMatch) {
+      return exactMatch;
+    }
+
+    const localePrefix = lowerLocale.split("-")[0];
+    const prefixMatch = normalizedSupportedLocales.find((candidate) => {
+      const lowerCandidate = candidate.toLowerCase();
+      return (
+        lowerCandidate === localePrefix ||
+        lowerCandidate.startsWith(`${localePrefix}-`)
+      );
+    });
+    if (prefixMatch) {
+      return prefixMatch;
+    }
+  }
+
+  const fallbackMatch = normalizedSupportedLocales.find(
+    (candidate) => candidate.toLowerCase() === fallbackLocale.toLowerCase(),
+  );
+  return fallbackMatch ?? normalizedSupportedLocales[0] ?? fallbackLocale;
+}
+
+export function getInputSourcePlaceholder({
+  inputSource,
+  defaultPlaceholder,
+  microphonePlaceholder,
+  audioFilePlaceholder,
+  microphoneUnsupportedPlaceholder,
+  speechRecognitionSupported,
+}: {
+  inputSource: InputSource;
+  defaultPlaceholder: string;
+  microphonePlaceholder: string;
+  audioFilePlaceholder: string;
+  microphoneUnsupportedPlaceholder: string;
+  speechRecognitionSupported: boolean;
+}): string {
+  if (inputSource === "text") {
+    return defaultPlaceholder;
+  }
+  if (inputSource === "audio-file") {
+    return audioFilePlaceholder;
+  }
+
+  return speechRecognitionSupported
+    ? microphonePlaceholder
+    : microphoneUnsupportedPlaceholder;
+}
 
 function getResolvedMode(
   mode: InputMode | undefined,
@@ -124,6 +265,7 @@ export function InputBox({
   > & {
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
+    knowledge_base_selection?: KnowledgeBaseSelection;
   };
   extraHeader?: React.ReactNode;
   isNewThread?: boolean;
@@ -136,6 +278,7 @@ export function InputBox({
     > & {
       mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
       reasoning_effort?: "minimal" | "low" | "medium" | "high";
+      knowledge_base_selection?: KnowledgeBaseSelection;
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
@@ -146,9 +289,12 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
+  const { data: audioInputConfig } = useAudioInputConfig();
   const { thread, isMock } = useThread();
-  const { textInput } = usePromptInputController();
+  const { attachments, textInput } = usePromptInputController();
+  const audioTranscription = useAudioTranscription(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
+  const attemptedAudioAttachmentIdsRef = useRef<Set<string>>(new Set());
 
   const [followups, setFollowups] = useState<string[]>([]);
   const [followupsHidden, setFollowupsHidden] = useState(false);
@@ -161,6 +307,57 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
+  const [inputSource, setInputSource] = useState<InputSource>("text");
+  const [speechRecognitionSupported, setSpeechRecognitionSupported] =
+    useState(false);
+  const [audioTranscriptionError, setAudioTranscriptionError] = useState<
+    string | null
+  >(null);
+  const [failedAudioAttachmentId, setFailedAudioAttachmentId] = useState<
+    string | null
+  >(null);
+  const [activeAudioAttachmentId, setActiveAudioAttachmentId] = useState<
+    string | null
+  >(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    setSpeechRecognitionSupported(
+      "SpeechRecognition" in window || "webkitSpeechRecognition" in window,
+    );
+  }, []);
+
+  const availableInputSources = useMemo(
+    () => getAvailableInputSources(audioInputConfig),
+    [audioInputConfig],
+  );
+
+  const activeInputSource = getSafeInputSource(
+    inputSource,
+    availableInputSources,
+  );
+
+  useEffect(() => {
+    if (activeInputSource !== inputSource) {
+      setInputSource(activeInputSource);
+    }
+  }, [activeInputSource, inputSource]);
+
+  const audioLocale = useMemo(
+    () =>
+      resolveAudioLocale(
+        typeof navigator !== "undefined" ? navigator.language : undefined,
+        audioInputConfig?.supported_locales,
+        audioInputConfig?.default_locale ?? DEFAULT_AUDIO_LOCALE,
+      ),
+    [audioInputConfig],
+  );
+
+  const microphoneInputEnabled = availableInputSources.includes("microphone");
+  const audioFileInputEnabled = availableInputSources.includes("audio-file");
 
   useEffect(() => {
     if (models.length === 0) {
@@ -247,10 +444,68 @@ export function InputBox({
     [onContextChange, context],
   );
 
+  const handleKnowledgeBaseSelectionChange = useCallback(
+    (selection: { enabled: boolean; selected_ids: string[] }) => {
+      onContextChange?.({
+        ...context,
+        knowledge_base_selection: selection,
+      });
+    },
+    [onContextChange, context],
+  );
+
+  const transcribeAudioAttachment = useCallback(
+    async (attachment: AudioPromptInputFile) => {
+      attemptedAudioAttachmentIdsRef.current.add(attachment.id);
+      setActiveAudioAttachmentId(attachment.id);
+      setAudioTranscriptionError(null);
+      setFailedAudioAttachmentId(null);
+
+      try {
+        const file = await promptInputFilePartToFile(attachment);
+        if (!(file instanceof File)) {
+          throw new Error(t.inputBox.audioFileTranscriptionFailed);
+        }
+
+        const result = await audioTranscription.mutateAsync({
+          file,
+          locale: audioLocale,
+          attachOriginal: false,
+        });
+        const nextText = appendTranscriptionToInput(
+          textInput.value ?? "",
+          result.transcript,
+        );
+        textInput.setInput(nextText);
+        attachments.remove(attachment.id);
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : t.inputBox.audioFileTranscriptionFailed;
+        setAudioTranscriptionError(message);
+        setFailedAudioAttachmentId(attachment.id);
+        toast.error(message);
+      } finally {
+        setActiveAudioAttachmentId(null);
+      }
+    },
+    [
+      attachments,
+      audioLocale,
+      audioTranscription,
+      t.inputBox.audioFileTranscriptionFailed,
+      textInput,
+    ],
+  );
+
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
       if (status === "streaming") {
         onStop?.();
+        return;
+      }
+      if (audioTranscription.isPending) {
         return;
       }
       if (!message.text) {
@@ -282,16 +537,73 @@ export function InputBox({
       onContextChange,
       onSubmit,
       onStop,
+      audioTranscription.isPending,
       resolvedModelName,
       selectedModel?.supports_thinking,
       status,
     ],
   );
 
+  const inputSourceLabels = useMemo(
+    () => ({
+      text: t.inputBox.textInput,
+      microphone: t.inputBox.microphoneInput,
+      "audio-file": t.inputBox.audioFileInput,
+    }),
+    [t],
+  );
+
+  const inputSourceLabel = getInputSourceLabel(
+    activeInputSource,
+    inputSourceLabels,
+  );
+
+  const inputPlaceholder = getInputSourcePlaceholder({
+    inputSource: activeInputSource,
+    defaultPlaceholder: t.inputBox.placeholder,
+    microphonePlaceholder: t.inputBox.microphonePlaceholder,
+    audioFilePlaceholder: t.inputBox.audioFilePlaceholder,
+    microphoneUnsupportedPlaceholder:
+      t.inputBox.microphoneUnsupportedPlaceholder,
+    speechRecognitionSupported,
+  });
+
+  const promptInputAccept =
+    activeInputSource === "audio-file" ? AUDIO_FILE_ACCEPT : undefined;
+
+  const microphoneButtonDisabled =
+    disabled ||
+    status === "streaming" ||
+    !microphoneInputEnabled ||
+    !speechRecognitionSupported
+      ? true
+      : undefined;
+
+  const failedAudioAttachment = useMemo(
+    () =>
+      attachments.files.find(
+        (file): file is AudioPromptInputFile =>
+          file.id === failedAudioAttachmentId && isAudioPromptInputFile(file),
+      ),
+    [attachments.files, failedAudioAttachmentId],
+  );
+
+  const audioFileStatusMessage =
+    audioTranscription.isPending
+      ? t.inputBox.audioFileTranscribing
+      : audioTranscriptionError ?? t.inputBox.audioFileInputDescription;
+
   const requestFormSubmit = useCallback(() => {
     const form = promptRootRef.current?.querySelector("form");
     form?.requestSubmit();
   }, []);
+
+  const retryAudioTranscription = useCallback(() => {
+    if (!failedAudioAttachment || audioTranscription.isPending) {
+      return;
+    }
+    void transcribeAudioAttachment(failedAudioAttachment);
+  }, [audioTranscription.isPending, failedAudioAttachment, transcribeAudioAttachment]);
 
   const handleFollowupClick = useCallback(
     (suggestion: string) => {
@@ -358,6 +670,61 @@ export function InputBox({
   useEffect(() => {
     messagesRef.current = thread.messages;
   }, [thread.messages]);
+
+  useEffect(() => {
+    const attachmentIds = new Set(attachments.files.map((file) => file.id));
+    attemptedAudioAttachmentIdsRef.current = new Set(
+      [...attemptedAudioAttachmentIdsRef.current].filter((id) =>
+        attachmentIds.has(id),
+      ),
+    );
+    if (failedAudioAttachmentId && !attachmentIds.has(failedAudioAttachmentId)) {
+      setFailedAudioAttachmentId(null);
+      setAudioTranscriptionError(null);
+    }
+    if (activeAudioAttachmentId && !attachmentIds.has(activeAudioAttachmentId)) {
+      setActiveAudioAttachmentId(null);
+    }
+  }, [activeAudioAttachmentId, attachments.files, failedAudioAttachmentId]);
+
+  useEffect(() => {
+    if (
+      activeInputSource !== "audio-file" ||
+      disabled ||
+      status === "streaming"
+    ) {
+      return;
+    }
+    if (audioTranscription.isPending || activeAudioAttachmentId) {
+      return;
+    }
+
+    const nextAudioAttachment = getNextPendingAudioAttachment(
+      attachments.files,
+      attemptedAudioAttachmentIdsRef.current,
+    );
+    if (!nextAudioAttachment) {
+      return;
+    }
+
+    void transcribeAudioAttachment(nextAudioAttachment);
+  }, [
+    activeAudioAttachmentId,
+    activeInputSource,
+    attachments.files,
+    audioTranscription.isPending,
+    disabled,
+    status,
+    transcribeAudioAttachment,
+  ]);
+
+  useEffect(() => {
+    if (activeInputSource === "audio-file") {
+      return;
+    }
+    setAudioTranscriptionError(null);
+    setFailedAudioAttachmentId(null);
+  }, [activeInputSource]);
 
   useEffect(() => {
     return () => followupsVisibilityChangeRef.current?.(false);
@@ -470,6 +837,7 @@ export function InputBox({
         </div>
       )}
       <PromptInput
+        accept={promptInputAccept}
         className={cn(
           "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
           className,
@@ -494,13 +862,127 @@ export function InputBox({
           <PromptInputTextarea
             className={cn("size-full")}
             disabled={disabled}
-            placeholder={t.inputBox.placeholder}
+            placeholder={inputPlaceholder}
             autoFocus={autoFocus}
             defaultValue={initialValue}
           />
         </PromptInputBody>
         <PromptInputFooter className="flex">
           <PromptInputTools>
+            <PromptInputActionMenu>
+              <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                {activeInputSource === "text" ? (
+                  <KeyboardIcon className="size-3" />
+                ) : activeInputSource === "audio-file" ? (
+                  <PaperclipIcon className="size-3" />
+                ) : (
+                  <MicIcon className="size-3" />
+                )}
+                <div className="text-xs font-normal">{inputSourceLabel}</div>
+              </PromptInputActionMenuTrigger>
+              <PromptInputActionMenuContent className="w-80">
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="text-muted-foreground text-xs">
+                    {t.inputBox.inputSource}
+                  </DropdownMenuLabel>
+                  <PromptInputActionMenu>
+                    <PromptInputActionMenuItem
+                      className={cn(
+                        activeInputSource === "text"
+                          ? "text-accent-foreground"
+                          : "text-muted-foreground/65",
+                      )}
+                      onSelect={() => setInputSource("text")}
+                    >
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-center gap-1 font-bold">
+                          <KeyboardIcon
+                            className={cn(
+                              "mr-2 size-4",
+                              activeInputSource === "text" &&
+                                "text-accent-foreground",
+                            )}
+                          />
+                          {t.inputBox.textInput}
+                        </div>
+                        <div className="pl-7 text-xs">
+                          {t.inputBox.textInputDescription}
+                        </div>
+                      </div>
+                      {activeInputSource === "text" ? (
+                        <CheckIcon className="ml-auto size-4" />
+                      ) : (
+                        <div className="ml-auto size-4" />
+                      )}
+                    </PromptInputActionMenuItem>
+                    {audioFileInputEnabled && (
+                      <PromptInputActionMenuItem
+                        className={cn(
+                          activeInputSource === "audio-file"
+                            ? "text-accent-foreground"
+                            : "text-muted-foreground/65",
+                        )}
+                        onSelect={() => setInputSource("audio-file")}
+                      >
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-center gap-1 font-bold">
+                            <PaperclipIcon
+                              className={cn(
+                                "mr-2 size-4",
+                                activeInputSource === "audio-file" &&
+                                  "text-accent-foreground",
+                              )}
+                            />
+                            {t.inputBox.audioFileInput}
+                          </div>
+                          <div className="pl-7 text-xs">
+                            {t.inputBox.audioFileInputDescription}
+                          </div>
+                        </div>
+                        {activeInputSource === "audio-file" ? (
+                          <CheckIcon className="ml-auto size-4" />
+                        ) : (
+                          <div className="ml-auto size-4" />
+                        )}
+                      </PromptInputActionMenuItem>
+                    )}
+                    {microphoneInputEnabled && (
+                      <PromptInputActionMenuItem
+                        className={cn(
+                          activeInputSource === "microphone"
+                            ? "text-accent-foreground"
+                            : "text-muted-foreground/65",
+                        )}
+                        onSelect={() => setInputSource("microphone")}
+                      >
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-center gap-1 font-bold">
+                            <MicIcon
+                              className={cn(
+                                "mr-2 size-4",
+                                activeInputSource === "microphone" &&
+                                  "text-accent-foreground",
+                              )}
+                            />
+                            {t.inputBox.microphoneInput}
+                          </div>
+                          <div className="pl-7 text-xs">
+                            {speechRecognitionSupported
+                              ? t.inputBox.microphoneInputDescription
+                              : t.inputBox.microphoneUnsupported}
+                          </div>
+                        </div>
+                        {activeInputSource === "microphone" ? (
+                          <CheckIcon className="ml-auto size-4" />
+                        ) : (
+                          <div className="ml-auto size-4" />
+                        )}
+                      </PromptInputActionMenuItem>
+                    )}
+                  </PromptInputActionMenu>
+                </DropdownMenuGroup>
+              </PromptInputActionMenuContent>
+            </PromptInputActionMenu>
             {/* TODO: Add more connectors here
           <PromptInputActionMenu>
             <PromptInputActionMenuTrigger className="px-2!" />
@@ -511,6 +993,22 @@ export function InputBox({
             </PromptInputActionMenuContent>
           </PromptInputActionMenu> */}
             <AddAttachmentsButton className="px-2!" />
+            {activeInputSource === "microphone" && microphoneInputEnabled && (
+              <Tooltip
+                content={
+                  speechRecognitionSupported
+                    ? t.inputBox.microphoneInputDescription
+                    : t.inputBox.microphoneUnsupported
+                }
+              >
+                <PromptInputSpeechButton
+                  aria-label={t.inputBox.microphoneInput}
+                  className="px-2!"
+                  disabled={microphoneButtonDisabled}
+                  language={audioLocale}
+                />
+              </Tooltip>
+            )}
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -798,6 +1296,10 @@ export function InputBox({
                 </PromptInputActionMenuContent>
               </PromptInputActionMenu>
             )}
+            <KnowledgeBaseSelector
+              selection={context.knowledge_base_selection}
+              onSelectionChange={handleKnowledgeBaseSelectionChange}
+            />
           </PromptInputTools>
           <PromptInputTools>
             <ModelSelector
@@ -840,12 +1342,42 @@ export function InputBox({
             </ModelSelector>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={disabled}
+              disabled={Boolean(disabled) || audioTranscription.isPending}
               variant="outline"
               status={status}
             />
           </PromptInputTools>
         </PromptInputFooter>
+        {activeInputSource === "audio-file" && audioFileInputEnabled && (
+          <div className="flex items-center justify-between gap-2 px-4 pb-2 text-[11px]">
+            <span
+              className={cn(
+                "text-muted-foreground",
+                audioTranscriptionError ? "text-destructive" : "",
+              )}
+            >
+              {audioFileStatusMessage}
+            </span>
+            {failedAudioAttachment && (
+              <Button
+                className="h-auto px-2 py-1 text-[11px]"
+                size="sm"
+                type="button"
+                variant="ghost"
+                onClick={retryAudioTranscription}
+              >
+                {t.inputBox.audioFileRetry}
+              </Button>
+            )}
+          </div>
+        )}
+        {activeInputSource === "microphone" &&
+          microphoneInputEnabled &&
+          !speechRecognitionSupported && (
+          <div className="text-muted-foreground px-4 pb-2 text-[11px]">
+            {t.inputBox.microphoneUnsupported}
+          </div>
+        )}
         {!isNewThread && (
           <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
         )}

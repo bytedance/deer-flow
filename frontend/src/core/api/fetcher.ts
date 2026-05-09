@@ -54,10 +54,15 @@ export function readCsrfCookie(): string | null {
  * present, so explicit overrides win.
  */
 export async function fetch(
-  input: RequestInfo | string,
+  input: RequestInfo | URL | string,
   init?: RequestInit,
 ): Promise<Response> {
-  const url = typeof input === "string" ? input : input.url;
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
 
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.

@@ -18,11 +18,13 @@ from app.gateway.routers import (
     agents,
     artifacts,
     assistants_compat,
+    audio,
     auth_router,
     auth,
     channels,
     cost,
     feedback,
+    knowledge_bases,
     mcp,
     memory,
     models,
@@ -109,6 +111,80 @@ async def _ensure_admin_user(app: FastAPI) -> None:
             await conn.execute(
                 text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_tenant ON users (email, tenant_id)")
             )
+
+            # ── Schema migration: add tenant_id column to threads_meta ──
+            result = await conn.execute(
+                text("PRAGMA table_info('threads_meta')")
+            )
+            tm_columns = {row[1] for row in result.fetchall()}
+            if "tenant_id" not in tm_columns:
+                logger.info("Migrating threads_meta table: adding tenant_id column")
+                await conn.execute(
+                    text("ALTER TABLE threads_meta ADD COLUMN tenant_id VARCHAR(64) NOT NULL DEFAULT 'default'")
+                )
+                await conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_threads_meta_tenant_id ON threads_meta (tenant_id)")
+                )
+                # Backfill tenant_id from the owning user's tenant
+                await conn.execute(
+                    text("""
+                        UPDATE threads_meta
+                        SET tenant_id = COALESCE(
+                            (SELECT u.tenant_id FROM users u WHERE u.id = threads_meta.user_id),
+                            'default'
+                        )
+                    """)
+                )
+                logger.info("Migration complete: threads_meta.tenant_id column added and backfilled")
+
+            # ── Schema migration: create tenants table ──
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS tenants (
+                    tenant_id VARCHAR(64) PRIMARY KEY,
+                    name VARCHAR(256) NOT NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT 1,
+                    daily_quota_usd FLOAT NOT NULL DEFAULT 50.0,
+                    monthly_quota_usd FLOAT NOT NULL DEFAULT 1000.0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+
+            # One-time import from tenants.json if the table is empty
+            row_count = await conn.execute(text("SELECT COUNT(*) FROM tenants"))
+            if row_count.scalar() == 0:
+                import json
+                from datetime import UTC, datetime
+                from pathlib import Path
+
+                from deerflow.config.paths import get_paths
+
+                json_path = Path(get_paths().base_dir) / "tenants.json"
+                if json_path.exists():
+                    try:
+                        data = json.loads(json_path.read_text(encoding="utf-8"))
+                        tenants_list = data if isinstance(data, list) else data.get("tenants", [])
+                        now = datetime.now(UTC).isoformat()
+                        for t in tenants_list:
+                            created = t.get("created_at") or now
+                            await conn.execute(
+                                text("""
+                                    INSERT OR IGNORE INTO tenants (tenant_id, name, is_active, daily_quota_usd, monthly_quota_usd, created_at, updated_at)
+                                    VALUES (:tid, :name, :active, :daily, :monthly, :created, :updated)
+                                """),
+                                {
+                                    "tid": t.get("tenant_id", "default"),
+                                    "name": t.get("name", "Unknown"),
+                                    "active": t.get("is_active", True),
+                                    "daily": t.get("daily_quota_usd", 50.0),
+                                    "monthly": t.get("monthly_quota_usd", 1000.0),
+                                    "created": created,
+                                    "updated": now,
+                                },
+                            )
+                        logger.info("Imported %d tenant(s) from tenants.json", len(tenants_list))
+                    except Exception as e:
+                        logger.warning("Failed to import tenants.json: %s", e)
 
     # Check session factory BEFORE trying get_local_provider(), which raises
     # a cryptic RuntimeError when the persistence engine isn't ready yet.
@@ -344,6 +420,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Upload and manage user files for threads",
             },
             {
+                "name": "audio",
+                "description": "Transcribe chat audio uploads into editable text",
+            },
+            {
                 "name": "threads",
                 "description": "Manage DeerFlow thread-local filesystem data",
             },
@@ -430,6 +510,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)
 
+    # Audio transcription API is mounted at /api/threads/{thread_id}/audio
+    app.include_router(audio.router)
+
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)
 
@@ -474,6 +557,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Tenant status API is mounted at /api/tenant
     app.include_router(tenant_status.router)
+
+    # Knowledge base API
+    app.include_router(knowledge_bases.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
