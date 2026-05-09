@@ -64,6 +64,7 @@ class _SandboxStub(Sandbox):
 class _AsyncOnlyProvider(SandboxProvider):
     def __init__(self) -> None:
         self.thread_ids: list[str | None] = []
+        self.released_ids: list[str] = []
         self.sandbox = _SandboxStub("async-sandbox")
 
     def acquire(self, thread_id: str | None = None) -> str:
@@ -79,6 +80,7 @@ class _AsyncOnlyProvider(SandboxProvider):
         return None
 
     def release(self, sandbox_id: str) -> None:
+        self.released_ids.append(sandbox_id)
         return None
 
 
@@ -167,3 +169,54 @@ async def test_default_lazy_tool_acquisition_uses_async_provider() -> None:
     assert provider.thread_ids == ["thread-lazy"]
     assert runtime.state["sandbox"] == {"sandbox_id": "async-sandbox"}
     assert runtime.context["sandbox_id"] == "async-sandbox"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("state", "runtime", "expected_sandbox_id"),
+    [
+        ({"sandbox": {"sandbox_id": "state-sandbox"}}, Runtime(context={}), "state-sandbox"),
+        ({}, Runtime(context={"sandbox_id": "context-sandbox"}), "context-sandbox"),
+    ],
+)
+async def test_aafter_agent_releases_sandbox_off_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    state: dict,
+    runtime: Runtime,
+    expected_sandbox_id: str,
+) -> None:
+    provider = _AsyncOnlyProvider()
+    to_thread_calls: list[tuple[object, tuple[object, ...]]] = []
+
+    async def fake_to_thread(func, /, *args):
+        to_thread_calls.append((func, args))
+        return func(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    set_sandbox_provider(provider)
+    try:
+        result = await SandboxMiddleware().aafter_agent(state, runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == [expected_sandbox_id]
+    assert to_thread_calls == [(provider.release, (expected_sandbox_id,))]
+
+
+@pytest.mark.anyio
+async def test_aafter_agent_delegates_to_super_when_no_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[dict, Runtime]] = []
+
+    async def fake_super_aafter_agent(self, state_arg, runtime_arg):
+        calls.append((state_arg, runtime_arg))
+        return {"delegated": True}
+
+    monkeypatch.setattr(AgentMiddleware, "aafter_agent", fake_super_aafter_agent)
+
+    state = {}
+    runtime = Runtime(context={})
+    result = await SandboxMiddleware().aafter_agent(state, runtime)
+
+    assert result == {"delegated": True}
+    assert calls == [(state, runtime)]
