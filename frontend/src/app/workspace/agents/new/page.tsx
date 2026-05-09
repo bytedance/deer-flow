@@ -18,7 +18,7 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -30,7 +30,7 @@ import { Input } from "@/components/ui/input";
 import { ArtifactsProvider } from "@/components/workspace/artifacts";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
-import type { Agent } from "@/core/agents";
+import { useAgentsApiStatus, type Agent } from "@/core/agents";
 import {
   AgentNameCheckError,
   AgentsApiDisabledError,
@@ -50,6 +50,7 @@ type SetupAgentStatus = "idle" | "requested" | "completed";
 const NAME_RE = /^[A-Za-z0-9-]+$/;
 const SAVE_HINT_STORAGE_KEY = "deerflow.agent-create.save-hint-seen";
 const AGENT_READ_RETRY_DELAYS_MS = [200, 500, 1_000, 2_000];
+const AGENTS_API_CONFIG_SNIPPET = "agents_api:\n  enabled: true";
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -88,6 +89,12 @@ function getCreateAgentErrorMessage(
 export default function NewAgentPage() {
   const { t } = useI18n();
   const router = useRouter();
+  const {
+    status: agentsApiStatus,
+    isLoading: isAgentsApiStatusLoading,
+    error: agentsApiStatusError,
+  } = useAgentsApiStatus();
+  const isAgentsApiEnabled = agentsApiStatus?.enabled ?? false;
 
   const [step, setStep] = useState<Step>("name");
   const [nameInput, setNameInput] = useState("");
@@ -139,6 +146,14 @@ export default function NewAgentPage() {
   }, [step]);
 
   const handleConfirmName = useCallback(async () => {
+    if (isAgentsApiStatusLoading) {
+      return;
+    }
+    if (!isAgentsApiEnabled) {
+      setNameError(t.agents.apiDisabledDescription);
+      return;
+    }
+
     const trimmed = nameInput.trim();
     if (!trimmed) return;
     if (!NAME_RE.test(trimmed)) {
@@ -162,6 +177,11 @@ export default function NewAgentPage() {
         err.reason === "backend_unreachable"
       ) {
         setNameError(t.agents.nameStepNetworkError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "api_disabled"
+      ) {
+        setNameError(t.agents.apiDisabledDescription);
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
@@ -207,9 +227,12 @@ export default function NewAgentPage() {
     t.agents.nameStepApiDisabledError,
     t.agents.nameStepNetworkError,
     t.agents.nameStepBootstrapMessage,
+    t.agents.apiDisabledDescription,
     t.agents.nameStepCheckError,
     t.agents.nameStepInvalidError,
     threadId,
+    isAgentsApiEnabled,
+    isAgentsApiStatusLoading,
   ]);
 
   const handleNameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -308,50 +331,86 @@ export default function NewAgentPage() {
   );
 
   if (step === "name") {
+    const isNameStepLocked =
+      isAgentsApiStatusLoading ||
+      !!agentsApiStatusError ||
+      !isAgentsApiEnabled ||
+      isCheckingName ||
+      isCreatingAgent;
+
     return (
       <div className="flex size-full flex-col">
         {header}
         <main className="flex flex-1 flex-col items-center justify-center px-4">
           <div className="w-full max-w-sm space-y-8">
-            <div className="space-y-3 text-center">
-              <div className="bg-primary/10 mx-auto flex h-14 w-14 items-center justify-center rounded-full">
-                <BotIcon className="text-primary h-7 w-7" />
+            {isAgentsApiStatusLoading ? (
+              <div className="text-muted-foreground py-12 text-center text-sm">
+                {t.common.loading}
               </div>
-              <div className="space-y-1">
-                <h2 className="text-xl font-semibold">
-                  {t.agents.nameStepTitle}
-                </h2>
-                <p className="text-muted-foreground text-sm">
-                  {t.agents.nameStepHint}
-                </p>
-              </div>
-            </div>
+            ) : (
+              <>
+                {agentsApiStatusError ? (
+                  <Alert>
+                    <InfoIcon className="h-4 w-4" />
+                    <AlertTitle>{t.agents.apiStatusErrorTitle}</AlertTitle>
+                    <AlertDescription>
+                      {t.agents.apiStatusErrorDescription}
+                    </AlertDescription>
+                  </Alert>
+                ) : !isAgentsApiEnabled ? (
+                  <Alert>
+                    <InfoIcon className="h-4 w-4" />
+                    <AlertTitle>{t.agents.apiDisabledTitle}</AlertTitle>
+                    <AlertDescription>
+                      <p>{t.agents.apiDisabledDescription}</p>
+                      <p>{t.agents.apiDisabledConfigHint}</p>
+                      <pre className="bg-muted text-foreground w-full overflow-x-auto rounded-md border px-3 py-2 font-mono text-xs whitespace-pre">
+                        <code>{AGENTS_API_CONFIG_SNIPPET}</code>
+                      </pre>
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
 
-            <div className="space-y-3">
-              <Input
-                autoFocus
-                placeholder={t.agents.nameStepPlaceholder}
-                value={nameInput}
-                onChange={(e) => {
-                  setNameInput(e.target.value);
-                  setNameError("");
-                }}
-                onKeyDown={handleNameKeyDown}
-                className={cn(nameError && "border-destructive")}
-              />
-              {nameError ? (
-                <p className="text-destructive text-sm">{nameError}</p>
-              ) : null}
-              <Button
-                className="w-full"
-                onClick={() => void handleConfirmName()}
-                disabled={
-                  !nameInput.trim() || isCheckingName || isCreatingAgent
-                }
-              >
-                {t.agents.nameStepContinue}
-              </Button>
-            </div>
+                <div className="space-y-3 text-center">
+                  <div className="bg-primary/10 mx-auto flex h-14 w-14 items-center justify-center rounded-full">
+                    <BotIcon className="text-primary h-7 w-7" />
+                  </div>
+                  <div className="space-y-1">
+                    <h2 className="text-xl font-semibold">
+                      {t.agents.nameStepTitle}
+                    </h2>
+                    <p className="text-muted-foreground text-sm">
+                      {t.agents.nameStepHint}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <Input
+                    autoFocus
+                    placeholder={t.agents.nameStepPlaceholder}
+                    value={nameInput}
+                    disabled={isNameStepLocked}
+                    onChange={(e) => {
+                      setNameInput(e.target.value);
+                      setNameError("");
+                    }}
+                    onKeyDown={handleNameKeyDown}
+                    className={cn(nameError && "border-destructive")}
+                  />
+                  {nameError ? (
+                    <p className="text-destructive text-sm">{nameError}</p>
+                  ) : null}
+                  <Button
+                    className="w-full"
+                    onClick={() => void handleConfirmName()}
+                    disabled={!nameInput.trim() || isNameStepLocked}
+                  >
+                    {t.agents.nameStepContinue}
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
         </main>
       </div>

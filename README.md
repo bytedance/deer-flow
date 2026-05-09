@@ -120,6 +120,13 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, and more.
 
+   > **Custom Agent UI**: If you want to create and manage custom agents from the web UI, enable the protected HTTP API in `config.yaml`:
+   >
+   > ```yaml
+   > agents_api:
+   >   enabled: true
+   > ```
+
    <details>
    <summary>Manual model configuration examples</summary>
 

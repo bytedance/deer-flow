@@ -1,22 +1,40 @@
 "use client";
 
-import { BotIcon, PlusIcon } from "lucide-react";
+import { BotIcon, InfoIcon, PlusIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { useAgents } from "@/core/agents";
+import { useAgents, useAgentsApiStatus } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { AgentCard } from "./agent-card";
 
+const AGENTS_API_CONFIG_SNIPPET = "agents_api:\n  enabled: true";
+
 export function AgentGallery() {
   const { t } = useI18n();
-  const { agents, isLoading } = useAgents();
+  const {
+    status: agentsApiStatus,
+    isLoading: isStatusLoading,
+    error: statusError,
+  } = useAgentsApiStatus();
+  const isAgentsApiEnabled = agentsApiStatus?.enabled ?? false;
+  const {
+    agents,
+    isLoading: isAgentsLoading,
+    error: agentsError,
+  } = useAgents({
+    enabled: isAgentsApiEnabled,
+  });
   const router = useRouter();
 
   const handleNewAgent = () => {
     router.push("/workspace/agents/new");
   };
+
+  const isLoading = isStatusLoading || (isAgentsApiEnabled && isAgentsLoading);
+  const hasAgents = agents.length > 0;
 
   return (
     <div className="flex size-full flex-col">
@@ -28,7 +46,7 @@ export function AgentGallery() {
             {t.agents.description}
           </p>
         </div>
-        <Button onClick={handleNewAgent}>
+        <Button onClick={handleNewAgent} disabled={!isAgentsApiEnabled}>
           <PlusIcon className="mr-1.5 h-4 w-4" />
           {t.agents.newAgent}
         </Button>
@@ -40,7 +58,33 @@ export function AgentGallery() {
           <div className="text-muted-foreground flex h-40 items-center justify-center text-sm">
             {t.common.loading}
           </div>
-        ) : agents.length === 0 ? (
+        ) : statusError ? (
+          <Alert className="max-w-2xl">
+            <InfoIcon />
+            <AlertTitle>{t.agents.apiStatusErrorTitle}</AlertTitle>
+            <AlertDescription>
+              {t.agents.apiStatusErrorDescription}
+            </AlertDescription>
+          </Alert>
+        ) : !isAgentsApiEnabled ? (
+          <Alert className="max-w-2xl">
+            <InfoIcon />
+            <AlertTitle>{t.agents.apiDisabledTitle}</AlertTitle>
+            <AlertDescription>
+              <p>{t.agents.apiDisabledDescription}</p>
+              <p>{t.agents.apiDisabledConfigHint}</p>
+              <pre className="bg-muted text-foreground w-full overflow-x-auto rounded-md border px-3 py-2 font-mono text-xs whitespace-pre">
+                <code>{AGENTS_API_CONFIG_SNIPPET}</code>
+              </pre>
+            </AlertDescription>
+          </Alert>
+        ) : agentsError && !hasAgents ? (
+          <Alert className="max-w-2xl">
+            <InfoIcon />
+            <AlertTitle>{t.agents.listErrorTitle}</AlertTitle>
+            <AlertDescription>{t.agents.listErrorDescription}</AlertDescription>
+          </Alert>
+        ) : !hasAgents ? (
           <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
             <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
               <BotIcon className="text-muted-foreground h-7 w-7" />

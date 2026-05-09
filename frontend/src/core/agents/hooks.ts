@@ -3,16 +3,26 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createAgent,
   deleteAgent,
+  getAgentsApiStatus,
   getAgent,
   listAgents,
   updateAgent,
 } from "./api";
 import type { CreateAgentRequest, UpdateAgentRequest } from "./types";
 
-export function useAgents() {
+export function useAgentsApiStatus() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["agents", "status"],
+    queryFn: () => getAgentsApiStatus(),
+  });
+  return { status: data ?? null, isLoading, error };
+}
+
+export function useAgents(options?: { enabled?: boolean }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["agents"],
     queryFn: () => listAgents(),
+    enabled: options?.enabled ?? true,
   });
   return { agents: data ?? [], isLoading, error };
 }
