@@ -48,14 +48,20 @@ async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll
     deadline = loop.time() + timeout
 
     async with httpx.AsyncClient(timeout=5) as client:
-        while loop.time() < deadline:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
             try:
-                response = await client.get(f"{sandbox_url}/v1/sandbox")
+                response = await client.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
                 if response.status_code == 200:
                     return True
             except httpx.RequestError:
                 pass
-            await asyncio.sleep(poll_interval)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(poll_interval, remaining))
     return False
 
 
