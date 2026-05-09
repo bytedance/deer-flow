@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from datetime import datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -368,8 +367,6 @@ You are {agent_name}, an open-source super agent.
 
 {soul}
 {self_update_section}
-{memory_context}
-
 <thinking_style>
 - Think concisely and strategically about the user's request BEFORE taking action
 - Break down the task: What is clear? What is ambiguous? What is missing?
@@ -776,9 +773,6 @@ def apply_prompt_template(
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
 ) -> str:
-    # Get memory context
-    memory_context = _get_memory_context(agent_name, app_config=app_config)
-
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
     subagent_section = _build_subagent_section(n, app_config=app_config) if subagent_enabled else ""
@@ -812,18 +806,18 @@ def apply_prompt_template(
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
     acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
 
-    # Format the prompt with dynamic skills and memory
-    prompt = SYSTEM_PROMPT_TEMPLATE.format(
+    # Build and return the fully static system prompt.
+    # Memory and current date are injected per-turn via DynamicContextMiddleware
+    # as a <system-reminder> in the first HumanMessage, keeping this prompt
+    # identical across users and sessions for maximum prefix-cache reuse.
+    return SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
-        memory_context=memory_context,
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
     )
-
-    return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"

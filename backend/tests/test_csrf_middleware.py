@@ -110,6 +110,22 @@ def test_auth_post_allows_forwarded_same_origin():
     assert response.cookies.get("csrf_token")
 
 
+def test_auth_post_allows_forwarded_same_origin_with_non_default_port():
+    client = TestClient(_make_app(), base_url="http://internal:8000")
+
+    response = client.post(
+        "/api/v1/auth/login/local",
+        headers={
+            "Origin": "http://localhost:2026",
+            "X-Forwarded-Proto": "http",
+            "X-Forwarded-Host": "localhost:2026",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.cookies.get("csrf_token")
+
+
 def test_auth_post_allows_rfc_forwarded_same_origin():
     client = TestClient(_make_app(), base_url="http://internal:8000")
 
