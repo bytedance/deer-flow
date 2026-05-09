@@ -48,6 +48,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
+    async def _acquire_sandbox_async(self, thread_id: str) -> str:
+        provider = get_sandbox_provider()
+        sandbox_id = await provider.acquire_async(thread_id)
+        logger.info(f"Acquiring sandbox {sandbox_id}")
+        return sandbox_id
+
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
         # Skip acquisition if lazy_init is enabled
@@ -63,6 +69,23 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)
+
+    @override
+    async def abefore_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        # Skip acquisition if lazy_init is enabled
+        if self._lazy_init:
+            return None
+
+        # Eager initialization (original behavior), but use the async provider
+        # hook so blocking sandbox startup/polling runs outside the event loop.
+        if "sandbox" not in state or state["sandbox"] is None:
+            thread_id = (runtime.context or {}).get("thread_id")
+            if thread_id is None:
+                return None
+            sandbox_id = await self._acquire_sandbox_async(thread_id)
+            logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
+            return {"sandbox": {"sandbox_id": sandbox_id}}
+        return None
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
