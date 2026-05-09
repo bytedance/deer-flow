@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage
 from langgraph.runtime import Runtime
 
 from deerflow.config.rag_config import get_rag_config
-from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id
+from deerflow.config.tenant import get_current_tenant_id
 from deerflow.knowledge_base.retrieval import (
     build_retrieval_trace_data,
     build_selection_snapshot,
@@ -179,7 +179,7 @@ class RagMiddleware(AgentMiddleware[RagMiddlewareState]):
             tenant_id, owner_user_id, selection.get("selected_ids"),
         )
 
-        if not tenant_id or tenant_id == _DEFAULT_TENANT_ID or not owner_user_id:
+        if not tenant_id or not owner_user_id:
             logger.warning("RagMiddleware: missing tenant_id=%r or user_id=%r in context (context keys: %s)",
                            tenant_id, owner_user_id, list(context.keys()))
             return None

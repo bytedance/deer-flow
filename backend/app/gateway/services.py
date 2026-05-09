@@ -324,11 +324,17 @@ async def start_run(
                 configurable.setdefault(key, context[key])
     merge_run_context_overrides(config, getattr(body, "context", None))
 
-    # Ensure tenant_id and user_id are always present in runtime context
-    # so middlewares (e.g. RagMiddleware) can resolve tenant-scoped resources.
+    # Server is the authority on identity — unconditionally override any
+    # client-provided user_id/tenant_id to prevent spoofing and ensure
+    # middlewares (e.g. RagMiddleware) resolve the correct tenant-scoped resources.
     runtime_context = config.setdefault("context", {})
-    runtime_context.setdefault("tenant_id", get_current_tenant_id())
-    runtime_context.setdefault("user_id", get_effective_user_id())
+    runtime_context["tenant_id"] = get_current_tenant_id()
+    runtime_context["user_id"] = get_effective_user_id()
+    logger.info(
+        "start_run: injected context tenant_id=%s, user_id=%s",
+        runtime_context["tenant_id"],
+        runtime_context["user_id"],
+    )
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 

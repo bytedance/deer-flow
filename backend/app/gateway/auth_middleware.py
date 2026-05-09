@@ -35,6 +35,18 @@ class _DefaultUser:
     id: str = "default"
 
 
+class _DictUser:
+    """Adapter for dict-based user objects from create_auth_middleware.
+
+    The Bearer token / API key path in create_auth_middleware sets
+    ``request.state.user`` as a plain dict. This wrapper satisfies the
+    ``CurrentUser`` protocol so ``get_effective_user_id()`` works.
+    """
+
+    def __init__(self, user_dict: dict) -> None:
+        self.id = user_dict.get("id", user_dict.get("username", "default"))
+
+
 # Paths that never require authentication.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/health",
@@ -114,7 +126,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # already handled and request.state.user is set.
         if internal_user is None and not request.cookies.get("access_token"):
             if hasattr(request.state, "user") and request.state.user is not None:
-                return await call_next(request)
+                state_user = request.state.user
+                if isinstance(state_user, dict):
+                    state_user = _DictUser(state_user)
+                token = set_current_user(state_user)
+                try:
+                    return await call_next(request)
+                finally:
+                    reset_current_user(token)
 
             return JSONResponse(
                 status_code=401,
