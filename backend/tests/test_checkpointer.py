@@ -1,6 +1,8 @@
-"""Unit tests for checkpointer config and singleton factory."""
+"""Unit tests for checkpointer config, packaging metadata, and factories."""
 
 import sys
+import tomllib
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,6 +15,8 @@ from deerflow.config.checkpointer_config import (
     set_checkpointer_config,
 )
 from deerflow.runtime.checkpointer import get_checkpointer, reset_checkpointer
+from deerflow.runtime.checkpointer.provider import POSTGRES_INSTALL
+from deerflow.runtime.store.provider import POSTGRES_STORE_INSTALL
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +70,42 @@ class TestCheckpointerConfig:
     def test_invalid_type_raises(self):
         with pytest.raises(Exception):
             load_checkpointer_config_from_dict({"type": "unknown"})
+
+    def test_connection_string_description_matches_runtime_defaults(self):
+        description = CheckpointerConfig.model_fields["connection_string"].description
+
+        assert description is not None
+        assert "Optional for sqlite" in description
+        assert "defaults to 'store.db'" in description
+        assert "Required for postgres" in description
+
+
+class TestHarnessPackaging:
+    def test_pyproject_declares_postgres_extra(self):
+        pyproject_path = Path(__file__).resolve().parents[1] / "packages" / "harness" / "pyproject.toml"
+        data = tomllib.loads(pyproject_path.read_text())
+
+        optional_dependencies = data["project"]["optional-dependencies"]
+        assert "postgres" in optional_dependencies
+        assert optional_dependencies["postgres"] == [
+            "asyncpg>=0.29",
+            "langgraph-checkpoint-postgres>=3.0.5",
+            "psycopg[binary]>=3.3.3",
+            "psycopg-pool>=3.3.0",
+        ]
+
+    def test_workspace_pyproject_forwards_postgres_extra_to_harness(self):
+        pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        data = tomllib.loads(pyproject_path.read_text())
+
+        optional_dependencies = data["project"]["optional-dependencies"]
+        assert optional_dependencies["postgres"] == ["deerflow-harness[postgres]"]
+
+    def test_postgres_missing_dependency_messages_recommend_package_extra(self):
+        assert "deerflow-harness[postgres]" in POSTGRES_INSTALL
+        assert "deerflow-harness[postgres]" in POSTGRES_STORE_INSTALL
+        assert "uv sync --all-packages --extra postgres" in POSTGRES_INSTALL
+        assert "uv sync --all-packages --extra postgres" in POSTGRES_STORE_INSTALL
 
 
 # ---------------------------------------------------------------------------
