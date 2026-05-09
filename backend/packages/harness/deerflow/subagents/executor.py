@@ -418,7 +418,7 @@ class SubagentExecutor:
 
             # Build config with thread_id for sandbox access and recursion limit
             run_config: RunnableConfig = {
-                "recursion_limit": self.config.max_turns,
+                "recursion_limit": self.config.max_turns * 10,  # Each turn ≈ 3-5 node hops
             }
             context: dict[str, Any] = {}
             if self.thread_id:

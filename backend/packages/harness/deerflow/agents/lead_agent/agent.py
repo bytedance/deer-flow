@@ -424,7 +424,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 app_config=resolved_app_config,
             ),
             state_schema=ThreadState,
-        )
+        ).with_config({"recursion_limit": 10_000})
 
     # Custom agents can update their own SOUL.md / config via update_agent.
     # The default agent (no agent_name) does not see this tool.
@@ -443,4 +443,4 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             app_config=resolved_app_config,
         ),
         state_schema=ThreadState,
-    )
+    ).with_config({"recursion_limit": 10_000})
