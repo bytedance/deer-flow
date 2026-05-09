@@ -24,14 +24,8 @@ from .stack_deploy import stack_deploy
 from .stack_status import stack_status
 from .stack_backup import stack_backup
 from .service_info import service_info
-
-# user_onboard/offboard may fail if Keycloak helpers were removed
-try:
-    from .user_onboard import user_onboard
-    from .user_offboard import user_offboard
-except ImportError:
-    user_onboard = None  # type: ignore[assignment]
-    user_offboard = None  # type: ignore[assignment]
+from .user_onboard import user_onboard
+from .user_offboard import user_offboard
 
 from .teable_list_spaces import teable_list_spaces
 from .teable_get_fields import teable_get_fields
@@ -48,6 +42,8 @@ __all__ = [
     "stack_status",
     "stack_backup",
     "service_info",
+    "user_onboard",
+    "user_offboard",
     "teable_list_spaces",
     "teable_get_fields",
     "teable_query_records",
