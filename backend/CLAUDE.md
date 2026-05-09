@@ -228,7 +228,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
 **Interface**: Abstract `Sandbox` with `execute_command`, `read_file`, `write_file`, `list_dir`
-**Provider Pattern**: `SandboxProvider` with `acquire`, `acquire_async`, `get`, `release` lifecycle. Async agent/tool paths call `acquire_async()` so Docker sandbox creation, discovery, cross-process locking, and readiness polling stay off the event loop.
+**Provider Pattern**: `SandboxProvider` with `acquire`, `acquire_async`, `get`, `release` lifecycle. Async agent/tool paths call async sandbox lifecycle hooks so Docker sandbox creation, discovery, cross-process locking, readiness polling, and release stay off the event loop.
 **Implementations**:
 - `LocalSandboxProvider` - Singleton local filesystem execution with path mappings
 - `AioSandboxProvider` (`packages/harness/deerflow/community/`) - Docker-based isolation
