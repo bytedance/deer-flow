@@ -13,6 +13,13 @@ from deerflow.tools.types import Runtime
 logger = logging.getLogger(__name__)
 
 
+def _get_runtime_user_id(runtime: Runtime) -> str:
+    context_user_id = runtime.context.get("user_id") if runtime.context else None
+    if context_user_id:
+        return str(context_user_id)
+    return get_effective_user_id()
+
+
 @tool
 def setup_agent(
     soul: str,
@@ -38,7 +45,7 @@ def setup_agent(
         if agent_name:
             # Custom agents are persisted under the current user's bucket so
             # different users do not see each other's agents.
-            user_id = get_effective_user_id()
+            user_id = _get_runtime_user_id(runtime)
             agent_dir = paths.user_agent_dir(user_id, agent_name)
         else:
             # Default agent (no agent_name): SOUL.md lives at the global base dir.

@@ -195,7 +195,7 @@ export const zhCN: Translations = {
     nameStepApiDisabledError:
       "服务器未开启自定义智能体管理功能，请联系管理员。",
     nameStepBootstrapMessage:
-      "新智能体的名称是 {name}，现在开始为它生成 **SOUL**。",
+      "新智能体的名称是 {name}。请先帮我设计它的用途、行为方式和 SOUL.md，再保存它。",
     save: "保存智能体",
     saving: "正在保存智能体...",
     saveRequested:

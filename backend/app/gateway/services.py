@@ -136,6 +136,24 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 runtime_context.setdefault(key, context[key])
 
 
+def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
+    """Stamp the authenticated user into the run context for background tools.
+
+    Tool execution may happen after the request handler has returned, so tools
+    that persist user-scoped files should not rely only on ambient ContextVars.
+    The value comes from server-side auth state, never from client context.
+    """
+
+    user = getattr(request.state, "user", None)
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return
+
+    runtime_context = config.setdefault("context", {})
+    if isinstance(runtime_context, dict):
+        runtime_context["user_id"] = str(user_id)
+
+
 def resolve_agent_factory(assistant_id: str | None):
     """Resolve the agent factory callable from config.
 
@@ -288,6 +306,7 @@ async def start_run(
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
     merge_run_context_overrides(config, getattr(body, "context", None))
+    inject_authenticated_user_context(config, request)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
