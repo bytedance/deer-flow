@@ -73,11 +73,6 @@ def _last_injected_date(messages: list) -> str | None:
     return None
 
 
-def is_dynamic_context_reminder(message: object) -> bool:
-    """Return whether *message* is a hidden dynamic-context reminder."""
-    return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY))
-
-
 def _is_user_injection_target(message: object) -> bool:
     """Return whether *message* can receive a dynamic-context reminder."""
     return isinstance(message, HumanMessage) and not is_dynamic_context_reminder(message) and message.name != _SUMMARY_MESSAGE_NAME
