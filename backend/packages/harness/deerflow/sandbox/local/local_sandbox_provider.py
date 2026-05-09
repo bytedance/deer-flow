@@ -119,3 +119,11 @@ class LocalSandboxProvider(SandboxProvider):
         # For Docker-based providers (e.g., AioSandboxProvider), cleanup
         # happens at application shutdown via the shutdown() method.
         pass
+
+    def reset(self) -> None:
+        # reset_sandbox_provider() must also clear the module singleton.
+        global _singleton
+        _singleton = None
+
+    def shutdown(self) -> None:
+        self.reset()
