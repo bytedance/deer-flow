@@ -67,6 +67,10 @@ def _unlock_file(lock_file) -> None:
     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
+def _open_lock_file(lock_path):
+    return open(lock_path, "a", encoding="utf-8")
+
+
 async def _acquire_thread_lock_async(lock: threading.Lock) -> None:
     """Acquire a threading.Lock without parking a worker thread indefinitely."""
     while True:
@@ -606,47 +610,48 @@ class AioSandboxProvider(SandboxProvider):
         await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=user_id)
         lock_path = paths.thread_dir(thread_id, user_id=user_id) / f"{sandbox_id}.lock"
 
-        with open(lock_path, "a", encoding="utf-8") as lock_file:
-            locked = False
-            try:
-                await asyncio.to_thread(_lock_file_exclusive, lock_file)
-                locked = True
-                # Re-check in-process caches under the file lock in case another
-                # thread in this process won the race while we were waiting.
+        lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
+        locked = False
+        try:
+            await asyncio.to_thread(_lock_file_exclusive, lock_file)
+            locked = True
+            # Re-check in-process caches under the file lock in case another
+            # thread in this process won the race while we were waiting.
+            with self._lock:
+                if thread_id in self._thread_sandboxes:
+                    existing_id = self._thread_sandboxes[thread_id]
+                    if existing_id in self._sandboxes:
+                        logger.info(f"Reusing in-process sandbox {existing_id} for thread {thread_id} (post-lock check)")
+                        self._last_activity[existing_id] = time.time()
+                        return existing_id
+                if sandbox_id in self._warm_pool:
+                    info, _ = self._warm_pool.pop(sandbox_id)
+                    sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+                    self._sandboxes[sandbox_id] = sandbox
+                    self._sandbox_infos[sandbox_id] = info
+                    self._last_activity[sandbox_id] = time.time()
+                    self._thread_sandboxes[thread_id] = sandbox_id
+                    logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for thread {thread_id} (post-lock check)")
+                    return sandbox_id
+
+            # Backend discovery is sync because local discovery may inspect
+            # Docker and perform a health check; keep it off the event loop.
+            discovered = await asyncio.to_thread(self._backend.discover, sandbox_id)
+            if discovered is not None:
+                sandbox = AioSandbox(id=discovered.sandbox_id, base_url=discovered.sandbox_url)
                 with self._lock:
-                    if thread_id in self._thread_sandboxes:
-                        existing_id = self._thread_sandboxes[thread_id]
-                        if existing_id in self._sandboxes:
-                            logger.info(f"Reusing in-process sandbox {existing_id} for thread {thread_id} (post-lock check)")
-                            self._last_activity[existing_id] = time.time()
-                            return existing_id
-                    if sandbox_id in self._warm_pool:
-                        info, _ = self._warm_pool.pop(sandbox_id)
-                        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
-                        self._sandboxes[sandbox_id] = sandbox
-                        self._sandbox_infos[sandbox_id] = info
-                        self._last_activity[sandbox_id] = time.time()
-                        self._thread_sandboxes[thread_id] = sandbox_id
-                        logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for thread {thread_id} (post-lock check)")
-                        return sandbox_id
+                    self._sandboxes[discovered.sandbox_id] = sandbox
+                    self._sandbox_infos[discovered.sandbox_id] = discovered
+                    self._last_activity[discovered.sandbox_id] = time.time()
+                    self._thread_sandboxes[thread_id] = discovered.sandbox_id
+                logger.info(f"Discovered existing sandbox {discovered.sandbox_id} for thread {thread_id} at {discovered.sandbox_url}")
+                return discovered.sandbox_id
 
-                # Backend discovery is sync because local discovery may inspect
-                # Docker and perform a health check; keep it off the event loop.
-                discovered = await asyncio.to_thread(self._backend.discover, sandbox_id)
-                if discovered is not None:
-                    sandbox = AioSandbox(id=discovered.sandbox_id, base_url=discovered.sandbox_url)
-                    with self._lock:
-                        self._sandboxes[discovered.sandbox_id] = sandbox
-                        self._sandbox_infos[discovered.sandbox_id] = discovered
-                        self._last_activity[discovered.sandbox_id] = time.time()
-                        self._thread_sandboxes[thread_id] = discovered.sandbox_id
-                    logger.info(f"Discovered existing sandbox {discovered.sandbox_id} for thread {thread_id} at {discovered.sandbox_url}")
-                    return discovered.sandbox_id
-
-                return await self._create_sandbox_async(thread_id, sandbox_id)
-            finally:
-                if locked:
-                    await asyncio.to_thread(_unlock_file, lock_file)
+            return await self._create_sandbox_async(thread_id, sandbox_id)
+        finally:
+            if locked:
+                await asyncio.to_thread(_unlock_file, lock_file)
+            await asyncio.to_thread(lock_file.close)
 
     def _evict_oldest_warm(self) -> str | None:
         """Destroy the oldest container in the warm pool to free capacity.

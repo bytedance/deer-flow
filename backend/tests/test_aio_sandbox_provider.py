@@ -176,3 +176,38 @@ async def test_acquire_async_uses_async_readiness_polling(monkeypatch):
     assert async_readiness_calls == [("http://sandbox", 60)]
     assert provider._backend.destroy.call_count == 0
     assert provider._thread_sandboxes["thread-async"] == "sandbox-async"
+
+
+@pytest.mark.anyio
+async def test_discover_or_create_with_lock_async_offloads_lock_file_open_and_close(tmp_path, monkeypatch):
+    """Async lock path must not open or close lock files on the event loop."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {"thread-async-lock": "sandbox-async-lock"}
+    provider._sandboxes = {"sandbox-async-lock": aio_mod.AioSandbox(id="sandbox-async-lock", base_url="http://sandbox")}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+    provider._backend = SimpleNamespace(discover=MagicMock(return_value=None))
+
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+
+    to_thread_calls: list[object] = []
+
+    async def fake_to_thread(func, /, *args, **kwargs):
+        to_thread_calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(aio_mod.asyncio, "to_thread", fake_to_thread)
+
+    sandbox_id = await provider._discover_or_create_with_lock_async("thread-async-lock", "sandbox-async-lock")
+
+    assert sandbox_id == "sandbox-async-lock"
+    assert aio_mod._open_lock_file in to_thread_calls
+    assert any(getattr(func, "__name__", "") == "close" for func in to_thread_calls)
