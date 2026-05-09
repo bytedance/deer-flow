@@ -10,6 +10,7 @@ The provider itself handles:
 - Mount computation (thread-specific, skills)
 """
 
+import asyncio
 import atexit
 import hashlib
 import logging
@@ -32,7 +33,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 from .aio_sandbox import AioSandbox
-from .backend import SandboxBackend, wait_for_sandbox_ready
+from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
 from .local_backend import LocalContainerBackend
 from .remote_backend import RemoteSandboxBackend
 from .sandbox_info import SandboxInfo
@@ -64,6 +65,14 @@ def _unlock_file(lock_file) -> None:
 
     lock_file.seek(0)
     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+async def _acquire_thread_lock_async(lock: threading.Lock) -> None:
+    """Acquire a threading.Lock without parking a worker thread indefinitely."""
+    while True:
+        if lock.acquire(blocking=False):
+            return
+        await asyncio.sleep(0.05)
 
 
 class AioSandboxProvider(SandboxProvider):
@@ -440,6 +449,23 @@ class AioSandboxProvider(SandboxProvider):
         else:
             return self._acquire_internal(thread_id)
 
+    async def acquire_async(self, thread_id: str | None = None) -> str:
+        """Acquire a sandbox environment without blocking the event loop.
+
+        Mirrors ``acquire()`` while keeping blocking backend operations off the
+        event loop and using async-native readiness polling for newly created
+        sandboxes.
+        """
+        if thread_id:
+            thread_lock = self._get_thread_lock(thread_id)
+            await _acquire_thread_lock_async(thread_lock)
+            try:
+                return await self._acquire_internal_async(thread_id)
+            finally:
+                thread_lock.release()
+
+        return await self._acquire_internal_async(thread_id)
+
     def _acquire_internal(self, thread_id: str | None) -> str:
         """Internal sandbox acquisition with two-layer consistency.
 
@@ -484,6 +510,42 @@ class AioSandboxProvider(SandboxProvider):
             return self._discover_or_create_with_lock(thread_id, sandbox_id)
 
         return self._create_sandbox(thread_id, sandbox_id)
+
+    async def _acquire_internal_async(self, thread_id: str | None) -> str:
+        """Async counterpart to ``_acquire_internal``."""
+        # ── Layer 1: In-process cache (fast path) ──
+        if thread_id:
+            with self._lock:
+                if thread_id in self._thread_sandboxes:
+                    existing_id = self._thread_sandboxes[thread_id]
+                    if existing_id in self._sandboxes:
+                        logger.info(f"Reusing in-process sandbox {existing_id} for thread {thread_id}")
+                        self._last_activity[existing_id] = time.time()
+                        return existing_id
+                    else:
+                        del self._thread_sandboxes[thread_id]
+
+        # Deterministic ID for thread-specific, random for anonymous
+        sandbox_id = self._deterministic_sandbox_id(thread_id) if thread_id else str(uuid.uuid4())[:8]
+
+        # ── Layer 1.5: Warm pool (container still running, no cold-start) ──
+        if thread_id:
+            with self._lock:
+                if sandbox_id in self._warm_pool:
+                    info, _ = self._warm_pool.pop(sandbox_id)
+                    sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+                    self._sandboxes[sandbox_id] = sandbox
+                    self._sandbox_infos[sandbox_id] = info
+                    self._last_activity[sandbox_id] = time.time()
+                    self._thread_sandboxes[thread_id] = sandbox_id
+                    logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for thread {thread_id} at {info.sandbox_url}")
+                    return sandbox_id
+
+        # ── Layer 2: Backend discovery + create (protected by cross-process lock) ──
+        if thread_id:
+            return await self._discover_or_create_with_lock_async(thread_id, sandbox_id)
+
+        return await self._create_sandbox_async(thread_id, sandbox_id)
 
     def _discover_or_create_with_lock(self, thread_id: str, sandbox_id: str) -> str:
         """Discover an existing sandbox or create a new one under a cross-process file lock.
@@ -536,6 +598,55 @@ class AioSandboxProvider(SandboxProvider):
             finally:
                 if locked:
                     _unlock_file(lock_file)
+
+    async def _discover_or_create_with_lock_async(self, thread_id: str, sandbox_id: str) -> str:
+        """Async counterpart to ``_discover_or_create_with_lock``."""
+        paths = get_paths()
+        user_id = get_effective_user_id()
+        await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=user_id)
+        lock_path = paths.thread_dir(thread_id, user_id=user_id) / f"{sandbox_id}.lock"
+
+        with open(lock_path, "a", encoding="utf-8") as lock_file:
+            locked = False
+            try:
+                await asyncio.to_thread(_lock_file_exclusive, lock_file)
+                locked = True
+                # Re-check in-process caches under the file lock in case another
+                # thread in this process won the race while we were waiting.
+                with self._lock:
+                    if thread_id in self._thread_sandboxes:
+                        existing_id = self._thread_sandboxes[thread_id]
+                        if existing_id in self._sandboxes:
+                            logger.info(f"Reusing in-process sandbox {existing_id} for thread {thread_id} (post-lock check)")
+                            self._last_activity[existing_id] = time.time()
+                            return existing_id
+                    if sandbox_id in self._warm_pool:
+                        info, _ = self._warm_pool.pop(sandbox_id)
+                        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+                        self._sandboxes[sandbox_id] = sandbox
+                        self._sandbox_infos[sandbox_id] = info
+                        self._last_activity[sandbox_id] = time.time()
+                        self._thread_sandboxes[thread_id] = sandbox_id
+                        logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for thread {thread_id} (post-lock check)")
+                        return sandbox_id
+
+                # Backend discovery is sync because local discovery may inspect
+                # Docker and perform a health check; keep it off the event loop.
+                discovered = await asyncio.to_thread(self._backend.discover, sandbox_id)
+                if discovered is not None:
+                    sandbox = AioSandbox(id=discovered.sandbox_id, base_url=discovered.sandbox_url)
+                    with self._lock:
+                        self._sandboxes[discovered.sandbox_id] = sandbox
+                        self._sandbox_infos[discovered.sandbox_id] = discovered
+                        self._last_activity[discovered.sandbox_id] = time.time()
+                        self._thread_sandboxes[thread_id] = discovered.sandbox_id
+                    logger.info(f"Discovered existing sandbox {discovered.sandbox_id} for thread {thread_id} at {discovered.sandbox_url}")
+                    return discovered.sandbox_id
+
+                return await self._create_sandbox_async(thread_id, sandbox_id)
+            finally:
+                if locked:
+                    await asyncio.to_thread(_unlock_file, lock_file)
 
     def _evict_oldest_warm(self) -> str | None:
         """Destroy the oldest container in the warm pool to free capacity.
@@ -592,6 +703,43 @@ class AioSandboxProvider(SandboxProvider):
         # Wait for sandbox to be ready
         if not wait_for_sandbox_ready(info.sandbox_url, timeout=60):
             self._backend.destroy(info)
+            raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+
+        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+        with self._lock:
+            self._sandboxes[sandbox_id] = sandbox
+            self._sandbox_infos[sandbox_id] = info
+            self._last_activity[sandbox_id] = time.time()
+            if thread_id:
+                self._thread_sandboxes[thread_id] = sandbox_id
+
+        logger.info(f"Created sandbox {sandbox_id} for thread {thread_id} at {info.sandbox_url}")
+        return sandbox_id
+
+    async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str) -> str:
+        """Async counterpart to ``_create_sandbox``."""
+        extra_mounts = await asyncio.to_thread(self._get_extra_mounts, thread_id)
+
+        # Enforce replicas: only warm-pool containers count toward eviction budget.
+        # Active sandboxes are in use by live threads and must not be forcibly stopped.
+        replicas = self._config.get("replicas", DEFAULT_REPLICAS)
+        with self._lock:
+            total = len(self._sandboxes) + len(self._warm_pool)
+        if total >= replicas:
+            evicted = await asyncio.to_thread(self._evict_oldest_warm)
+            if evicted:
+                logger.info(f"Evicted warm-pool sandbox {evicted} to stay within replicas={replicas}")
+            else:
+                # All slots are occupied by active sandboxes — proceed anyway and log.
+                # The replicas limit is a soft cap; we never forcibly stop a container
+                # that is actively serving a thread.
+                logger.warning(f"All {replicas} replica slots are in active use; creating sandbox {sandbox_id} beyond the soft limit")
+
+        info = await asyncio.to_thread(self._backend.create, thread_id, sandbox_id, extra_mounts=extra_mounts or None)
+
+        # Wait for sandbox to be ready without blocking the event loop.
+        if not await wait_for_sandbox_ready_async(info.sandbox_url, timeout=60):
+            await asyncio.to_thread(self._backend.destroy, info)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
 
         sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)

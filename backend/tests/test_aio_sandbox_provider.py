@@ -1,6 +1,7 @@
 """Tests for AioSandboxProvider mount helpers."""
 
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -136,3 +137,42 @@ def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatc
             provider._discover_or_create_with_lock("thread-5", "sandbox-5")
 
     assert unlock_calls == []
+
+
+@pytest.mark.anyio
+async def test_acquire_async_uses_async_readiness_polling(monkeypatch):
+    """AioSandboxProvider async creation must not use sync readiness polling."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(None)
+    provider._config = {"replicas": 3}
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+    provider._backend = SimpleNamespace(
+        create=MagicMock(return_value=aio_mod.SandboxInfo(sandbox_id="sandbox-async", sandbox_url="http://sandbox")),
+        destroy=MagicMock(),
+        discover=MagicMock(return_value=None),
+    )
+
+    async_readiness_calls: list[tuple[str, int]] = []
+
+    async def fake_wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll_interval: float = 1.0) -> bool:
+        async_readiness_calls.append((sandbox_url, timeout))
+        return True
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", fake_wait_for_sandbox_ready_async)
+    monkeypatch.setattr(
+        aio_mod,
+        "wait_for_sandbox_ready",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("sync readiness should not be used")),
+    )
+
+    sandbox_id = await provider._create_sandbox_async("thread-async", "sandbox-async")
+
+    assert sandbox_id == "sandbox-async"
+    assert async_readiness_calls == [("http://sandbox", 60)]
+    assert provider._backend.destroy.call_count == 0
+    assert provider._thread_sandboxes["thread-async"] == "sandbox-async"
