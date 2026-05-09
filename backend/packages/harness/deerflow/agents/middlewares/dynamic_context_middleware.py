@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 _DATE_RE = re.compile(r"<current_date>([^<]+)</current_date>")
 _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
+_SUMMARY_MESSAGE_NAME = "summary"
 
 
 def _extract_date(content: str) -> str | None:
@@ -70,6 +71,16 @@ def _last_injected_date(messages: list) -> str | None:
             content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
             return _extract_date(content_str)
     return None
+
+
+def is_dynamic_context_reminder(message: object) -> bool:
+    """Return whether *message* is a hidden dynamic-context reminder."""
+    return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY))
+
+
+def _is_user_injection_target(message: object) -> bool:
+    """Return whether *message* can receive a dynamic-context reminder."""
+    return isinstance(message, HumanMessage) and not is_dynamic_context_reminder(message) and message.name != _SUMMARY_MESSAGE_NAME
 
 
 class DynamicContextMiddleware(AgentMiddleware):
@@ -163,7 +174,7 @@ class DynamicContextMiddleware(AgentMiddleware):
 
         if last_date is None:
             # ── First turn: inject full reminder as a separate HumanMessage ─────
-            first_idx = next((i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), None)
+            first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
             if first_idx is None:
                 return None
             full_reminder = self._build_full_reminder()
@@ -181,7 +192,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             return None
 
         # ── Midnight crossed: inject date-update reminder as a separate HumanMessage ──
-        last_human_idx = next((i for i in reversed(range(len(messages))) if isinstance(messages[i], HumanMessage)), None)
+        last_human_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
         if last_human_idx is None:
             return None
 

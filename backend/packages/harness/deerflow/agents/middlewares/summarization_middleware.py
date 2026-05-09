@@ -14,6 +14,7 @@ from langgraph.config import get_config
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         messages_to_summarize, preserved_messages = self._partition_with_skill_rescue(messages, cutoff_index)
+        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = self._create_summary(messages_to_summarize)
         new_messages = self._build_new_messages(summary)
@@ -160,6 +162,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         messages_to_summarize, preserved_messages = self._partition_with_skill_rescue(messages, cutoff_index)
+        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = await self._acreate_summary(messages_to_summarize)
         new_messages = self._build_new_messages(summary)
@@ -178,6 +181,24 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         And this message will be ignored to display in the frontend, but still can be used as context for the model.
         """
         return [HumanMessage(content=f"Here is a summary of the conversation to date:\n\n{summary}", name="summary")]
+
+    def _preserve_dynamic_context_reminders(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        preserved_messages: list[AnyMessage],
+    ) -> tuple[list[AnyMessage], list[AnyMessage]]:
+        """Keep hidden dynamic-context reminders out of summary compression.
+
+        These reminders carry the current date and optional memory. If summarization
+        removes them, DynamicContextMiddleware can mistake the summary HumanMessage
+        for the first user message and inject the reminder in the wrong place.
+        """
+        reminders = [msg for msg in messages_to_summarize if is_dynamic_context_reminder(msg)]
+        if not reminders:
+            return messages_to_summarize, preserved_messages
+
+        remaining = [msg for msg in messages_to_summarize if not is_dynamic_context_reminder(msg)]
+        return remaining, reminders + preserved_messages
 
     def _partition_with_skill_rescue(
         self,
