@@ -33,6 +33,10 @@ RUN apt-get update && apt-get install -y \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Install @googleworkspace/cli (gws) — required by gdrive_gws MCP server
+# for Drive/Docs operations (replaces deprecated @modelcontextprotocol/server-gdrive)
+RUN npm install -g @googleworkspace/cli
+
 # Install uv (source image overridable via UV_IMAGE build arg)
 COPY --from=uv-source /uv /uvx /usr/local/bin/
 
@@ -66,7 +70,8 @@ FROM python:3.12-slim-bookworm
 COPY --from=builder /usr/bin/node /usr/bin/node
 COPY --from=builder /usr/lib/node_modules /usr/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm \
-    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx \
+    && ln -s ../lib/node_modules/@googleworkspace/cli/run.js /usr/bin/gws
 
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
