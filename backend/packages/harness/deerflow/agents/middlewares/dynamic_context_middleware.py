@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
@@ -42,8 +43,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_REMINDER_TAG = "<system-reminder>"
 _DATE_RE = re.compile(r"<current_date>([^<]+)</current_date>")
+_DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 
 
 def _extract_date(content: str) -> str | None:
@@ -53,12 +54,16 @@ def _extract_date(content: str) -> str | None:
 
 
 def _last_injected_date(messages: list) -> str | None:
-    """Scan messages in reverse and return the most recently injected date."""
+    """Scan messages in reverse and return the most recently injected date.
+
+    Detection uses the ``dynamic_context_reminder`` additional_kwargs flag rather
+    than content substring matching, so user messages containing ``<system-reminder>``
+    are not mistakenly treated as injected reminders.
+    """
     for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
+        if isinstance(msg, HumanMessage) and msg.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY):
             content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
-            if _SYSTEM_REMINDER_TAG in content_str:
-                return _extract_date(content_str)
+            return _extract_date(content_str)
     return None
 
 
@@ -119,11 +124,19 @@ class DynamicContextMiddleware(AgentMiddleware):
         reminder_msg takes the original message's ID so that add_messages replaces it
         in-place (preserving position).  user_msg carries the original content with a
         derived ``{id}__user`` ID and is appended immediately after by add_messages.
+
+        If the original message has no ID a stable UUID is generated so the derived
+        ``{id}__user`` ID never collapses to the ambiguous ``None__user`` string.
         """
-        reminder_msg = HumanMessage(content=reminder_content, id=original.id, additional_kwargs={"hide_from_ui": True})
+        stable_id = original.id or str(uuid.uuid4())
+        reminder_msg = HumanMessage(
+            content=reminder_content,
+            id=stable_id,
+            additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+        )
         user_msg = HumanMessage(
             content=original.content,
-            id=f"{original.id}__user",
+            id=f"{stable_id}__user",
             name=original.name,
             additional_kwargs=original.additional_kwargs,
         )
@@ -136,7 +149,7 @@ class DynamicContextMiddleware(AgentMiddleware):
 
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
         last_date = _last_injected_date(messages)
-        logger.info(
+        logger.debug(
             "DynamicContextMiddleware._inject: msg_count=%d last_date=%r current_date=%r",
             len(messages),
             last_date,
@@ -168,7 +181,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             return None
 
         reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder())
-        logger.debug("Midnight crossing detected — injected date update before current turn")
+        logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
         return {"messages": [reminder_msg, user_msg]}
 
     @override
