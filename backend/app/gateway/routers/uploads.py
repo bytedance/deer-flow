@@ -16,6 +16,7 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provi
 from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
+    claim_unique_filename,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
@@ -192,6 +193,10 @@ async def upload_files(
     sandbox_sync_targets = []
     skipped_files = []
     total_size = 0
+    # Track filenames within this request so duplicate form parts do not
+    # silently truncate each other. Existing uploads keep the historical
+    # overwrite behavior for a single replacement upload.
+    seen_filenames: set[str] = set()
 
     sandbox_provider = get_sandbox_provider()
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
@@ -208,7 +213,8 @@ async def upload_files(
             continue
 
         try:
-            safe_filename = normalize_filename(file.filename)
+            original_filename = normalize_filename(file.filename)
+            safe_filename = claim_unique_filename(original_filename, seen_filenames)
         except ValueError:
             logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
             continue
@@ -236,6 +242,8 @@ async def upload_files(
                 "virtual_path": virtual_path,
                 "artifact_url": upload_artifact_url(thread_id, safe_filename),
             }
+            if safe_filename != original_filename:
+                file_info["original_filename"] = original_filename
 
             logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
 
