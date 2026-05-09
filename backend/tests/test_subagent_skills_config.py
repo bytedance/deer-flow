@@ -9,8 +9,6 @@ Covers:
 - Skills filter passthrough in task_tool config assembly
 """
 
-from types import SimpleNamespace
-
 import pytest
 
 from deerflow.config.subagents_config import (
@@ -353,16 +351,14 @@ class TestRegistryCustomAgentLookup:
 
         monkeypatch.setattr("deerflow.config.subagents_config.get_subagents_app_config", fail_get_subagents_app_config)
 
-        app_config = SimpleNamespace(
-            subagents=SubagentsAppConfig(
-                custom_agents={
-                    "analysis": CustomSubagentConfig(
-                        description="Data analysis specialist",
-                        system_prompt="You are a data analysis subagent.",
-                        skills=["data-analysis"],
-                    )
-                }
-            )
+        app_config = SubagentsAppConfig(
+            custom_agents={
+                "analysis": CustomSubagentConfig(
+                    description="Data analysis specialist",
+                    system_prompt="You are a data analysis subagent.",
+                    skills=["data-analysis"],
+                )
+            }
         )
 
         config = get_subagent_config("analysis", app_config=app_config)
@@ -377,11 +373,11 @@ class TestRegistryCustomAgentLookup:
         _reset_subagents_config()
         assert get_subagent_config("nonexistent") is None
 
-    def test_get_available_subagent_names_falls_back_when_subagents_app_config_lacks_sandbox(self, monkeypatch):
+    def test_get_available_subagent_names_lets_bash_gate_resolve_sandbox_fallback(self, monkeypatch):
         from deerflow.subagents import registry as registry_module
         from deerflow.subagents.registry import get_available_subagent_names
 
-        captured: dict[str, tuple] = {}
+        captured: dict[str, tuple[object, ...]] = {}
 
         def fake_is_host_bash_allowed(*args, **kwargs):
             captured["args"] = args
@@ -391,7 +387,7 @@ class TestRegistryCustomAgentLookup:
 
         get_available_subagent_names(app_config=SubagentsAppConfig())
 
-        assert captured["args"] == ()
+        assert captured["args"] == (SubagentsAppConfig(),)
 
     def test_builtin_takes_priority_over_custom(self):
         """If a custom agent has the same name as a builtin, builtin wins."""

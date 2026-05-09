@@ -85,3 +85,10 @@ def test_get_available_tools_keeps_bash_for_aio_sandbox(monkeypatch):
 def test_is_host_bash_allowed_defaults_false_when_sandbox_missing():
     assert is_host_bash_allowed(SimpleNamespace()) is False
     assert is_host_bash_allowed(SimpleNamespace(sandbox=None)) is False
+
+
+def test_is_host_bash_allowed_does_not_fall_back_for_config_without_sandbox(monkeypatch):
+    ambient_config = _make_config(allow_host_bash=True)
+    monkeypatch.setattr("deerflow.sandbox.security.get_app_config", lambda: ambient_config)
+
+    assert is_host_bash_allowed(SimpleNamespace(custom_agents={})) is False

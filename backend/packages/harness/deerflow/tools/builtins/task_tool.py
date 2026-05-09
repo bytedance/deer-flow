@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
@@ -29,10 +30,17 @@ logger = logging.getLogger(__name__)
 
 def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
     context = getattr(runtime, "context", None)
-    if isinstance(context, dict):
+    if isinstance(context, Mapping):
         app_config = context.get("app_config")
         if app_config is not None:
             return cast("AppConfig", app_config)
+    return None
+
+
+def _get_runtime_context_value(runtime: Any, key: str) -> object | None:
+    context = getattr(runtime, "context", None)
+    if isinstance(context, Mapping):
+        return context.get(key)
     return None
 
 
@@ -91,20 +99,20 @@ async def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
-    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config)
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config)
     if config is None:
         available = ", ".join(available_subagent_names)
         return f"Error: Unknown subagent type '{subagent_type}'. Available: {available}"
     if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        host_bash_allowed = is_host_bash_allowed(runtime_app_config)
         if not host_bash_allowed:
             return f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}"
 
     # Build config overrides
-    overrides: dict = {}
+    overrides: dict[str, object] = {}
 
     # Skills are loaded by SubagentExecutor per-session (aligned with Codex's pattern:
     # each subagent loads its own skills based on config, injected as conversation items).
@@ -116,25 +124,33 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
-    metadata: dict = {}
+    metadata: dict[str, object] = {}
 
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
-        thread_id = runtime.context.get("thread_id") if runtime.context else None
+        thread_id_value = _get_runtime_context_value(runtime, "thread_id")
+        thread_id = thread_id_value if isinstance(thread_id_value, str) else None
         if thread_id is None:
-            thread_id = runtime.config.get("configurable", {}).get("thread_id")
+            configurable = runtime.config.get("configurable", {})
+            if isinstance(configurable, Mapping):
+                configured_thread_id = configurable.get("thread_id")
+                thread_id = configured_thread_id if isinstance(configured_thread_id, str) else None
 
         # Try to get parent model from configurable
-        metadata = runtime.config.get("metadata", {})
-        parent_model = metadata.get("model_name")
+        raw_metadata = runtime.config.get("metadata", {})
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        parent_model_value = metadata.get("model_name")
+        parent_model = parent_model_value if isinstance(parent_model_value, str) else None
 
         # Get or generate trace_id for distributed tracing
-        trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
+        trace_id_value = metadata.get("trace_id")
+        trace_id = trace_id_value if isinstance(trace_id_value, str) else str(uuid.uuid4())[:8]
 
     parent_available_skills = metadata.get("available_skills")
-    if parent_available_skills is not None:
-        overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
+    if isinstance(parent_available_skills, list):
+        parent_skill_names = [skill for skill in parent_available_skills if isinstance(skill, str)]
+        overrides["skills"] = _merge_skill_allowlists(parent_skill_names, config.skills)
 
     if overrides:
         config = replace(config, **overrides)
@@ -144,35 +160,32 @@ async def task_tool(
     from deerflow.tools import get_available_tools
 
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
-    parent_tool_groups = metadata.get("tool_groups")
+    parent_tool_groups_value = metadata.get("tool_groups")
+    parent_tool_groups = [group for group in parent_tool_groups_value if isinstance(group, str)] if isinstance(parent_tool_groups_value, list) else None
     resolved_app_config = runtime_app_config
     if config.model == "inherit" and parent_model is None and resolved_app_config is None:
         resolved_app_config = get_app_config()
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    available_tools_kwargs = {
-        "model_name": effective_model,
-        "groups": parent_tool_groups,
-        "subagent_enabled": False,
-    }
-    if resolved_app_config is not None:
-        available_tools_kwargs["app_config"] = resolved_app_config
-    tools = get_available_tools(**available_tools_kwargs)
+    tools = get_available_tools(
+        model_name=effective_model,
+        groups=parent_tool_groups,
+        subagent_enabled=False,
+        app_config=resolved_app_config,
+    )
 
     # Create executor
-    executor_kwargs = {
-        "config": config,
-        "tools": tools,
-        "parent_model": parent_model,
-        "sandbox_state": sandbox_state,
-        "thread_data": thread_data,
-        "thread_id": thread_id,
-        "trace_id": trace_id,
-    }
-    if resolved_app_config is not None:
-        executor_kwargs["app_config"] = resolved_app_config
-    executor = SubagentExecutor(**executor_kwargs)
+    executor = SubagentExecutor(
+        config=config,
+        tools=tools,
+        parent_model=parent_model,
+        sandbox_state=sandbox_state,
+        thread_data=thread_data,
+        thread_id=thread_id,
+        trace_id=trace_id,
+        app_config=resolved_app_config,
+    )
 
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability

@@ -2,8 +2,9 @@
 
 import logging
 from dataclasses import replace
-from typing import Any
 
+from deerflow.config.app_config import AppConfig
+from deerflow.config.subagents_config import SubagentsAppConfig
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
 from deerflow.subagents.config import SubagentConfig
@@ -11,15 +12,17 @@ from deerflow.subagents.config import SubagentConfig
 logger = logging.getLogger(__name__)
 
 
-def _resolve_subagents_app_config(app_config: Any | None = None):
+def _resolve_subagents_app_config(app_config: AppConfig | SubagentsAppConfig | None = None) -> SubagentsAppConfig:
     if app_config is None:
         from deerflow.config.subagents_config import get_subagents_app_config
 
         return get_subagents_app_config()
-    return getattr(app_config, "subagents", app_config)
+    if isinstance(app_config, AppConfig):
+        return app_config.subagents
+    return app_config
 
 
-def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -> SubagentConfig | None:
+def _build_custom_subagent_config(name: str, *, app_config: AppConfig | SubagentsAppConfig | None = None) -> SubagentConfig | None:
     """Build a SubagentConfig from config.yaml custom_agents section.
 
     Args:
@@ -47,7 +50,7 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
     )
 
 
-def get_subagent_config(name: str, *, app_config: Any | None = None) -> SubagentConfig | None:
+def get_subagent_config(name: str, *, app_config: AppConfig | SubagentsAppConfig | None = None) -> SubagentConfig | None:
     """Get a subagent configuration by name, with config.yaml overrides applied.
 
     Resolution order (mirrors Codex's config layering):
@@ -116,13 +119,13 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     return config
 
 
-def list_subagents(*, app_config: Any | None = None) -> list[SubagentConfig]:
+def list_subagents(*, app_config: AppConfig | SubagentsAppConfig | None = None) -> list[SubagentConfig]:
     """List all available subagent configurations (with config.yaml overrides applied).
 
     Returns:
         List of all registered SubagentConfig instances (built-in + custom).
     """
-    configs = []
+    configs: list[SubagentConfig] = []
     for name in get_subagent_names(app_config=app_config):
         config = get_subagent_config(name, app_config=app_config)
         if config is not None:
@@ -130,13 +133,13 @@ def list_subagents(*, app_config: Any | None = None) -> list[SubagentConfig]:
     return configs
 
 
-def get_subagent_names(*, app_config: Any | None = None) -> list[str]:
+def get_subagent_names(*, app_config: AppConfig | SubagentsAppConfig | None = None) -> list[str]:
     """Get all available subagent names (built-in + custom).
 
     Returns:
         List of subagent names.
     """
-    names = list(BUILTIN_SUBAGENTS.keys())
+    names: list[str] = list(BUILTIN_SUBAGENTS.keys())
 
     # Merge custom_agents from config.yaml
     subagents_config = _resolve_subagents_app_config(app_config)
@@ -147,7 +150,7 @@ def get_subagent_names(*, app_config: Any | None = None) -> list[str]:
     return names
 
 
-def get_available_subagent_names(*, app_config: Any | None = None) -> list[str]:
+def get_available_subagent_names(*, app_config: AppConfig | SubagentsAppConfig | None = None) -> list[str]:
     """Get subagent names that should be exposed to the active runtime.
 
     Returns:
@@ -155,7 +158,7 @@ def get_available_subagent_names(*, app_config: Any | None = None) -> list[str]:
     """
     names = get_subagent_names(app_config=app_config)
     try:
-        host_bash_allowed = is_host_bash_allowed(app_config) if hasattr(app_config, "sandbox") else is_host_bash_allowed()
+        host_bash_allowed = is_host_bash_allowed(app_config)
     except Exception:
         logger.debug("Could not determine host bash availability; exposing all subagents")
         return names
