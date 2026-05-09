@@ -167,6 +167,61 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_counts_completed_runs_only(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("success-run", thread_id="t1", status="running")
+        await repo.update_run_completion(
+            "success-run",
+            status="success",
+            total_input_tokens=70,
+            total_output_tokens=30,
+            total_tokens=100,
+            lead_agent_tokens=80,
+            subagent_tokens=15,
+            middleware_tokens=5,
+        )
+        await repo.put("error-run", thread_id="t1", status="running")
+        await repo.update_run_completion(
+            "error-run",
+            status="error",
+            total_input_tokens=20,
+            total_output_tokens=30,
+            total_tokens=50,
+            lead_agent_tokens=40,
+            subagent_tokens=10,
+        )
+        await repo.put("running-run", thread_id="t1", status="running")
+        await repo.update_run_completion(
+            "running-run",
+            status="running",
+            total_input_tokens=900,
+            total_output_tokens=99,
+            total_tokens=999,
+            lead_agent_tokens=999,
+        )
+        await repo.put("other-thread-run", thread_id="t2", status="running")
+        await repo.update_run_completion(
+            "other-thread-run",
+            status="success",
+            total_tokens=888,
+            lead_agent_tokens=888,
+        )
+
+        agg = await repo.aggregate_tokens_by_thread("t1")
+
+        assert agg["total_tokens"] == 150
+        assert agg["total_input_tokens"] == 90
+        assert agg["total_output_tokens"] == 60
+        assert agg["total_runs"] == 2
+        assert agg["by_model"] == {"unknown": {"tokens": 150, "runs": 2}}
+        assert agg["by_caller"] == {
+            "lead_agent": 120,
+            "subagent": 25,
+            "middleware": 5,
+        }
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_list_by_thread_ordered_desc(self, tmp_path):
         """list_by_thread returns newest first."""
         repo = await _make_repo(tmp_path)

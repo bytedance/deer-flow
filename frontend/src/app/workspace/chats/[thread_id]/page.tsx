@@ -25,7 +25,8 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
-import { useThreadStream } from "@/core/threads/hooks";
+import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
+import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -44,6 +45,11 @@ export default function ChatPage() {
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
+  const threadTokenUsage = useThreadTokenUsage(
+    isNewThread || isMock ? undefined : threadId,
+    { enabled: tokenUsageEnabled && !isMock },
+  );
+  const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const mountedRef = useRef(false);
   useSpecificChatMode();
 
@@ -63,6 +69,7 @@ export default function ChatPage() {
 
   const {
     thread,
+    pendingUsageMessages,
     sendMessage,
     isUploading,
     isHistoryLoading,
@@ -137,8 +144,11 @@ export default function ChatPage() {
             </div>
             <div className="flex items-center gap-2">
               <TokenUsageIndicator
+                threadId={isNewThread ? undefined : threadId}
+                backendUsage={backendTokenUsage}
                 enabled={tokenUsageEnabled}
                 messages={thread.messages}
+                pendingMessages={pendingUsageMessages}
                 preferences={localSettings.tokenUsage}
                 onPreferencesChange={(preferences) =>
                   setLocalSettings("tokenUsage", preferences)

@@ -31,3 +31,17 @@ export interface RunMessage {
   };
   created_at: string;
 }
+
+export interface ThreadTokenUsageResponse {
+  thread_id: string;
+  total_tokens: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_runs: number;
+  by_model: Record<string, { tokens: number; runs: number }>;
+  by_caller: {
+    lead_agent: number;
+    subagent: number;
+    middleware: number;
+  };
+}
