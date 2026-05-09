@@ -134,12 +134,42 @@ class ExtensionsConfig(BaseModel):
         try:
             with open(resolved_path, encoding="utf-8") as f:
                 config_data = json.load(f)
+            cls.decrypt_secrets(config_data)
             cls.resolve_env_variables(config_data)
             return cls.model_validate(config_data)
         except json.JSONDecodeError as e:
             raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
         except Exception as e:
             raise RuntimeError(f"Failed to load extensions config from {resolved_path}: {e}") from e
+
+    @classmethod
+    def decrypt_secrets(cls, config: dict[str, Any]) -> None:
+        """Decrypt any ``fernet:``-prefixed values inside ``mcpServers`` in place.
+
+        Always called on load — ``decrypt_server_sensitive`` is a no-op for
+        plaintext values, so deployments that have never opted into
+        ``MCP_ENCRYPT_SECRETS`` pay only the import cost. Encrypted-on-save
+        only runs when the env var is set, but reading must always be able
+        to handle either form so an operator can flip the flag back off
+        without orphaning ciphertext on disk.
+        """
+        try:
+            from deerflow.mcp.secrets import decrypt_server_sensitive
+        except Exception:  # pragma: no cover - cryptography missing
+            return
+
+        servers = config.get("mcpServers") or config.get("mcp_servers")
+        if not isinstance(servers, dict):
+            return
+        for name, server in list(servers.items()):
+            if isinstance(server, dict):
+                try:
+                    servers[name] = decrypt_server_sensitive(server)
+                except Exception:
+                    # Leave the value as-is; validation or first real use
+                    # will surface corruption with a clearer error than this
+                    # path (which runs during gateway startup) can.
+                    pass
 
     @classmethod
     def resolve_env_variables(cls, config: dict[str, Any]) -> dict[str, Any]:
