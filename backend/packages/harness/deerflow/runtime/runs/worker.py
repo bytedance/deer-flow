@@ -239,8 +239,7 @@ async def run_agent(
             if isinstance(resolved, dict):
                 effective = resolved.get("model_name")
                 if effective and effective != record.model_name:
-                    record.model_name = effective
-                    await run_manager._persist_to_store(record)
+                    await run_manager.update_model_name(record.run_id, effective)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:
