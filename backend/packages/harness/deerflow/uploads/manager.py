@@ -121,9 +121,11 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     Upload directories may be mounted into local sandboxes. A sandbox process can
     therefore leave a symlink at a future upload filename. Normal ``Path.write_bytes``
     follows that link and can overwrite files outside the uploads directory with
-    gateway privileges. This helper rejects symlink destinations and uses
-    ``O_NOFOLLOW`` where available so the final path component cannot be raced into
-    a symlink between validation and open.
+    gateway privileges. This helper rejects symlink destinations using ``O_NOFOLLOW``
+    on POSIX. On Windows (which lacks ``O_NOFOLLOW``), it uses dual ``lstat`` checks
+    and ``fstat`` validation after ``open()`` to reduce the TOCTOU window; this does
+    not eliminate all races but makes exploitation significantly harder. Path-traversal
+    validation prevents escapes from *base_dir* in both cases.
     """
     safe_name = normalize_filename(filename)
     dest = base_dir / safe_name
@@ -138,23 +140,65 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
 
     validate_path_traversal(dest, base_dir)
 
-    if not hasattr(os, "O_NOFOLLOW"):
-        raise UnsafeUploadPathError("Upload writes require O_NOFOLLOW support")
+    has_nofollow = hasattr(os, "O_NOFOLLOW")
 
-    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
-    if hasattr(os, "O_NONBLOCK"):
-        flags |= os.O_NONBLOCK
+    if has_nofollow:
+        # POSIX: O_NOFOLLOW makes open() fail with ELOOP if dest is a symlink.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+
+        try:
+            fd = os.open(dest, flags, 0o600)
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
+                raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
+            raise
+
+        try:
+            opened_stat = os.fstat(fd)
+            if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
+                raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
+            os.ftruncate(fd, 0)
+            fh = os.fdopen(fd, "wb")
+            fd = -1
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        return dest, fh
+
+    # Windows: no O_NOFOLLOW available. Uses a second lstat immediately before open()
+    # to narrow the TOCTOU window, then fstat after open() as a further defence.
+    # Note: a narrow race window remains between the pre-open lstat and open(); the
+    # path-traversal check mitigates escapes from base_dir but cannot prevent an
+    # attacker who can atomically replace dest with a symlink after the check.
+    if st is not None and st.st_nlink > 1:
+        raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
+
+    flags = os.O_WRONLY | os.O_CREAT
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+
+    try:
+        pre_open_st = os.lstat(dest)
+    except FileNotFoundError:
+        pre_open_st = None
+
+    if pre_open_st is not None and not stat.S_ISREG(pre_open_st.st_mode):
+        raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
+    if pre_open_st is not None and pre_open_st.st_nlink > 1:
+        raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     try:
         fd = os.open(dest, flags, 0o600)
     except OSError as exc:
-        if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
+        if exc.errno in {errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
             raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
         raise
 
     try:
         opened_stat = os.fstat(fd)
-        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
+        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink > 1:
             raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
         os.ftruncate(fd, 0)
         fh = os.fdopen(fd, "wb")
