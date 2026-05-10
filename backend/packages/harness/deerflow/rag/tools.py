@@ -111,8 +111,8 @@ def _search_selected_kbs(
     repo = KnowledgeBaseRepository(sf)
 
     async def _resolve():
-        return await repo.resolve_active_by_ids(
-            selected_ids, tenant_id=tenant_id, owner_user_id=user_id
+        return await repo.resolve_accessible_by_ids(
+            selected_ids, tenant_id=tenant_id, user_id=user_id
         )
 
     def _run_async():
@@ -170,8 +170,8 @@ def _search_single_collection(query: str, collection: str, rag_config, config: R
     repo = KnowledgeBaseRepository(sf)
 
     async def _resolve():
-        return await repo.resolve_active_by_collections(
-            [collection], tenant_id=tenant_id, owner_user_id=user_id
+        return await repo.resolve_accessible_by_collections(
+            [collection], tenant_id=tenant_id, user_id=user_id
         )
 
     def _run_async():

@@ -100,34 +100,52 @@ export function KnowledgeBaseSelector({
             <Loader2Icon className="text-muted-foreground size-4 animate-spin" />
           </div>
         ) : (
-          knowledgeBases.map((kb) => (
-            <DropdownMenuCheckboxItem
-              key={kb.id}
-              checked={selectedIds.has(kb.id)}
-              onCheckedChange={() => handleToggleKB(kb.id)}
-              onSelect={(e) => e.preventDefault()}
-            >
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <span
-                  className={cn(
-                    "h-2 w-2 shrink-0 rounded-full",
-                    kb.status === "active" && "bg-green-500",
-                    kb.status === "indexing" && "bg-yellow-500",
-                    kb.status !== "active" &&
-                      kb.status !== "indexing" &&
-                      "bg-red-500",
-                  )}
-                />
-                <div className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate text-sm">{kb.name}</span>
-                  <span className="text-muted-foreground truncate text-xs">
-                    {kb.description ??
-                      `${kb.document_count} ${t.knowledgeBase.documentCount}`}
-                  </span>
-                </div>
+          (() => {
+            const mine = knowledgeBases.filter((kb) => kb.visibility === "private");
+            const tenant = knowledgeBases.filter((kb) => kb.visibility === "tenant");
+            const pub = knowledgeBases.filter((kb) => kb.visibility === "public");
+            const groups = [
+              { label: t.knowledgeBase.groupMine, items: mine },
+              { label: t.knowledgeBase.groupTenant, items: tenant },
+              { label: t.knowledgeBase.groupPublic, items: pub },
+            ].filter((g) => g.items.length > 0);
+            return groups.map((group, gi) => (
+              <div key={group.label}>
+                {gi > 0 && <DropdownMenuSeparator />}
+                <DropdownMenuLabel className="text-muted-foreground text-xs">
+                  {group.label}
+                </DropdownMenuLabel>
+                {group.items.map((kb) => (
+                  <DropdownMenuCheckboxItem
+                    key={kb.id}
+                    checked={selectedIds.has(kb.id)}
+                    onCheckedChange={() => handleToggleKB(kb.id)}
+                    onSelect={(e) => e.preventDefault()}
+                  >
+                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                      <span
+                        className={cn(
+                          "h-2 w-2 shrink-0 rounded-full",
+                          kb.status === "active" && "bg-green-500",
+                          kb.status === "indexing" && "bg-yellow-500",
+                          kb.status !== "active" &&
+                            kb.status !== "indexing" &&
+                            "bg-red-500",
+                        )}
+                      />
+                      <div className="flex min-w-0 flex-1 flex-col">
+                        <span className="truncate text-sm">{kb.name}</span>
+                        <span className="text-muted-foreground truncate text-xs">
+                          {kb.description ??
+                            `${kb.document_count} ${t.knowledgeBase.documentCount}`}
+                        </span>
+                      </div>
+                    </div>
+                  </DropdownMenuCheckboxItem>
+                ))}
               </div>
-            </DropdownMenuCheckboxItem>
-          ))
+            ));
+          })()
         )}
       </DropdownMenuContent>
     </DropdownMenu>

@@ -225,6 +225,35 @@ export interface Translations {
     uploadSuccess: string;
     textInput: string;
     fileUpload: string;
+    // Visibility (multi-level)
+    visibilityTenant: string;
+    visibilityPublic: string;
+    // Permissions
+    permissions: string;
+    permissionsDescription: string;
+    roleViewer: string;
+    roleEditor: string;
+    roleAdmin: string;
+    grantPermission: string;
+    revokePermission: string;
+    revokeConfirm: string;
+    noPermissions: string;
+    userIdPlaceholder: string;
+    selectRole: string;
+    grantSuccess: string;
+    revokeSuccess: string;
+    myRole: string;
+    // Tabs
+    tabAll: string;
+    tabMine: string;
+    tabTenant: string;
+    tabPublic: string;
+    tabAdmin: string;
+    groupMine: string;
+    groupTenant: string;
+    groupPublic: string;
+    visibilityHintTenant: string;
+    visibilityHintPublic: string;
   };
 
   // Breadcrumb

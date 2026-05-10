@@ -83,7 +83,7 @@ class TestKnowledgeBaseRepository:
         assert await kb_repo.soft_delete(kb["id"], tenant_id=TENANT, owner_user_id=USER)
         assert await kb_repo.get(kb["id"], tenant_id=TENANT, owner_user_id=USER) is None
     @pytest.mark.asyncio
-    async def test_resolve_active_by_ids(self):
+    async def test_resolve_accessible_by_ids(self):
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
         from deerflow.persistence.base import Base
@@ -99,10 +99,10 @@ class TestKnowledgeBaseRepository:
         kb2 = await repo.create(tenant_id="t1", owner_user_id="u1", name="KB2")
         kb3 = await repo.create(tenant_id="t1", owner_user_id="u2", name="KB3")
 
-        results = await repo.resolve_active_by_ids(
+        results = await repo.resolve_accessible_by_ids(
             [kb1["id"], kb2["id"], kb3["id"]],
             tenant_id="t1",
-            owner_user_id="u1",
+            user_id="u1",
         )
         assert len(results) == 2
         ids = {r["id"] for r in results}
@@ -113,7 +113,7 @@ class TestKnowledgeBaseRepository:
         await engine.dispose()
 
     @pytest.mark.asyncio
-    async def test_resolve_active_by_collections(self):
+    async def test_resolve_accessible_by_collections(self):
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
         from deerflow.persistence.base import Base
@@ -129,10 +129,10 @@ class TestKnowledgeBaseRepository:
         kb2 = await repo.create(tenant_id="t1", owner_user_id="u1", name="KB2")
         kb3 = await repo.create(tenant_id="t1", owner_user_id="u2", name="KB3")
 
-        results = await repo.resolve_active_by_collections(
+        results = await repo.resolve_accessible_by_collections(
             [kb1["collection_name"], kb2["collection_name"], kb3["collection_name"]],
             tenant_id="t1",
-            owner_user_id="u1",
+            user_id="u1",
         )
         assert len(results) == 2
         collections = {r["collection_name"] for r in results}

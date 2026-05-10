@@ -174,9 +174,9 @@ class TestMultiKbRetrieve:
         assert len(results) == 3
 
 
-class TestResolveActiveByIds:
+class TestResolveAccessibleByIds:
     @pytest.mark.asyncio
-    async def test_resolve_active_by_ids(self):
+    async def test_resolve_accessible_by_ids(self):
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
         from deerflow.persistence.base import Base
@@ -192,10 +192,10 @@ class TestResolveActiveByIds:
         kb2 = await repo.create(tenant_id="t1", owner_user_id="u1", name="KB2")
         kb3 = await repo.create(tenant_id="t1", owner_user_id="u2", name="KB3")
 
-        results = await repo.resolve_active_by_ids(
+        results = await repo.resolve_accessible_by_ids(
             [kb1["id"], kb2["id"], kb3["id"]],
             tenant_id="t1",
-            owner_user_id="u1",
+            user_id="u1",
         )
         assert len(results) == 2
         ids = {r["id"] for r in results}
@@ -218,7 +218,7 @@ class TestResolveActiveByIds:
         sf = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
         repo = KnowledgeBaseRepository(sf)
-        results = await repo.resolve_active_by_ids([], tenant_id="t1", owner_user_id="u1")
+        results = await repo.resolve_accessible_by_ids([], tenant_id="t1", user_id="u1")
         assert results == []
 
         await engine.dispose()
@@ -239,7 +239,7 @@ class TestResolveActiveByIds:
         kb = await repo.create(tenant_id="t1", owner_user_id="u1", name="ToDelete")
         await repo.soft_delete(kb["id"], tenant_id="t1", owner_user_id="u1")
 
-        results = await repo.resolve_active_by_ids([kb["id"]], tenant_id="t1", owner_user_id="u1")
+        results = await repo.resolve_accessible_by_ids([kb["id"]], tenant_id="t1", user_id="u1")
         assert results == []
 
         await engine.dispose()

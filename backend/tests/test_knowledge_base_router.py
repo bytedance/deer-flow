@@ -19,9 +19,10 @@ def _make_app(kb_service_mock) -> FastAPI:
 
 
 class FakeUser:
-    def __init__(self, user_id: str = "user-1", tenant_id: str = "tenant-1"):
+    def __init__(self, user_id: str = "user-1", tenant_id: str = "tenant-1", system_role: str = "superadmin"):
         self.id = user_id
         self.tenant_id = tenant_id
+        self.system_role = system_role
 
 
 @pytest.fixture
@@ -31,7 +32,13 @@ def mock_user():
 
 @pytest.fixture
 def kb_service():
-    return AsyncMock()
+    svc = AsyncMock()
+    from unittest.mock import MagicMock
+
+    ac = MagicMock()
+    ac.can_create.return_value = True
+    svc.access_control = ac
+    return svc
 
 
 @pytest.fixture
@@ -67,12 +74,12 @@ class TestKnowledgeBaseCRUD:
         assert resp.json()["name"] == "Test KB"
 
     def test_get_not_found(self, client, kb_service):
-        kb_service.get_knowledge_base.return_value = None
+        kb_service.get_kb_with_permissions.return_value = None
         resp = client.get("/api/knowledge-bases/nonexistent")
         assert resp.status_code == 404
 
     def test_get_found(self, client, kb_service):
-        kb_service.get_knowledge_base.return_value = {
+        kb_service.get_kb_with_permissions.return_value = {
             "id": "kb-1",
             "name": "My KB",
             "description": "desc",
@@ -90,19 +97,20 @@ class TestKnowledgeBaseCRUD:
         assert resp.json()["id"] == "kb-1"
 
     def test_delete(self, client, kb_service):
+        kb_service.check_admin_permission.return_value = None
         kb_service.delete_knowledge_base.return_value = True
         resp = client.delete("/api/knowledge-bases/kb-1")
         assert resp.status_code == 204
 
     def test_delete_not_found(self, client, kb_service):
-        kb_service.delete_knowledge_base.return_value = False
+        kb_service.check_admin_permission.side_effect = ValueError("not found")
         resp = client.delete("/api/knowledge-bases/kb-1")
         assert resp.status_code == 404
 
 
 class TestDocumentCRUD:
     def test_create_document(self, client, kb_service):
-        kb_service.create_document.return_value = {
+        kb_service.create_document_with_access_check.return_value = {
             "id": "doc-1",
             "knowledge_base_id": "kb-1",
             "title": "Doc",
@@ -125,13 +133,12 @@ class TestDocumentCRUD:
         assert resp.json()["title"] == "Doc"
 
     def test_get_document_not_found(self, client, kb_service):
-        kb_service.get_document.return_value = None
+        kb_service.get_document_with_access_check.return_value = None
         resp = client.get("/api/knowledge-bases/kb-1/documents/doc-1")
         assert resp.status_code == 404
 
     def test_delete_document(self, client, kb_service):
-        kb_service.get_document.return_value = {"id": "doc-1", "knowledge_base_id": "kb-1"}
-        kb_service.delete_document.return_value = True
+        kb_service.delete_document_with_access_check.return_value = True
         resp = client.delete("/api/knowledge-bases/kb-1/documents/doc-1")
         assert resp.status_code == 204
 

@@ -4,6 +4,8 @@ import { getBackendBaseURL } from "../config";
 import type {
   CreateDocumentRequest,
   CreateKBRequest,
+  GrantPermissionRequest,
+  KBPermission,
   KnowledgeBase,
   KnowledgeBaseDocument,
   SearchResponse,
@@ -225,4 +227,81 @@ export async function uploadDocument(
     );
   }
   return res.json() as Promise<KnowledgeBaseDocument>;
+}
+
+// ---------------------------------------------------------------------------
+// Permissions
+// ---------------------------------------------------------------------------
+
+export async function listPermissions(kbId: string): Promise<KBPermission[]> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/permissions`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to list permissions: ${res.statusText}`);
+  }
+  return res.json() as Promise<KBPermission[]>;
+}
+
+export async function grantPermission(
+  kbId: string,
+  request: GrantPermissionRequest,
+): Promise<KBPermission> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/permissions`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to grant permission: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<KBPermission>;
+}
+
+export async function revokePermission(
+  kbId: string,
+  targetUserId: string,
+): Promise<void> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/permissions/${targetUserId}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to revoke permission: ${res.statusText}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+
+export async function listAdminKnowledgeBases(params?: {
+  visibility?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<KnowledgeBase[]> {
+  const searchParams = new URLSearchParams();
+  if (params?.visibility) searchParams.set("visibility", params.visibility);
+  if (params?.limit) searchParams.set("limit", String(params.limit));
+  if (params?.offset) searchParams.set("offset", String(params.offset));
+
+  const qs = searchParams.toString();
+  const url = `${getBackendBaseURL()}/api/knowledge-bases/admin/all${qs ? `?${qs}` : ""}`;
+  const res = await fetchGateway(url);
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to list admin knowledge bases: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<KnowledgeBase[]>;
 }

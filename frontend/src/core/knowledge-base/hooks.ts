@@ -5,9 +5,13 @@ import {
   createKnowledgeBase,
   deleteDocument,
   deleteKnowledgeBase,
+  grantPermission,
+  listAdminKnowledgeBases,
   listDocuments,
   listKnowledgeBases,
+  listPermissions,
   reindexDocument,
+  revokePermission,
   searchKnowledgeBase,
   updateDocument,
   updateKnowledgeBase,
@@ -16,6 +20,7 @@ import {
 import type {
   CreateDocumentRequest,
   CreateKBRequest,
+  GrantPermissionRequest,
   UpdateDocumentRequest,
   UpdateKBRequest,
 } from "./types";
@@ -157,4 +162,75 @@ export function useUploadDocument(kbId: string) {
       void queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Permissions
+// ---------------------------------------------------------------------------
+
+export function usePermissions(kbId: string, { enabled = true } = {}) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["knowledge-bases", kbId, "permissions"],
+    queryFn: () => listPermissions(kbId),
+    enabled: enabled && !!kbId,
+    refetchOnWindowFocus: false,
+  });
+  return {
+    permissions: data ?? [],
+    isLoading,
+    error,
+  };
+}
+
+export function useGrantPermission(kbId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (request: GrantPermissionRequest) =>
+      grantPermission(kbId, request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["knowledge-bases", kbId, "permissions"],
+      });
+    },
+  });
+}
+
+export function useRevokePermission(kbId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (targetUserId: string) => revokePermission(kbId, targetUserId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["knowledge-bases", kbId, "permissions"],
+      });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+
+export function useAdminKnowledgeBases({
+  enabled = true,
+  visibility,
+  limit,
+  offset,
+}: {
+  enabled?: boolean;
+  visibility?: string;
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["knowledge-bases", "admin", { visibility, limit, offset }],
+    queryFn: () => listAdminKnowledgeBases({ visibility, limit, offset }),
+    enabled,
+    refetchOnWindowFocus: false,
+  });
+  return {
+    knowledgeBases: data ?? [],
+    isLoading,
+    error,
+  };
 }

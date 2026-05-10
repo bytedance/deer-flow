@@ -1,15 +1,33 @@
+export type KBVisibility = "private" | "tenant" | "public";
+export type KBPermissionRole = "viewer" | "editor" | "admin";
+
 export interface KnowledgeBase {
   id: string;
   name: string;
   description: string | null;
-  visibility: string;
+  visibility: KBVisibility;
   status: string;
+  owner_user_id: string | null;
+  owner_display_name: string | null;
   document_count: number;
   chunk_count: number;
   last_indexed_at: string | null;
   last_search_at: string | null;
   created_at: string;
   updated_at: string;
+  my_role: string | null;
+  can_write: boolean | null;
+  can_admin: boolean | null;
+}
+
+export interface KBPermission {
+  id: string;
+  knowledge_base_id: string;
+  tenant_id: string;
+  user_id: string;
+  role: KBPermissionRole;
+  granted_by: string;
+  created_at: string;
 }
 
 export interface KnowledgeBaseDocument {
@@ -31,13 +49,17 @@ export interface KnowledgeBaseDocument {
 export interface CreateKBRequest {
   name: string;
   description?: string;
-  visibility?: string;
+  visibility?: KBVisibility;
 }
 
 export interface UpdateKBRequest {
   name?: string;
   description?: string | null;
-  visibility?: string;
+}
+
+export interface GrantPermissionRequest {
+  user_id: string;
+  role: KBPermissionRole;
 }
 
 export interface CreateDocumentRequest {

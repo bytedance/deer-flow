@@ -196,8 +196,8 @@ class RagMiddleware(AgentMiddleware[RagMiddlewareState]):
         repo = KnowledgeBaseRepository(sf)
 
         async def _resolve():
-            return await repo.resolve_active_by_ids(
-                selected_ids, tenant_id=tenant_id, owner_user_id=owner_user_id
+            return await repo.resolve_accessible_by_ids(
+                selected_ids, tenant_id=tenant_id, user_id=owner_user_id
             )
 
         def _run_async():

@@ -110,12 +110,14 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
             from deerflow.knowledge_base.service import KnowledgeBaseService
             from deerflow.persistence.knowledge_base.document_repository import DocumentRepository
             from deerflow.persistence.knowledge_base.index_job_repository import IndexJobRepository
+            from deerflow.persistence.knowledge_base.permission_repository import KbPermissionRepository
             from deerflow.persistence.knowledge_base.repository import KnowledgeBaseRepository
 
             app.state.kb_service = KnowledgeBaseService(
                 kb_repo=KnowledgeBaseRepository(sf),
                 doc_repo=DocumentRepository(sf),
                 job_repo=IndexJobRepository(sf),
+                permission_repo=KbPermissionRepository(sf),
             )
         else:
             app.state.kb_service = None

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.knowledge_base.model import KnowledgeBaseRow
@@ -32,6 +32,7 @@ class KnowledgeBaseRepository:
         owner_user_id: str,
         name: str,
         description: str | None = None,
+        visibility: str = "private",
     ) -> dict[str, Any]:
         kb_id = uuid4().hex
         collection_name = f"kb_{uuid4().hex}"
@@ -42,6 +43,7 @@ class KnowledgeBaseRepository:
             owner_user_id=owner_user_id,
             name=name,
             description=description,
+            visibility=visibility,
             collection_name=collection_name,
             created_at=now,
             updated_at=now,
@@ -104,7 +106,7 @@ class KnowledgeBaseRepository:
         owner_user_id: str,
         **fields: Any,
     ) -> dict[str, Any] | None:
-        allowed = {"name", "description", "visibility", "status"}
+        allowed = {"name", "description", "status"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return await self.get(kb_id, tenant_id=tenant_id, owner_user_id=owner_user_id)
@@ -175,49 +177,149 @@ class KnowledgeBaseRepository:
             row = result.scalar_one_or_none()
             return self._row_to_dict(row) if row else None
 
-    async def resolve_active_by_ids(
+    def _build_access_conditions(self, *, tenant_id: str, user_id: str):
+        """Build OR conditions for three-level visibility access control."""
+        return or_(
+            and_(
+                KnowledgeBaseRow.visibility == "private",
+                KnowledgeBaseRow.owner_user_id == user_id,
+                KnowledgeBaseRow.tenant_id == tenant_id,
+            ),
+            and_(
+                KnowledgeBaseRow.visibility == "tenant",
+                KnowledgeBaseRow.tenant_id == tenant_id,
+            ),
+            KnowledgeBaseRow.visibility == "public",
+        )
+
+    async def list_accessible(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        visibility_filter: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List all KBs accessible to the user based on visibility rules."""
+        async with self._sf() as session:
+            access_conditions = self._build_access_conditions(tenant_id=tenant_id, user_id=user_id)
+            conditions = [
+                KnowledgeBaseRow.deleted_at.is_(None),
+                KnowledgeBaseRow.status == "active",
+                access_conditions,
+            ]
+            if visibility_filter:
+                conditions.append(KnowledgeBaseRow.visibility == visibility_filter)
+            stmt = (
+                select(KnowledgeBaseRow)
+                .where(*conditions)
+                .order_by(KnowledgeBaseRow.updated_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def get_accessible(
+        self,
+        kb_id: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Get a single KB if the user has read access based on visibility rules."""
+        async with self._sf() as session:
+            access_conditions = self._build_access_conditions(tenant_id=tenant_id, user_id=user_id)
+            stmt = (
+                select(KnowledgeBaseRow)
+                .where(
+                    KnowledgeBaseRow.id == kb_id,
+                    KnowledgeBaseRow.deleted_at.is_(None),
+                    access_conditions,
+                )
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return self._row_to_dict(row) if row else None
+
+    async def list_admin(
+        self,
+        *,
+        tenant_id: str,
+        role: str,
+        visibility_filter: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List KBs for admin view. superadmin sees tenant+public; tenant_admin sees tenant."""
+        async with self._sf() as session:
+            conditions = [
+                KnowledgeBaseRow.deleted_at.is_(None),
+                KnowledgeBaseRow.status == "active",
+            ]
+            if role == "superadmin":
+                conditions.append(KnowledgeBaseRow.visibility.in_(["tenant", "public"]))
+            else:
+                conditions.append(KnowledgeBaseRow.visibility == "tenant")
+                conditions.append(KnowledgeBaseRow.tenant_id == tenant_id)
+
+            if visibility_filter:
+                conditions.append(KnowledgeBaseRow.visibility == visibility_filter)
+
+            stmt = (
+                select(KnowledgeBaseRow)
+                .where(*conditions)
+                .order_by(KnowledgeBaseRow.updated_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def resolve_accessible_by_ids(
         self,
         kb_ids: list[str],
         *,
         tenant_id: str,
-        owner_user_id: str,
+        user_id: str,
     ) -> list[dict[str, Any]]:
-        """Batch-fetch active KBs by ID list with tenant+owner isolation."""
+        """Batch-fetch active KBs by ID list with visibility-based access control."""
         if not kb_ids:
             return []
         async with self._sf() as session:
+            access_conditions = self._build_access_conditions(tenant_id=tenant_id, user_id=user_id)
             stmt = (
                 select(KnowledgeBaseRow)
                 .where(
                     KnowledgeBaseRow.id.in_(kb_ids),
-                    KnowledgeBaseRow.tenant_id == tenant_id,
-                    KnowledgeBaseRow.owner_user_id == owner_user_id,
                     KnowledgeBaseRow.status == "active",
                     KnowledgeBaseRow.deleted_at.is_(None),
+                    access_conditions,
                 )
             )
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def resolve_active_by_collections(
+    async def resolve_accessible_by_collections(
         self,
         collection_names: list[str],
         *,
         tenant_id: str,
-        owner_user_id: str,
+        user_id: str,
     ) -> list[dict[str, Any]]:
-        """Batch-fetch active KBs by collection name with tenant+owner isolation."""
+        """Batch-fetch active KBs by collection name with visibility-based access control."""
         if not collection_names:
             return []
         async with self._sf() as session:
+            access_conditions = self._build_access_conditions(tenant_id=tenant_id, user_id=user_id)
             stmt = (
                 select(KnowledgeBaseRow)
                 .where(
                     KnowledgeBaseRow.collection_name.in_(collection_names),
-                    KnowledgeBaseRow.tenant_id == tenant_id,
-                    KnowledgeBaseRow.owner_user_id == owner_user_id,
                     KnowledgeBaseRow.status == "active",
                     KnowledgeBaseRow.deleted_at.is_(None),
+                    access_conditions,
                 )
             )
             result = await session.execute(stmt)

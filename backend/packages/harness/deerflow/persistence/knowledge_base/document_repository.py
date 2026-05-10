@@ -216,3 +216,86 @@ class DocumentRepository:
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             return self._row_to_dict(row) if row else None
+
+    async def get_by_kb(self, doc_id: str, *, knowledge_base_id: str) -> dict[str, Any] | None:
+        """Get a document by ID scoped to a KB (no owner filter). Use after access control check."""
+        async with self._sf() as session:
+            stmt = select(KnowledgeBaseDocumentRow).where(
+                KnowledgeBaseDocumentRow.id == doc_id,
+                KnowledgeBaseDocumentRow.knowledge_base_id == knowledge_base_id,
+                KnowledgeBaseDocumentRow.deleted_at.is_(None),
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return self._row_to_dict(row) if row else None
+
+    async def list_by_kb_accessible(
+        self,
+        knowledge_base_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List documents in a KB without owner filter. Use after access control check."""
+        async with self._sf() as session:
+            stmt = (
+                select(KnowledgeBaseDocumentRow)
+                .where(
+                    KnowledgeBaseDocumentRow.knowledge_base_id == knowledge_base_id,
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+                .order_by(KnowledgeBaseDocumentRow.updated_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def update_by_kb(
+        self,
+        doc_id: str,
+        *,
+        knowledge_base_id: str,
+        **fields: Any,
+    ) -> dict[str, Any] | None:
+        """Update a document scoped to KB (no owner filter). Use after write permission check."""
+        allowed = {"title", "content", "content_format", "content_hash", "content_length", "version", "source_name", "metadata_json"}
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return await self.get_by_kb(doc_id, knowledge_base_id=knowledge_base_id)
+        updates["updated_at"] = datetime.now(UTC)
+        async with self._sf() as session:
+            stmt = (
+                update(KnowledgeBaseDocumentRow)
+                .where(
+                    KnowledgeBaseDocumentRow.id == doc_id,
+                    KnowledgeBaseDocumentRow.knowledge_base_id == knowledge_base_id,
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+                .values(**updates)
+            )
+            await session.execute(stmt)
+            await session.commit()
+        return await self.get_by_kb(doc_id, knowledge_base_id=knowledge_base_id)
+
+    async def soft_delete_by_kb_doc(
+        self,
+        doc_id: str,
+        *,
+        knowledge_base_id: str,
+    ) -> bool:
+        """Soft-delete a document scoped to KB (no owner filter). Use after write permission check."""
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            stmt = (
+                update(KnowledgeBaseDocumentRow)
+                .where(
+                    KnowledgeBaseDocumentRow.id == doc_id,
+                    KnowledgeBaseDocumentRow.knowledge_base_id == knowledge_base_id,
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+                .values(deleted_at=now, updated_at=now)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount > 0

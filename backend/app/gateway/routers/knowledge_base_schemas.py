@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -13,6 +12,7 @@ from pydantic import BaseModel, Field
 class CreateKnowledgeBaseRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=256)
     description: str | None = None
+    visibility: str = Field("private", pattern=r"^(private|tenant|public)$")
 
 
 class UpdateKnowledgeBaseRequest(BaseModel):
@@ -51,12 +51,17 @@ class KnowledgeBaseResponse(BaseModel):
     description: str | None = None
     visibility: str
     status: str
+    owner_user_id: str | None = None
+    owner_display_name: str | None = None
     document_count: int
     chunk_count: int
     last_indexed_at: str | None = None
     last_search_at: str | None = None
     created_at: str
     updated_at: str
+    my_role: str | None = None
+    can_write: bool | None = None
+    can_admin: bool | None = None
 
 
 class DocumentResponse(BaseModel):
@@ -92,3 +97,23 @@ class SearchResponse(BaseModel):
     results: list[SearchResultItem]
     query: str
     knowledge_base_id: str
+
+
+# ---------------------------------------------------------------------------
+# Permission management models
+# ---------------------------------------------------------------------------
+
+
+class GrantPermissionRequest(BaseModel):
+    user_id: str = Field(..., min_length=1)
+    role: str = Field(..., pattern=r"^(viewer|editor|admin)$")
+
+
+class PermissionResponse(BaseModel):
+    id: str
+    knowledge_base_id: str
+    tenant_id: str
+    user_id: str
+    role: str
+    granted_by: str
+    created_at: str

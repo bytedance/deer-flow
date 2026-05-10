@@ -6,7 +6,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from app.gateway.deps import get_current_user_from_request
 from app.gateway.routers.knowledge_base_schemas import (
@@ -14,7 +14,9 @@ from app.gateway.routers.knowledge_base_schemas import (
     CreateKnowledgeBaseRequest,
     DocumentDetailResponse,
     DocumentResponse,
+    GrantPermissionRequest,
     KnowledgeBaseResponse,
+    PermissionResponse,
     SearchRequest,
     SearchResponse,
     SearchResultItem,
@@ -36,6 +38,34 @@ def _get_kb_service(request: Request):
     return svc
 
 
+async def _enrich_owner_display_names(items: list[dict]) -> list[dict]:
+    """Add owner_display_name to KB dicts by looking up user emails."""
+    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.user.model import UserRow
+
+    owner_ids = {item["owner_user_id"] for item in items if item.get("owner_user_id")}
+    if not owner_ids:
+        return items
+
+    sf = get_session_factory()
+    if sf is None:
+        return items
+
+    from sqlalchemy import select
+
+    async with sf() as session:
+        stmt = select(UserRow.id, UserRow.email).where(UserRow.id.in_(owner_ids))
+        result = await session.execute(stmt)
+        id_to_email = {row.id: row.email for row in result}
+
+    for item in items:
+        uid = item.get("owner_user_id")
+        email = id_to_email.get(uid) if uid else None
+        item["owner_display_name"] = email.split("@")[0] if email else None
+
+    return items
+
+
 # ---------------------------------------------------------------------------
 # Knowledge Base CRUD
 # ---------------------------------------------------------------------------
@@ -44,6 +74,7 @@ def _get_kb_service(request: Request):
 @router.get("", response_model=list[KnowledgeBaseResponse])
 async def list_knowledge_bases(
     request: Request,
+    visibility: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
@@ -51,10 +82,12 @@ async def list_knowledge_bases(
     svc = _get_kb_service(request)
     items = await svc.list_knowledge_bases(
         tenant_id=user.tenant_id,
-        owner_user_id=str(user.id),
+        user_id=str(user.id),
+        visibility_filter=visibility,
         limit=limit,
         offset=offset,
     )
+    await _enrich_owner_display_names(items)
     return items
 
 
@@ -65,13 +98,49 @@ async def create_knowledge_base(
 ):
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
+
+    from deerflow.knowledge_base.access_control import UserContext
+
+    user_ctx = UserContext(user_id=str(user.id), tenant_id=user.tenant_id, role=user.system_role)
+    if not svc.access_control.can_create(user_ctx, body.visibility):
+        raise HTTPException(status_code=403, detail="Not allowed to create knowledge base with this visibility")
+
     kb = await svc.create_knowledge_base(
         tenant_id=user.tenant_id,
         owner_user_id=str(user.id),
         name=body.name,
         description=body.description,
+        visibility=body.visibility,
     )
     return kb
+
+
+# ---------------------------------------------------------------------------
+# Admin View (must be before /{kb_id} to avoid path parameter capture)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/admin/all", response_model=list[KnowledgeBaseResponse])
+async def list_admin_knowledge_bases(
+    request: Request,
+    visibility: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    user = await get_current_user_from_request(request)
+    svc = _get_kb_service(request)
+    try:
+        items = await svc.list_admin_knowledge_bases(
+            tenant_id=user.tenant_id,
+            role=user.system_role,
+            visibility_filter=visibility,
+            limit=limit,
+            offset=offset,
+        )
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Admin role required")
+    await _enrich_owner_display_names(items)
+    return items
 
 
 @router.get("/{kb_id}", response_model=KnowledgeBaseResponse)
@@ -81,9 +150,12 @@ async def get_knowledge_base(
 ):
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
-    kb = await svc.get_knowledge_base(kb_id, tenant_id=user.tenant_id, owner_user_id=str(user.id))
+    kb = await svc.get_kb_with_permissions(
+        kb_id, user_id=str(user.id), tenant_id=user.tenant_id, role=user.system_role
+    )
     if kb is None:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
+    await _enrich_owner_display_names([kb])
     return kb
 
 
@@ -95,6 +167,15 @@ async def update_knowledge_base(
 ):
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
+    try:
+        await svc.check_admin_permission(
+            kb_id, user_id=str(user.id), tenant_id=user.tenant_id, role=user.system_role
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Admin access required to update knowledge base")
+
     kb = await svc.update_knowledge_base(
         kb_id,
         tenant_id=user.tenant_id,
@@ -114,6 +195,15 @@ async def delete_knowledge_base(
 ):
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
+    try:
+        await svc.check_admin_permission(
+            kb_id, user_id=str(user.id), tenant_id=user.tenant_id, role=user.system_role
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Admin access required to delete knowledge base")
+
     deleted = await svc.delete_knowledge_base(kb_id, tenant_id=user.tenant_id, owner_user_id=str(user.id))
     if not deleted:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
@@ -133,13 +223,16 @@ async def list_documents(
 ):
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
-    docs = await svc.list_documents(
-        kb_id,
-        tenant_id=user.tenant_id,
-        owner_user_id=str(user.id),
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        docs = await svc.list_documents_with_access_check(
+            kb_id,
+            user_id=str(user.id),
+            tenant_id=user.tenant_id,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
     return docs
 
 
@@ -152,10 +245,11 @@ async def create_document(
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
     try:
-        doc = await svc.create_document(
+        doc = await svc.create_document_with_access_check(
             kb_id,
+            user_id=str(user.id),
             tenant_id=user.tenant_id,
-            owner_user_id=str(user.id),
+            role=user.system_role,
             title=body.title,
             content=body.content,
             content_format=body.content_format,
@@ -164,6 +258,8 @@ async def create_document(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Write access denied")
     return doc
 
 
@@ -175,8 +271,8 @@ async def get_document(
 ):
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
-    doc = await svc.get_document(doc_id, tenant_id=user.tenant_id, owner_user_id=str(user.id))
-    if doc is None or doc.get("knowledge_base_id") != kb_id:
+    doc = await svc.get_document_with_access_check(kb_id, doc_id, user_id=str(user.id), tenant_id=user.tenant_id)
+    if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
 
@@ -190,20 +286,22 @@ async def update_document(
 ):
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
-    # Verify doc belongs to this KB
-    existing = await svc.get_document(doc_id, tenant_id=user.tenant_id, owner_user_id=str(user.id))
-    if existing is None or existing.get("knowledge_base_id") != kb_id:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    doc = await svc.update_document(
-        doc_id,
-        tenant_id=user.tenant_id,
-        owner_user_id=str(user.id),
-        title=body.title,
-        content=body.content,
-        content_format=body.content_format,
-        source_name=body.source_name,
-    )
+    try:
+        doc = await svc.update_document_with_access_check(
+            kb_id,
+            doc_id,
+            user_id=str(user.id),
+            tenant_id=user.tenant_id,
+            role=user.system_role,
+            title=body.title,
+            content=body.content,
+            content_format=body.content_format,
+            source_name=body.source_name,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Write access denied")
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
@@ -217,12 +315,18 @@ async def delete_document(
 ):
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
-    # Verify doc belongs to this KB
-    existing = await svc.get_document(doc_id, tenant_id=user.tenant_id, owner_user_id=str(user.id))
-    if existing is None or existing.get("knowledge_base_id") != kb_id:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    deleted = await svc.delete_document(doc_id, tenant_id=user.tenant_id, owner_user_id=str(user.id))
+    try:
+        deleted = await svc.delete_document_with_access_check(
+            kb_id,
+            doc_id,
+            user_id=str(user.id),
+            tenant_id=user.tenant_id,
+            role=user.system_role,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Write access denied")
     if not deleted:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -235,14 +339,95 @@ async def reindex_document(
 ):
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
-    existing = await svc.get_document(doc_id, tenant_id=user.tenant_id, owner_user_id=str(user.id))
-    if existing is None or existing.get("knowledge_base_id") != kb_id:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    doc = await svc.reindex_document(doc_id, tenant_id=user.tenant_id, owner_user_id=str(user.id))
+    try:
+        doc = await svc.reindex_document_with_access_check(
+            kb_id,
+            doc_id,
+            user_id=str(user.id),
+            tenant_id=user.tenant_id,
+            role=user.system_role,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Write access denied")
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
+
+
+# ---------------------------------------------------------------------------
+# Permission Management
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{kb_id}/permissions", response_model=list[PermissionResponse])
+async def list_permissions(
+    kb_id: str,
+    request: Request,
+):
+    user = await get_current_user_from_request(request)
+    svc = _get_kb_service(request)
+    try:
+        perms = await svc.list_permissions(
+            kb_id, user_id=str(user.id), tenant_id=user.tenant_id, role=user.system_role
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return perms
+
+
+@router.post("/{kb_id}/permissions", response_model=PermissionResponse, status_code=201)
+async def grant_permission(
+    kb_id: str,
+    body: GrantPermissionRequest,
+    request: Request,
+):
+    user = await get_current_user_from_request(request)
+    svc = _get_kb_service(request)
+    try:
+        perm = await svc.grant_permission(
+            kb_id,
+            grantor_user_id=str(user.id),
+            grantor_tenant_id=user.tenant_id,
+            grantor_role=user.system_role,
+            target_user_id=body.user_id,
+            role=body.role,
+        )
+    except ValueError as e:
+        detail = str(e)
+        if "not found" in detail:
+            raise HTTPException(status_code=404, detail="Knowledge base not found")
+        raise HTTPException(status_code=400, detail=detail)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return perm
+
+
+@router.delete("/{kb_id}/permissions/{target_user_id}", status_code=204)
+async def revoke_permission(
+    kb_id: str,
+    target_user_id: str,
+    request: Request,
+):
+    user = await get_current_user_from_request(request)
+    svc = _get_kb_service(request)
+    try:
+        revoked = await svc.revoke_permission(
+            kb_id,
+            grantor_user_id=str(user.id),
+            grantor_tenant_id=user.tenant_id,
+            grantor_role=user.system_role,
+            target_user_id=target_user_id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if not revoked:
+        raise HTTPException(status_code=404, detail="Permission not found")
 
 
 # ---------------------------------------------------------------------------
@@ -298,9 +483,12 @@ async def upload_document(
     user = await get_current_user_from_request(request)
     svc = _get_kb_service(request)
 
-    kb = await svc.get_knowledge_base(kb_id, tenant_id=user.tenant_id, owner_user_id=str(user.id))
-    if kb is None:
+    try:
+        await svc.check_write_permission(kb_id, user_id=str(user.id), tenant_id=user.tenant_id, role=user.system_role)
+    except ValueError:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Write access denied")
 
     filename = file.filename or "untitled"
     ext = Path(filename).suffix.lower()
@@ -324,10 +512,11 @@ async def upload_document(
 
     doc_title = title or Path(filename).stem
     try:
-        doc = await svc.create_document(
+        doc = await svc.create_document_with_access_check(
             kb_id,
+            user_id=str(user.id),
             tenant_id=user.tenant_id,
-            owner_user_id=str(user.id),
+            role=user.system_role,
             title=doc_title,
             content=content,
             content_format="markdown",
@@ -335,6 +524,8 @@ async def upload_document(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Write access denied")
     return doc
 
 

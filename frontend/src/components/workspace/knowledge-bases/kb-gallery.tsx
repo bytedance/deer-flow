@@ -1,19 +1,84 @@
 "use client";
 
 import { BookOpenIcon, PlusIcon } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
-import { useKnowledgeBases } from "@/core/knowledge-base";
+import {
+  useAdminKnowledgeBases,
+  useKnowledgeBases,
+} from "@/core/knowledge-base";
+import type { KnowledgeBase } from "@/core/knowledge-base";
 
 import { KBCard } from "./kb-card";
 import { KBFormDialog } from "./kb-form-dialog";
+
+type TabValue = "all" | "mine" | "tenant" | "public" | "admin";
 
 export function KBGallery() {
   const { t } = useI18n();
   const { knowledgeBases, isLoading } = useKnowledgeBases();
   const [createOpen, setCreateOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabValue>("all");
+
+  const { knowledgeBases: adminKBs, isLoading: adminLoading } =
+    useAdminKnowledgeBases({ enabled: activeTab === "admin" });
+
+  const filteredKBs = useMemo(() => {
+    if (activeTab === "admin") return adminKBs;
+    if (activeTab === "all") return knowledgeBases;
+    const visibilityMap: Record<string, string> = {
+      mine: "private",
+      tenant: "tenant",
+      public: "public",
+    };
+    const target = visibilityMap[activeTab];
+    return knowledgeBases.filter((kb) => kb.visibility === target);
+  }, [activeTab, knowledgeBases, adminKBs]);
+
+  const loading = activeTab === "admin" ? adminLoading : isLoading;
+
+  function renderGrid(items: KnowledgeBase[]) {
+    if (loading) {
+      return (
+        <div className="text-muted-foreground flex h-40 items-center justify-center text-sm">
+          {t.common.loading}
+        </div>
+      );
+    }
+    if (items.length === 0) {
+      return (
+        <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
+          <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
+            <BookOpenIcon className="text-muted-foreground h-7 w-7" />
+          </div>
+          <div>
+            <p className="font-medium">{t.knowledgeBase.emptyTitle}</p>
+            <p className="text-muted-foreground mt-1 text-sm">
+              {t.knowledgeBase.emptyDescription}
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            className="mt-2"
+            onClick={() => setCreateOpen(true)}
+          >
+            <PlusIcon className="mr-1.5 h-4 w-4" />
+            {t.knowledgeBase.newKnowledgeBase}
+          </Button>
+        </div>
+      );
+    }
+    return (
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {items.map((kb) => (
+          <KBCard key={kb.id} knowledgeBase={kb} />
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div className="flex size-full flex-col">
@@ -31,37 +96,24 @@ export function KBGallery() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
-        {isLoading ? (
-          <div className="text-muted-foreground flex h-40 items-center justify-center text-sm">
-            {t.common.loading}
-          </div>
-        ) : knowledgeBases.length === 0 ? (
-          <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
-            <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
-              <BookOpenIcon className="text-muted-foreground h-7 w-7" />
-            </div>
-            <div>
-              <p className="font-medium">{t.knowledgeBase.emptyTitle}</p>
-              <p className="text-muted-foreground mt-1 text-sm">
-                {t.knowledgeBase.emptyDescription}
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              className="mt-2"
-              onClick={() => setCreateOpen(true)}
-            >
-              <PlusIcon className="mr-1.5 h-4 w-4" />
-              {t.knowledgeBase.newKnowledgeBase}
-            </Button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {knowledgeBases.map((kb) => (
-              <KBCard key={kb.id} knowledgeBase={kb} />
-            ))}
-          </div>
-        )}
+        <Tabs
+          value={activeTab}
+          onValueChange={(v) => setActiveTab(v as TabValue)}
+        >
+          <TabsList className="mb-4">
+            <TabsTrigger value="all">{t.knowledgeBase.tabAll}</TabsTrigger>
+            <TabsTrigger value="mine">{t.knowledgeBase.tabMine}</TabsTrigger>
+            <TabsTrigger value="tenant">
+              {t.knowledgeBase.tabTenant}
+            </TabsTrigger>
+            <TabsTrigger value="public">
+              {t.knowledgeBase.tabPublic}
+            </TabsTrigger>
+            <TabsTrigger value="admin">{t.knowledgeBase.tabAdmin}</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value={activeTab}>{renderGrid(filteredKBs)}</TabsContent>
+        </Tabs>
       </div>
 
       <KBFormDialog open={createOpen} onOpenChange={setCreateOpen} />

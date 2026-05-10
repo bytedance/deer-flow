@@ -3,8 +3,12 @@
 import {
   BookOpenIcon,
   FileTextIcon,
+  GlobeIcon,
+  LockIcon,
   PencilIcon,
+  ShieldIcon,
   Trash2Icon,
+  UsersIcon,
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -33,6 +37,7 @@ import type { KnowledgeBase } from "@/core/knowledge-base";
 
 import { KBDocumentsDialog } from "./kb-documents-dialog";
 import { KBFormDialog } from "./kb-form-dialog";
+import { KBPermissionsDialog } from "./kb-permissions-dialog";
 
 interface KBCardProps {
   knowledgeBase: KnowledgeBase;
@@ -44,6 +49,33 @@ export function KBCard({ knowledgeBase }: KBCardProps) {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [docsOpen, setDocsOpen] = useState(false);
+  const [permsOpen, setPermsOpen] = useState(false);
+
+  const canWrite = knowledgeBase.can_write ?? false;
+  const canAdmin = knowledgeBase.can_admin ?? false;
+
+  function visibilityIcon() {
+    switch (knowledgeBase.visibility) {
+      case "public":
+        return <GlobeIcon className="h-3 w-3" />;
+      case "tenant":
+        return <UsersIcon className="h-3 w-3" />;
+      default:
+        return <LockIcon className="h-3 w-3" />;
+    }
+  }
+
+  function visibilityLabel() {
+    switch (knowledgeBase.visibility) {
+      case "public":
+        return t.knowledgeBase.visibilityPublic;
+      case "tenant":
+        return t.knowledgeBase.visibilityTenant;
+      default:
+        return t.knowledgeBase.visibilityPrivate;
+    }
+  }
+
   function statusVariant() {
     switch (knowledgeBase.status) {
       case "active":
@@ -89,9 +121,15 @@ export function KBCard({ knowledgeBase }: KBCardProps) {
                 <CardTitle className="truncate text-base">
                   {knowledgeBase.name}
                 </CardTitle>
-                <Badge variant={statusVariant()} className="mt-0.5 text-xs">
-                  {statusLabel()}
-                </Badge>
+                <div className="mt-0.5 flex items-center gap-1">
+                  <Badge variant={statusVariant()} className="text-xs">
+                    {statusLabel()}
+                  </Badge>
+                  <Badge variant="outline" className="text-xs gap-1">
+                    {visibilityIcon()}
+                    {visibilityLabel()}
+                  </Badge>
+                </div>
               </div>
             </div>
           </div>
@@ -118,24 +156,39 @@ export function KBCard({ knowledgeBase }: KBCardProps) {
             {t.knowledgeBase.documents}
           </Button>
           <div className="flex gap-1">
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-8 w-8 shrink-0"
-              onClick={() => setEditOpen(true)}
-              title={t.common.edit}
-            >
-              <PencilIcon className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
-              onClick={() => setDeleteOpen(true)}
-              title={t.knowledgeBase.delete}
-            >
-              <Trash2Icon className="h-3.5 w-3.5" />
-            </Button>
+            {canAdmin && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8 shrink-0"
+                onClick={() => setPermsOpen(true)}
+                title={t.knowledgeBase.permissions}
+              >
+                <ShieldIcon className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {canWrite && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8 shrink-0"
+                onClick={() => setEditOpen(true)}
+                title={t.common.edit}
+              >
+                <PencilIcon className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {canAdmin && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
+                onClick={() => setDeleteOpen(true)}
+                title={t.knowledgeBase.delete}
+              >
+                <Trash2Icon className="h-3.5 w-3.5" />
+              </Button>
+            )}
           </div>
         </CardFooter>
       </Card>
@@ -149,6 +202,12 @@ export function KBCard({ knowledgeBase }: KBCardProps) {
       <KBDocumentsDialog
         open={docsOpen}
         onOpenChange={setDocsOpen}
+        knowledgeBase={knowledgeBase}
+      />
+
+      <KBPermissionsDialog
+        open={permsOpen}
+        onOpenChange={setPermsOpen}
         knowledgeBase={knowledgeBase}
       />
 
