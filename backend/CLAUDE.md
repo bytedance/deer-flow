@@ -565,6 +565,7 @@ See `docs/` directory for detailed documentation:
 - [CONFIGURATION.md](docs/CONFIGURATION.md) - Configuration options
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) - Architecture details
 - [API.md](docs/API.md) - API reference
+- [BENCHMARKS.md](docs/BENCHMARKS.md) - Recursion-limit profiles and reproducibility guidance for long-horizon evaluations
 - [SETUP.md](docs/SETUP.md) - Setup guide
 - [FILE_UPLOAD.md](docs/FILE_UPLOAD.md) - File upload feature
 - [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
