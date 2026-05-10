@@ -348,8 +348,9 @@ class TestAgentConstruction:
         skill_file.write_text("Skill instructions here", encoding="utf-8")
 
         monkeypatch.setattr(
-            "deerflow.skills.storage.get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file)]),
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
         )
 
         executor = SubagentExecutor(
@@ -358,7 +359,7 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        state = await executor._build_initial_state("Do the task")
+        state, _filtered_tools = await executor._build_initial_state("Do the task")
 
         messages = state["messages"]
         # Should have exactly 2 messages: one combined SystemMessage + one HumanMessage
@@ -385,7 +386,8 @@ class TestAgentConstruction:
         SubagentExecutor = classes["SubagentExecutor"]
 
         monkeypatch.setattr(
-            "deerflow.skills.storage.get_or_new_skill_storage",
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
             lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
         )
 
@@ -395,7 +397,7 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        state = await executor._build_initial_state("Do the task")
+        state, _filtered_tools = await executor._build_initial_state("Do the task")
 
         messages = state["messages"]
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -429,14 +431,15 @@ class TestAgentConstruction:
         skill_file.write_text("Skill content", encoding="utf-8")
 
         monkeypatch.setattr(
-            "deerflow.skills.storage.get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file)]),
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
         )
 
         SubagentExecutor = classes["SubagentExecutor"]
         executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
 
-        state = await executor._build_initial_state("Do the task")
+        state, _filtered_tools = await executor._build_initial_state("Do the task")
 
         messages = state["messages"]
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -657,8 +660,9 @@ class TestAsyncExecutionPath:
         (skill_dir / "SKILL.md").write_text("Skill instruction text", encoding="utf-8")
 
         monkeypatch.setattr(
-            "deerflow.skills.storage.get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md")]),
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md", allowed_tools=None)]),
         )
 
         captured_states: list[dict] = []
