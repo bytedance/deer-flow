@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.auth_middleware import AuthMiddleware
+from app.gateway.authentik_trust_middleware import AuthentikTrustMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware
 from app.gateway.deps import langgraph_runtime
@@ -306,6 +307,12 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)
+
+    # Authentik forward-auth trust: opt-in via DEER_FLOW_AUTHENTIK_TRUST_ENABLED.
+    # Mounted AFTER CSRF/Auth so it runs BEFORE them on inbound requests --
+    # it injects the synthesized access_token cookie that AuthMiddleware
+    # then validates normally.
+    app.add_middleware(AuthentikTrustMiddleware)
 
     # CORS: when GATEWAY_CORS_ORIGINS is set (dev without nginx), add CORS middleware.
     # In production, nginx handles CORS and no middleware is needed.
