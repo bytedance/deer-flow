@@ -82,7 +82,14 @@ async def init_engine(
             import asyncpg  # noqa: F401
         except ImportError:
             raise ImportError(
-                "database.backend is set to 'postgres' but asyncpg is not installed.\nInstall it with:\n    uv sync --all-packages --extra postgres\nOr switch to backend: sqlite in config.yaml for single-node deployment."
+                "database.backend is set to 'postgres' but asyncpg is not installed.\n"
+                "Install it with:\n"
+                "    cd backend && uv sync --all-packages --extra postgres\n"
+                "On the next `make dev` the postgres extra is auto-detected from\n"
+                "config.yaml (database.backend: postgres) and reinstalled, so it\n"
+                "will not be wiped again. Set UV_EXTRAS=postgres in .env to opt in\n"
+                "explicitly. Or switch to backend: sqlite in config.yaml for\n"
+                "single-node deployment."
             ) from None
 
     if backend == "sqlite":
