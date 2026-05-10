@@ -367,12 +367,11 @@ class SubagentExecutor:
         Returns:
             Initial state dictionary and tools filtered by loaded skill metadata.
         """
-        
+
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
         filtered_tools = self._apply_skill_allowed_tools(skills)
         skill_messages = await self._load_skill_messages(skills)
-
 
         # Combine system_prompt and skills into a single SystemMessage.
         # Some LLM APIs reject multiple SystemMessages with
