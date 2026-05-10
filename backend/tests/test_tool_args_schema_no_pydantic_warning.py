@@ -104,12 +104,5 @@ def test_write_file_append_is_discoverable_in_tool_schema() -> None:
 @pytest.mark.parametrize("tool_obj", [case[0] for case in _TOOL_CASES], ids=[case[0].name for case in _TOOL_CASES])
 def test_model_facing_tool_parameters_have_descriptions(tool_obj) -> None:
     """Every model-facing tool parameter should explain when and how to use it."""
-    missing_descriptions = [
-        field_name
-        for field_name, field in tool_obj.tool_call_schema.model_fields.items()
-        if not field.description
-    ]
-    assert missing_descriptions == [], (
-        f"{tool_obj.name} has model-facing parameters without descriptions: {missing_descriptions}. "
-        "Add an Args: section to the tool's docstring and ensure @tool(parse_docstring=True) is set."
-    )
+    missing_descriptions = [field_name for field_name, field in tool_obj.tool_call_schema.model_fields.items() if not field.description]
+    assert missing_descriptions == [], f"{tool_obj.name} has model-facing parameters without descriptions: {missing_descriptions}. Add an Args: section to the tool's docstring and ensure @tool(parse_docstring=True) is set."
