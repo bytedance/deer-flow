@@ -26,6 +26,7 @@ from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.token_collector import SubagentTokenCollector
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,8 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
+    token_usage_records: list[dict[str, int | str]] = field(default_factory=list)
+    usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def __post_init__(self):
@@ -412,13 +415,20 @@ class SubagentExecutor:
             ai_messages = []
             result.ai_messages = ai_messages
 
+        collector: SubagentTokenCollector | None = None
         try:
             state, filtered_tools = await self._build_initial_state(task)
             agent = self._create_agent(filtered_tools)
 
+            # Token collector for subagent LLM calls
+            collector_caller = f"subagent:{self.config.name}"
+            collector = SubagentTokenCollector(caller=collector_caller)
+
             # Build config with thread_id for sandbox access and recursion limit
             run_config: RunnableConfig = {
                 "recursion_limit": self.config.max_turns,
+                "callbacks": [collector],
+                "tags": [collector_caller],
             }
             context: dict[str, Any] = {}
             if self.thread_id:
@@ -441,6 +451,8 @@ class SubagentExecutor:
                         result.status = SubagentStatus.CANCELLED
                         result.error = "Cancelled by user"
                         result.completed_at = datetime.now()
+                if collector is not None:
+                    result.token_usage_records = collector.snapshot_records()
                 return result
 
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
@@ -455,6 +467,7 @@ class SubagentExecutor:
                             result.status = SubagentStatus.CANCELLED
                             result.error = "Cancelled by user"
                             result.completed_at = datetime.now()
+                    result.token_usage_records = collector.snapshot_records()
                     return result
 
                 final_state = chunk
@@ -481,6 +494,7 @@ class SubagentExecutor:
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
+            result.token_usage_records = collector.snapshot_records()
 
             if final_state is None:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no final state")
@@ -560,6 +574,8 @@ class SubagentExecutor:
             result.status = SubagentStatus.FAILED
             result.error = str(e)
             result.completed_at = datetime.now()
+            if collector is not None:
+                result.token_usage_records = collector.snapshot_records()
 
         return result
 
