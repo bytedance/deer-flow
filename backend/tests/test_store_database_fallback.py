@@ -268,3 +268,34 @@ async def test_async_make_store_uses_database_sqlite_when_legacy_checkpointer_ab
 
     assert FakeAsyncSqliteStore.conn_string == config.database.sqlite_path
     store_instance.setup.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_async_make_store_uses_database_postgres_when_legacy_checkpointer_absent():
+    from deerflow.runtime.store.async_provider import make_store
+
+    config = _app_config_with_database(DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/deerflow"))
+
+    store_instance = MagicMock(name="async_postgres_store")
+    store_instance.setup = AsyncMock()
+
+    class FakeAsyncPostgresStore:
+        @classmethod
+        def from_conn_string(cls, conn_string):
+            FakeAsyncPostgresStore.conn_string = conn_string
+            return cls()
+
+        async def __aenter__(self):
+            return store_instance
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    store_module = MagicMock(AsyncPostgresStore=FakeAsyncPostgresStore)
+
+    with patch.dict(sys.modules, {"langgraph.store.postgres.aio": store_module}):
+        async with make_store(config) as store:
+            assert store is store_instance
+
+    assert FakeAsyncPostgresStore.conn_string == config.database.postgres_url
+    store_instance.setup.assert_awaited_once()

@@ -96,7 +96,19 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
 
 @contextlib.contextmanager
 def _sync_checkpointer_from_database(db_config) -> Iterator[Checkpointer]:
-    """Context manager that creates a sync checkpointer from unified DatabaseConfig."""
+    """Build the sync checkpointer from ``database:`` when no legacy config exists.
+
+    Selection order stays backward compatible:
+    1. ``checkpointer:`` still wins and is handled by ``_sync_checkpointer_cm``.
+    2. This helper handles the unified ``database:`` fallback.
+    3. Callers fall back to in-memory only when no persistent database backend
+       is selected.
+
+    SQLite and Postgres checkpointers keep real connections open. For singleton
+    usage, ``get_checkpointer()`` stores this context manager in
+    ``_checkpointer_ctx`` so the connection stays alive, and
+    ``reset_checkpointer()`` later exits it to release the resources.
+    """
     if db_config.backend == "memory":
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -161,25 +173,24 @@ def get_checkpointer() -> Checkpointer:
     # Ensure app config is loaded before checking checkpointer config
     # This prevents returning InMemorySaver when config.yaml actually has a checkpointer section
     # but hasn't been loaded yet
-    from deerflow.config.app_config import _app_config
+    import deerflow.config.app_config as app_config_module
     from deerflow.config.checkpointer_config import get_checkpointer_config
 
     config = get_checkpointer_config()
-    app_config = _app_config
 
-    if config is None and app_config is None:
+    if config is None and app_config_module._app_config is None:
         # Only load app config lazily when neither the app config nor an explicit
         # checkpointer config has been initialized yet. This keeps tests that
         # intentionally set the global checkpointer config isolated from any
         # ambient config.yaml on disk.
         try:
-            app_config = get_app_config()
+            get_app_config()
         except FileNotFoundError:
             # In test environments without config.yaml, this is expected.
             pass
         config = get_checkpointer_config()
     if config is None:
-        db_config = getattr(app_config, "database", None)
+        db_config = getattr(app_config_module._app_config, "database", None)
         db_backend = getattr(db_config, "backend", None)
         if db_backend in ("sqlite", "postgres"):
             _checkpointer_ctx = _sync_checkpointer_from_database(db_config)

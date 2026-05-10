@@ -96,7 +96,19 @@ def _sync_store_cm(config) -> Iterator[BaseStore]:
 
 @contextlib.contextmanager
 def _sync_store_from_database(db_config) -> Iterator[BaseStore]:
-    """Context manager that creates a sync Store from unified DatabaseConfig."""
+    """Build the sync store from ``database:`` when no legacy config exists.
+
+    Selection order mirrors the checkpointer factory:
+    1. ``checkpointer:`` still wins and is handled by ``_sync_store_cm``.
+    2. This helper handles the unified ``database:`` fallback.
+    3. Callers fall back to in-memory only when no persistent database backend
+       is selected.
+
+    SQLite and Postgres stores keep real connections open. For singleton usage,
+    ``get_store()`` stores this context manager in ``_store_ctx`` so the
+    connection stays alive, and ``reset_store()`` later exits it to release the
+    resources.
+    """
     if db_config.backend == "memory":
         from langgraph.store.memory import InMemoryStore
 
@@ -162,21 +174,20 @@ def get_store() -> BaseStore:
 
     # Lazily load app config, mirroring the checkpointer singleton pattern so
     # that tests that set the global checkpointer config explicitly remain isolated.
-    from deerflow.config.app_config import _app_config
+    import deerflow.config.app_config as app_config_module
     from deerflow.config.checkpointer_config import get_checkpointer_config
 
     config = get_checkpointer_config()
-    app_config = _app_config
 
-    if config is None and app_config is None:
+    if config is None and app_config_module._app_config is None:
         try:
-            app_config = get_app_config()
+            get_app_config()
         except FileNotFoundError:
             pass
         config = get_checkpointer_config()
 
     if config is None:
-        db_config = getattr(app_config, "database", None)
+        db_config = getattr(app_config_module._app_config, "database", None)
         db_backend = getattr(db_config, "backend", None)
         if db_backend in ("sqlite", "postgres"):
             _store_ctx = _sync_store_from_database(db_config)
