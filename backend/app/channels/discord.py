@@ -21,6 +21,13 @@ class DiscordChannel(Channel):
     Configuration keys (in ``config.yaml`` under ``channels.discord``):
         - ``bot_token``: Discord Bot token.
         - ``allowed_guilds``: (optional) List of allowed Discord guild IDs. Empty = allow all.
+        - ``mention_only``: (optional) If true, only respond when the bot is mentioned.
+        - ``allowed_channels``: (optional) List of channel IDs where messages are always accepted
+          (even when mention_only is true). Use for channels where you want the bot to respond
+          without mentions. Empty = mention_only applies everywhere.
+        - ``thread_mode``: (optional) If true, first mention creates a thread; subsequent messages
+          in that channel are auto-routed to the thread without needing a mention (Hermes-style).
+          Default: true when mention_only is true.
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
@@ -32,6 +39,20 @@ class DiscordChannel(Channel):
                 self._allowed_guilds.add(int(guild_id))
             except (TypeError, ValueError):
                 continue
+        self._mention_only: bool = bool(config.get("mention_only", False))
+        self._thread_mode: bool = config.get("thread_mode", self._mention_only)
+        self._allowed_channels: set[int] = set()
+        for channel_id in config.get("allowed_channels", []):
+            try:
+                self._allowed_channels.add(int(channel_id))
+            except (TypeError, ValueError):
+                continue
+
+        # Session tracking: channel_id -> thread_id
+        self._active_threads: dict[str, str] = {}
+        
+        # Typing indicator management
+        self._typing_tasks: dict[str, asyncio.Task] = {}
 
         self._client = None
         self._thread: threading.Thread | None = None
@@ -100,6 +121,9 @@ class DiscordChannel(Channel):
         logger.info("Discord channel stopped")
 
     async def send(self, msg: OutboundMessage) -> None:
+        # Stop typing indicator once we're sending the response
+        self._stop_typing(msg.chat_id, msg.thread_ts)
+        
         target = await self._resolve_target(msg)
         if target is None:
             logger.error("[Discord] target not found for chat_id=%s thread_ts=%s", msg.chat_id, msg.thread_ts)
@@ -130,6 +154,34 @@ class DiscordChannel(Channel):
             logger.exception("[Discord] failed to upload file: %s", attachment.filename)
             return False
 
+    async def _start_typing(self, channel, chat_id: str, thread_ts: str = None) -> None:
+        """Starts a loop to send periodic typing indicators."""
+        target_id = thread_ts or chat_id
+        if target_id in self._typing_tasks:
+            return  # Already typing for this target
+
+        async def _typing_loop():
+            try:
+                while True:
+                    try:
+                        await channel.typing()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+
+        task = asyncio.create_task(_typing_loop())
+        self._typing_tasks[target_id] = task
+
+    def _stop_typing(self, chat_id: str, thread_ts: str = None) -> None:
+        """Stops the typing loop for a specific target."""
+        target_id = thread_ts or chat_id
+        task = self._typing_tasks.pop(target_id, None)
+        if task and not task.done():
+            task.cancel()
+            logger.debug("[Discord] stopped typing indicator for target %s", target_id)
+
     async def _on_message(self, message) -> None:
         if not self._running or not self._client:
             return
@@ -152,15 +204,108 @@ class DiscordChannel(Channel):
         if self._discord_module is None:
             return
 
-        if isinstance(message.channel, self._discord_module.Thread):
-            chat_id = str(message.channel.parent_id or message.channel.id)
-            thread_id = str(message.channel.id)
+        # Determine whether the bot is mentioned in this message
+        user = self._client.user if self._client else None
+        if user:
+            bot_mention = user.mention  # <@ID>
+            alt_mention = f"<@!{user.id}>"  # <@!ID> (ping variant)
+            standard_mention = f"<@{user.id}>"
         else:
-            thread = await self._create_thread(message)
-            if thread is None:
+            bot_mention = None
+            alt_mention = None
+            standard_mention = ""
+        has_mention = (
+            bot_mention in message.content
+            or alt_mention in message.content
+            or standard_mention in message.content
+        )
+
+        # Strip mention from text for processing
+        if has_mention:
+            text = text.replace(bot_mention or "", "").replace(alt_mention or "", "").replace(standard_mention or "", "").strip()
+            # Don't return early if text is empty — still process the mention (e.g., create thread)
+
+        # --- Determine thread/channel routing and typing target ---
+        thread_id = None
+        chat_id = None
+        typing_target = None  # The Discord object to type into
+
+        if isinstance(message.channel, self._discord_module.Thread):
+            # --- Message already inside a thread ---
+            thread_obj = message.channel
+            thread_id = str(thread_obj.id)
+            chat_id = str(thread_obj.parent_id or thread_obj.id)
+            typing_target = thread_obj
+
+            # If this is a known active thread, process normally
+            if thread_id in self._active_threads.values():
+                msg_type = InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT
+                inbound = self._make_inbound(
+                    chat_id=chat_id,
+                    user_id=str(message.author.id),
+                    text=text,
+                    msg_type=msg_type,
+                    thread_ts=thread_id,
+                    metadata={
+                        "guild_id": str(guild.id) if guild else None,
+                        "channel_id": str(message.channel.id),
+                        "message_id": str(message.id),
+                    },
+                )
+                inbound.topic_id = thread_id
+                self._publish(inbound)
+                # Start typing indicator in the thread
+                if typing_target:
+                    asyncio.create_task(self._start_typing(typing_target, chat_id, thread_id))
                 return
-            chat_id = str(message.channel.id)
-            thread_id = str(thread.id)
+
+            # Thread not in our tracking — fall through to normal handling below
+
+        # --- Message in a channel (not a thread, or thread not tracked) ---
+        channel_id = str(message.channel.id)
+
+        # Check if there's an active thread for this channel
+        if channel_id in self._active_threads:
+            # Existing session → route to the existing thread
+            target_thread_id = self._active_threads[channel_id]
+            logger.debug("[Discord] routing message in channel %s to existing thread %s", channel_id, target_thread_id)
+            thread_id = target_thread_id
+            chat_id = channel_id
+        elif self._mention_only and not has_mention:
+            # Not mentioned and not in a known thread → skip
+            logger.debug("[Discord] skipping message without mention in channel %s", channel_id)
+            return
+        elif self._mention_only and has_mention:
+            # First mention in this channel → create thread
+            thread_obj = await self._create_thread(message)
+            if thread_obj is not None:
+                target_thread_id = str(thread_obj.id)
+                self._active_threads[channel_id] = target_thread_id
+                thread_id = target_thread_id
+                chat_id = channel_id
+                typing_target = thread_obj  # Type into the new thread
+                logger.info("[Discord] created thread %s in channel %s for user %s", target_thread_id, channel_id, message.author.display_name)
+            else:
+                # Fallback: thread creation failed (disabled/permissions), reply in channel
+                logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
+                thread_id = channel_id
+                chat_id = channel_id
+                typing_target = message.channel  # Type into the channel
+        elif self._thread_mode:
+            # thread_mode but mention_only is False → create thread anyway for conversation grouping
+            thread_obj = await self._create_thread(message)
+            if thread_obj is None:
+                return
+            target_thread_id = str(thread_obj.id)
+            self._active_threads[channel_id] = target_thread_id
+            thread_id = target_thread_id
+            chat_id = channel_id
+            typing_target = thread_obj  # Type into the new thread
+        else:
+            # No threading — reply directly in channel
+            thread_id = channel_id
+            chat_id = channel_id
+            typing_target = message.channel  # Type into the channel
 
         msg_type = InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT
         inbound = self._make_inbound(
@@ -177,6 +322,14 @@ class DiscordChannel(Channel):
         )
         inbound.topic_id = thread_id
 
+        # Start typing indicator in the correct target (thread or channel)
+        if typing_target:
+            asyncio.create_task(self._start_typing(typing_target, chat_id, thread_id))
+
+        self._publish(inbound)
+
+    def _publish(self, inbound) -> None:
+        """Publish an inbound message to the main event loop."""
         if self._main_loop and self._main_loop.is_running():
             future = asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
             future.add_done_callback(lambda f: logger.exception("[Discord] publish_inbound failed", exc_info=f.exception()) if f.exception() else None)
@@ -202,10 +355,6 @@ class DiscordChannel(Channel):
             return await message.create_thread(name=thread_name)
         except Exception:
             logger.exception("[Discord] failed to create thread for message=%s (threads may be disabled or missing permissions)", message.id)
-            try:
-                await message.channel.send("Could not create a thread for your message. Please check that threads are enabled in this channel.")
-            except Exception:
-                pass
             return None
 
     async def _resolve_target(self, msg: OutboundMessage):
