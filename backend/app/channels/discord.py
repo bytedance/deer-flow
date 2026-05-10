@@ -271,8 +271,8 @@ class DiscordChannel(Channel):
             logger.debug("[Discord] routing message in channel %s to existing thread %s", channel_id, target_thread_id)
             thread_id = target_thread_id
             chat_id = channel_id
-        elif self._mention_only and not has_mention:
-            # Not mentioned and not in a known thread → skip
+        elif self._mention_only and not has_mention and channel_id not in self._allowed_channels:
+            # Not mentioned and not in an allowed channel → skip
             logger.debug("[Discord] skipping message without mention in channel %s", channel_id)
             return
         elif self._mention_only and has_mention:
