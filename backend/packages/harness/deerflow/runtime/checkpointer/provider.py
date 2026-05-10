@@ -159,7 +159,8 @@ _checkpointer_ctx = None  # open context manager keeping the connection alive
 def get_checkpointer() -> Checkpointer:
     """Return the global sync checkpointer singleton, creating it on first call.
 
-    Returns an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+    Returns an ``InMemorySaver`` when neither the legacy checkpointer section
+    nor a persistent database backend is configured.
 
     Raises:
         ImportError: If the required package for the configured backend is not installed.
@@ -241,7 +242,8 @@ def checkpointer_context() -> Iterator[Checkpointer]:
         with checkpointer_context() as cp:
             graph.invoke(input, config={"configurable": {"thread_id": "1"}})
 
-    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+    Yields an ``InMemorySaver`` when neither the legacy checkpointer section
+    nor a persistent database backend is configured.
     """
 
     config = get_app_config()

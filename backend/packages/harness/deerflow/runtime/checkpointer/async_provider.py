@@ -130,7 +130,8 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
         async with make_checkpointer(app_config) as checkpointer:
             app.state.checkpointer = checkpointer
 
-    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+    Yields an ``InMemorySaver`` when neither the legacy checkpointer section
+    nor a persistent database backend is configured.
 
     Priority:
     1. Legacy ``checkpointer:`` config section (backward compatible)
@@ -158,4 +159,7 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
     # Default: in-memory
     from langgraph.checkpoint.memory import InMemorySaver
 
+    if db_backend == "memory":
+        logger.info("Checkpointer: using InMemorySaver (in-process, not persistent)")
     yield InMemorySaver()
+    return
