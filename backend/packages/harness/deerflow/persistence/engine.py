@@ -81,7 +81,9 @@ async def init_engine(
         try:
             import asyncpg  # noqa: F401
         except ImportError:
-            raise ImportError("database.backend is set to 'postgres' but asyncpg is not installed.\nInstall it with:\n    uv sync --extra postgres\nOr switch to backend: sqlite in config.yaml for single-node deployment.") from None
+            raise ImportError(
+                "database.backend is set to 'postgres' but asyncpg is not installed.\nInstall it with:\n    uv sync --all-packages --extra postgres\nOr switch to backend: sqlite in config.yaml for single-node deployment."
+            ) from None
 
     if backend == "sqlite":
         import os

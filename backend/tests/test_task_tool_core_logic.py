@@ -221,7 +221,6 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
         prompt="collect diagnostics",
         subagent_type="general-purpose",
         tool_call_id="tc-123",
-        max_turns=7,
     )
 
     assert output == "Task Succeeded. Result: all done"
@@ -229,7 +228,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert captured["task_id"] == "tc-123"
     assert captured["executor_kwargs"]["thread_id"] == "thread-1"
     assert captured["executor_kwargs"]["parent_model"] == "ark-model"
-    assert captured["executor_kwargs"]["config"].max_turns == 7
+    assert captured["executor_kwargs"]["config"].max_turns == config.max_turns
     # Skills are no longer appended to system_prompt; they are loaded per-session
     # by SubagentExecutor and injected as conversation items (Codex pattern).
     assert captured["executor_kwargs"]["config"].system_prompt == "Base system prompt"

@@ -311,6 +311,28 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
+    async def test_structured_content_round_trips(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        content = [{"type": "text", "text": "hello"}, {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}]
+        record = await s.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message", content=content)
+
+        assert record["content"] == content
+        assert record["metadata"]["content_is_json"] is True
+        assert "content_is_dict" not in record["metadata"]
+
+        messages = await s.list_messages("t1")
+        assert messages[0]["content"] == content
+        assert messages[0]["metadata"]["content_is_json"] is True
+
+        await close_engine()
+
+    @pytest.mark.anyio
     async def test_pagination(self, tmp_path):
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
         from deerflow.runtime.events.store.db import DbRunEventStore
@@ -371,6 +393,55 @@ class TestDbRunEventStore:
         results = await s.put_batch(events)
         seqs = [r["seq"] for r in results]
         assert seqs == list(range(1, 51))
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_put_batch_accepts_structured_content(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        content = [{"messages": [{"type": "ai", "content": ""}]}]
+        results = await s.put_batch(
+            [
+                {
+                    "thread_id": "t1",
+                    "run_id": "r1",
+                    "event_type": "run.end",
+                    "category": "outputs",
+                    "content": content,
+                }
+            ]
+        )
+
+        assert results[0]["content"] == content
+        assert results[0]["metadata"]["content_is_json"] is True
+
+        events = await s.list_events("t1", "r1")
+        assert events[0]["content"] == content
+        assert events[0]["metadata"]["content_is_json"] is True
+
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_dict_content_keeps_legacy_metadata_flag(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        content = {"status": "success"}
+        record = await s.put(thread_id="t1", run_id="r1", event_type="run.end", category="outputs", content=content)
+
+        assert record["content"] == content
+        assert record["metadata"]["content_is_json"] is True
+        assert record["metadata"]["content_is_dict"] is True
+
         await close_engine()
 
 
