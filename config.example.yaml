@@ -30,7 +30,7 @@ log_level: info
 # When enabled, DeerFlow records input/output/total tokens per model call
 # and shows usage metadata in the workspace UI when providers return it.
 token_usage:
-  enabled: false
+  enabled: true
 
 # ============================================================================
 # Models Configuration
