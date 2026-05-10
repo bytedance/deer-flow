@@ -841,6 +841,7 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
     events = []
     report_calls = []
     cleanup_calls = []
+    scheduled_cleanups = []
 
     # Always return RUNNING — subagent never finishes
     monkeypatch.setattr(
@@ -855,6 +856,18 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
     def fake_report_subagent_usage(runtime, result):
         report_calls.append((runtime, result))
 
+    class DummyCleanupTask:
+        def __init__(self, coro):
+            self.coro = coro
+
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+    def fake_create_task(coro):
+        scheduled_cleanups.append(coro)
+        coro.close()
+        return DummyCleanupTask(coro)
+
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(
         task_tool_module,
@@ -864,6 +877,7 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_first_sleep)
+    monkeypatch.setattr(task_tool_module.asyncio, "create_task", fake_create_task)
     monkeypatch.setattr(task_tool_module, "_report_subagent_usage", fake_report_subagent_usage)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
@@ -881,8 +895,10 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
             tool_call_id="tc-cancelled-timeout",
         )
 
-    # cleanup is always attempted; the real implementation skips non-terminal tasks
-    assert len(cleanup_calls) == 1
+    # Non-terminal tasks cannot be cleaned immediately; a deferred cleanup
+    # keeps polling after the parent cancellation path exits.
+    assert cleanup_calls == []
+    assert len(scheduled_cleanups) == 1
     # _report_subagent_usage is called (but skips because result has no records)
     assert len(report_calls) == 1
 

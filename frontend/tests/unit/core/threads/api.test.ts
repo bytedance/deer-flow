@@ -21,9 +21,9 @@ test("fetchThreadTokenUsage uses shared auth fetch without JSON GET headers", as
       total_runs: 1,
       by_model: { unknown: { tokens: 7, runs: 1 } },
       by_caller: {
-        lead_agent: { tokens: 0, runs: 0 },
-        subagent: { tokens: 0, runs: 0 },
-        middleware: { tokens: 0, runs: 0 },
+        lead_agent: 0,
+        subagent: 0,
+        middleware: 0,
       },
     }),
   });

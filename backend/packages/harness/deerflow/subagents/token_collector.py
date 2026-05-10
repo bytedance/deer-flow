@@ -30,6 +30,9 @@ class SubagentTokenCollector(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         rid = str(run_id)
+        if rid in self._counted_run_ids:
+            return
+
         for generation in response.generations:
             for gen in generation:
                 if not hasattr(gen, "message"):
@@ -42,9 +45,7 @@ class SubagentTokenCollector(BaseCallbackHandler):
                 if total_tk <= 0:
                     total_tk = input_tk + output_tk
                 if total_tk <= 0:
-                    return
-                if rid in self._counted_run_ids:
-                    return
+                    continue
                 self._counted_run_ids.add(rid)
                 self._records.append(
                     {
@@ -55,6 +56,7 @@ class SubagentTokenCollector(BaseCallbackHandler):
                         "total_tokens": total_tk,
                     }
                 )
+                return
 
     def snapshot_records(self) -> list[dict[str, int | str]]:
         """Return a copy of the accumulated usage records."""

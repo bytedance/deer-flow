@@ -20,6 +20,23 @@ def _make_llm_response(content="Hello", usage=None):
     return response
 
 
+def _make_llm_response_from_usages(usages):
+    """Create a mock LLM response with one generation per usage entry."""
+    generations = []
+    for usage in usages:
+        msg = MagicMock()
+        msg.content = "chunk"
+        msg.usage_metadata = usage
+
+        gen = MagicMock()
+        gen.message = msg
+        generations.append([gen])
+
+    response = MagicMock()
+    response.generations = generations
+    return response
+
+
 class TestSubagentTokenCollector:
     def test_collects_usage_from_response(self):
         collector = SubagentTokenCollector(caller="subagent:test")
@@ -70,6 +87,21 @@ class TestSubagentTokenCollector:
         collector.on_llm_end(_make_llm_response("Hi", usage=usage), run_id=uuid4())
         records = collector.snapshot_records()
         assert len(records) == 0
+
+    def test_skips_empty_generation_and_records_later_usage(self):
+        collector = SubagentTokenCollector(caller="subagent:test")
+        response = _make_llm_response_from_usages(
+            [
+                None,
+                {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+            ]
+        )
+
+        collector.on_llm_end(response, run_id=uuid4())
+
+        records = collector.snapshot_records()
+        assert len(records) == 1
+        assert records[0]["total_tokens"] == 30
 
     def test_snapshot_returns_copy(self):
         collector = SubagentTokenCollector(caller="subagent:test")

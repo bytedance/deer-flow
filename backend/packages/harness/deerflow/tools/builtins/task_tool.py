@@ -27,15 +27,53 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def _await_subagent_terminal(task_id: str, max_polls: int) -> None:
+def _is_subagent_terminal(result: Any) -> bool:
+    """Return whether a background subagent result is safe to clean up."""
+    return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
+
+
+async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
     """Poll until the background subagent reaches a terminal status or we run out of polls."""
     for _ in range(max_polls):
         result = get_background_task_result(task_id)
         if result is None:
+            return None
+        if _is_subagent_terminal(result):
+            return result
+        await asyncio.sleep(5)
+    return None
+
+
+async def _deferred_cleanup_subagent_task(task_id: str, trace_id: str, max_polls: int) -> None:
+    """Keep polling a cancelled subagent until it can be safely removed."""
+    cleanup_poll_count = 0
+    while True:
+        result = get_background_task_result(task_id)
+        if result is None:
             return
-        if result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None:
+        if _is_subagent_terminal(result):
+            cleanup_background_task(task_id)
+            return
+        if cleanup_poll_count >= max_polls:
+            logger.warning(f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls")
             return
         await asyncio.sleep(5)
+        cleanup_poll_count += 1
+
+
+def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, task_id: str) -> None:
+    if cleanup_task.cancelled():
+        return
+
+    exc = cleanup_task.exception()
+    if exc is not None:
+        logger.error(f"[trace={trace_id}] Deferred cleanup failed for task {task_id}: {exc}")
+
+
+def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: int) -> None:
+    logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled task {task_id}")
+    cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(task_id, trace_id, max_polls))
+    cleanup_task.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, task_id=task_id))
 
 
 def _find_usage_recorder(runtime: Any) -> Any | None:
@@ -322,14 +360,18 @@ async def task_tool(
         # Wait (shielded) for the subagent to reach a terminal state so the
         # final token usage snapshot is reported to the parent RunJournal
         # before the parent worker persists get_completion_data().
+        terminal_result = None
         try:
-            await asyncio.shield(_await_subagent_terminal(task_id, max_poll_count))
+            terminal_result = await asyncio.shield(_await_subagent_terminal(task_id, max_poll_count))
         except asyncio.CancelledError:
             pass
 
         # Report whatever the subagent collected (even if we timed out).
-        final_result = get_background_task_result(task_id)
+        final_result = terminal_result or get_background_task_result(task_id)
         if final_result is not None:
             _report_subagent_usage(runtime, final_result)
-        cleanup_background_task(task_id)
+        if final_result is not None and _is_subagent_terminal(final_result):
+            cleanup_background_task(task_id)
+        else:
+            _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
         raise
