@@ -493,9 +493,6 @@ class SubagentExecutor:
                             ai_messages.append(message_dict)
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
 
-                # Sync token records so timeout/cancel can capture partial usage
-                result.token_usage_records = collector.snapshot_records()
-
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             result.token_usage_records = collector.snapshot_records()
 

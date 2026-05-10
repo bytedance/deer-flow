@@ -447,6 +447,7 @@ class TestCallerBucketing:
         j, _ = journal_setup
         run_id = uuid4()
         j.on_llm_end(_make_llm_response("A", usage=None), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        assert str(run_id) not in j._counted_llm_run_ids
         # Second callback for the same run_id with actual usage must still count
         usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
         j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
