@@ -2,7 +2,7 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -43,6 +43,10 @@ export default function AgentChatPage() {
 
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
+  // `isNewThread` gates history/token-usage fetches until the backend creates
+  // the thread. `isWelcomeMode` controls only the centered welcome layout, so
+  // it can flip immediately on submit without triggering eager history loads.
+  const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
@@ -53,6 +57,11 @@ export default function AgentChatPage() {
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
 
   const { showNotification } = useNotification();
+
+  useEffect(() => {
+    setIsWelcomeMode(isNewThread);
+  }, [isNewThread]);
+
   const {
     thread,
     pendingUsageMessages,
@@ -64,6 +73,9 @@ export default function AgentChatPage() {
     threadId: isNewThread ? undefined : threadId,
     context: { ...settings.context, agent_name: agent_name },
     isMock,
+    onSend: () => {
+      setIsWelcomeMode(false);
+    },
     onStart: (createdThreadId) => {
       setThreadId(createdThreadId);
       setIsNewThread(false);
@@ -115,7 +127,7 @@ export default function AgentChatPage() {
           <header
             className={cn(
               "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-4",
-              isNewThread
+              isWelcomeMode
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
@@ -162,7 +174,7 @@ export default function AgentChatPage() {
           <main className="flex min-h-0 max-w-full grow flex-col">
             <div className="flex min-h-0 flex-1 justify-center">
               <MessageList
-                className={cn("size-full", !isNewThread && "pt-10")}
+                className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
                 paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
@@ -176,14 +188,14 @@ export default function AgentChatPage() {
             <div
               className={cn(
                 "right-0 bottom-0 left-0 z-30 flex justify-center px-4",
-                isNewThread ? "absolute" : "relative shrink-0 pb-4",
+                isWelcomeMode ? "absolute" : "relative shrink-0 pb-4",
               )}
             >
               <div
                 className={cn(
                   "relative w-full",
-                  isNewThread && "-translate-y-[calc(50vh-96px)]",
-                  isNewThread
+                  isWelcomeMode && "-translate-y-[calc(50vh-96px)]",
+                  isWelcomeMode
                     ? "max-w-(--container-width-sm)"
                     : "max-w-(--container-width-md)",
                 )}
@@ -192,13 +204,13 @@ export default function AgentChatPage() {
                   <div
                     className={cn(
                       "right-0 left-0 z-0",
-                      isNewThread ? "absolute -top-4" : "relative",
+                      isWelcomeMode ? "absolute -top-4" : "relative",
                     )}
                   >
                     <div
                       className={cn(
                         "right-0 bottom-0 left-0",
-                        isNewThread ? "absolute" : "relative",
+                        isWelcomeMode ? "absolute" : "relative",
                       )}
                     >
                       <TodoList
@@ -213,11 +225,11 @@ export default function AgentChatPage() {
                 <InputBox
                   className={cn(
                     "bg-background/5 w-full",
-                    isNewThread && "-translate-y-4",
+                    isWelcomeMode && "-translate-y-4",
                   )}
-                  isWelcomeMode={isNewThread}
+                  isWelcomeMode={isWelcomeMode}
                   threadId={threadId}
-                  autoFocus={isNewThread}
+                  autoFocus={isWelcomeMode}
                   status={
                     thread.error
                       ? "error"
@@ -227,7 +239,7 @@ export default function AgentChatPage() {
                   }
                   context={settings.context}
                   extraHeader={
-                    isNewThread && (
+                    isWelcomeMode && (
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }
