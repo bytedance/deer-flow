@@ -89,3 +89,20 @@ def test_tool_args_schema_does_not_emit_pydantic_context_warning(tool_obj, extra
 
     pydantic_warnings = [w for w in caught if "PydanticSerializationUnexpectedValue" in str(w.message)]
     assert not pydantic_warnings, f"{tool_obj.name} args_schema.model_dump() emitted Pydantic context serialization warnings: {[str(w.message) for w in pydantic_warnings]}"
+
+
+def test_write_file_append_is_discoverable_in_tool_schema() -> None:
+    """``append`` must be visible and described in the model-facing tool schema."""
+    assert "append" in write_file_tool.description
+
+    append_field = write_file_tool.tool_call_schema.model_fields["append"]
+    assert append_field.default is False
+    assert append_field.description
+    assert "append" in append_field.description
+
+
+@pytest.mark.parametrize("tool_obj", [case[0] for case in _TOOL_CASES], ids=[case[0].name for case in _TOOL_CASES])
+def test_model_facing_tool_parameters_have_descriptions(tool_obj) -> None:
+    """Every model-facing tool parameter should explain when and how to use it."""
+    missing_descriptions = [field_name for field_name, field in tool_obj.tool_call_schema.model_fields.items() if not field.description]
+    assert missing_descriptions == [], f"{tool_obj.name} has model-facing parameters without descriptions: {missing_descriptions}. Add an Args: section to the tool's docstring and ensure @tool(parse_docstring=True) is set."
