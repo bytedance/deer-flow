@@ -45,15 +45,24 @@ jobs:
       fail-fast: false
       matrix:
         service: ${{ fromJSON(needs.matrix.outputs.services) }}
+        # build_context: dir passed to buildx as build context (`.` = repo root).
+        #   Backend/frontend Dockerfiles do `COPY backend ./backend` and
+        #   `COPY frontend ./frontend` so they need the repo-root layout.
+        # dockerfile_dir: dir used to construct the dockerfile path.
         include:
           - service: gateway
-            context: backend
+            build_context: .
+            dockerfile_dir: backend
             dockerfile: Dockerfile
           - service: frontend
-            context: frontend
+            build_context: .
+            dockerfile_dir: frontend
             dockerfile: Dockerfile
           - service: provisioner
-            context: docker/provisioner
+            # Provisioner Dockerfile does `COPY app.py .` — needs its own dir
+            # as context so app.py resolves against docker/provisioner/app.py.
+            build_context: docker/provisioner
+            dockerfile_dir: docker/provisioner
             dockerfile: Dockerfile
     steps:
       - name: Checkout
@@ -78,18 +87,21 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.context }}/${{ matrix.dockerfile }}
+          context: ${{ matrix.build_context }}
+          file: ${{ matrix.dockerfile_dir }}/${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
+          # Push to anomalous-ventures (local Harbor project) — `ghcr` is a
+          # proxy project and rejects pushes (denied: can not push artifact
+          # to a proxy project: ghcr).
           tags: |
-            ${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}
-            ${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:latest
-          cache-from: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache
-          cache-to: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache,mode=max
+            ${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}
+            ${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:latest
+          cache-from: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache
+          cache-to: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache,mode=max
 
       - name: Summary
         run: |
           echo "### Built deer-flow-${{ matrix.service }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Tag: \`${{ steps.tag.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Image: \`${{ secrets.HARBOR_REGISTRY }}/ghcr/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"

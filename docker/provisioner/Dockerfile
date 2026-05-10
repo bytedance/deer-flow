@@ -1,4 +1,9 @@
-FROM python:3.12-slim-bookworm
+# Base registry: defaults to mirror.gcr.io (Google's pull-through cache of Docker Hub
+# library/* -- no rate limit, no auth). Avoids docker.io anon 100/6h/IP cap that wedged
+# stax CI builds on 2026-05-09. Override w/ --build-arg BASE_REGISTRY=docker.io for
+# upstream/local dev, or harbor.spooty.io/dockerhub once that proxy has upstream creds.
+ARG BASE_REGISTRY=mirror.gcr.io
+FROM ${BASE_REGISTRY}/library/python:3.12-slim-bookworm
 
 ARG APT_MIRROR
 ARG PIP_INDEX_URL
