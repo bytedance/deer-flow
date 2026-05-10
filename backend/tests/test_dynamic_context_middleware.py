@@ -139,6 +139,30 @@ def test_injects_only_into_first_human_message_not_later_ones():
     assert all(m.id != "msg-2" for m in msgs)
 
 
+def test_summary_human_message_is_not_used_as_injection_target():
+    """After summarization, the synthetic summary HumanMessage is not a user turn."""
+    mw = _make_middleware()
+    state = {
+        "messages": [
+            HumanMessage(content="Here is a summary of the conversation to date:\n\n...", id="summary-1", name="summary"),
+            AIMessage(content="Earlier reply"),
+            HumanMessage(content="Follow-up", id="msg-2"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    assert result is not None
+    msgs = result["messages"]
+    assert len(msgs) == 2
+    assert msgs[0].id == "msg-2"
+    assert msgs[0].additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY) is True
+    assert msgs[1].id == "msg-2__user"
+    assert msgs[1].content == "Follow-up"
+
+
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------

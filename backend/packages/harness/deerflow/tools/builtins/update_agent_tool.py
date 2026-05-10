@@ -67,7 +67,7 @@ def _cleanup_temps(temps: list[Path]) -> None:
             logger.debug("Failed to clean up temp file %s", tmp, exc_info=True)
 
 
-@tool
+@tool(parse_docstring=True)
 def update_agent(
     runtime: Runtime,
     soul: str | None = None,
