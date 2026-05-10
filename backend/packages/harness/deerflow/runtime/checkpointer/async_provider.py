@@ -130,8 +130,8 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
         async with make_checkpointer(app_config) as checkpointer:
             app.state.checkpointer = checkpointer
 
-    Yields an ``InMemorySaver`` when neither the legacy checkpointer section
-    nor a persistent database backend is configured.
+    Yields an ``InMemorySaver`` when neither a legacy checkpointer nor a
+    persistent database backend is configured in *config.yaml*.
 
     Priority:
     1. Legacy ``checkpointer:`` config section (backward compatible)

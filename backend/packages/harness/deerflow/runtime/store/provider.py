@@ -160,9 +160,9 @@ _store_ctx = None  # open context manager keeping the connection alive
 def get_store() -> BaseStore:
     """Return the global sync Store singleton, creating it on first call.
 
-    Returns an :class:`~langgraph.store.memory.InMemoryStore` when neither the
-    legacy ``checkpointer:`` section nor a persistent ``database:`` backend is
-    configured.
+    Returns an :class:`~langgraph.store.memory.InMemoryStore` when neither a
+    legacy checkpointer nor a persistent database backend is configured in
+    *config.yaml* (emits a WARNING in that case).
 
     Raises:
         ImportError: If the required package for the configured backend is not installed.
@@ -241,9 +241,9 @@ def store_context() -> Iterator[BaseStore]:
         with store_context() as store:
             store.put(("threads",), thread_id, {...})
 
-    Yields an :class:`~langgraph.store.memory.InMemoryStore` when neither the
-    legacy ``checkpointer:`` section nor a persistent ``database:`` backend is
-    configured.
+    Yields an :class:`~langgraph.store.memory.InMemoryStore` when neither a
+    legacy checkpointer nor a persistent database backend is configured in
+    *config.yaml*.
     """
     config = get_app_config()
     if config.checkpointer is not None:

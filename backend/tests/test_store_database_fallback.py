@@ -299,3 +299,65 @@ async def test_async_make_store_uses_database_postgres_when_legacy_checkpointer_
 
     assert FakeAsyncPostgresStore.conn_string == config.database.postgres_url
     store_instance.setup.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_async_make_checkpointer_uses_database_sqlite_when_legacy_checkpointer_absent(tmp_path):
+    from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+
+    config = _app_config_with_database(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+
+    saver_instance = MagicMock(name="async_sqlite_saver")
+    saver_instance.setup = AsyncMock()
+
+    class FakeAsyncSqliteSaver:
+        @classmethod
+        def from_conn_string(cls, conn_string):
+            FakeAsyncSqliteSaver.conn_string = conn_string
+            return cls()
+
+        async def __aenter__(self):
+            return saver_instance
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    saver_module = MagicMock(AsyncSqliteSaver=FakeAsyncSqliteSaver)
+
+    with patch.dict(sys.modules, {"langgraph.checkpoint.sqlite.aio": saver_module}):
+        async with make_checkpointer(config) as checkpointer:
+            assert checkpointer is saver_instance
+
+    assert FakeAsyncSqliteSaver.conn_string == config.database.sqlite_path
+    saver_instance.setup.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_async_make_checkpointer_uses_database_postgres_when_legacy_checkpointer_absent():
+    from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+
+    config = _app_config_with_database(DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/deerflow"))
+
+    saver_instance = MagicMock(name="async_postgres_saver")
+    saver_instance.setup = AsyncMock()
+
+    class FakeAsyncPostgresSaver:
+        @classmethod
+        def from_conn_string(cls, conn_string):
+            FakeAsyncPostgresSaver.conn_string = conn_string
+            return cls()
+
+        async def __aenter__(self):
+            return saver_instance
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    saver_module = MagicMock(AsyncPostgresSaver=FakeAsyncPostgresSaver)
+
+    with patch.dict(sys.modules, {"langgraph.checkpoint.postgres.aio": saver_module}):
+        async with make_checkpointer(config) as checkpointer:
+            assert checkpointer is saver_instance
+
+    assert FakeAsyncPostgresSaver.conn_string == config.database.postgres_url
+    saver_instance.setup.assert_awaited_once()
