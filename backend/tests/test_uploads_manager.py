@@ -126,15 +126,18 @@ class TestWriteUploadFileNoSymlink:
         assert dest.read_bytes() == b"new contents"
         assert os.stat(dest).st_nlink == 1
 
-    def test_fails_closed_without_no_follow_support(self, tmp_path, monkeypatch):
+    def test_fallback_without_no_follow_support_succeeds(self, tmp_path, monkeypatch):
         monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
 
-        with pytest.raises(UnsafeUploadPathError, match="O_NOFOLLOW"):
-            write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
-
-        assert not (tmp_path / "notes.txt").exists()
+        # When O_NOFOLLOW is absent (Windows), the function falls back to
+        # a dual-lstat + fstat approach and succeeds.
+        result = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
+        assert result == tmp_path / "notes.txt"
+        assert (tmp_path / "notes.txt").read_bytes() == b"hello"
 
     def test_open_uses_nonblocking_flag_when_available(self, tmp_path):
+        if not hasattr(os, "O_NONBLOCK"):
+            pytest.skip("O_NONBLOCK not available on this platform")
         with patch("deerflow.uploads.manager.os.open", side_effect=OSError(errno.ENXIO, "no reader")) as open_mock:
             with pytest.raises(UnsafeUploadPathError, match="Unsafe upload destination"):
                 write_upload_file_no_symlink(tmp_path, "pipe.txt", b"hello")
@@ -144,6 +147,8 @@ class TestWriteUploadFileNoSymlink:
 
     @pytest.mark.parametrize("open_errno", [errno.ENXIO, errno.EAGAIN])
     def test_nonblocking_special_file_open_errors_are_unsafe(self, tmp_path, open_errno):
+        if not hasattr(os, "O_NONBLOCK"):
+            pytest.skip("O_NONBLOCK not available on this platform")
         with patch("deerflow.uploads.manager.os.open", side_effect=OSError(open_errno, "would block")):
             with pytest.raises(UnsafeUploadPathError, match="Unsafe upload destination"):
                 write_upload_file_no_symlink(tmp_path, "pipe.txt", b"hello")
