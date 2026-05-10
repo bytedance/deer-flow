@@ -20,7 +20,7 @@ def _get_runtime_user_id(runtime: Runtime) -> str:
     return get_effective_user_id()
 
 
-@tool
+@tool(parse_docstring=True)
 def setup_agent(
     soul: str,
     description: str,
