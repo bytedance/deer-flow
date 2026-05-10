@@ -15,7 +15,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useI18n } from "@/core/i18n/hooks";
-import { accumulateUsage, formatTokenCount } from "@/core/messages/usage";
+import {
+  formatTokenCount,
+  selectHeaderTokenUsage,
+  type TokenUsage,
+} from "@/core/messages/usage";
 import {
   getTokenUsageViewPreset,
   tokenUsagePreferencesFromPreset,
@@ -25,7 +29,10 @@ import {
 import { cn } from "@/lib/utils";
 
 interface TokenUsageIndicatorProps {
+  threadId?: string;
   messages: Message[];
+  pendingMessages?: Message[];
+  backendUsage?: TokenUsage | null;
   enabled?: boolean;
   preferences: TokenUsagePreferences;
   onPreferencesChange: (preferences: TokenUsagePreferences) => void;
@@ -33,7 +40,10 @@ interface TokenUsageIndicatorProps {
 }
 
 export function TokenUsageIndicator({
+  threadId,
   messages,
+  pendingMessages,
+  backendUsage,
   enabled = false,
   preferences,
   onPreferencesChange,
@@ -41,7 +51,15 @@ export function TokenUsageIndicator({
 }: TokenUsageIndicatorProps) {
   const { t } = useI18n();
 
-  const usage = useMemo(() => accumulateUsage(messages), [messages]);
+  const usage = useMemo(
+    () =>
+      selectHeaderTokenUsage({
+        backendUsage: threadId ? backendUsage : null,
+        messages,
+        pendingMessages,
+      }),
+    [backendUsage, messages, pendingMessages, threadId],
+  );
   const preset = getTokenUsageViewPreset(preferences);
 
   if (!enabled) {

@@ -1,5 +1,6 @@
 """Tests for TokenUsageMiddleware attribution annotations."""
 
+import logging
 from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage
@@ -17,6 +18,82 @@ def _make_runtime():
 
 
 class TestTokenUsageMiddleware:
+    def test_logs_cache_token_details(self, caplog):
+        middleware = TokenUsageMiddleware()
+        message = AIMessage(
+            content="Here is the final answer.",
+            usage_metadata={
+                "input_tokens": 350,
+                "output_tokens": 240,
+                "total_tokens": 590,
+                "input_token_details": {
+                    "audio": 10,
+                    "cache_creation": 200,
+                    "cache_read": 100,
+                },
+                "output_token_details": {
+                    "audio": 10,
+                    "reasoning": 200,
+                },
+            },
+        )
+
+        with caplog.at_level(
+            logging.INFO,
+            logger="deerflow.agents.middlewares.token_usage_middleware",
+        ):
+            result = middleware.after_model({"messages": [message]}, _make_runtime())
+
+        assert result is not None
+        assert "LLM token usage: input=350 output=240 total=590" in caplog.text
+        assert "input_token_details={'audio': 10, 'cache_creation': 200, 'cache_read': 100}" in caplog.text
+        assert "output_token_details={'audio': 10, 'reasoning': 200}" in caplog.text
+
+    def test_logs_basic_tokens_when_no_detail_fields_in_usage_metadata(self, caplog):
+        """When usage_metadata has only totals (no input_token_details), log just the counts."""
+        middleware = TokenUsageMiddleware()
+        message = AIMessage(
+            content="Here is the final answer.",
+            usage_metadata={
+                "input_tokens": 350,
+                "output_tokens": 240,
+                "total_tokens": 590,
+            },
+        )
+
+        with caplog.at_level(
+            logging.INFO,
+            logger="deerflow.agents.middlewares.token_usage_middleware",
+        ):
+            result = middleware.after_model({"messages": [message]}, _make_runtime())
+
+        assert result is not None
+        assert "LLM token usage: input=350 output=240 total=590" in caplog.text
+        assert "input_token_details" not in caplog.text
+
+    def test_no_log_when_usage_metadata_is_missing(self, caplog):
+        """When usage_metadata is absent, no token usage line is logged."""
+        middleware = TokenUsageMiddleware()
+        message = AIMessage(
+            content="Here is the final answer.",
+            response_metadata={
+                "usage": {
+                    "input_tokens": 350,
+                    "output_tokens": 240,
+                    "total_tokens": 590,
+                }
+            },
+        )
+
+        with caplog.at_level(
+            logging.INFO,
+            logger="deerflow.agents.middlewares.token_usage_middleware",
+        ):
+            result = middleware.after_model({"messages": [message]}, _make_runtime())
+
+        assert result is not None
+        assert "LLM token usage" not in caplog.text
+
     def test_annotates_todo_updates_with_structured_actions(self):
         middleware = TokenUsageMiddleware()
         message = AIMessage(

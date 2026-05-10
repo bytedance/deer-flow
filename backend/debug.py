@@ -79,7 +79,9 @@ async def main():
     from langgraph.runtime import Runtime
 
     from deerflow.agents import make_lead_agent
+    from deerflow.config.paths import get_paths
     from deerflow.mcp import initialize_mcp_tools
+    from deerflow.runtime.user_context import get_effective_user_id
 
     # Initialize MCP tools at startup
     try:
@@ -113,6 +115,8 @@ async def main():
         print("Tip: `uv sync --group dev` to enable arrow-key & history support")
     print("=" * 50)
 
+    seen_artifacts: set[str] = set()
+
     while True:
         try:
             if session:
@@ -133,6 +137,22 @@ async def main():
             if result.get("messages"):
                 last_message = result["messages"][-1]
                 print(f"\nAgent: {last_message.content}")
+
+            # Show files presented to the user this turn (new artifacts only)
+            artifacts = result.get("artifacts") or []
+            new_artifacts = [p for p in artifacts if p not in seen_artifacts]
+            if new_artifacts:
+                thread_id = config["configurable"]["thread_id"]
+                user_id = get_effective_user_id()
+                paths = get_paths()
+                print("\n[Presented files]")
+                for virtual in new_artifacts:
+                    try:
+                        physical = paths.resolve_virtual_path(thread_id, virtual, user_id=user_id)
+                        print(f"  - {virtual}\n    → {physical}")
+                    except ValueError as exc:
+                        print(f"  - {virtual}    (failed to resolve physical path: {exc})")
+                seen_artifacts.update(new_artifacts)
 
         except (KeyboardInterrupt, EOFError):
             print("\nGoodbye!")

@@ -8,7 +8,9 @@ Tests:
 5. Postgres missing-dep error message
 """
 
+import sys
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
 
@@ -221,13 +223,8 @@ class TestEngineLifecycle:
         """If asyncpg is not installed, error message tells user what to do."""
         from deerflow.persistence.engine import init_engine
 
-        try:
-            import asyncpg  # noqa: F401
-
-            pytest.skip("asyncpg is installed -- cannot test missing-dep path")
-        except ImportError:
-            # asyncpg is not installed — this is the expected state for this test.
-            # We proceed to verify that init_engine raises an actionable ImportError.
-            pass  # noqa: S110 — intentionally ignored
-        with pytest.raises(ImportError, match="uv sync --extra postgres"):
+        with (
+            patch.dict(sys.modules, {"asyncpg": None}),
+            pytest.raises(ImportError, match="uv sync --all-packages --extra postgres"),
+        ):
             await init_engine("postgres", url="postgresql+asyncpg://x:x@localhost/x")

@@ -243,7 +243,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - `bash` - Execute commands with path translation and error handling
 - `ls` - Directory listing (tree format, max 2 levels)
 - `read_file` - Read file contents with optional line range
-- `write_file` - Write/append to files, creates directories
+- `write_file` - Write/append to files, creates directories; overwrites by default and exposes the `append` argument in the model-facing schema for end-of-file writes
 - `str_replace` - Substring replacement (single or all occurrences); same-path serialization is scoped to `(sandbox.id, path)` so isolated sandboxes do not contend on identical virtual paths inside one process
 
 ### Subagent System (`packages/harness/deerflow/subagents/`)
@@ -266,7 +266,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
    - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
-   - `task` - Delegate to subagent (description, prompt, subagent_type, max_turns)
+   - `task` - Delegate to subagent (description, prompt, subagent_type)
 
 **Community tools** (`packages/harness/deerflow/community/`):
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)
@@ -520,6 +520,7 @@ Multi-file upload with automatic document conversion:
 - Rejects directory inputs before copying so uploads stay all-or-nothing
 - Reuses one conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories
+- Duplicate filenames in a single upload request are auto-renamed with `_N` suffixes so later files do not truncate earlier files
 - Agent receives uploaded file list via `UploadsMiddleware`
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
