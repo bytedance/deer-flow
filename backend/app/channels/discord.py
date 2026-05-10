@@ -25,9 +25,8 @@ class DiscordChannel(Channel):
         - ``allowed_channels``: (optional) List of channel IDs where messages are always accepted
           (even when mention_only is true). Use for channels where you want the bot to respond
           without mentions. Empty = mention_only applies everywhere.
-        - ``thread_mode``: (optional) If true, first mention creates a thread; subsequent messages
-          in that channel are auto-routed to the thread without needing a mention (Hermes-style).
-          Default: true when mention_only is true.
+        - ``thread_mode``: (optional) If true, create a new thread for each reply (conversation grouping).
+          Default: same as ``mention_only``.
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
