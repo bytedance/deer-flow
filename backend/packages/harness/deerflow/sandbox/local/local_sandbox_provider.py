@@ -126,4 +126,6 @@ class LocalSandboxProvider(SandboxProvider):
         _singleton = None
 
     def shutdown(self) -> None:
+        # LocalSandboxProvider has no extra resources beyond the shared
+        # singleton, so shutdown uses the same cleanup path as reset.
         self.reset()

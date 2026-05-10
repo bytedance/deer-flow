@@ -37,6 +37,10 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def reset(self) -> None:
+        """Clear cached state that survives provider instance replacement."""
+        pass
+
 
 _default_sandbox_provider: SandboxProvider | None = None
 
@@ -65,18 +69,17 @@ def reset_sandbox_provider() -> None:
     The next call to `get_sandbox_provider()` will create a new instance.
     Useful for testing or when switching configurations.
 
-    Providers may opt into a lightweight `reset()` hook to clear any
-    module-level state they keep alive across instances (for example,
-    `LocalSandboxProvider`'s cached `LocalSandbox` singleton). Without it,
-    config/mount changes would not take effect on the next acquire().
+    Providers can override `reset()` to clear any module-level state they keep
+    alive across instances (for example, `LocalSandboxProvider`'s cached
+    `LocalSandbox` singleton). Without it, config/mount changes would not take
+    effect on the next acquire().
 
     Note: If the provider has active sandboxes, they will be orphaned.
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
     global _default_sandbox_provider
     if _default_sandbox_provider is not None:
-        if hasattr(_default_sandbox_provider, "reset"):
-            _default_sandbox_provider.reset()
+        _default_sandbox_provider.reset()
         _default_sandbox_provider = None
 
 
