@@ -1,0 +1,48 @@
+"use client";
+
+import { useBlockStore } from "@/core/genui/store";
+
+import { GenUIRenderer } from "./GenUIRenderer";
+
+interface LayoutBlockProps {
+  block: {
+    block_id: string;
+    props: {
+      layout_type: "grid" | "flex";
+      columns?: number;
+      gap?: number;
+      align?: "start" | "center" | "end" | "stretch";
+    };
+    onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
+  };
+}
+
+export default function LayoutBlock({ block }: LayoutBlockProps) {
+  const { props, block_id, onInteraction } = block;
+  const { layout_type, columns = 2, gap = 16, align = "stretch" } = props;
+
+  const children = useBlockStore((state) => state.getChildBlocks(block_id));
+
+  const style: React.CSSProperties =
+    layout_type === "grid"
+      ? {
+          display: "grid",
+          gridTemplateColumns: `repeat(${columns}, 1fr)`,
+          gap: `${gap}px`,
+          alignItems: align,
+        }
+      : {
+          display: "flex",
+          flexWrap: "wrap",
+          gap: `${gap}px`,
+          alignItems: align,
+        };
+
+  return (
+    <div style={style} role="group" aria-label={`${layout_type} layout`}>
+      {children.map((child) => (
+        <GenUIRenderer key={child.block_id} block={child} onInteraction={onInteraction} />
+      ))}
+    </div>
+  );
+}

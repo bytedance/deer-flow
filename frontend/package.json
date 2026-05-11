@@ -26,6 +26,7 @@
     "@codemirror/lang-markdown": "^6.5.0",
     "@codemirror/lang-python": "^6.2.1",
     "@codemirror/language-data": "^6.5.2",
+    "@hookform/resolvers": "^5.2.2",
     "@langchain/core": "^1.1.15",
     "@langchain/langgraph-sdk": "^1.5.3",
     "@radix-ui/react-avatar": "^1.1.11",
@@ -65,6 +66,7 @@
     "embla-carousel-react": "^8.6.0",
     "gsap": "^3.13.0",
     "hast": "^1.0.0",
+    "isomorphic-dompurify": "^3.12.0",
     "katex": "^0.16.28",
     "lucide-react": "^0.562.0",
     "motion": "^12.26.2",
@@ -77,6 +79,7 @@
     "ogl": "^1.0.11",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-hook-form": "^7.75.0",
     "react-resizable-panels": "^4.4.1",
     "recharts": "^3.8.1",
     "rehype-katex": "^7.0.1",
@@ -91,7 +94,8 @@
     "unist-util-visit": "^5.0.0",
     "use-stick-to-bottom": "^1.1.1",
     "uuid": "^14.0.0",
-    "zod": "^3.24.2"
+    "zod": "^3.24.2",
+    "zustand": "^5.0.13"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.1",

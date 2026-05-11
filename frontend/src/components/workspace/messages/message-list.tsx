@@ -7,7 +7,9 @@ import {
   Conversation,
   ConversationContent,
 } from "@/components/ai-elements/conversation";
+import { GenUIBlockList } from "@/components/genui";
 import { Button } from "@/components/ui/button";
+import { submitInteraction } from "@/core/genui";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildTokenDebugSteps,
@@ -253,6 +255,13 @@ export function MessageList({
     [thread.isLoading, tokenDebugSteps, tokenUsageInlineMode],
   );
 
+  const handleInteraction = useCallback(
+    (callbackId: string, payload: Record<string, unknown>) => {
+      void submitInteraction(threadId, callbackId, payload);
+    },
+    [threadId],
+  );
+
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
@@ -476,6 +485,7 @@ export function MessageList({
           }
         })}
         {thread.isLoading && <StreamingIndicator className="my-4" />}
+        <GenUIBlockList threadId={threadId} onInteraction={handleInteraction} />
         <div style={{ height: `${paddingBottom}px` }} />
       </ConversationContent>
     </Conversation>

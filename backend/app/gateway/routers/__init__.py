@@ -10,6 +10,8 @@ _ROUTER_MODULES = {
     "channels",
     "cost",
     "feedback",
+    "genui",
+    "genui_telemetry",
     "mcp",
     "memory",
     "models",

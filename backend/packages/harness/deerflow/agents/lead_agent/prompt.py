@@ -429,6 +429,8 @@ You: "Deploying to staging..." [proceed]
 
 {deferred_tools_section}
 
+{genui_section}
+
 {subagent_section}
 
 <working_directory existed="true">
@@ -784,6 +786,11 @@ def apply_prompt_template(
     # Get deferred tools section (tool_search)
     deferred_tools_section = get_deferred_tools_prompt_section(app_config=app_config)
 
+    # Get GenUI guidance section
+    from deerflow.agents.prompts import GENUI_GUIDANCE
+
+    genui_section = GENUI_GUIDANCE
+
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section(app_config=app_config)
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
@@ -796,6 +803,7 @@ def apply_prompt_template(
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
+        genui_section=genui_section,
         memory_context=memory_context,
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,

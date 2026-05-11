@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { type UIBlock, useBlockStore } from "@/core/genui/store";
 
 import { fetchGateway, getAPIClient } from "../api";
 import { getBackendBaseURL } from "../config";
@@ -239,6 +240,16 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "ui_block"
+      ) {
+        useBlockStore.getState().applyBlock(event as UIBlock);
+        return;
+      }
+
       if (
         typeof event === "object" &&
         event !== null &&

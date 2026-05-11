@@ -24,6 +24,8 @@ from app.gateway.routers import (
     channels,
     cost,
     feedback,
+    genui,
+    genui_telemetry,
     knowledge_bases,
     mcp,
     memory,
@@ -560,6 +562,12 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Knowledge base API
     app.include_router(knowledge_bases.router)
+
+    # GenUI interaction API
+    app.include_router(genui.router)
+
+    # GenUI telemetry and block recovery API
+    app.include_router(genui_telemetry.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
