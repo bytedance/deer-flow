@@ -10,13 +10,18 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool, tool
+from pydantic import BaseModel, Field
 
 from deerflow.tools.tools import get_available_tools
 
 # ---------------------------------------------------------------------------
 # Fixture tools
 # ---------------------------------------------------------------------------
+
+
+class AsyncToolArgs(BaseModel):
+    x: int = Field(..., description="test input")
 
 
 @tool
@@ -52,8 +57,43 @@ def _make_minimal_config(tools):
     config.tools = tools
     config.models = []
     config.tool_search.enabled = False
+    config.skill_evolution.enabled = False
     config.sandbox = MagicMock()
+    config.acp_agents = {}
     return config
+
+
+@patch("deerflow.tools.tools.get_app_config")
+@patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
+@patch("deerflow.tools.tools.reset_deferred_registry")
+def test_config_loaded_async_only_tool_gets_sync_wrapper(mock_reset, mock_bash, mock_cfg):
+    """Config-loaded async-only tools can still be invoked by sync clients."""
+
+    async def async_tool_impl(x: int) -> str:
+        return f"result: {x}"
+
+    async_tool = StructuredTool(
+        name="async_tool",
+        description="Async-only test tool.",
+        args_schema=AsyncToolArgs,
+        func=None,
+        coroutine=async_tool_impl,
+    )
+    tool_cfg = MagicMock()
+    tool_cfg.name = "async_tool"
+    tool_cfg.group = "test"
+    tool_cfg.use = "tests.fake:async_tool"
+    mock_cfg.return_value = _make_minimal_config([tool_cfg])
+
+    with (
+        patch("deerflow.tools.tools.resolve_variable", return_value=async_tool),
+        patch("deerflow.tools.tools.BUILTIN_TOOLS", []),
+    ):
+        result = get_available_tools(include_mcp=False, app_config=mock_cfg.return_value)
+
+    assert async_tool in result
+    assert async_tool.func is not None
+    assert async_tool.invoke({"x": 42}) == "result: 42"
 
 
 @patch("deerflow.tools.tools.get_app_config")
