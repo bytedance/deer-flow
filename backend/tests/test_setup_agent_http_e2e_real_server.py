@@ -55,14 +55,58 @@ def _build_fake_create_chat_model(agent_name: str):
 
 @pytest.fixture
 def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Point DEER_FLOW_HOME at tmp_path so we don't touch the real .deer-flow."""
+    """Stand up an isolated DeerFlow data root + config under tmp_path.
+
+    - Sets ``DEER_FLOW_HOME`` so paths land under tmp_path, not the real
+      ``.deer-flow`` directory.
+    - Stages a copy of the project's ``config.yaml`` (or ``config.example.yaml``
+      on a fresh CI checkout where ``config.yaml`` is gitignored) and pins
+      ``DEER_FLOW_CONFIG_PATH`` to it, so lifespan boot doesn't depend on the
+      developer's local config layout.
+    - Sets a placeholder OPENAI_API_KEY because the config has
+      ``$OPENAI_API_KEY`` that gets resolved at parse time; the LLM itself is
+      mocked, so any non-empty value works.
+    """
     home = tmp_path / "deer-flow-home"
     home.mkdir()
     monkeypatch.setenv("DEER_FLOW_HOME", str(home))
-    # config.yaml resolves $OPENAI_API_KEY; supply any value so config parses
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-key-not-used-because-llm-is-mocked")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.invalid")
+
+    # Hermetic config: do not depend on whether the dev machine has a real
+    # ``config.yaml`` at the repo root. CI's ``actions/checkout`` only ships
+    # ``config.example.yaml`` (and its ``models:`` list is commented out, so
+    # AppConfig validation would reject it). Write a minimal, self-sufficient
+    # config to tmp_path and pin ``DEER_FLOW_CONFIG_PATH`` to it.
+    staged_config = tmp_path / "config.yaml"
+    staged_config.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(staged_config))
+
     return home
+
+
+# Minimal config that satisfies AppConfig + LeadAgent's _resolve_model_name.
+# The model `use` path must resolve to a real class for config parsing to
+# succeed; the test patches ``create_chat_model`` on the lead agent module,
+# so the model is never actually instantiated. SandboxConfig.use is required
+# at schema level; LocalSandboxProvider is the only sandbox that runs without
+# Docker.
+_MINIMAL_CONFIG_YAML = """\
+log_level: info
+models:
+  - name: fake-test-model
+    display_name: Fake Test Model
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o-mini
+    api_key: $OPENAI_API_KEY
+    base_url: $OPENAI_API_BASE
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+agents_api:
+  enabled: true
+database:
+  backend: sqlite
+"""
 
 
 def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
