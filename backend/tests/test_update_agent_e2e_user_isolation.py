@@ -200,9 +200,7 @@ def test_update_agent_should_use_runtime_context_user_id_when_contextvar_missing
         thread_id="thread-update-2",
     )
     runtime_ctx = _build_runtime_context("thread-update-2", "run-2", config.get("context"), None)
-    assert runtime_ctx["user_id"] == auth_uid, (
-        "Pre-condition: inject must have placed user_id into runtime_ctx"
-    )
+    assert runtime_ctx["user_id"] == auth_uid, "Pre-condition: inject must have placed user_id into runtime_ctx"
 
     _install_runtime_context(config, runtime_ctx)
     runtime = Runtime(context=runtime_ctx, store=None)
@@ -225,15 +223,8 @@ def test_update_agent_should_use_runtime_context_user_id_when_contextvar_missing
     auth_soul = (auth_dir / "SOUL.md").read_text()
     default_soul = (default_dir / "SOUL.md").read_text()
 
-    assert auth_soul == "# Auth Updated", (
-        f"BUG: update_agent ignored runtime.context['user_id']={auth_uid!r} "
-        f"and instead routed the write to users/default/. "
-        f"auth_soul={auth_soul!r}, default_soul={default_soul!r}"
-    )
-    assert default_soul == "# Default Original", (
-        "BUG: update_agent corrupted the shared default-user agent. "
-        "It should have written under the authenticated user's path."
-    )
+    assert auth_soul == "# Auth Updated", f"BUG: update_agent ignored runtime.context['user_id']={auth_uid!r} and instead routed the write to users/default/. auth_soul={auth_soul!r}, default_soul={default_soul!r}"
+    assert default_soul == "# Default Original", "BUG: update_agent corrupted the shared default-user agent. It should have written under the authenticated user's path."
 
 
 # ---------------------------------------------------------------------------

@@ -267,17 +267,10 @@ async def test_real_graph_real_setup_agent_writes_to_authenticated_user_dir(tmp_
     default_dir = tmp_path / "users" / "default" / "agents" / "e2e-agent"
 
     # Load-bearing assertions:
-    assert expected_dir.exists(), (
-        f"Agent directory not found at the authenticated user's path. "
-        f"Expected: {expected_dir}. tmp_path tree: "
-        f"{[str(p) for p in tmp_path.rglob('*')]}"
-    )
+    assert expected_dir.exists(), f"Agent directory not found at the authenticated user's path. Expected: {expected_dir}. tmp_path tree: {[str(p) for p in tmp_path.rglob('*')]}"
     assert (expected_dir / "SOUL.md").read_text() == "# My E2E Agent\n\nA SOUL written by the model."
     assert (expected_dir / "config.yaml").exists()
-    assert not default_dir.exists(), (
-        "REGRESSION: agent landed under users/default/. user_id propagation broke "
-        "somewhere between HTTP layer and ToolRuntime.context."
-    )
+    assert not default_dir.exists(), "REGRESSION: agent landed under users/default/. user_id propagation broke somewhere between HTTP layer and ToolRuntime.context."
 
     # And final state should reflect tool success
     last = final_state["messages"][-1]
@@ -319,10 +312,7 @@ async def test_inject_failure_falls_back_to_default_proving_test_is_load_bearing
         )
 
     default_dir = tmp_path / "users" / "default" / "agents" / "fallback-agent"
-    assert default_dir.exists(), (
-        "Negative control failed: even without inject + contextvar, agent did not "
-        "land in default/. The test infrastructure may not be reproducing the bug condition."
-    )
+    assert default_dir.exists(), "Negative control failed: even without inject + contextvar, agent did not land in default/. The test infrastructure may not be reproducing the bug condition."
 
 
 # ---------------------------------------------------------------------------
