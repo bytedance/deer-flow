@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["deerflow-harness[postgres]"]
+discord = ["discord.py>=2.7.0"]
 
 [dependency-groups]
 dev = [
