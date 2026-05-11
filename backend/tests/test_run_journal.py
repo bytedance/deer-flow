@@ -56,11 +56,6 @@ def _make_llm_response(content="Hello", usage=None, tool_calls=None, additional_
     return response
 
 
-def _make_llm_response_with_raw_content(content):
-    """Create a mock LLM response preserving raw message.content shape."""
-    return _make_llm_response(content=content)
-
-
 class TestLlmCallbacks:
     @pytest.mark.anyio
     async def test_on_llm_end_produces_trace_event(self, journal_setup):
@@ -379,7 +374,7 @@ class TestConvenienceFields:
     async def test_last_ai_message_extracts_mixed_content_without_extra_newlines(self, journal_setup):
         j, _ = journal_setup
         j.on_llm_end(
-            _make_llm_response_with_raw_content(
+            _make_llm_response(
                 [
                     {"type": "text", "text": "First "},
                     {"type": "text", "content": "second"},
@@ -400,12 +395,31 @@ class TestConvenienceFields:
     @pytest.mark.anyio
     async def test_last_ai_message_extracts_mapping_content(self, journal_setup):
         j, _ = journal_setup
-        j.on_llm_end(_make_llm_response_with_raw_content({"content": "Nested answer"}), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response({"content": "Nested answer"}), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
 
         data = j.get_completion_data()
 
         assert data["message_count"] == 1
         assert data["last_ai_message"] == "Nested answer"
+
+    @pytest.mark.anyio
+    async def test_duplicate_llm_run_id_does_not_double_count_message_summary(self, journal_setup):
+        j, _ = journal_setup
+        run_id = uuid4()
+
+        j.on_llm_end(_make_llm_response("Answer", usage=None), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(
+            _make_llm_response("Answer", usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 1
+        assert data["last_ai_message"] == "Answer"
+        assert data["total_tokens"] == 15
 
     @pytest.mark.anyio
     async def test_subagent_ai_does_not_overwrite_lead_last_ai_message(self, journal_setup):

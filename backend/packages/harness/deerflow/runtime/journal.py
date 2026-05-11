@@ -72,6 +72,7 @@ class RunJournal(BaseCallbackHandler):
         # Dedup: LangChain may fire on_llm_end multiple times for the same run_id
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
+        self._counted_message_llm_run_ids: set[str] = set()
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -268,7 +269,8 @@ class RunJournal(BaseCallbackHandler):
                     "llm_call_index": call_index,
                 },
             )
-            self._record_message_summary(message, caller=caller)
+            if rid not in self._counted_message_llm_run_ids:
+                self._record_message_summary(message, caller=caller)
 
             # Token accumulation (dedup by langchain run_id to avoid double-counting
             # when the callback fires more than once for the same response)
@@ -291,6 +293,9 @@ class RunJournal(BaseCallbackHandler):
                         self._middleware_tokens += total_tk
                     else:
                         self._lead_agent_tokens += total_tk
+
+        if messages:
+            self._counted_message_llm_run_ids.add(str(run_id))
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._llm_start_times.pop(str(run_id), None)
