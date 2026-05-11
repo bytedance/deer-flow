@@ -28,51 +28,26 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage
-from langchain_core.runnables import Runnable
-
-
-class _FakeToolCallingModel(FakeMessagesListChatModel):
-    """FakeMessagesListChatModel plus a no-op bind_tools so create_agent works."""
-
-    def bind_tools(  # type: ignore[override]
-        self,
-        tools: Any,
-        *,
-        tool_choice: Any = None,
-        **kwargs: Any,
-    ) -> Runnable:
-        return self
+from _agent_e2e_helpers import FakeToolCallingModel, build_single_tool_call_model
 
 
 def _build_fake_create_chat_model(agent_name: str):
-    """Returns a callable matching the real ``create_chat_model`` signature.
+    """Return a callable matching the real ``create_chat_model`` signature.
 
     Whenever the lead agent constructs a chat model during the bootstrap flow,
-    we instead hand it a fake that emits a single setup_agent tool_call on
-    its first turn, then a benign final answer on its second turn.
+    we hand it a fake that emits a single setup_agent tool_call on its first
+    turn, then a benign final answer on its second turn.
     """
 
-    def fake_create_chat_model(*args: Any, **kwargs: Any) -> _FakeToolCallingModel:
-        return _FakeToolCallingModel(
-            responses=[
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "setup_agent",
-                            "args": {
-                                "soul": f"# Real HTTP E2E SOUL for {agent_name}",
-                                "description": "real-http-e2e agent",
-                            },
-                            "id": "call_real_http_1",
-                            "type": "tool_call",
-                        }
-                    ],
-                ),
-                AIMessage(content=f"Agent {agent_name} created via real HTTP e2e."),
-            ]
+    def fake_create_chat_model(*args: Any, **kwargs: Any) -> FakeToolCallingModel:
+        return build_single_tool_call_model(
+            tool_name="setup_agent",
+            tool_args={
+                "soul": f"# Real HTTP E2E SOUL for {agent_name}",
+                "description": "real-http-e2e agent",
+            },
+            tool_call_id="call_real_http_1",
+            final_text=f"Agent {agent_name} created via real HTTP e2e.",
         )
 
     return fake_create_chat_model
@@ -90,40 +65,60 @@ def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return home
 
 
+def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset every process-wide cache that would survive across tests.
+
+    This fixture stands up a full FastAPI app + sqlite DB + LangGraph runtime
+    inside ``tmp_path``. To get true per-test isolation we have to invalidate
+    a handful of module-level caches that production normally never resets,
+    so they pick up our test-only ``DEER_FLOW_HOME`` and sqlite path:
+
+    - ``deerflow.config.app_config`` caches the parsed ``config.yaml``.
+    - ``deerflow.config.paths`` caches the ``Paths`` singleton derived from
+      ``DEER_FLOW_HOME`` at first access.
+    - ``deerflow.persistence.engine`` caches the SQLAlchemy engine and
+      session factory after the first call to ``init_engine_from_config``.
+
+    ``raising=False`` keeps the fixture resilient if upstream renames or
+    drops one of these attributes — the test will simply skip that reset
+    instead of failing with a confusing AttributeError, and the next test
+    to call ``get_app_config()``/``get_paths()`` will surface the real
+    incompatibility loudly.
+    """
+    from deerflow.config import app_config as app_config_module
+    from deerflow.config import paths as paths_module
+    from deerflow.persistence import engine as engine_module
+
+    for module, attr in (
+        (app_config_module, "_app_config"),
+        (app_config_module, "_app_config_path"),
+        (app_config_module, "_app_config_mtime"),
+        (paths_module, "_paths_singleton"),
+        (engine_module, "_engine"),
+        (engine_module, "_session_factory"),
+    ):
+        monkeypatch.setattr(module, attr, None, raising=False)
+
+
 @pytest.fixture
 def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch):
     """Build a fresh FastAPI app inside a clean DEER_FLOW_HOME.
 
-    We rebuild the app per-test so each test gets a fresh sqlite DB and
-    a fresh checkpoint store under tmp_path, with no cross-test contamination.
+    Each test gets its own sqlite DB and checkpoint store under ``tmp_path``,
+    with no cross-test contamination.
     """
-    # Reset any cached config so the new env vars take effect
+    _reset_process_singletons(monkeypatch)
+
+    # Re-resolve the config from the test-only DEER_FLOW_HOME and pin its
+    # sqlite path into tmp_path so the lifespan-time engine init lands there.
     from deerflow.config import app_config as app_config_module
 
-    monkeypatch.setattr(app_config_module, "_app_config", None, raising=False)
-    monkeypatch.setattr(app_config_module, "_app_config_path", None, raising=False)
-    monkeypatch.setattr(app_config_module, "_app_config_mtime", None, raising=False)
-
-    # Force a brand-new local sandbox + sqlite location under DEER_FLOW_HOME
-    from deerflow.config import paths as paths_module
-
-    monkeypatch.setattr(paths_module, "_paths_singleton", None, raising=False)
-
-    # Override config: sqlite directory inside DEER_FLOW_HOME so each test
-    # gets a clean DB. We patch the loaded config object's database field.
     cfg = app_config_module.get_app_config()
     cfg.database.sqlite_dir = str(isolated_deer_flow_home / "db")
 
-    # Reset persistence engine so it picks up the new sqlite path on startup
-    from deerflow.persistence import engine as engine_module
-
-    monkeypatch.setattr(engine_module, "_engine", None, raising=False)
-    monkeypatch.setattr(engine_module, "_session_factory", None, raising=False)
-
     from app.gateway.app import create_app
 
-    app = create_app()
-    return app
+    return create_app()
 
 
 def _drain_stream(response, *, timeout: float = 30.0, max_bytes: int = 4 * 1024 * 1024) -> str:

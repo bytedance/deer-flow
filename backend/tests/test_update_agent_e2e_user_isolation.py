@@ -20,17 +20,16 @@ These tests are load-bearing under @no_auto_user (contextvar empty):
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
 import yaml
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.runnables import Runnable
+from _agent_e2e_helpers import build_single_tool_call_model
+from langchain_core.messages import HumanMessage
 
 from app.gateway.services import (
     build_run_config,
@@ -38,17 +37,6 @@ from app.gateway.services import (
     merge_run_context_overrides,
 )
 from deerflow.runtime.runs.worker import _build_runtime_context, _install_runtime_context
-
-
-class _FakeToolCallingModel(FakeMessagesListChatModel):
-    def bind_tools(  # type: ignore[override]
-        self,
-        tools: Any,
-        *,
-        tool_choice: Any = None,
-        **kwargs: Any,
-    ) -> Runnable:
-        return self
 
 
 def _make_request(user_id_str: str | None) -> SimpleNamespace:
@@ -114,21 +102,11 @@ def _build_update_graph(*, soul_payload: str):
 
     from deerflow.tools.builtins.update_agent_tool import update_agent
 
-    fake_model = _FakeToolCallingModel(
-        responses=[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "update_agent",
-                        "args": {"soul": soul_payload, "description": "refined"},
-                        "id": "call_update_1",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(content="updated"),
-        ]
+    fake_model = build_single_tool_call_model(
+        tool_name="update_agent",
+        tool_args={"soul": soul_payload, "description": "refined"},
+        tool_call_id="call_update_1",
+        final_text="updated",
     )
     return create_agent(model=fake_model, tools=[update_agent], system_prompt="updater")
 
@@ -160,17 +138,13 @@ def test_update_agent_falls_back_to_default_when_no_inject_and_no_contextvar(tmp
 
     graph = _build_update_graph(soul_payload="# Fallback Updated")
 
-    patches = _patch_update_agent_dependencies(tmp_path)
-    for p in patches:
-        p.start()
-    try:
+    with ExitStack() as stack:
+        for p in _patch_update_agent_dependencies(tmp_path):
+            stack.enter_context(p)
         graph.invoke(
             {"messages": [HumanMessage(content="update fallback-target")]},
             config=config,
         )
-    finally:
-        for p in patches:
-            p.stop()
 
     soul = (tmp_path / "users" / "default" / "agents" / "fallback-target" / "SOUL.md").read_text()
     assert soul == "# Fallback Updated", "Sanity: tool should have written under default/"
@@ -213,17 +187,13 @@ def test_update_agent_should_use_runtime_context_user_id_when_contextvar_missing
 
     graph = _build_update_graph(soul_payload="# Auth Updated")
 
-    patches = _patch_update_agent_dependencies(tmp_path)
-    for p in patches:
-        p.start()
-    try:
+    with ExitStack() as stack:
+        for p in _patch_update_agent_dependencies(tmp_path):
+            stack.enter_context(p)
         graph.invoke(
             {"messages": [HumanMessage(content="update shared-name")]},
             config=config,
         )
-    finally:
-        for p in patches:
-            p.stop()
 
     auth_soul = (auth_dir / "SOUL.md").read_text()
     default_soul = (default_dir / "SOUL.md").read_text()
@@ -265,19 +235,17 @@ def test_update_agent_uses_contextvar_when_present(tmp_path: Path, monkeypatch):
 
     graph = _build_update_graph(soul_payload="# CtxVar Updated")
 
-    patches = _patch_update_agent_dependencies(tmp_path)
-    for p in patches:
-        p.start()
-    token = set_current_user(user)
-    try:
-        final = graph.invoke(
-            {"messages": [HumanMessage(content="update ctxvar-agent")]},
-            config=config,
-        )
-    finally:
-        reset_current_user(token)
-        for p in patches:
-            p.stop()
+    with ExitStack() as stack:
+        for p in _patch_update_agent_dependencies(tmp_path):
+            stack.enter_context(p)
+        token = set_current_user(user)
+        try:
+            final = graph.invoke(
+                {"messages": [HumanMessage(content="update ctxvar-agent")]},
+                config=config,
+            )
+        finally:
+            reset_current_user(token)
 
     # surface the tool's reply for debug if it errored
     tool_replies = [m.content for m in final["messages"] if getattr(m, "type", "") == "tool"]

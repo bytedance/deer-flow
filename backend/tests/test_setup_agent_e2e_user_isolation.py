@@ -27,14 +27,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import patch
 from uuid import UUID
 
 import pytest
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from _agent_e2e_helpers import FakeToolCallingModel
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.runnables import Runnable
 
 from app.gateway.services import (
     build_run_config,
@@ -42,26 +40,6 @@ from app.gateway.services import (
     merge_run_context_overrides,
 )
 from deerflow.runtime.runs.worker import _build_runtime_context, _install_runtime_context
-
-
-class _FakeToolCallingModel(FakeMessagesListChatModel):
-    """FakeMessagesListChatModel + minimal bind_tools for create_agent compatibility.
-
-    create_agent inside langchain.agents calls ``model.bind_tools(...)`` to expose
-    the tool schemas to the model. The default fake model raises NotImplementedError
-    there, so we just no-op and return ourselves — we don't need real schema
-    handling, only deterministic tool_call emission.
-    """
-
-    def bind_tools(  # type: ignore[override]
-        self,
-        tools: Any,
-        *,
-        tool_choice: Any = None,
-        **kwargs: Any,
-    ) -> Runnable:
-        return self
-
 
 # ---------------------------------------------------------------------------
 # Helpers — real production code paths
@@ -194,7 +172,7 @@ def _build_real_bootstrap_graph(authenticated_user_id: str):
 
     # First model turn: emit a tool_call for setup_agent
     # Second model turn (after tool result): final answer (terminates the loop)
-    fake_model = _FakeToolCallingModel(
+    fake_model = FakeToolCallingModel(
         responses=[
             AIMessage(
                 content="",
@@ -338,7 +316,7 @@ async def test_subgraph_invocation_preserves_user_id_in_runtime(tmp_path: Path):
     auth_uid = "deadbeef-0000-1111-2222-333344445555"
 
     # Inner graph: same as the bootstrap flow
-    inner_model = _FakeToolCallingModel(
+    inner_model = FakeToolCallingModel(
         responses=[
             AIMessage(
                 content="",
@@ -406,7 +384,7 @@ def test_sync_tool_dispatch_through_thread_pool_uses_runtime_context(tmp_path: P
 
     auth_uid = "11112222-3333-4444-5555-666677778888"
 
-    fake_model = _FakeToolCallingModel(
+    fake_model = FakeToolCallingModel(
         responses=[
             AIMessage(
                 content="",
