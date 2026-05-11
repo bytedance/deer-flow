@@ -6,6 +6,7 @@ type LazyComponent = ComponentType<any>;
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const COMPONENT_REGISTRY: Record<string, () => Promise<{ default: LazyComponent }>> = {
   chart: () => import("@/components/genui/ChartBlock") as any,
+  echart: () => import("@/components/genui/EChartBlock") as any,
   table: () => import("@/components/genui/TableBlock") as any,
   card: () => import("@/components/genui/CardBlock") as any,
   form: () => import("@/components/genui/FormBlock") as any,

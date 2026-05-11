@@ -8,8 +8,8 @@
 |------|------|
 | **Sprint Goal** | 实现 Agent 动态生成结构化 UI 的完整闭环，使 DeerFlow 支持图表、表格、表单等富交互组件 |
 | **Duration** | 4 周（4 个 Sprint，每 Sprint 1 周） |
-| **预估总工作量** | ~138 Story Points |
-| **技术栈** | Python (LangGraph) + TypeScript (React/Next.js) + Zustand + Zod + Recharts |
+| **预估总工作量** | ~146 Story Points |
+| **技术栈** | Python (LangGraph) + TypeScript (React/Next.js) + Zustand + Zod + Recharts + ECharts |
 
 ---
 
@@ -147,9 +147,9 @@ Sprint 1 → 3.3 → 3.4 → 3.5 → 3.6 → 3.7
 
 ## Sprint 4: 高级功能与可观测性（Week 4）
 
-**Sprint Goal**: 补全剩余组件，建立可观测性体系，配置安全加固，确保系统生产就绪。
+**Sprint Goal**: 补全剩余组件（含 ECharts 高级可视化），建立可观测性体系，配置安全加固，确保系统生产就绪。
 
-**容量**: ~32 SP
+**容量**: ~40 SP
 
 ### Stories
 
@@ -164,7 +164,8 @@ Sprint 1 → 3.3 → 3.4 → 3.5 → 3.6 → 3.7
 | 4.7 | 告警规则配置（错误率、延迟、超时） | 2 | 后端 | 4.5 | P2 |
 | 4.8 | CSP Header 配置（限制 inline script、iframe 来源） | 2 | 后端 | 4.1 | P1 |
 | 4.9 | Block 恢复 API `/api/threads/{id}/ui-blocks` | 3 | 后端 | 3.8 | P1 |
-| 4.10 | 全量回归测试 + 性能基准测试 | 5 | 全栈 | 4.1-4.9 | P0 |
+| 4.10 | `echart` 组件（基于 ECharts，支持 map/gauge/funnel/radar/heatmap/sankey/treemap/3D）+ Zod schema | 8 | 前端 | Sprint 2 | P0 |
+| 4.11 | 全量回归测试 + 性能基准测试 | 5 | 全栈 | 4.1-4.10 | P0 |
 
 ### 验收标准
 
@@ -175,18 +176,21 @@ Sprint 1 → 3.3 → 3.4 → 3.5 → 3.6 → 3.7
 - [ ] 后端 telemetry API 正确接收并存储前端上报数据
 - [ ] CSP header 正确配置，阻止非法 inline script
 - [ ] Block 恢复 API 能返回指定 thread 的完整 UIBlock 历史
+- [ ] `echart` 组件能正确渲染 ECharts option 对象（map/gauge/funnel/radar/heatmap 等）
+- [ ] `echart` 组件 Props Sanitizer 白名单正确过滤函数类型值
+- [ ] Agent Prompt Guidance 中 chart vs echart 选型指南生效
 - [ ] 全量 E2E 测试通过，无 P0 回归
 
 ### 依赖关系图
 
 ```
-Sprint 2 → 4.1, 4.2
+Sprint 2 → 4.1, 4.2, 4.10
 Sprint 3 → 4.3, 4.4, 4.5, 4.9
 3.8 → 4.9
 4.4 → 4.6
 4.5 → 4.7
 4.1 → 4.8
-4.1-4.9 → 4.10
+4.1-4.10 → 4.11
 ```
 
 ### 延期至 Phase 5（后续迭代）
@@ -205,6 +209,7 @@ Sprint 3 → 4.3, 4.4, 4.5, 4.9
 | LangGraph `get_stream_writer()` API 变更 | 低 | 高 | Sprint 1 第一天验证 API 兼容性，锁定版本 |
 | Agent 频繁生成无效 UIBlock | 中 | 中 | Prompt Guidance 迭代优化 + 后端白名单兜底 |
 | Recharts 包体积影响首屏 | 中 | 低 | React.lazy 按需加载，监控 bundle size |
+| ECharts 包体积较大（~800KB min） | 中 | 中 | React.lazy 按需加载 + 仅引入需要的图表模块（tree-shaking） |
 | 交互回调与 checkpoint 状态不一致 | 中 | 高 | InteractionStore 强绑定 checkpoint_id，增加集成测试 |
 | iframe sandbox 浏览器兼容性 | 低 | 中 | Phase 4 实现，有充足时间测试；降级为只读代码块 |
 | 团队对 LangGraph StreamWriter 不熟悉 | 中 | 中 | Sprint 1 安排 spike 任务，产出示例代码 |
@@ -253,7 +258,7 @@ Sprint 3 → 4.3, 4.4, 4.5, 4.9
 | Week 1 末 | M1: 数据通路打通 | Agent → SSE → 前端占位符渲染 |
 | Week 2 末 | M2: 可视化 Demo | Agent 输出 dashboard（chart + card + table），集成到消息流 |
 | Week 3 末 | M3: 交互闭环 | 用户通过 form 与 Agent 双向交互，含持久化和恢复 |
-| Week 4 末 | M4: 生产就绪 | 全组件 + 可观测性 + CSP 安全加固 + 回归测试通过 |
+| Week 4 末 | M4: 生产就绪 | 全组件（含 ECharts 高级可视化）+ 可观测性 + CSP 安全加固 + 回归测试通过 |
 
 ---
 
@@ -267,7 +272,7 @@ Sprint 3 → 4.3, 4.4, 4.5, 4.9
 | §4.2 操作语义 (create/update/delete) | 1.7, 4.3 | ✅ |
 | §4.3 交互式 UIBlock (callback_id, timeout) | 3.3-3.7 | ✅ |
 | §4.4 布局与分组 (layout, parent_id) | 2.4 | ✅ |
-| §4.5 全部 9 种组件类型 | 2.1-2.5, 3.1-3.2, 4.1-4.2 | ✅ |
+| §4.5 全部 10 种组件类型 | 2.1-2.5, 3.1-3.2, 4.1-4.2, 4.10 | ✅ |
 | §4.6 协议版本演进策略 | 1.10 (降级路由) + Phase 5 (双版本) | ✅ |
 | §5.1 render_ui Tool | 1.2 | ✅ |
 | §5.2 GenUIMiddleware + InteractionStore | 3.3, 3.4 | ✅ |

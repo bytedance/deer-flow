@@ -5,6 +5,9 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
     "chart_type", "title", "subtitle", "x_key", "y_key", "data",
     "series", "colors", "x_label", "y_label", "legend", "stacked",
   ]),
+  echart: new Set([
+    "option", "height", "theme", "loading",
+  ]),
   table: new Set([
     "columns", "data", "title", "sortable", "paginated", "page_size",
     "onRowSelect",
@@ -33,17 +36,21 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   ]),
 };
 
-function sanitizeValue(value: unknown): unknown {
+function sanitizeValue(value: unknown, depth = 0): unknown {
+  if (typeof value === "function") {
+    return undefined;
+  }
+  if (depth > 20) return value;
   if (typeof value === "string") {
     return DOMPurify.sanitize(value, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] });
   }
   if (Array.isArray(value)) {
-    return value.map(sanitizeValue);
+    return value.map((v) => sanitizeValue(v, depth + 1));
   }
   if (typeof value === "object" && value !== null) {
     const sanitized: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      sanitized[k] = sanitizeValue(v);
+      sanitized[k] = sanitizeValue(v, depth + 1);
     }
     return sanitized;
   }

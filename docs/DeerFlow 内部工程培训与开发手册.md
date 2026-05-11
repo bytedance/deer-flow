@@ -108,16 +108,17 @@ deer-flow/
 
 ## 4. 系统架构与核心概念
 
-### 4.1 四个核心模块
+### 4.1 三个核心模块
 
-DeerFlow 可以先拆成 4 个部分理解：
+DeerFlow 可以先拆成 3 个部分理解：
 
 | 模块 | 默认端口 | 主要职责 |
 | --- | --- | --- |
 | `Nginx` | `2026` | 统一入口与反向代理 |
 | `Frontend` | `3000` | 页面、交互、展示 |
-| `LangGraph Server` | `2024` | Agent 主运行逻辑 |
-| `Gateway API` | `8001` | 模型、MCP、Skills、Memory、上传、Artifact 等管理型接口 |
+| `Gateway API` | `8001` | REST API + 内嵌 LangGraph 兼容 Agent Runtime（模型、MCP、Skills、Memory、上传、Artifact、Agent 执行） |
+
+> **注意**：早期版本中 LangGraph Server 作为独立服务运行在 2024 端口。当前架构已将 Agent Runtime 内嵌到 Gateway 中，通过 `RunManager` + `run_agent()` + `StreamBridge`（位于 `packages/harness/deerflow/runtime/`）实现。Nginx 将 `/api/langgraph/*` 路由到 Gateway 并重写为 `/api/*`，对前端完全透明。
 
 #### 项目架构图
 
@@ -133,12 +134,8 @@ Port: 2026"]
 Next.js / React
 Port: 3000"]
 
-    LangGraph["LangGraph Server
-Agent Runtime
-Port: 2024"]
-
     Gateway["Gateway API
-FastAPI
+FastAPI + 内嵌 Agent Runtime
 Port: 8001"]
 
     Config["config.yaml
@@ -164,22 +161,19 @@ workspace / uploads / outputs"]
 
     Browser --> Nginx
     Nginx -->|"非 API 请求 /"| Frontend
-    Nginx -->|"/api/langgraph/*"| LangGraph
+    Nginx -->|"/api/langgraph/* (重写为 /api/*)"| Gateway
     Nginx -->|"/api/*"| Gateway
 
     Frontend -->|"页面请求 / 表单提交 / 消息发送"| Nginx
 
-    LangGraph -->|"读取主配置"| Config
     Gateway -->|"读取主配置"| Config
-    LangGraph -->|"读取环境变量"| Env
     Gateway -->|"读取环境变量"| Env
     Gateway -->|"管理扩展配置"| Ext
 
-    LangGraph -->|"加载 Skills"| Skills
-    LangGraph -->|"调用外部能力"| MCP
-    LangGraph -->|"申请执行环境"| Sandbox
-    LangGraph -->|"读写线程数据"| ThreadData
-    Gateway -->|"管理上传与 Artifact"| ThreadData
+    Gateway -->|"加载 Skills"| Skills
+    Gateway -->|"调用外部能力"| MCP
+    Gateway -->|"申请执行环境"| Sandbox
+    Gateway -->|"读写线程数据"| ThreadData
 ```
 
 ### 4.2 请求路由关系
@@ -187,13 +181,13 @@ workspace / uploads / outputs"]
 通过浏览器访问系统时：
 
 - `/` 路由到前端
-- `/api/langgraph/*` 路由到 LangGraph Server
+- `/api/langgraph/*` 路由到 Gateway（Nginx 重写为 `/api/*`，由内嵌 Runtime 处理）
 - `/api/*` 路由到 Gateway API
 
 因此可以形成一个简单判断：
 
 - 页面展示问题，先看前端
-- Agent 执行问题，先看 LangGraph
+- Agent 执行问题，先看 Gateway 日志（Runtime 内嵌在 Gateway 中）
 - 模型配置、技能、上传、Artifact 问题，优先看 Gateway
 - “页面能开但接口怪异”时，别忘了看 Nginx 代理链路
 
@@ -206,7 +200,7 @@ flowchart LR
 组装请求 / 展示流式结果"]
     N["Nginx
 统一代理"]
-    L["LangGraph Server
+    G["Gateway (内嵌 Runtime)
 收到 runs 请求"]
     M1["ThreadDataMiddleware
 准备线程目录"]
@@ -215,7 +209,7 @@ flowchart LR
     M3["SandboxMiddleware
 获取 Sandbox"]
     M4["其他中间件
-摘要 / 标题 / 记忆 / 图片 / Clarification"]
+摘要 / 标题 / 记忆 / 图片 / RAG / GenUI / Clarification"]
     A["Lead Agent
 模型推理 + 工具调用 + Subagent"]
     T["Thread State / Outputs / Artifacts"]
@@ -223,8 +217,8 @@ flowchart LR
 
     U --> F
     F --> N
-    N -->|"POST /api/langgraph/.../runs"| L
-    L --> M1 --> M2 --> M3 --> M4 --> A
+    N -->|"POST /api/langgraph/.../runs (重写为 /api/.../runs)"| G
+    G --> M1 --> M2 --> M3 --> M4 --> A
     A --> T
     A --> S
     S --> N
@@ -243,7 +237,7 @@ flowchart LR
     Upload["线程上传目录
 uploads/"]
     Convert["文档转换 / 元数据处理"]
-    L["LangGraph Server"]
+    Runtime["Gateway 内嵌 Runtime"]
     Context["消息上下文中注入文件信息"]
     Output["线程输出目录
 outputs/"]
@@ -257,8 +251,8 @@ outputs/"]
     G --> Convert
     Upload --> Context
     Convert --> Context
-    Context --> L
-    L --> Output
+    Context --> Runtime
+    Runtime --> Output
     Output --> Artifact
     Artifact --> G
     G --> N
@@ -309,31 +303,41 @@ DeerFlow 的请求不是“收到消息后立刻调模型”，而是先进入�
 
 #### 4.4.2 当前主 Agent 的完整 Middleware Chain
 
-从当前运行时文档看，主 Agent 的完整链路包含 14 个 middleware。  
-培训中常先记住 9 个“业务上最常接触的中间件”，但做后端开发和排障时，建议按完整链来理解。
+从当前运行时代码看，主 Agent 的完整链路包含 18 个 middleware（部分为条件加载）。  
+培训中常先记住核心业务中间件，但做后端开发和排障时，建议按完整链来理解。
 
-| 顺序 | Middleware | 主要作用 | 触发阶段 |
-| --- | --- | --- | --- |
-| 0 | `ThreadDataMiddleware` | 创建线程级 `workspace/uploads/outputs` 目录 | `before_agent` |
-| 1 | `UploadsMiddleware` | 扫描并注入上传文件上下文 | `before_agent` |
-| 2 | `SandboxMiddleware` | 获取并释放 Sandbox | `before_agent` / `after_agent` |
-| 3 | `DanglingToolCallMiddleware` | 补缺失 `ToolMessage` | `after_model` |
-| 4 | `GuardrailMiddleware` | 工具调用前做策略校验 | `wrap_tool_call` |
-| 5 | `ToolErrorHandlingMiddleware` | 工具错误标准化 | `wrap_tool_call` |
-| 6 | `SummarizationMiddleware` | 上下文接近上限时压缩消息 | `after_model` |
-| 7 | `TodoMiddleware` | Plan Mode 任务跟踪 | `after_model` |
-| 8 | `TitleMiddleware` | 自动生成会话标题 | `after_model` |
-| 9 | `MemoryMiddleware` | 将对话入队到记忆系统 | `after_agent` |
-| 10 | `ViewImageMiddleware` | 注入图片内容给视觉模型 | `before_model` |
-| 11 | `SubagentLimitMiddleware` | 限制过量 subagent / task 调用 | `after_model` |
-| 12 | `LoopDetectionMiddleware` | 检测循环执行风险 | `after_model` |
-| 13 | `ClarificationMiddleware` | 拦截 `ask_clarification` 并中断 | `after_model` |
+| 顺序 | Middleware | 主要作用 | 触发阶段 | 条件 |
+| --- | --- | --- | --- | --- |
+| 0 | `InputGuardMiddleware` | 内容安全输入检查 | `before_agent` | content_safety 启用时 |
+| 1 | `ThreadDataMiddleware` | 创建线程级 `workspace/uploads/outputs` 目录 | `before_agent` | 始终 |
+| 2 | `UploadsMiddleware` | 扫描并注入上传文件上下文 | `before_agent` | 始终 |
+| 3 | `SandboxMiddleware` | 获取并释放 Sandbox | `before_agent` / `after_agent` | 始终 |
+| 4 | `DanglingToolCallMiddleware` | 补缺失 `ToolMessage`（含中断恢复） | `after_model` | 始终 |
+| 5 | `LLMErrorHandlingMiddleware` | 模型调用失败标准化为可恢复错误 | `before_model` | 始终 |
+| 6 | `GuardrailMiddleware` | 工具调用前做策略校验 | `wrap_tool_call` | guardrails 启用时 |
+| 7 | `SandboxAuditMiddleware` | 沙箱操作安全审计日志 | `wrap_tool_call` | 始终 |
+| 8 | `ToolErrorHandlingMiddleware` | 工具错误标准化为 ToolMessage | `wrap_tool_call` | 始终 |
+| 9 | `OutputGuardMiddleware` | 内容安全输出检查 | `after_model` | content_safety 启用时 |
+| 10 | `SummarizationMiddleware` | 上下文接近上限时压缩消息 | `after_model` | summarization 启用时 |
+| 11 | `TodoMiddleware` | Plan Mode 任务跟踪 | `after_model` | plan_mode 启用时 |
+| 12 | `TokenUsageMiddleware` | 记录 Token 使用量 | `after_model` | token_usage 启用时 |
+| 13 | `TitleMiddleware` | 自动生成会话标题 | `after_model` | 始终 |
+| 14 | `MemoryMiddleware` | 将对话入队到记忆系统 | `after_agent` | 始终 |
+| 15 | `RagMiddleware` | 注入知识库检索结果 | `before_model` | RAG 启用时 |
+| 16 | `ViewImageMiddleware` | 注入图片内容给视觉模型 | `before_model` | 模型支持 vision 时 |
+| 17 | `DeferredToolFilterMiddleware` | 隐藏延迟工具 schema | `before_model` | 有延迟工具时 |
+| 18 | `SubagentLimitMiddleware` | 限制过量 subagent / task 调用 | `after_model` | subagent 启用时 |
+| 19 | `LoopDetectionMiddleware` | 检测循环执行风险 | `after_model` | 始终 |
+| 20 | `GenUIMiddleware` | GenUI 交互状态管理 | 自定义 | GenUI 启用时 |
+| 21 | `ClarificationMiddleware` | 拦截 `ask_clarification` 并中断 | `after_model` | 始终（必须最后） |
 
 补充说明：
 
-- 主 Agent 会走完整链路。
-- Subagent 通常只走更轻量的子集，例如 `ThreadData`、`Sandbox`、`Guardrail`、`ToolErrorHandling`。
-- 你看到的“9 个 middleware”通常是培训/概览文档对核心业务中间件的简化说法，不代表运行时真的只有 9 个。
+- 主 Agent 会走完整链路（条件满足的中间件全部加载）。
+- Subagent 通常只走更轻量的子集，例如 `ThreadData`、`Sandbox`、`ToolErrorHandling`。
+- `InputGuardMiddleware` / `OutputGuardMiddleware` 是内容安全中间件，需要在 `config.yaml` 中启用 `content_safety`。
+- `RagMiddleware` 在启用 RAG 知识库功能后自动加载，负责在模型调用前注入相关知识片段。
+- `GenUIMiddleware` 管理 Agent 动态 UI 渲染的交互状态（表单提交、确认对话框等）。
 
 #### 4.4.3 执行规则一定要记住
 
@@ -941,15 +945,15 @@ DeerFlow 为每个线程维护独立数据目录。
    - 官方文档明确提醒：如果部署到跨设备、跨网络或公网环境，必须自己加严格安全措施
    - 也就是说，默认并不建议直接裸暴露给不受控用户访问
 
-2. **账号体系不是当前项目的核心完成态**
-   - 前端代码里已经有 `better-auth` 的接入骨架
-   - 但当前项目说明里也明确写了认证能力还不是“完整启用后的平台化状态”
-   - 培训时不要把它讲成“已经具备成熟的企业账号体系”
+2. **认证体系已实现但默认关闭**
+   - 后端已有自定义 `AuthProvider`（支持 `gateway-config` 和 `proxy-policy` 策略）
+   - 默认部署为无认证模式，`user_id` 统一为 `”default”`
+   - 培训时不要把它讲成”已经具备成熟的企业账号体系”，但也不要说”没有认证”
 
-3. **默认 memory 更偏单用户或共享记忆模型**
-   - 当前默认 memory 通常是本地 `memory.json`
-   - 如果不额外设计隔离策略，多名用户可能共享长期 memory
-   - 这和真正的 per-user 持久记忆不是一回事
+3. **Memory 已支持 per-user 隔离**
+   - Memory 存储路径为 `{base_dir}/users/{user_id}/memory.json`
+   - 启用认证后自动按用户隔离
+   - 无认证模式下所有用户共享 `default` 用户的 memory
 
 4. **缺少开箱即用的多租户治理能力**
    - 例如统一身份认证、RBAC、租户隔离、配额治理、审计分级等
@@ -980,7 +984,7 @@ DeerFlow 为每个线程维护独立数据目录。
 
 1. **统一认证入口**
    - 例如在 Nginx 或 API Gateway 前加企业认证
-   - 阻止未认证用户直接访问 LangGraph / Gateway
+   - 阻止未认证用户直接访问 Gateway API
 
 2. **用户与 thread 的绑定关系**
    - 明确一个用户能访问哪些 thread
@@ -1005,6 +1009,120 @@ DeerFlow 为每个线程维护独立数据目录。
 
 前者说的是运行时能力，后者说的是平台治理能力。  
 DeerFlow 当前更强的是前者；如果要落企业级正式场景，还要把后者补上。
+
+### 4.12 GenUI / A2UI 动态 UI 渲染系统
+
+GenUI（Agent-to-UI）是 DeerFlow 的动态 UI 渲染系统，允许 Agent 在对话过程中生成结构化 UI 组件（图表、表格、表单、确认对话框等），而不仅仅是文本/Markdown 输出。
+
+#### 4.12.1 核心概念
+
+| 概念 | 说明 |
+| --- | --- |
+| `UIBlock` | Agent 生成的 UI 组件描述协议，包含 component 类型、props、callback_id 等 |
+| `render_ui` Tool | Agent 调用的内置工具，通过 StreamWriter 将 UIBlock 推送到前端 |
+| `BlockStore` | 前端 Zustand 状态管理，存储和管理所有 UIBlock |
+| `Component Registry` | 前端组件注册表，将 component 类型映射到 React 组件 |
+| `InteractionStore` | 后端交互状态管理，处理表单提交、确认等用户交互 |
+
+#### 4.12.2 支持的组件类型
+
+| 组件 | 用途 | 前端文件 |
+| --- | --- | --- |
+| `chart` | 柱状图/折线图/饼图/散点图 | `components/genui/ChartBlock.tsx` |
+| `table` | 可排序、分页表格 | `components/genui/TableBlock.tsx` |
+| `card` | KPI 卡片（含趋势指标） | `components/genui/CardBlock.tsx` |
+| `form` | 动态表单（React Hook Form） | `components/genui/FormBlock.tsx` |
+| `confirm` | 确认/取消对话框 | `components/genui/ConfirmBlock.tsx` |
+| `code` | 代码高亮展示 | `components/genui/CodeBlock.tsx` |
+| `timeline` | 垂直时间线 | `components/genui/TimelineBlock.tsx` |
+| `layout` | 网格/弹性布局容器 | `components/genui/LayoutBlock.tsx` |
+| `markdown` | Markdown 降级渲染 | `components/genui/MarkdownBlock.tsx` |
+
+#### 4.12.3 数据流
+
+```mermaid
+flowchart LR
+    A["Agent 调用 render_ui Tool"]
+    SW["StreamWriter 发送 custom event"]
+    SSE["SSE 流推送 ui_block 事件"]
+    BS["BlockStore 接收并存储"]
+    R["GenUIRenderer 渲染组件"]
+    U["用户交互（表单/确认）"]
+    API["POST /api/threads/{id}/ui-interaction"]
+    MW["GenUIMiddleware 处理交互"]
+
+    A --> SW --> SSE --> BS --> R
+    R --> U --> API --> MW
+    MW -->|"恢复 Agent 执行"| A
+```
+
+#### 4.12.4 交互式组件
+
+当 `interactive=True` 时，Agent 可以等待用户输入：
+
+1. Agent 调用 `render_ui` 并指定 `callback_id`
+2. 前端渲染交互组件（表单/确认按钮）
+3. 用户提交后，前端调用 `POST /api/threads/{id}/ui-interaction`
+4. 后端 `InteractionStore` 验证 callback、检查超时和幂等性
+5. 将用户输入作为 HumanMessage 恢复 Agent 执行
+
+#### 4.12.5 安全机制
+
+- **Props 白名单**：每种组件类型有允许的 props 列表（`core/genui/sanitizer.ts`）
+- **DOMPurify 消毒**：所有字符串类型 props 经过 XSS 过滤
+- **Zod Schema 验证**：props 结构通过 Zod schema 校验（`core/genui/validator.ts`）
+- **组件白名单**：后端 `render_ui` 工具只允许 9 种已注册组件类型
+- **ErrorBoundary**：每个组件包裹在错误边界中，渲染失败不影响整体页面
+
+### 4.13 RAG 知识库系统
+
+DeerFlow 集成了 RAG（Retrieval-Augmented Generation）知识库系统，支持个人、公司和公共知识库的管理与检索。
+
+#### 4.13.1 核心组件
+
+| 组件 | 位置 | 作用 |
+| --- | --- | --- |
+| `RagMiddleware` | `agents/middlewares/rag_middleware.py` | 在模型调用前注入相关知识片段 |
+| `search_knowledge_base` Tool | `deerflow.rag.tools` | Agent 主动检索知识库的工具 |
+| `KnowledgeBaseRepository` | `deerflow.rag` | 知识库访问控制与管理 |
+| Vector Store | 可配置 | 向量存储后端 |
+
+#### 4.13.2 知识库类型
+
+| 类型 | 说明 | 访问控制 |
+| --- | --- | --- |
+| 个人知识库 | 用户私有 | 仅 owner 可访问 |
+| 公司知识库 | 租户级共享 | 同 tenant 下用户可访问 |
+| 公共知识库 | 全局共享 | 所有用户可访问 |
+
+#### 4.13.3 安全约束
+
+- 显式 `collection` 名称不再直接作为向量存储句柄使用
+- 检索前必须验证 collection 属于当前 `tenant_id` 和 `user_id` 的活跃知识库
+- 无认证模式下，除非显式启用 `rag.allow_no_auth_kb`，否则 KB 访问被阻止
+- 工具失败返回通用错误消息，详细诊断信息仅在服务端日志中
+
+### 4.14 语音交互系统
+
+DeerFlow 支持语音输入/输出交互，通过 Audio Provider 实现语音识别和语音合成。
+
+#### 4.14.1 架构
+
+| 组件 | 说明 |
+| --- | --- |
+| Audio Provider | 语音服务提供者（当前支持 OpenAI） |
+| 语音识别（STT） | 将用户语音转为文本输入 |
+| 语音合成（TTS） | 将 Agent 文本回复转为语音输出 |
+
+#### 4.14.2 配置
+
+在 `config.yaml` 中配置 audio provider：
+
+```yaml
+audio:
+  provider: openai
+  # STT/TTS 相关配置
+```
 
 ## 5. 环境准备与启动
 
@@ -1162,7 +1280,7 @@ Windows 本地开发建议优先使用 Git Bash。
 1. `config.yaml` 是否存在
 2. `make check` 是否通过
 3. `.env` 是否缺少必要变量
-4. 端口 `2026`、`2024`、`8001`、`3000` 是否被占用
+4. 端口 `8001`、`3000` 是否被占用
 5. Docker 或本机依赖是否正常
 
 ## 6. 团队开发规范
@@ -1380,15 +1498,26 @@ pnpm check
 
 ### 8.2 后端关键目录
 
+后端采用 Harness / App 分层架构，严格遵循依赖方向：App 可以导入 Harness，但 Harness 不能导入 App。
+
 | 目录 | 作用 |
 | --- | --- |
-| `backend/src/agents` | Agent 运行时逻辑 |
-| `backend/src/gateway` | FastAPI 应用与路由 |
-| `backend/src/sandbox` | Sandbox 抽象与执行 |
-| `backend/src/tools` | 内置工具与工具装配 |
-| `backend/src/mcp` | MCP 集成 |
-| `backend/src/skills` | Skills 发现与加载 |
-| `backend/tests` | 后端测试 |
+| `backend/packages/harness/deerflow/agents/` | Agent 运行时逻辑（Lead Agent、中间件、Memory） |
+| `backend/packages/harness/deerflow/runtime/` | 内嵌 Runtime（RunManager、StreamBridge） |
+| `backend/packages/harness/deerflow/sandbox/` | Sandbox 抽象与执行 |
+| `backend/packages/harness/deerflow/tools/` | 内置工具与工具装配 |
+| `backend/packages/harness/deerflow/mcp/` | MCP 集成 |
+| `backend/packages/harness/deerflow/skills/` | Skills 发现与加载 |
+| `backend/packages/harness/deerflow/models/` | 模型工厂（含 vLLM Provider） |
+| `backend/packages/harness/deerflow/subagents/` | Subagent 委派系统 |
+| `backend/packages/harness/deerflow/community/` | 社区工具（tavily、jina_ai、firecrawl） |
+| `backend/packages/harness/deerflow/rag/` | RAG 知识库检索 |
+| `backend/packages/harness/deerflow/config/` | 配置系统 |
+| `backend/app/gateway/` | FastAPI Gateway 应用与路由 |
+| `backend/app/channels/` | IM 渠道集成（Feishu、Slack、Telegram、DingTalk） |
+| `backend/tests/` | 后端测试 |
+
+> **导入约定**：Harness 层使用 `from deerflow.*` 导入，App 层使用 `from app.*` 导入。CI 通过 `tests/test_harness_boundary.py` 强制检查边界。
 
 ### 8.3 后端常用命令
 
@@ -1406,34 +1535,39 @@ make format
 
 后端开发时一定要先分清两个层次：
 
-#### LangGraph Runtime
+#### Harness 层（`packages/harness/deerflow/`）
 
-负责：
+可发布的 Agent 框架包（`deerflow-harness`），负责：
 
-- 线程执行
-- 工具编排
-- 中间件执行
-- 流式输出
+- Agent 编排与执行
+- 中间件链
+- 工具系统（内置 + MCP + 社区 + ACP）
+- Sandbox 管理
+- 模型工厂
+- Skills 加载
+- Memory 系统
+- RAG 知识库
+- GenUI 渲染
 
-#### Gateway API
+#### App 层（`app/`）
 
-负责：
+应用层代码，负责：
 
-- 模型接口
-- MCP 配置接口
-- Skills 管理接口
-- Memory 接口
-- 上传与 Artifact 接口
+- FastAPI Gateway API（REST 接口）
+- 内嵌 Agent Runtime（RunManager + StreamBridge）
+- IM 渠道集成（Feishu、Slack、Telegram、DingTalk）
+- 认证与授权
 
 ### 8.5 后端工程师的最小代码地图
 
 第一次看后端，建议按这个顺序：
 
-1. 看 `agents`，理解 Lead Agent 和中间件链
-2. 看 `gateway`，理解接口层职责
-3. 看 `sandbox`，理解线程工作空间和执行环境
-4. 看 `mcp`、`skills`，理解扩展能力
-5. 看 `tests`，理解已有验证方式
+1. 看 `packages/harness/deerflow/agents/lead_agent/`，理解 Lead Agent 和中间件链
+2. 看 `app/gateway/`，理解 REST 接口层职责
+3. 看 `packages/harness/deerflow/sandbox/`，理解线程工作空间和执行环境
+4. 看 `packages/harness/deerflow/mcp/`、`skills/`，理解扩展能力
+5. 看 `packages/harness/deerflow/runtime/`，理解内嵌 Runtime 如何处理 runs 请求
+6. 看 `tests`，理解已有验证方式
 
 ### 8.6 后端典型开发任务
 
@@ -1786,9 +1920,11 @@ make format
 | 来源 | 说明 | 典型例子 |
 | --- | --- | --- |
 | 配置工具 | 在 `config.yaml` 的 `tools` 段声明，通过 `use` 路径加载 | `web_search`、`bash`、`read_file` |
-| 内置工具 | 硬编码在 `tools/builtins/`，不需要配置 | `present_files`、`ask_clarification`、`view_image` |
+| 内置工具 | 硬编码在 `tools/builtins/`，不需要配置 | `present_files`、`ask_clarification`、`render_ui` |
 | MCP 工具 | 从启用的 MCP Server 动态加载 | 各类外部服务工具 |
+| ACP 工具 | 从 `config.yaml` 配置的 ACP Agent 加载 | `invoke_acp_agent` |
 | Subagent 工具 | 仅在 `subagent_enabled=True` 时加载 | `task` |
+| 条件工具 | 根据运行时条件动态加载 | `view_image`（需 vision 模型）、`tool_search`（有延迟工具时） |
 
 工具加载的入口是 `get_available_tools()`，位于 `backend/packages/harness/deerflow/tools/tools.py`。
 
@@ -1888,8 +2024,11 @@ def ask_clarification_tool(
 BUILTIN_TOOLS = [
     present_file_tool,
     ask_clarification_tool,
+    render_ui_tool,
 ]
 ```
+
+> `view_image_tool` 和 `tool_search_tool` 不在 `BUILTIN_TOOLS` 中，而是在 `get_available_tools()` 里根据条件动态添加。
 
 ### 12.4 工具需要访问运行时上下文时
 
@@ -2100,8 +2239,7 @@ DeerFlow 的生产部署包含以下核心组件：
 | --- | --- | --- | --- |
 | Nginx | 2026 | 单实例或 LB 后端多实例 | 水平扩展 |
 | Frontend | 3000 | 静态资源 + Node.js Server | 水平扩展 |
-| LangGraph Server | 2024 | 有状态服务 | 按线程数垂直扩展 |
-| Gateway API | 8001 | 无状态服务 | 水平扩展 |
+| Gateway API（含内嵌 Runtime） | 8001 | 有状态服务 | 按线程数垂直扩展 |
 | Sandbox (AioSandbox) | 动态 | 容器化，按线程分配 | 副本池管理 |
 | Provisioner | 8002 | 仅在 K8s 模式下使用 | 按需 |
 
@@ -2172,7 +2310,7 @@ make docker-start
 make docker-logs
 ```
 
-Docker Compose 会启动：Nginx、Frontend、LangGraph Server、Gateway API。
+Docker Compose 会启动：Nginx、Frontend、Gateway（内嵌 Agent Runtime）。
 
 #### 方式二：Kubernetes（推荐用于生产环境）
 
@@ -2289,16 +2427,16 @@ make dev-daemon
 
 ### 14.6 扩缩容策略
 
-#### Gateway API（无状态）
+#### Gateway API 层（无状态）
 
 - **扩容指标**：CPU > 70%、QPS 增长
 - **扩容方式**：增加实例数，前面加负载均衡
-- **缩容注意**：确保没有进行中的上传请求
+- **缩容注意**：确保没有进行中的上传请求或流式响应
 
-#### LangGraph Server（有状态）
+#### Gateway（内嵌 Runtime，有状态）
 
-- **扩容限制**：受线程数据存储影响
-- **建议**：优先垂直扩容（增加单实例资源），水平扩容需配合共享存储
+- **扩容限制**：Runtime 内嵌在 Gateway 中，线程数据存储影响水平扩容
+- **建议**：优先垂直扩容（增加单实例资源），水平扩容需配合共享存储（如 PostgreSQL checkpointer）
 - **关键参数**：`sandbox.replicas` 控制并发 Sandbox 数
 
 #### Sandbox 池
@@ -2719,8 +2857,11 @@ guardrails:
 
 #### 当前状态
 
-- 前端已有 `better-auth` 接入骨架
-- 默认部署不强制认证，适合本地和可信内网
+- 后端已实现自定义 `AuthProvider` 认证体系（位于 `app/gateway/` 中）
+- 支持 `gateway-config` 和 `proxy-policy` 两种认证策略
+- 默认部署为无认证模式（`user_id` 默认为 `"default"`）
+- 用户隔离通过 `get_effective_user_id()` 实现，Memory、Thread 数据按用户目录隔离
+- IM 渠道通过内部 auth token + CSRF cookie 对进行认证
 
 #### 生产环境必须补齐
 

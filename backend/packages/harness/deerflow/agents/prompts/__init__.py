@@ -11,6 +11,7 @@ Use it when visual structure adds clarity beyond what plain text or markdown can
 | Component | When to Use | Example |
 |-----------|-------------|---------|
 | chart | Numerical data with trends or comparisons | Bar/line/pie/scatter charts |
+| echart | Complex visualizations not supported by chart | Maps, gauge, funnel, radar, heatmap, sankey, treemap, 3D |
 | table | Structured data with multiple fields | Search results, comparison tables |
 | card | Single KPI or summary statistic | Revenue, user count, status |
 | form | When you need structured user input to proceed | Settings, filters, parameters |
@@ -23,19 +24,21 @@ Use it when visual structure adds clarity beyond what plain text or markdown can
 ### Guidelines
 
 1. **Prefer plain text/markdown** for simple responses. Only use render_ui when visual structure genuinely adds clarity.
-2. **Use chart** when data has 3+ data points and trends/comparisons matter.
-3. **Use table** for structured data with 3+ columns or 5+ rows.
-4. **Use card** for highlighting 1-4 key metrics or KPIs.
-5. **Use layout** to group related blocks (e.g., cards + chart as a dashboard).
-6. **Use form** when you need specific structured input from the user. Always set `interactive=True` and provide a `callback_id`.
-7. **Use confirm** before any destructive action. Always set `interactive=True` and provide a `callback_id`.
-8. **Keep props minimal** — only include data the component needs to render.
-9. **Never render sensitive data** (passwords, tokens, secrets) in UI blocks.
-10. **For interactive components**, always provide a meaningful `callback_id` that describes the action (e.g., "confirm_delete_user_123").
+2. **Use chart** when data has 3+ data points and trends/comparisons matter (simple bar/line/pie/scatter).
+3. **Use echart** for complex visualizations: maps, gauge, funnel, radar, heatmap, sankey, treemap, 3D, or large datasets (>1000 points). Pass a standard ECharts option object in `props.option`.
+4. **Use table** for structured data with 3+ columns or 5+ rows.
+5. **Use card** for highlighting 1-4 key metrics or KPIs.
+6. **Use layout** to group related blocks (e.g., cards + chart as a dashboard).
+7. **Use form** when you need specific structured input from the user. Always set `interactive=True` and provide a `callback_id`.
+8. **Use confirm** before any destructive action. Always set `interactive=True` and provide a `callback_id`.
+9. **Keep props minimal** — only include data the component needs to render.
+10. **Never render sensitive data** (passwords, tokens, secrets) in UI blocks.
+11. **For interactive components**, always provide a meaningful `callback_id` that describes the action (e.g., "confirm_delete_user_123").
 
 ### Props Structure Examples
 
 **chart**: `{"chart_type": "bar", "title": "Monthly Revenue", "x_key": "month", "y_key": "revenue", "data": [...]}`
+**echart**: `{"option": {"title": {"text": "..."}, "xAxis": {...}, "yAxis": {...}, "series": [...]}, "height": 400}`
 **table**: `{"columns": [{"key": "name", "label": "Name"}, ...], "data": [...]}`
 **card**: `{"title": "Total Users", "value": "12,345", "trend": {"direction": "up", "value": "+5.2%"}}`
 **form**: `{"title": "Search Filters", "fields": [{"name": "query", "type": "text", "label": "Search"}], "submit_label": "Search"}`

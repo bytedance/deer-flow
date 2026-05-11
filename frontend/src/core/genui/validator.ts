@@ -120,8 +120,19 @@ export const markdownPropsSchema = z.object({
   title: z.string().max(200).optional(),
 });
 
+export const echartPropsSchema = z.object({
+  option: z.record(z.unknown()).refine(
+    (val) => JSON.stringify(val).length <= 500_000,
+    { message: "option object exceeds 500KB size limit" },
+  ),
+  height: z.number().min(100).max(2000).optional(),
+  theme: z.string().max(50).optional(),
+  loading: z.boolean().optional(),
+});
+
 const propsSchemas: Record<string, z.ZodType> = {
   chart: chartPropsSchema,
+  echart: echartPropsSchema,
   table: tablePropsSchema,
   card: cardPropsSchema,
   form: formPropsSchema,
