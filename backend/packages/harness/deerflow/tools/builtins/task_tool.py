@@ -402,4 +402,5 @@ async def task_tool(
             cleanup_background_task(task_id)
         else:
             _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
+        _subagent_usage_cache.pop(tool_call_id, None)
         raise
