@@ -254,7 +254,10 @@ class DiscordChannel(Channel):
                     asyncio.create_task(self._start_typing(typing_target, chat_id, thread_id))
                 return
 
-            # Thread not in our tracking — fall through to normal handling below
+            # Thread not tracked (orphaned) — create new thread and handle below
+            logger.debug("[Discord] message in orphaned thread %s, will create new thread", thread_id)
+            thread_id = None
+            typing_target = None
 
         # --- Message in a channel (not a thread, or thread not tracked) ---
         channel_id = str(message.channel.id)
