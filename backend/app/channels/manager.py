@@ -787,13 +787,22 @@ class ChannelManager:
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
-        result = await client.runs.wait(
-            thread_id,
-            assistant_id,
-            input={"messages": [{"role": "human", "content": msg.text}]},
-            config=run_config,
-            context=run_context,
-        )
+        try:
+            result = await client.runs.wait(
+                thread_id,
+                assistant_id,
+                input={"messages": [{"role": "human", "content": msg.text}]},
+                config=run_config,
+                context=run_context,
+                multitask_strategy="reject",
+            )
+        except Exception as exc:
+            if _is_thread_busy_error(exc):
+                logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                await self._send_error(msg, THREAD_BUSY_MESSAGE)
+                return
+            else:
+                raise
 
         response_text = _extract_response_text(result)
         artifacts = _extract_artifacts(result)

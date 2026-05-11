@@ -167,6 +167,8 @@ class ChannelService:
             return False
 
         try:
+            config = dict(config)
+            config["channel_store"] = self.store
             channel = channel_cls(bus=self.bus, config=config)
             self._channels[name] = channel
             await channel.start()

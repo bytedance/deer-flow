@@ -9,6 +9,7 @@ from typing import Any
 
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.store import ChannelStore
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,9 @@ class DiscordChannel(Channel):
             except (TypeError, ValueError):
                 continue
 
-        # Session tracking: channel_id -> thread_id
+        # Session tracking: channel_id -> thread_id (in-memory, persisted to store)
         self._active_threads: dict[str, str] = {}
+        self._channel_store: ChannelStore | None = config.get("channel_store")
 
         # Typing indicator management
         self._typing_tasks: dict[str, asyncio.Task] = {}
@@ -95,7 +97,31 @@ class DiscordChannel(Channel):
 
         self._thread = threading.Thread(target=self._run_client, daemon=True)
         self._thread.start()
+        self._load_active_threads()
         logger.info("Discord channel started")
+
+    def _load_active_threads(self) -> None:
+        """Restore active threads from persisted store on startup."""
+        if self._channel_store is None:
+            return
+        for entry in self._channel_store.list_entries("discord"):
+            if "chat_id" in entry and "thread_id" in entry:
+                channel_id = entry["chat_id"]
+                thread_id = entry["thread_id"]
+                self._active_threads[channel_id] = thread_id
+        if self._active_threads:
+            logger.info("[Discord] restored %d thread mappings from store", len(self._active_threads))
+        else:
+            logger.debug("[Discord] no thread mappings found in store")
+
+    def _save_thread(self, channel_id: str, thread_id: str) -> None:
+        """Persist a thread mapping to the store."""
+        if self._channel_store is None:
+            return
+        try:
+            self._channel_store.set_thread_id("discord", channel_id, thread_id, topic_id=thread_id)
+        except Exception:
+            logger.exception("[Discord] failed to save thread mapping for channel %s", channel_id)
 
     async def stop(self) -> None:
         self._running = False
@@ -285,6 +311,7 @@ class DiscordChannel(Channel):
                 if thread_obj is not None:
                     target_thread_id = str(thread_obj.id)
                     self._active_threads[channel_id] = target_thread_id
+                    self._save_thread(channel_id, target_thread_id)
                     thread_id = target_thread_id
                     chat_id = channel_id
                     typing_target = thread_obj
@@ -308,12 +335,13 @@ class DiscordChannel(Channel):
             # First mention in this channel → create thread
             thread_obj = await self._create_thread(message)
             if thread_obj is not None:
-                target_thread_id = str(thread_obj.id)
-                self._active_threads[channel_id] = target_thread_id
-                thread_id = target_thread_id
-                chat_id = channel_id
-                typing_target = thread_obj  # Type into the new thread
-                logger.info("[Discord] created thread %s in channel %s for user %s", target_thread_id, channel_id, message.author.display_name)
+                    target_thread_id = str(thread_obj.id)
+                    self._active_threads[channel_id] = target_thread_id
+                    self._save_thread(channel_id, target_thread_id)
+                    thread_id = target_thread_id
+                    chat_id = channel_id
+                    typing_target = thread_obj  # Type into the new thread
+                    logger.info("[Discord] created thread %s in channel %s for user %s", target_thread_id, channel_id, message.author.display_name)
             else:
                 # Fallback: thread creation failed (disabled/permissions), reply in channel
                 logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
@@ -332,6 +360,7 @@ class DiscordChannel(Channel):
             else:
                 target_thread_id = str(thread_obj.id)
                 self._active_threads[channel_id] = target_thread_id
+                self._save_thread(channel_id, target_thread_id)
                 thread_id = target_thread_id
                 chat_id = channel_id
                 typing_target = thread_obj  # Type into the new thread
@@ -386,8 +415,38 @@ class DiscordChannel(Channel):
 
     async def _create_thread(self, message):
         try:
+            if self._discord_module is None:
+                return None
+
+            # Only TextChannel (type 0) and NewsChannel (type 10) support threads
+            channel_type = message.channel.type
+            if channel_type not in (
+                self._discord_module.ChannelType.text,
+                self._discord_module.ChannelType.news,
+            ):
+                logger.info(
+                    "[Discord] channel type %s (%s) does not support threads",
+                    channel_type.value,
+                    channel_type.name,
+                )
+                return None
+
             thread_name = f"deerflow-{message.author.display_name}-{message.id}"[:100]
             return await message.create_thread(name=thread_name)
+        except self._discord_module.errors.HTTPException as exc:
+            if exc.code == 50024:
+                logger.info(
+                    "[Discord] cannot create thread in channel %s (error code 50024): %s",
+                    message.channel.id,
+                    channel_type.name if (channel_type := message.channel.type) else "unknown",
+                )
+            else:
+                logger.exception(
+                    "[Discord] failed to create thread for message=%s (HTTPException %s)",
+                    message.id,
+                    exc.code,
+                )
+            return None
         except Exception:
             logger.exception("[Discord] failed to create thread for message=%s (threads may be disabled or missing permissions)", message.id)
             return None
