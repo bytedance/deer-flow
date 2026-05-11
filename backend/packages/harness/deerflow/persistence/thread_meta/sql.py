@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,13 +16,6 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 
 logger = logging.getLogger(__name__)
 
-_SAFE_JSON_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
-
-
-def _is_safe_json_key(key: str) -> bool:
-    """Matches json_match's _KEY_CHARSET_RE; dots rejected to avoid nested-path ambiguity."""
-    return bool(_SAFE_JSON_KEY_RE.match(key))
-
 
 class ThreadMetaRepository(ThreadMetaStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -32,7 +24,7 @@ class ThreadMetaRepository(ThreadMetaStore):
     @staticmethod
     def _row_to_dict(row: ThreadMetaRow) -> dict[str, Any]:
         d = row.to_dict()
-        d["metadata"] = d.pop("metadata_json", {})
+        d["metadata"] = d.pop("metadata_json", None) or {}
         for key in ("created_at", "updated_at"):
             val = d.get(key)
             if isinstance(val, datetime):
@@ -116,12 +108,12 @@ class ThreadMetaRepository(ThreadMetaStore):
     async def search(
         self,
         *,
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
         status: str | None = None,
         limit: int = 100,
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Search threads with optional metadata and status filters.
 
         Owner filter is enforced by default: caller must be in a user
@@ -135,11 +127,15 @@ class ThreadMetaRepository(ThreadMetaStore):
             stmt = stmt.where(ThreadMetaRow.status == status)
 
         if metadata:
+            applied = 0
             for key, value in metadata.items():
-                if not _is_safe_json_key(key):
-                    logger.warning("Skipping unsafe metadata filter key: %s", key)
-                    continue
-                stmt = stmt.where(json_match(ThreadMetaRow.metadata_json, key, value))
+                try:
+                    stmt = stmt.where(json_match(ThreadMetaRow.metadata_json, key, value))
+                    applied += 1
+                except ValueError:
+                    logger.warning("Skipping unsafe metadata filter key: %r", key)
+            if applied == 0:
+                raise ValueError(f"All metadata filter keys were rejected as unsafe: {list(metadata)!r}")
 
         stmt = stmt.limit(limit).offset(offset)
         async with self._sf() as session:
