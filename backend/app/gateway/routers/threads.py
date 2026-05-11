@@ -90,6 +90,30 @@ class ThreadSearchRequest(BaseModel):
     offset: int = Field(default=0, ge=0, description="Pagination offset")
     status: str | None = Field(default=None, description="Filter by thread status")
 
+    @field_validator("metadata")
+    @classmethod
+    def _validate_metadata_filters(cls, v: dict[str, Any]) -> dict[str, Any]:
+        """Reject metadata filter entries that the SQL backend would skip.
+
+        Keeps `/threads/search` behavior consistent across SQL and memory
+        backends — both now return HTTP 422 for the same invalid input
+        instead of one rejecting (400) and the other silently accepting.
+        See ``deerflow.persistence.json_compat`` for the shared validators.
+        """
+        if not v:
+            return v
+        from deerflow.persistence.json_compat import validate_metadata_filter_key, validate_metadata_filter_value
+
+        bad_entries: list[str] = []
+        for key, value in v.items():
+            if not validate_metadata_filter_key(key):
+                bad_entries.append(f"{key!r} (unsafe key)")
+            elif not validate_metadata_filter_value(value):
+                bad_entries.append(f"{key!r} (unsupported value type {type(value).__name__})")
+        if bad_entries:
+            raise ValueError(f"Invalid metadata filter entries: {', '.join(bad_entries)}")
+        return v
+
 
 class ThreadStateResponse(BaseModel):
     """Response model for thread state."""

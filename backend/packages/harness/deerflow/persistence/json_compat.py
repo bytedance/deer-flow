@@ -16,6 +16,36 @@ from sqlalchemy.types import Boolean, TypeEngine
 # Key is interpolated into compiled SQL; restrict charset to prevent injection.
 _KEY_CHARSET_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
+# Allowed value types for metadata filter values (same set accepted by JsonMatch).
+ALLOWED_FILTER_VALUE_TYPES: tuple[type, ...] = (type(None), bool, int, float, str)
+
+
+def validate_metadata_filter_key(key: object) -> bool:
+    """Return True if *key* is safe for use as a JSON metadata filter key.
+
+    A key is "safe" when it is a string matching ``[A-Za-z0-9_-]+``. The
+    charset is restricted because the key is interpolated into the
+    compiled SQL path expression (``$."<key>"`` / ``->`` literal), so any
+    laxer pattern would open a SQL/JSONPath injection surface.
+
+    Shared by ``JsonMatch.__init__`` (raises) and the Gateway-side
+    Pydantic validator on ``ThreadSearchRequest.metadata`` (returns 422)
+    so both layers use the same admission rule.
+    """
+    return isinstance(key, str) and bool(_KEY_CHARSET_RE.match(key))
+
+
+def validate_metadata_filter_value(value: object) -> bool:
+    """Return True if *value* is an allowed type for a JSON metadata filter.
+
+    Matches the set of types ``_build_clause`` knows how to compile into
+    a dialect-portable predicate. Anything else (list/dict/bytes/...) is
+    intentionally rejected rather than silently coerced via ``str()`` —
+    silent coercion would (a) produce wrong matches and (b) break
+    SQLAlchemy's ``inherit_cache`` invariant when ``value`` is unhashable.
+    """
+    return isinstance(value, ALLOWED_FILTER_VALUE_TYPES)
+
 
 class JsonMatch(ColumnElement):
     """Dialect-portable ``column[key] == value`` for JSON columns.
@@ -25,6 +55,7 @@ class JsonMatch(ColumnElement):
     that distinguishes bool vs int and NULL vs missing key.
 
     *key* must be a single literal key matching ``[A-Za-z0-9_-]+``.
+    *value* must be one of: ``None``, ``bool``, ``int``, ``float``, ``str``.
     """
 
     inherit_cache = True
@@ -38,9 +69,14 @@ class JsonMatch(ColumnElement):
     ]
 
     def __init__(self, column: ColumnElement, key: str, value: object) -> None:
-        if not isinstance(key, str) or not _KEY_CHARSET_RE.match(key):
+        # Reuse the shared validators so this class and the Gateway-side
+        # Pydantic validator on ThreadSearchRequest.metadata cannot drift.
+        # Distinct exception types preserve the (ValueError, TypeError)
+        # split that ``ThreadMetaRepository.search()`` filters on to
+        # log+skip a single bad entry without aborting the whole query.
+        if not validate_metadata_filter_key(key):
             raise ValueError(f"JsonMatch key must match {_KEY_CHARSET_RE.pattern!r}; got: {key!r}")
-        if not isinstance(value, (type(None), bool, int, float, str)):
+        if not validate_metadata_filter_value(value):
             raise TypeError(f"JsonMatch value must be None, bool, int, float, or str; got: {type(value).__name__!r}")
         self.column = column
         self.key = key
