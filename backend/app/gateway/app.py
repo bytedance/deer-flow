@@ -59,8 +59,16 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     authentication have existing LangGraph thread data that needs an
     owner assigned.
         First boot (no admin exists):
-            - Does NOT create any user accounts automatically.
-            - The operator must visit ``/setup`` to create the first admin.
+            - If ``DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL`` is set: auto-create that
+              email as the first admin (needs_setup=False). Used by SSO
+              deployments where Authentik already gates access and the
+              operator should land directly on ``/workspace`` without
+              visiting ``/setup``. Password defaults to a random secret
+              when ``DEER_FLOW_BOOTSTRAP_ADMIN_PASSWORD`` is unset, which
+              is safe because the Authentik trust middleware mints the
+              session without ever invoking ``/login/local``.
+            - Otherwise: does NOT create any user accounts automatically.
+              The operator must visit ``/setup`` to create the first admin.
 
     Subsequent boots (admin already exists):
       - Runs the one-time "no-auth → with-auth" orphan thread migration for
@@ -71,6 +79,8 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     alongside the auth module via create_all, so freshly created tables
     never contain NULL-owner rows.
     """
+    import secrets
+
     from sqlalchemy import select
 
     from app.gateway.deps import get_local_provider
@@ -92,6 +102,29 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     admin_count = await provider.count_admin_users()
 
     if admin_count == 0:
+        bootstrap_email = os.environ.get("DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL", "").strip()
+        if bootstrap_email:
+            password = os.environ.get(
+                "DEER_FLOW_BOOTSTRAP_ADMIN_PASSWORD"
+            ) or secrets.token_urlsafe(32)
+            try:
+                await provider.create_user(
+                    email=bootstrap_email,
+                    password=password,
+                    system_role="admin",
+                    needs_setup=False,
+                )
+                logger.info(
+                    "Bootstrapped admin account %s from "
+                    "DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL",
+                    bootstrap_email,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to bootstrap admin %s — fall back to /setup flow",
+                    bootstrap_email,
+                )
+            return
         logger.info("=" * 60)
         logger.info("  First boot detected — no admin account exists.")
         logger.info("  Visit /setup to complete admin account creation.")
