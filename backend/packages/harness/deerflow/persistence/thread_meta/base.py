@@ -15,6 +15,7 @@ three-state semantics (see :mod:`deerflow.runtime.user_context`):
 from __future__ import annotations
 
 import abc
+from typing import Any
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
@@ -40,12 +41,12 @@ class ThreadMetaStore(abc.ABC):
     async def search(
         self,
         *,
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
         status: str | None = None,
         limit: int = 100,
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         pass
 
     @abc.abstractmethod

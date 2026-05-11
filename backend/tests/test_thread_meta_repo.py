@@ -280,7 +280,7 @@ class TestThreadMetaRepository:
 
     @pytest.mark.anyio
     async def test_search_metadata_non_string_key_skipped(self, repo, caplog):
-        """Non-string keys raise TypeError from re.match; should be warned and skipped."""
+        """Non-string keys raise ValueError from isinstance check; should be warned and skipped."""
         await repo.create("t1", metadata={"env": "prod"})
         await repo.create("t2", metadata={"env": "staging"})
 
