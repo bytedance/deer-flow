@@ -215,7 +215,7 @@ The nginx configuration provides:
 - Routes `/api/langgraph/*` to LangGraph Server (2024)
 - Routes other `/api/*` endpoints to Gateway API (8001)
 - Routes non-API requests to Frontend (3000)
-- Centralized CORS handling
+- Same-origin API routing; split-origin or port-forwarded browser clients should use the Gateway `GATEWAY_CORS_ORIGINS` allowlist
 - SSE/streaming support for real-time agent responses
 - Optimized timeouts for long-running operations
 
