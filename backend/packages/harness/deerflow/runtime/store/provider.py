@@ -251,8 +251,8 @@ def store_context() -> Iterator[BaseStore]:
             yield store
             return
 
-    db_config = getattr(config, "database", None)
-    db_backend = getattr(db_config, "backend", None)
+    db_config = config.database
+    db_backend = db_config.backend
     if db_backend in ("sqlite", "postgres"):
         with _sync_store_from_database(db_config) as store:
             yield store

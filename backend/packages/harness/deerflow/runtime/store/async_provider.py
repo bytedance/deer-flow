@@ -130,18 +130,28 @@ async def _async_store_from_database(db_config) -> AsyncIterator[BaseStore]:
 
 @contextlib.asynccontextmanager
 async def make_store(app_config: AppConfig | None = None) -> AsyncIterator[BaseStore]:
-    """Async context manager that yields a Store whose backend matches the
-    configured checkpointer.
+    """Async context manager that yields a Store aligned with the configured
+    persistence backend.
 
-    Reads from the same ``checkpointer`` section of *config.yaml* used by
-    :func:`deerflow.runtime.checkpointer.async_provider.make_checkpointer` so
-    that both singletons always use the same persistence technology::
+    Resolves the backend with the same precedence as
+    :func:`deerflow.runtime.checkpointer.async_provider.make_checkpointer`, so
+    the store and checkpointer always use the same persistence technology:
+
+    1. Legacy ``checkpointer:`` config section (backward compatible).
+    2. Unified ``database:`` config section (``sqlite`` / ``postgres``).
+    3. :class:`~langgraph.store.memory.InMemoryStore` fallback.
+
+    Logging:
+
+    - Explicit ``database.backend=memory`` is logged at INFO (in-process, not
+      persistent — intentional choice).
+    - Falling back because neither ``checkpointer:`` nor ``database:`` is
+      configured emits a WARNING — thread list will be lost on server restart.
+
+    Usage::
 
         async with make_store(app_config) as store:
             app.state.store = store
-
-    Yields an :class:`~langgraph.store.memory.InMemoryStore` when no
-    ``checkpointer`` section is configured (emits a WARNING in that case).
     """
     if app_config is None:
         app_config = get_app_config()
@@ -151,8 +161,8 @@ async def make_store(app_config: AppConfig | None = None) -> AsyncIterator[BaseS
             yield store
             return
 
-    db_config = getattr(app_config, "database", None)
-    db_backend = getattr(db_config, "backend", None)
+    db_config = app_config.database
+    db_backend = db_config.backend
     if db_backend in ("sqlite", "postgres"):
         async with _async_store_from_database(db_config) as store:
             yield store

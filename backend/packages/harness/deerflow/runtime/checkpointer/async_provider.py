@@ -149,8 +149,8 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
             return
 
     # Unified database config
-    db_config = getattr(app_config, "database", None)
-    db_backend = getattr(db_config, "backend", None)
+    db_config = app_config.database
+    db_backend = db_config.backend
     if db_backend in ("sqlite", "postgres"):
         async with _async_checkpointer_from_database(db_config) as saver:
             yield saver

@@ -252,8 +252,8 @@ def checkpointer_context() -> Iterator[Checkpointer]:
             yield saver
             return
 
-    db_config = getattr(config, "database", None)
-    db_backend = getattr(db_config, "backend", None)
+    db_config = config.database
+    db_backend = db_config.backend
     if db_backend in ("sqlite", "postgres"):
         with _sync_checkpointer_from_database(db_config) as saver:
             yield saver
