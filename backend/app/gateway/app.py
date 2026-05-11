@@ -219,7 +219,9 @@ def create_app() -> FastAPI:
         Configured FastAPI application instance.
     """
     config = get_gateway_config()
-    docs_kwargs = {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"} if config.enable_docs else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    docs_url = "/docs" if config.enable_docs else None
+    redoc_url = "/redoc" if config.enable_docs else None
+    openapi_url = "/openapi.json" if config.enable_docs else None
 
     app = FastAPI(
         title="DeerFlow API Gateway",
@@ -244,7 +246,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         """,
         version="0.1.0",
         lifespan=lifespan,
-        **docs_kwargs,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
         openapi_tags=[
             {
                 "name": "models",
@@ -307,8 +311,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)
 
-    # CORS: when GATEWAY_CORS_ORIGINS is set (dev without nginx), add CORS middleware.
-    # In production, nginx handles CORS and no middleware is needed.
+    # CORS: the unified nginx endpoint is same-origin by default. Split-origin
+    # browser clients must opt in with this explicit Gateway allowlist so CORS
+    # and CSRF origin checks share the same source of truth.
     cors_origins_env = os.environ.get("GATEWAY_CORS_ORIGINS", "")
     if cors_origins_env:
         cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
@@ -374,7 +379,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     app.include_router(runs.router)
 
     @app.get("/health", tags=["health"])
-    async def health_check() -> dict:
+    async def health_check() -> dict[str, str]:
         """Health check endpoint.
 
         Returns:
