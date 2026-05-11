@@ -1,6 +1,5 @@
 """Tests for ThreadMetaRepository (SQLAlchemy-backed)."""
 
-import asyncio
 import logging
 
 import pytest
@@ -234,7 +233,6 @@ class TestThreadMetaRepository:
         for i in range(30):
             meta = {"target": "yes"} if i % 3 == 0 else {"target": "no"}
             await repo.create(f"t{i:03d}", metadata=meta)
-            await asyncio.sleep(0.01)  # ensure distinct updated_at
 
         # Total matching rows: i in {0,3,6,9,12,15,18,21,24,27} = 10 rows
         all_matches = await repo.search(metadata={"target": "yes"}, limit=100)
@@ -341,6 +339,9 @@ class TestThreadMetaRepository:
         assert _is_safe_json_key("region_us") is True
         assert _is_safe_json_key("_private") is True
         assert _is_safe_json_key("key123") is True
+        assert _is_safe_json_key("my-key") is True
+        assert _is_safe_json_key("1leading_digit") is True
+        assert _is_safe_json_key("a-b-c") is True
 
     @pytest.mark.anyio
     async def test_safe_json_key_rejects_non_identifier(self):
@@ -352,7 +353,6 @@ class TestThreadMetaRepository:
         assert _is_safe_json_key("bad;key") is False
         assert _is_safe_json_key("with space") is False
         assert _is_safe_json_key("") is False
-        assert _is_safe_json_key("1leading_digit") is False
 
     @pytest.mark.anyio
     async def test_search_metadata_dotted_key_ignored(self, tmp_path, caplog):
@@ -481,9 +481,9 @@ class TestJsonMatchCompilation:
         dialect = postgresql.dialect()
 
         cases = [
-            (None, "jsonb_typeof(t.data -> 'k') = 'null'"),
-            (True, "(jsonb_typeof(t.data -> 'k') = 'boolean' AND (t.data ->> 'k') = 'true')"),
-            (False, "(jsonb_typeof(t.data -> 'k') = 'boolean' AND (t.data ->> 'k') = 'false')"),
+            (None, "json_typeof(t.data -> 'k') = 'null'"),
+            (True, "(json_typeof(t.data -> 'k') = 'boolean' AND (t.data ->> 'k') = 'true')"),
+            (False, "(json_typeof(t.data -> 'k') = 'boolean' AND (t.data ->> 'k') = 'false')"),
         ]
         for value, expected_fragment in cases:
             expr = json_match(t.c.data, "k", value)
@@ -492,13 +492,13 @@ class TestJsonMatchCompilation:
 
         int_expr = json_match(t.c.data, "k", 42)
         sql = str(int_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
-        assert "jsonb_typeof" in sql
+        assert "json_typeof" in sql
         assert "'number'" in sql
         assert "DOUBLE PRECISION" in sql
 
         str_expr = json_match(t.c.data, "k", "hello")
         sql = str(str_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
-        assert "jsonb_typeof" in sql
+        assert "json_typeof" in sql
         assert "'string'" in sql
 
     def test_json_match_rejects_unsafe_key(self):

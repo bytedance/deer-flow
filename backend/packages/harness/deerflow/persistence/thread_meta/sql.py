@@ -17,11 +17,11 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 
 logger = logging.getLogger(__name__)
 
-_SAFE_JSON_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SAFE_JSON_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
 def _is_safe_json_key(key: str) -> bool:
-    """Single identifier segment only; dots are rejected to avoid ambiguity with nested paths."""
+    """Matches json_match's _KEY_CHARSET_RE; dots rejected to avoid nested-path ambiguity."""
     return bool(_SAFE_JSON_KEY_RE.match(key))
 
 
@@ -128,7 +128,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         context. Pass ``user_id=None`` to bypass (migration/CLI).
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.search")
-        stmt = select(ThreadMetaRow).order_by(ThreadMetaRow.updated_at.desc())
+        stmt = select(ThreadMetaRow).order_by(ThreadMetaRow.updated_at.desc(), ThreadMetaRow.thread_id.desc())
         if resolved_user_id is not None:
             stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
         if status:

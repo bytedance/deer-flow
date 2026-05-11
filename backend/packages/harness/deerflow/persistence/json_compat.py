@@ -19,7 +19,7 @@ class JsonMatch(ColumnElement):
     """Dialect-portable ``column[key] == value`` for JSON columns.
 
     Compiles to ``json_type``/``json_extract`` on SQLite and
-    ``jsonb_typeof``/``->>`` on PostgreSQL, with type-safe comparison
+    ``json_typeof``/``->>`` on PostgreSQL, with type-safe comparison
     that distinguishes bool vs int and NULL vs missing key.
 
     *key* must be a single literal key matching ``[A-Za-z0-9_-]+``.
@@ -114,7 +114,7 @@ def _compile_sqlite(element: JsonMatch, compiler, **kw):
 def _compile_pg(element: JsonMatch, compiler, **kw):
     col = compiler.process(element.column, **kw)
     key = element.key.replace("'", "''")
-    typeof = f"jsonb_typeof({col} -> '{key}')"
+    typeof = f"json_typeof({col} -> '{key}')"
     extract = f"({col} ->> '{key}')"
     return _build_clause(compiler, typeof, extract, element.value, _PG, **kw)
 
