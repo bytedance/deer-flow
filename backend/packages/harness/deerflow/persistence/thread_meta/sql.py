@@ -132,8 +132,8 @@ class ThreadMetaRepository(ThreadMetaStore):
                 try:
                     stmt = stmt.where(json_match(ThreadMetaRow.metadata_json, key, value))
                     applied += 1
-                except (ValueError, TypeError):
-                    logger.warning("Skipping unsafe metadata filter key: %r", key)
+                except (ValueError, TypeError) as exc:
+                    logger.warning("Skipping metadata filter key %r: %s", key, exc)
             if applied == 0:
                 raise ValueError(f"All metadata filter keys were rejected as unsafe: {list(metadata)!r}")
 

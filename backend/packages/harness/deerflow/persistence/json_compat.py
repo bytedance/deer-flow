@@ -38,7 +38,7 @@ class JsonMatch(ColumnElement):
     ]
 
     def __init__(self, column: ColumnElement, key: str, value: object) -> None:
-        if not _KEY_CHARSET_RE.match(key):
+        if not isinstance(key, str) or not _KEY_CHARSET_RE.match(key):
             raise ValueError(f"JsonMatch key must match {_KEY_CHARSET_RE.pattern!r}; got: {key!r}")
         if not isinstance(value, (type(None), bool, int, float, str)):
             raise TypeError(f"JsonMatch value must be None, bool, int, float, or str; got: {type(value).__name__!r}")
@@ -57,9 +57,11 @@ class _Dialect:
     num_cast: str
     int_types: tuple[str, ...]
     int_cast: str
+    # None for SQLite where json_type already returns 'integer'/'real';
+    # regex literal for PostgreSQL where json_typeof returns 'number' for
+    # both ints and floats, so an extra guard prevents CAST errors on floats.
+    int_guard: str | None
     string_type: str
-    # None for SQLite (json_type already returns 'true'/'false');
-    # 'boolean' for PostgreSQL (json_typeof needs an extra value check).
     bool_type: str | None
 
 
@@ -69,6 +71,7 @@ _SQLITE = _Dialect(
     num_cast="REAL",
     int_types=("integer",),
     int_cast="INTEGER",
+    int_guard=None,
     string_type="text",
     bool_type=None,
 )
@@ -79,6 +82,7 @@ _PG = _Dialect(
     num_cast="DOUBLE PRECISION",
     int_types=("number",),
     int_cast="BIGINT",
+    int_guard="'^-?[0-9]+$'",
     string_type="string",
     bool_type="boolean",
 )
@@ -107,6 +111,9 @@ def _build_clause(compiler: SQLCompiler, typeof: str, extract: str, value: objec
         return f"({typeof} = '{dialect.bool_type}' AND {extract} = '{bool_str}')"
     if isinstance(value, int):
         bp = _bind(compiler, value, BigInteger(), **kw)
+        if dialect.int_guard:
+            # CASE prevents CAST error when json_typeof = 'number' also matches floats
+            return f"(CASE WHEN {_type_check(typeof, dialect.int_types)} AND {extract} ~ {dialect.int_guard} THEN CAST({extract} AS {dialect.int_cast}) END = {bp})"
         return f"({_type_check(typeof, dialect.int_types)} AND CAST({extract} AS {dialect.int_cast}) = {bp})"
     if isinstance(value, float):
         bp = _bind(compiler, value, Float(), **kw)

@@ -442,12 +442,14 @@ class TestJsonMatchCompilation:
             sql = expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True})
             assert str(sql) == expected_fragment, f"value={value!r}: {sql}"
 
-        # int: uses BIGINT cast for precision
+        # int: CASE guard prevents CAST error when 'number' also matches floats
         int_expr = json_match(t.c.data, "k", 42)
         sql = str(int_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
         assert "json_typeof" in sql
         assert "'number'" in sql
         assert "BIGINT" in sql
+        assert "CASE WHEN" in sql
+        assert "'^-?[0-9]+$'" in sql
 
         # float: uses DOUBLE PRECISION cast
         float_expr = json_match(t.c.data, "k", 3.14)
@@ -473,6 +475,11 @@ class TestJsonMatchCompilation:
         for bad_key in ["a.b", "with space", "bad'quote", 'bad"quote', "back\\slash", "semi;colon", ""]:
             with pytest.raises(ValueError, match="JsonMatch key must match"):
                 json_match(t.c.data, bad_key, "x")
+
+        # Non-string keys must also raise ValueError (not TypeError from re.match)
+        for non_str_key in [42, None, ("k",)]:
+            with pytest.raises(ValueError, match="JsonMatch key must match"):
+                json_match(t.c.data, non_str_key, "x")
 
     def test_json_match_rejects_unsupported_value_type(self):
         from sqlalchemy import Column, MetaData, String, Table
