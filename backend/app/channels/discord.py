@@ -26,7 +26,7 @@ class DiscordChannel(Channel):
         - ``allowed_channels``: (optional) List of channel IDs where messages are always accepted
           (even when mention_only is true). Use for channels where you want the bot to respond
           without mentions. Empty = mention_only applies everywhere.
-        - ``thread_mode``: (optional) If true, create a new thread for each reply (conversation grouping).
+        - ``thread_mode``: (optional) If true, group a channel conversation into a thread.
           Default: same as ``mention_only``.
     """
 
@@ -41,12 +41,9 @@ class DiscordChannel(Channel):
                 continue
         self._mention_only: bool = bool(config.get("mention_only", False))
         self._thread_mode: bool = config.get("thread_mode", self._mention_only)
-        self._allowed_channels: set[int] = set()
+        self._allowed_channels: set[str] = set()
         for channel_id in config.get("allowed_channels", []):
-            try:
-                self._allowed_channels.add(int(channel_id))
-            except (TypeError, ValueError):
-                continue
+            self._allowed_channels.add(str(channel_id))
 
         # Session tracking: channel_id -> thread_id (in-memory, persisted to store)
         self._active_threads: dict[str, str] = {}
@@ -147,7 +144,8 @@ class DiscordChannel(Channel):
 
     async def send(self, msg: OutboundMessage) -> None:
         # Stop typing indicator once we're sending the response
-        self._stop_typing(msg.chat_id, msg.thread_ts)
+        stop_future = asyncio.run_coroutine_threadsafe(self._stop_typing(msg.chat_id, msg.thread_ts), self._discord_loop)
+        await asyncio.wrap_future(stop_future)
 
         target = await self._resolve_target(msg)
         if target is None:
@@ -160,6 +158,9 @@ class DiscordChannel(Channel):
             await asyncio.wrap_future(send_future)
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        stop_future = asyncio.run_coroutine_threadsafe(self._stop_typing(msg.chat_id, msg.thread_ts), self._discord_loop)
+        await asyncio.wrap_future(stop_future)
+
         target = await self._resolve_target(msg)
         if target is None:
             logger.error("[Discord] target not found for file upload chat_id=%s thread_ts=%s", msg.chat_id, msg.thread_ts)
@@ -199,7 +200,7 @@ class DiscordChannel(Channel):
         task = asyncio.create_task(_typing_loop())
         self._typing_tasks[target_id] = task
 
-    def _stop_typing(self, chat_id: str, thread_ts: str | None = None) -> None:
+    async def _stop_typing(self, chat_id: str, thread_ts: str | None = None) -> None:
         """Stops the typing loop for a specific target."""
         target_id = thread_ts or chat_id
         task = self._typing_tasks.pop(target_id, None)
@@ -327,6 +328,7 @@ class DiscordChannel(Channel):
                 logger.debug("[Discord] routing message in channel %s to existing thread %s", channel_id, target_thread_id)
                 thread_id = target_thread_id
                 chat_id = channel_id
+                typing_target = await self._get_channel_or_thread(target_thread_id)
         elif self._mention_only and not has_mention and channel_id not in self._allowed_channels:
             # Not mentioned and not in an allowed channel → skip
             logger.debug("[Discord] skipping message without mention in channel %s", channel_id)
@@ -335,13 +337,13 @@ class DiscordChannel(Channel):
             # First mention in this channel → create thread
             thread_obj = await self._create_thread(message)
             if thread_obj is not None:
-                    target_thread_id = str(thread_obj.id)
-                    self._active_threads[channel_id] = target_thread_id
-                    self._save_thread(channel_id, target_thread_id)
-                    thread_id = target_thread_id
-                    chat_id = channel_id
-                    typing_target = thread_obj  # Type into the new thread
-                    logger.info("[Discord] created thread %s in channel %s for user %s", target_thread_id, channel_id, message.author.display_name)
+                target_thread_id = str(thread_obj.id)
+                self._active_threads[channel_id] = target_thread_id
+                self._save_thread(channel_id, target_thread_id)
+                thread_id = target_thread_id
+                chat_id = channel_id
+                typing_target = thread_obj  # Type into the new thread
+                logger.info("[Discord] created thread %s in channel %s for user %s", target_thread_id, channel_id, message.author.display_name)
             else:
                 # Fallback: thread creation failed (disabled/permissions), reply in channel
                 logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
