@@ -91,6 +91,8 @@ DeerFlow 适合以下场景：
 deer-flow/
 ├── backend/                  后端代码
 ├── frontend/                 前端代码
+├── agents/                   多级 Agent 系统
+│   └── builtin/             系统内置 Agent（随仓库提交）
 ├── docker/                   Docker 与 nginx 配置
 ├── scripts/                  启动、检查、配置脚本
 ├── skills/                   Skills 目录
@@ -1102,11 +1104,195 @@ DeerFlow 集成了 RAG（Retrieval-Augmented Generation）知识库系统，支�
 - 无认证模式下，除非显式启用 `rag.allow_no_auth_kb`，否则 KB 访问被阻止
 - 工具失败返回通用错误消息，详细诊断信息仅在服务端日志中
 
-### 4.14 语音交互系统
+### 4.15 多级 Agent 系统
+
+DeerFlow 实现了三级 Agent 发现与管理体系，支持平台内置、租户共享和用户自定义三个层级的 Agent。
+
+#### 4.15.1 三级架构
+
+| 层级 | 存储位置 | 管理方式 | 优先级 |
+| --- | --- | --- | --- |
+| **Builtin（内置）** | `agents/builtin/{name}/` | 随仓库提交，只读 | 最低 |
+| **Tenant（租户）** | `{base_dir}/tenants/{tenant_id}/agents/{name}/` | CRUD API + 文件系统 | 中 |
+| **User（用户）** | `{base_dir}/users/{user_id}/agents/{name}/` | Fork 或 Bootstrap 创建 | 最高 |
+
+优先级规则：同名 Agent 存在于多个层级时，高优先级覆盖低优先级。即用户级 > 租户级 > 内置级。
+
+#### 4.15.2 Agent 配置结构
+
+每个 Agent 是一个独立目录，包含两个必须文件：
+
+```text
+agents/builtin/researcher/
+├── config.yaml    # Agent 配置（名称、描述、工具、Skills 等）
+└── SOUL.md        # Agent 人格定义与行为指导（作为 system prompt 注入）
+```
+
+`config.yaml` 的完整字段：
+
+| 字段 | 类型 | 是否必须 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string | 是 | 唯一标识，必须和目录名一致 |
+| `display_name` | string | 是 | 前端展示名称 |
+| `description` | string | 是 | Agent 能力描述，影响推荐和选择 |
+| `icon` | string | 否 | 图标标识 |
+| `model` | string / null | 否 | 指定模型名，null 使用默认模型 |
+| `tool_groups` | list | 否 | 可用工具组（对应主 config.yaml 中的 tool_groups） |
+| `skills` | list | 否 | 自动加载的 Skills 列表 |
+| `mcp_servers` | list / null | 否 | 限制可用的 MCP Server（null = 全部可用） |
+| `tags` | list | 否 | 分类标签，用于推荐 |
+| `visibility` | string | 否 | 可见性控制 |
+
+`SOUL.md` 是 Agent 的系统提示词，定义角色、行为准则、输出标准。它会在 Agent 执行时注入到 system prompt 中。
+
+#### 4.15.3 新增系统内置 Agent 的完整流程
+
+新增一个内置 Agent 只需要创建文件，不需要修改任何 Python 代码。
+
+##### 第一步：创建目录
+
+```bash
+mkdir -p agents/builtin/my-agent
+```
+
+##### 第二步：编写 config.yaml
+
+```yaml
+name: my-agent
+display_name: "我的助手"
+description: "擅长做某件事的专业助手"
+icon: "sparkles"
+model: null
+tool_groups:
+  - web
+skills: []
+mcp_servers: null
+tags:
+  - my-tag
+```
+
+##### 第三步：编写 SOUL.md
+
+```markdown
+# My Agent
+
+You are a specialized assistant for [specific domain].
+
+## Core Principles
+
+1. [原则一]
+2. [原则二]
+
+## Working Process
+
+1. [步骤一]
+2. [步骤二]
+
+## Output Standards
+
+- [标准一]
+- [标准二]
+```
+
+##### 第四步：重启服务验证
+
+```bash
+# 重启后确认新 Agent 出现在列表中
+curl http://localhost:8001/api/agents
+```
+
+##### 不需要做的事
+
+- 不需要修改任何 Python 代码
+- 不需要注册到任何列表或配置文件
+- 不需要改项目主 `config.yaml`
+- 不需要改 `extensions_config.json`
+
+**原理**：`scan_builtin_agents()` 在启动时自动扫描 `agents/builtin/` 目录下所有包含 `config.yaml` 的子目录，解析为 `AgentConfig` 并注册到三级发现体系中。
+
+#### 4.15.4 当前内置 Agent 列表
+
+| Agent | 目录 | 用途 |
+| --- | --- | --- |
+| `researcher` | `agents/builtin/researcher/` | 深度信息检索、文献分析、研究报告 |
+| `code-reviewer` | `agents/builtin/code-reviewer/` | 代码审查、质量分析 |
+| `data-analyst` | `agents/builtin/data-analyst/` | 数据分析、可视化建议 |
+| `writer` | `agents/builtin/writer/` | 文案撰写、内容编辑、翻译 |
+
+#### 4.15.5 MCP Server 过滤机制
+
+Agent 的 `mcp_servers` 字段用于限制该 Agent 只能使用特定 MCP Server 的工具。
+
+过滤规则：MCP 工具名格式为 `server_name__tool_name`（双下划线分隔）。如果 Agent 配置了 `mcp_servers: ["github"]`，则只有以 `github__` 开头的 MCP 工具会对该 Agent 可用。
+
+设为 `null` 表示不限制，所有已启用的 MCP 工具都可用。
+
+#### 4.15.6 Agent 使用日志与 Token 追踪
+
+系统自动记录每个 Agent 的使用情况：
+
+- 每次 Agent 执行完成后，`worker.py` 的 finally 块自动写入使用记录
+- 记录内容包括：tenant_id、agent_name、user_id、thread_id、run_id、input/output token 数、执行时长
+- 通过 `GET /api/agents/stats` 查看租户级统计
+- 通过 `GET /api/agents/stats/mine` 查看个人统计
+
+#### 4.15.7 租户级 Agent 管理
+
+租户管理员可以通过 API 创建和管理租户级 Agent：
+
+```bash
+# 创建租户 Agent
+POST /api/tenants/{tenant_id}/agents
+{
+  "name": "custom-agent",
+  "display_name": "自定义助手",
+  "description": "...",
+  "soul": "# Agent\n\nYou are..."
+}
+
+# 列出租户 Agent
+GET /api/tenants/{tenant_id}/agents
+
+# 更新
+PUT /api/tenants/{tenant_id}/agents/{name}
+
+# 删除
+DELETE /api/tenants/{tenant_id}/agents/{name}
+```
+
+#### 4.15.8 用户级 Agent 操作
+
+普通用户可以：
+
+- **Fork**：将内置或租户 Agent 复制到自己名下进行定制
+
+  ```bash
+  POST /api/agents/fork/{name}
+  ```
+
+- **启用/禁用**：控制哪些 Agent 对自己可见
+
+  ```bash
+  PUT /api/agents/{name}/enabled
+  {"enabled": false}
+  ```
+
+禁用状态存储在用户目录下的 `disabled_agents.json` 中。
+
+#### 4.15.9 新增内置 Agent 的设计建议
+
+1. **明确定位**：每个 Agent 应该有清晰的专业领域，避免和已有 Agent 重叠
+2. **合理配置工具**：只给 Agent 它真正需要的 tool_groups，减少模型选择困难
+3. **SOUL.md 要具体**：写清楚角色定位、工作流程和输出标准，避免模糊指令
+4. **name 用短横线**：例如 `code-reviewer`，不要用下划线或驼峰
+5. **description 要精准**：它直接影响 Agent 推荐算法的匹配质量
+6. **先测试再提交**：本地创建后重启验证，确认 Agent 能正常出现在列表中并正确执行
+
+### 4.16 语音交互系统
 
 DeerFlow 支持语音输入/输出交互，通过 Audio Provider 实现语音识别和语音合成。
 
-#### 4.14.1 架构
+#### 4.16.1 架构
 
 | 组件 | 说明 |
 | --- | --- |
@@ -1114,7 +1300,7 @@ DeerFlow 支持语音输入/输出交互，通过 Audio Provider 实现语音识
 | 语音识别（STT） | 将用户语音转为文本输入 |
 | 语音合成（TTS） | 将 Agent 文本回复转为语音输出 |
 
-#### 4.14.2 配置
+#### 4.16.2 配置
 
 在 `config.yaml` 中配置 audio provider：
 
@@ -1513,6 +1699,7 @@ pnpm check
 | `backend/packages/harness/deerflow/community/` | 社区工具（tavily、jina_ai、firecrawl） |
 | `backend/packages/harness/deerflow/rag/` | RAG 知识库检索 |
 | `backend/packages/harness/deerflow/config/` | 配置系统 |
+| `backend/packages/harness/deerflow/persistence/` | 持久化层（Agent 使用记录、租户 Agent、MCP Server） |
 | `backend/app/gateway/` | FastAPI Gateway 应用与路由 |
 | `backend/app/channels/` | IM 渠道集成（Feishu、Slack、Telegram、DingTalk） |
 | `backend/tests/` | 后端测试 |
@@ -1874,6 +2061,10 @@ make format
 | `Skills` | 可加载的能力说明或工作流模板 |
 | `MCP` | 标准化的外部工具服务接入机制 |
 | `Artifact` | Agent 执行后生成并可回传的文件或产物 |
+| `Builtin Agent` | 系统内置 Agent，随仓库提交，位于 `agents/builtin/` |
+| `Tenant Agent` | 租户级共享 Agent，通过 API 管理 |
+| `SOUL.md` | Agent 的人格定义文件，作为 system prompt 注入 |
+| `AgentConfig` | Agent 配置模型，定义名称、工具、Skills 等 |
 
 ### 11.3 推荐补充阅读
 
