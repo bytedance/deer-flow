@@ -281,6 +281,65 @@ Sprint 2 → 5.7, 5.8
 
 ---
 
+## Sprint 6：Agent 使用日志与 Token 流量追踪
+
+**Sprint Goal:** Agent 使用记录由后端自动完成（不再依赖前端调用），每次 run 结束时自动记录 token 消耗，支持按 Agent 维度查询 token 流量统计。
+
+**Duration:** 2 周
+**Committed:** 28 SP / 6 Stories
+**Buffer:** 8 SP
+
+### 前置条件
+
+- Sprint 5 完成（`agent_usage` 表已存在，`AgentUsageRepository` 已有基础 CRUD）
+- `TokenUsageMiddleware` 已在 middleware chain 中运行
+- `RunManager` / `StreamBridge` 有 run 结束回调机制
+
+### Stories
+
+| # | Story | SP | Owner | 依赖 | AC |
+| --- | --- | --- | --- | --- | --- |
+| 6.1 | 扩展 `AgentUsageRow` 数据模型 | 3 | BE-2 | Sprint 5 | 新增 `thread_id`, `run_id`, `token_input`, `token_output`, `duration_ms` 字段；Alembic migration；现有数据向后兼容（新字段 nullable 或有默认值） |
+| 6.2 | 扩展 `AgentUsageRepository` 方法 | 3 | BE-2 | 6.1 | `record()` 接受新字段；新增 `stats_by_agent(tenant_id, period)` 聚合查询（按 agent_name 汇总 token_input/output/count/avg_duration）；新增 `stats_for_agent(tenant_id, agent_name, period)` 单 Agent 详细统计 |
+| 6.3 | Run 结束自动记录 Agent 使用 | 8 | BE-1 | 6.2 | 在 `RunManager.on_end` 或 `StreamBridge` 的 run 结束回调中，读取 `TokenUsageMiddleware` 累计的 token 用量 + `agent_name`（从 config.configurable 获取），自动调用 `AgentUsageRepository.record()`；无 agent_name 时跳过（普通对话不记录）；记录 duration_ms（run 开始到结束的耗时） |
+| 6.4 | 扩展 Agent Stats API | 5 | BE-2 | 6.2, 6.3 | 扩展 `GET /api/agents/stats` 返回 token_input_total, token_output_total, avg_duration_ms, last_used_at；新增 `GET /api/agents/{name}/stats` 单 Agent 详细统计；新增 `GET /api/agents/stats/summary?period=7d` 时间范围聚合；`POST /agents/{name}/usage` 标记为 deprecated（保留向后兼容） |
+| 6.5 | 前端 Agent 统计展示 | 5 | FE-1 | 6.4 | Agent 详情页展示使用次数、token 消耗、平均耗时；Agent Gallery 卡片展示使用热度；可选：简单的 token 消耗趋势图 |
+| 6.6 | 单元 + 集成测试 | 4 | BE-1 | 6.3, 6.4 | 覆盖：run 结束自动记录、token 累计正确性、stats API 聚合结果、无 agent_name 时不记录、多租户隔离统计；覆盖率 ≥ 80% |
+
+### 依赖图
+
+```text
+6.1 → 6.2
+6.2 → 6.3
+6.2, 6.3 → 6.4
+6.4 → 6.5
+6.3, 6.4 → 6.6
+```
+
+### 关键路径
+
+```text
+6.1 → 6.2 → 6.3 → 6.4 → 6.6
+```
+
+### 风险
+
+| 风险 | 缓解 |
+| --- | --- |
+| `TokenUsageMiddleware` 累计值在 run 结束时不可靠（中断/超时） | 使用 best-effort 记录；中断时记录已累计的部分值；duration_ms 为 nullable |
+| Run 结束回调与 `AgentUsageRepository` 的 async 上下文不匹配 | 复用 `_load_tenant_mcp_configs()` 中已验证的 sync/async 桥接模式 |
+| 高并发下 agent_usage 表写入压力 | 索引已有 `(tenant_id, agent_name)` 和 `(user_id)`；新增 `(tenant_id, used_at)` 支持时间范围查询；必要时可引入批量写入 |
+| 前端 deprecated 的 `POST /usage` 仍在调用 | 保留端点但内部改为 no-op（自动记录已覆盖）；前端下个版本移除调用 |
+
+### 实现要点
+
+1. **触发位置**：优先在 `RunManager` 的 run 完成回调中触发（而非 middleware），因为此时 token 累计已完成且有完整的 run 上下文（thread_id, run_id, duration）。
+2. **agent_name 获取**：从 `config["configurable"]["agent_name"]` 获取，与 `make_lead_agent()` 中的传递路径一致。
+3. **向后兼容**：新字段均有默认值（token_input=0, token_output=0, duration_ms=None, thread_id=None, run_id=None），现有 `POST /agents/{name}/usage` 调用不会报错。
+4. **Harness/App 边界**：`AgentUsageRepository` 在 harness 层（persistence/），run 结束回调在 runtime 层（也是 harness），不违反边界规则。
+
+---
+
 ## 总览
 
 | Sprint | 目标 | SP | 关键交付 |
@@ -290,7 +349,8 @@ Sprint 2 → 5.7, 5.8
 | Sprint 3 | 租户 MCP Server + 启用/禁用 | 33 | tenant_mcp_servers、MCP 合并加载、启用/禁用机制 |
 | Sprint 4 | 前端 Agent 选择器 + 管理界面 | 39 | Agent 选择器、管理界面、平台管理员界面、Fork 功能 |
 | Sprint 5 | 增强功能 + 端到端验收 | 34 | 使用统计、推荐、E2E 验收、安全审查、租户初始化、兼容性验证 |
-| **合计** | | **180 SP** | **10 周完成全量实施** |
+| Sprint 6 | Agent 使用日志与 Token 流量追踪 | 28 | AgentUsageRow 扩展、run 结束自动记录、Agent 维度 token 统计 API、前端统计展示 |
+| **合计** | | **208 SP** | **12 周完成全量实施** |
 
 ---
 
@@ -303,6 +363,7 @@ Sprint 2 → 5.7, 5.8
 | Sprint 3 结束（第 6 周） | 租户 MCP 隔离完成，Agent 可独立绑定 MCP Server |
 | Sprint 4 结束（第 8 周） | 前端管理界面上线，用户体验完整 |
 | Sprint 5 结束（第 10 周） | 全量验收通过，生产就绪 |
+| Sprint 6 结束（第 12 周） | Agent 维度 token 流量追踪上线，自动记录无需前端调用 |
 
 ---
 

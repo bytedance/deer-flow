@@ -681,6 +681,135 @@ Agent 可用工具 =
 
 ---
 
+## 11.5 Agent 使用日志与 Token 流量追踪
+
+### 11.5.1 背景
+
+当前系统存在两套独立的使用追踪机制：
+
+1. **Token 用量追踪**（已有）：`TokenUsageMiddleware` 在每次 LLM 调用后记录 token 消耗，存储在 `RunRepository` 中，按 thread/run 维度聚合。API：`GET /{thread_id}/token-usage`。
+2. **Agent 使用计数**（新增）：`AgentUsageRepository` 记录 Agent 被选择使用的次数，由前端在开始对话时主动调用 `POST /agents/{name}/usage`。
+
+**问题：** 两套系统未关联。无法回答"researcher Agent 本月消耗了多少 token"或"哪个 Agent 的 token 成本最高"。且 Agent 使用记录依赖前端主动调用，后端无自动记录机制。
+
+### 11.5.2 设计方案（方案 B：完整集成）
+
+将 Agent 使用记录与 Token 流量追踪统一，由后端在 run 结束时自动记录，不再依赖前端调用。
+
+#### 数据模型扩展
+
+```sql
+-- 扩展 agent_usage 表，增加 token 字段
+ALTER TABLE agent_usage ADD COLUMN thread_id VARCHAR(64);
+ALTER TABLE agent_usage ADD COLUMN run_id VARCHAR(64);
+ALTER TABLE agent_usage ADD COLUMN token_input INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agent_usage ADD COLUMN token_output INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agent_usage ADD COLUMN duration_ms INTEGER;
+
+CREATE INDEX ix_agent_usage_thread ON agent_usage(thread_id);
+CREATE INDEX ix_agent_usage_time_range ON agent_usage(tenant_id, used_at);
+```
+
+扩展后的 `AgentUsageRow`：
+
+```python
+class AgentUsageRow(Base):
+    __tablename__ = "agent_usage"
+
+    id: Mapped[str]
+    tenant_id: Mapped[str]
+    agent_name: Mapped[str]
+    user_id: Mapped[str]
+    thread_id: Mapped[str | None]       # 新增：关联的 thread
+    run_id: Mapped[str | None]          # 新增：关联的 run
+    token_input: Mapped[int]            # 新增：输入 token 数
+    token_output: Mapped[int]           # 新增：输出 token 数
+    duration_ms: Mapped[int | None]     # 新增：run 耗时（毫秒）
+    used_at: Mapped[datetime]
+```
+
+#### 自动记录机制
+
+在 `TokenUsageMiddleware` 的 `after_model` 或 run 结束回调中，自动写入 `agent_usage` 记录：
+
+```python
+# 在 run 结束时（StreamBridge 或 RunManager 回调）
+async def _record_agent_usage_on_run_end(
+    tenant_id: str,
+    user_id: str,
+    agent_name: str,
+    thread_id: str,
+    run_id: str,
+    token_input: int,
+    token_output: int,
+    duration_ms: int,
+):
+    await usage_repo.record(
+        tenant_id=tenant_id,
+        agent_name=agent_name,
+        user_id=user_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        token_input=token_input,
+        token_output=token_output,
+        duration_ms=duration_ms,
+    )
+```
+
+**触发时机：** Run 结束时（`task_completed` / stream 结束），由 `RunManager` 或 `StreamBridge` 的 `on_end` 回调触发。此时 `TokenUsageMiddleware` 已累计完整的 token 用量。
+
+#### API 扩展
+
+```text
+GET /api/agents/stats                    # 已有，扩展返回 token 统计
+GET /api/agents/stats/mine               # 已有，扩展返回 token 统计
+GET /api/agents/{name}/stats             # 新增：单个 Agent 详细统计
+GET /api/agents/stats/summary?period=7d  # 新增：时间范围聚合
+```
+
+响应格式扩展：
+
+```json
+{
+  "stats": [
+    {
+      "agent_name": "researcher",
+      "count": 42,
+      "token_input_total": 125000,
+      "token_output_total": 89000,
+      "avg_duration_ms": 3200,
+      "last_used_at": "2026-05-11T10:30:00Z"
+    }
+  ]
+}
+```
+
+#### 与现有系统的关系
+
+```text
+TokenUsageMiddleware（每次 LLM 调用累计 token）
+    ↓ run 结束时汇总
+RunManager.on_end / StreamBridge.on_end
+    ↓ 自动写入
+AgentUsageRepository.record(含 token_input, token_output, duration_ms)
+    ↓ 查询
+GET /api/agents/stats（按 agent_name 聚合 token 流量）
+```
+
+- **不再依赖前端调用** `POST /agents/{name}/usage`（该端点保留向后兼容，但标记为 deprecated）
+- **不修改** `TokenUsageMiddleware` 的核心逻辑，仅在 run 结束时读取其累计值
+- **不修改** 现有 `GET /{thread_id}/token-usage` 端点（thread 维度统计保持不变）
+- **新增** Agent 维度的 token 聚合查询
+
+#### 安全与隔离
+
+- Agent 统计严格按 `tenant_id` 隔离
+- 普通用户仅可查看自己的统计（`/stats/mine`）
+- 租户管理员可查看租户维度统计（`/stats`）
+- 平台管理员可查看全局统计（未来扩展）
+
+---
+
 ## 12. 与现有系统的兼容性
 
 ### 12.1 与 Subagent 系统

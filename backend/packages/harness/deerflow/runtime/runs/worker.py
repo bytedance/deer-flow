@@ -159,6 +159,7 @@ async def run_agent(
         )
 
     try:
+        _run_start_mono = __import__("time").monotonic()
         # Initialize RunJournal + write human_message event.
         # These are inside the try block so any exception (e.g. a DB
         # error writing the event) flows through the except/finally
@@ -405,6 +406,35 @@ async def run_agent(
                         ))
             except Exception:
                 logger.debug("Failed to record usage for run %s (non-fatal)", run_id, exc_info=True)
+
+            # Record agent-level usage with token stats
+            try:
+                agent_name = config.get("configurable", {}).get("agent_name") or config.get("context", {}).get("agent_name")
+                if agent_name:
+                    from deerflow.config.tenant import get_current_tenant_id
+                    from deerflow.persistence.agent.usage_repository import AgentUsageRepository
+                    from deerflow.persistence.engine import get_session_factory
+
+                    sf = get_session_factory()
+                    if sf is not None:
+                        agent_completion = journal.get_completion_data()
+                        _duration = int((__import__("time").monotonic() - _run_start_mono) * 1000)
+                        _tenant = get_current_tenant_id() or "default"
+                        _user = config.get("configurable", {}).get("user_id") or "default"
+
+                        repo = AgentUsageRepository(sf)
+                        await repo.record(
+                            tenant_id=_tenant,
+                            agent_name=agent_name,
+                            user_id=_user,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            token_input=agent_completion.get("total_input_tokens", 0),
+                            token_output=agent_completion.get("total_output_tokens", 0),
+                            duration_ms=_duration,
+                        )
+            except Exception:
+                logger.debug("Failed to record agent usage for run %s (non-fatal)", run_id, exc_info=True)
 
         # Sync title from checkpoint to threads_meta.display_name
         if checkpointer is not None and thread_store is not None:

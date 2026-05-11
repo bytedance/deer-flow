@@ -701,15 +701,16 @@ async def fork_agent(name: str) -> AgentResponse:
 
 @router.post(
     "/agents/{name}/usage",
-    summary="Record Agent Usage",
-    description="Record that the current user used an agent (called when starting a conversation).",
+    summary="Record Agent Usage (Deprecated)",
+    description="Deprecated: usage is now auto-recorded on run end. Kept for backward compatibility.",
+    deprecated=True,
 )
 async def record_agent_usage(
     name: str,
     request: Request,
     usage_repo=Depends(get_agent_usage_repo),
 ) -> dict:
-    """Record an agent usage event."""
+    """Record an agent usage event (deprecated — auto-recorded on run end)."""
     if usage_repo is None:
         return {"recorded": False}
     user_id = get_effective_user_id()
@@ -721,35 +722,74 @@ async def record_agent_usage(
 @router.get(
     "/agents/stats",
     summary="Get Agent Usage Stats",
-    description="Get usage counts for all agents visible to the current user.",
+    description="Get usage stats with token aggregation for all agents in the current tenant.",
 )
 async def get_agent_usage_stats(
     request: Request,
+    period: int | None = None,
     usage_repo=Depends(get_agent_usage_repo),
 ) -> dict:
-    """Return usage counts grouped by agent name for the current user's tenant."""
+    """Return usage stats grouped by agent name with token totals."""
     if usage_repo is None:
         return {"stats": []}
     tenant_id = get_current_tenant_id() or "default"
-    stats = await usage_repo.count_by_tenant(tenant_id)
+    stats = await usage_repo.stats_by_tenant(tenant_id, period_days=period)
     return {"stats": stats}
 
 
 @router.get(
     "/agents/stats/mine",
     summary="Get My Agent Usage Stats",
-    description="Get usage counts for agents used by the current user.",
+    description="Get usage stats with token aggregation for the current user.",
 )
 async def get_my_agent_usage_stats(
     request: Request,
+    period: int | None = None,
     usage_repo=Depends(get_agent_usage_repo),
 ) -> dict:
-    """Return usage counts for the current user."""
+    """Return usage stats for the current user with token totals."""
     if usage_repo is None:
         return {"stats": []}
     user_id = get_effective_user_id()
-    stats = await usage_repo.count_by_user(user_id)
+    stats = await usage_repo.stats_by_user(user_id, period_days=period)
     return {"stats": stats}
+
+
+@router.get(
+    "/agents/{name}/stats",
+    summary="Get Single Agent Stats",
+    description="Get detailed usage stats for a specific agent.",
+)
+async def get_single_agent_stats(
+    name: str,
+    request: Request,
+    period: int | None = None,
+    usage_repo=Depends(get_agent_usage_repo),
+) -> dict:
+    """Return detailed stats for a single agent."""
+    if usage_repo is None:
+        return {"stats": {}}
+    tenant_id = get_current_tenant_id() or "default"
+    stats = await usage_repo.stats_for_agent(tenant_id, name, period_days=period)
+    return {"stats": stats}
+
+
+@router.get(
+    "/agents/stats/summary",
+    summary="Get Agent Usage Summary",
+    description="Get aggregated usage summary for a time period (default 7 days).",
+)
+async def get_agent_usage_summary(
+    request: Request,
+    period: int = 7,
+    usage_repo=Depends(get_agent_usage_repo),
+) -> dict:
+    """Return time-bounded usage summary for the tenant."""
+    if usage_repo is None:
+        return {"stats": [], "period_days": period}
+    tenant_id = get_current_tenant_id() or "default"
+    stats = await usage_repo.stats_by_tenant(tenant_id, period_days=period)
+    return {"stats": stats, "period_days": period}
 
 
 @router.get(

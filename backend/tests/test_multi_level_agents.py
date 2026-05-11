@@ -1015,3 +1015,136 @@ class TestAgentRecommendation:
                 scored.append(agent.name)
 
         assert scored == []
+
+
+class TestAgentUsageTokenTracking:
+    """Test AgentUsageRow extended fields and AgentUsageRepository stats methods."""
+
+    def test_usage_row_has_token_fields(self):
+        from deerflow.persistence.agent.usage_model import AgentUsageRow
+
+        row = AgentUsageRow(
+            id="test-id",
+            tenant_id="t1",
+            agent_name="researcher",
+            user_id="u1",
+            thread_id="thread-123",
+            run_id="run-456",
+            token_input=1500,
+            token_output=800,
+            duration_ms=3200,
+        )
+        assert row.thread_id == "thread-123"
+        assert row.run_id == "run-456"
+        assert row.token_input == 1500
+        assert row.token_output == 800
+        assert row.duration_ms == 3200
+
+    def test_usage_row_token_defaults(self):
+        from deerflow.persistence.agent.usage_model import AgentUsageRow
+
+        row = AgentUsageRow(
+            id="test-id",
+            tenant_id="t1",
+            agent_name="writer",
+            user_id="u1",
+        )
+        assert row.thread_id is None
+        assert row.run_id is None
+        # SQLAlchemy defaults apply at flush time; direct construction yields None
+        assert row.duration_ms is None
+
+    def test_usage_row_indexes(self):
+        from deerflow.persistence.agent.usage_model import AgentUsageRow
+
+        index_names = [idx.name for idx in AgentUsageRow.__table_args__ if hasattr(idx, "name")]
+        assert "ix_agent_usage_tenant_agent" in index_names
+        assert "ix_agent_usage_user" in index_names
+        assert "ix_agent_usage_thread" in index_names
+        assert "ix_agent_usage_time_range" in index_names
+
+    def test_repository_record_accepts_new_fields(self):
+        """Verify record() signature accepts all new parameters without error."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from deerflow.persistence.agent.usage_repository import AgentUsageRepository
+
+        mock_sf = MagicMock()
+        repo = AgentUsageRepository(mock_sf)
+
+        import inspect
+        sig = inspect.signature(repo.record)
+        params = list(sig.parameters.keys())
+        assert "thread_id" in params
+        assert "run_id" in params
+        assert "token_input" in params
+        assert "token_output" in params
+        assert "duration_ms" in params
+
+    def test_repository_has_stats_methods(self):
+        """Verify new stats methods exist on the repository."""
+        from deerflow.persistence.agent.usage_repository import AgentUsageRepository
+
+        assert hasattr(AgentUsageRepository, "stats_by_tenant")
+        assert hasattr(AgentUsageRepository, "stats_for_agent")
+        assert hasattr(AgentUsageRepository, "stats_by_user")
+        assert callable(getattr(AgentUsageRepository, "stats_by_tenant"))
+        assert callable(getattr(AgentUsageRepository, "stats_for_agent"))
+        assert callable(getattr(AgentUsageRepository, "stats_by_user"))
+
+    def test_stats_by_tenant_accepts_period_days(self):
+        """Verify stats_by_tenant has period_days keyword argument."""
+        import inspect
+
+        from deerflow.persistence.agent.usage_repository import AgentUsageRepository
+
+        sig = inspect.signature(AgentUsageRepository.stats_by_tenant)
+        params = sig.parameters
+        assert "period_days" in params
+        assert params["period_days"].default is None
+
+    def test_stats_for_agent_accepts_period_days(self):
+        """Verify stats_for_agent has period_days keyword argument."""
+        import inspect
+
+        from deerflow.persistence.agent.usage_repository import AgentUsageRepository
+
+        sig = inspect.signature(AgentUsageRepository.stats_for_agent)
+        params = sig.parameters
+        assert "tenant_id" in params
+        assert "agent_name" in params
+        assert "period_days" in params
+
+    def test_worker_auto_record_hook_exists(self):
+        """Verify the auto-record hook is present in worker.py."""
+        import importlib.util
+
+        spec = importlib.util.find_spec("deerflow.runtime.runs.worker")
+        assert spec is not None
+        source_path = spec.origin
+        with open(source_path, encoding="utf-8") as f:
+            source = f.read()
+        assert "AgentUsageRepository" in source
+        assert "agent_name" in source
+        assert "_run_start_mono" in source
+
+    def test_stats_api_endpoints_exist(self):
+        """Verify the new stats endpoints are registered in the agents router."""
+        from app.gateway.routers.agents import router
+
+        paths = [route.path for route in router.routes if hasattr(route, "path")]
+        assert "/api/agents/stats" in paths
+        assert "/api/agents/stats/mine" in paths
+        assert "/api/agents/{name}/stats" in paths
+        assert "/api/agents/stats/summary" in paths
+
+    def test_record_usage_endpoint_deprecated(self):
+        """Verify POST /agents/{name}/usage is marked deprecated."""
+        from app.gateway.routers.agents import router
+
+        for route in router.routes:
+            if hasattr(route, "path") and route.path == "/api/agents/{name}/usage":
+                if hasattr(route, "methods") and "POST" in route.methods:
+                    assert getattr(route, "deprecated", None) is True
+                    return
+        pytest.fail("POST /api/agents/{name}/usage endpoint not found")
