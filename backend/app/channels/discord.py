@@ -259,15 +259,17 @@ class DiscordChannel(Channel):
             thread_id = None
             typing_target = None
 
-        # --- Message in a channel (not a thread, or thread not tracked) ---
+        # Track whether the original message was posted in a thread
+        message_in_thread = message.thread is not None
         channel_id = str(message.channel.id)
 
         # Check if there's an active thread for this channel
         if channel_id in self._active_threads:
             # respect mention_only: if enabled, only process messages that mention the bot
             # (unless the channel is in allowed_channels)
-            if self._mention_only and not has_mention and channel_id not in self._allowed_channels:
-                logger.debug("[Discord] skipping message without mention in existing thread channel %s", channel_id)
+            # Thread messages are always allowed through (continuation within a thread)
+            if not message_in_thread and self._mention_only and not has_mention and channel_id not in self._allowed_channels:
+                logger.debug("[Discord] skipping no-@ message in channel %s (not in thread)", channel_id)
                 return
             # mention_only + fresh @ → create new thread instead of routing to existing one
             if self._mention_only and has_mention:
