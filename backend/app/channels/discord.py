@@ -153,7 +153,7 @@ class DiscordChannel(Channel):
             logger.exception("[Discord] failed to upload file: %s", attachment.filename)
             return False
 
-    async def _start_typing(self, channel, chat_id: str, thread_ts: str = None) -> None:
+    async def _start_typing(self, channel, chat_id: str, thread_ts: str | None = None) -> None:
         """Starts a loop to send periodic typing indicators."""
         target_id = thread_ts or chat_id
         if target_id in self._typing_tasks:
@@ -173,7 +173,7 @@ class DiscordChannel(Channel):
         task = asyncio.create_task(_typing_loop())
         self._typing_tasks[target_id] = task
 
-    def _stop_typing(self, chat_id: str, thread_ts: str = None) -> None:
+    def _stop_typing(self, chat_id: str, thread_ts: str | None = None) -> None:
         """Stops the typing loop for a specific target."""
         target_id = thread_ts or chat_id
         task = self._typing_tasks.pop(target_id, None)
@@ -213,7 +213,7 @@ class DiscordChannel(Channel):
             bot_mention = None
             alt_mention = None
             standard_mention = ""
-        has_mention = bot_mention in message.content or alt_mention in message.content or standard_mention in message.content
+        has_mention = (bot_mention and bot_mention in message.content) or (alt_mention and alt_mention in message.content) or (standard_mention and standard_mention in message.content)
 
         # Strip mention from text for processing
         if has_mention:
@@ -290,12 +290,17 @@ class DiscordChannel(Channel):
             # thread_mode but mention_only is False → create thread anyway for conversation grouping
             thread_obj = await self._create_thread(message)
             if thread_obj is None:
-                return
-            target_thread_id = str(thread_obj.id)
-            self._active_threads[channel_id] = target_thread_id
-            thread_id = target_thread_id
-            chat_id = channel_id
-            typing_target = thread_obj  # Type into the new thread
+                # Thread creation failed (disabled/permissions), fall back to channel replies
+                logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
+                thread_id = channel_id
+                chat_id = channel_id
+                typing_target = message.channel  # Type into the channel
+            else:
+                target_thread_id = str(thread_obj.id)
+                self._active_threads[channel_id] = target_thread_id
+                thread_id = target_thread_id
+                chat_id = channel_id
+                typing_target = thread_obj  # Type into the new thread
         else:
             # No threading — reply directly in channel
             thread_id = channel_id

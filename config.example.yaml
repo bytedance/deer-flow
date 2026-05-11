@@ -1035,7 +1035,7 @@ run_events:
 #     bot_token: $DISCORD_BOT_TOKEN
 #     allowed_guilds: []              # empty = allow all guilds; can also be a single guild ID
 #     mention_only: false             # If true, only respond when bot is mentioned or commands are used
-#     # allowed_channels: []          # Optional: channel IDs exempt from mention_only (bot responds without mention)
+#     allowed_channels: []              # Optional: channel IDs exempt from mention_only (bot responds without mention)
 #     thread_mode: false               # If true, create a new thread for each reply (conversation grouping)
 
 # ============================================================================
