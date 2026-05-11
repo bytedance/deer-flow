@@ -55,7 +55,7 @@ function TokenUsageSummary({
 export function MessageTokenUsageList({
   className,
   enabled = false,
-  isLoading = false,
+  isLoading: _isLoading = false,
   messages,
 }: {
   className?: string;
@@ -63,7 +63,7 @@ export function MessageTokenUsageList({
   isLoading?: boolean;
   messages: Message[];
 }) {
-  if (!enabled || isLoading) {
+  if (!enabled) {
     return null;
   }
 
@@ -74,6 +74,10 @@ export function MessageTokenUsageList({
   }
 
   const usage = accumulateUsage(aiMessages);
+
+  if (!usage) {
+    return null;
+  }
 
   return (
     <TokenUsageSummary

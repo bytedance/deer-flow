@@ -59,12 +59,15 @@ def _make_result(
     ai_messages: list[dict] | None = None,
     result: str | None = None,
     error: str | None = None,
+    token_usage_records: list[dict] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         status=status,
         ai_messages=ai_messages or [],
         result=result,
         error=error,
+        token_usage_records=token_usage_records or [],
+        usage_reported=False,
     )
 
 
@@ -1132,3 +1135,80 @@ def test_cancellation_reports_subagent_usage(monkeypatch):
     assert len(report_calls) == 1
     assert report_calls[0][1] is cancel_result
     assert cleanup_calls == ["tc-cancel-report"]
+
+
+@pytest.mark.parametrize(
+    "status, expected_type",
+    [
+        (FakeSubagentStatus.COMPLETED, "task_completed"),
+        (FakeSubagentStatus.FAILED, "task_failed"),
+        (FakeSubagentStatus.CANCELLED, "task_cancelled"),
+        (FakeSubagentStatus.TIMED_OUT, "task_timed_out"),
+    ],
+)
+def test_terminal_events_include_usage(monkeypatch, status, expected_type):
+    """Terminal task events include a usage summary from token_usage_records."""
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    events = []
+
+    records = [
+        {"source_run_id": "r1", "caller": "subagent:general-purpose", "input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+        {"source_run_id": "r2", "caller": "subagent:general-purpose", "input_tokens": 200, "output_tokens": 80, "total_tokens": 280},
+    ]
+    result = _make_result(status, result="ok" if status == FakeSubagentStatus.COMPLETED else None, error="err" if status != FakeSubagentStatus.COMPLETED else None, token_usage_records=records)
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+
+    _run_task_tool(
+        runtime=runtime,
+        description="test",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-usage",
+    )
+
+    terminal_events = [e for e in events if e["type"] == expected_type]
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["usage"] == {
+        "input_tokens": 300,
+        "output_tokens": 130,
+        "total_tokens": 430,
+    }
+
+
+def test_terminal_event_usage_none_when_no_records(monkeypatch):
+    """Terminal event has usage=None when token_usage_records is empty."""
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    events = []
+
+    result = _make_result(FakeSubagentStatus.COMPLETED, result="done", token_usage_records=[])
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+
+    _run_task_tool(
+        runtime=runtime,
+        description="test",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-no-records",
+    )
+
+    completed = [e for e in events if e["type"] == "task_completed"]
+    assert len(completed) == 1
+    assert completed[0]["usage"] is None

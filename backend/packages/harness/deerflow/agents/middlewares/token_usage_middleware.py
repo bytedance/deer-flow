@@ -9,7 +9,7 @@ from typing import Any, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.todo import Todo
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -217,6 +217,17 @@ def _infer_step_kind(message: AIMessage, actions: list[dict[str, Any]]) -> str:
     return "thinking"
 
 
+def _has_tool_call(message: AIMessage, tool_call_id: str) -> bool:
+    """Return True if the AIMessage contains a tool_call with the given id."""
+    for tc in message.tool_calls or []:
+        if isinstance(tc, dict):
+            if tc.get("id") == tool_call_id:
+                return True
+        elif hasattr(tc, "id") and tc.id == tool_call_id:
+            return True
+    return False
+
+
 def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
     tool_calls = getattr(message, "tool_calls", None) or []
     actions: list[dict[str, Any]] = []
@@ -261,8 +272,48 @@ class TokenUsageMiddleware(AgentMiddleware):
         if not messages:
             return None
 
+        # Annotate subagent token usage onto the AIMessage that dispatched it.
+        # When a task tool completes, its usage is cached by tool_call_id.  Detect
+        # the ToolMessage → search backward for the corresponding AIMessage → merge.
+        state_updates: list = []
+        if len(messages) >= 2:
+            tool_msg = messages[-2]
+            if isinstance(tool_msg, ToolMessage) and tool_msg.tool_call_id:
+                from deerflow.tools.builtins.task_tool import pop_cached_subagent_usage
+
+                subagent_usage = pop_cached_subagent_usage(tool_msg.tool_call_id)
+                if subagent_usage:
+                    # Search backward from the ToolMessage to find the AIMessage
+                    # that dispatched it.  A single model response can dispatch
+                    # multiple task tool calls, so we can't assume a fixed offset.
+                    dispatch_idx = len(messages) - 3
+                    while dispatch_idx >= 0:
+                        candidate = messages[dispatch_idx]
+                        if isinstance(candidate, AIMessage) and _has_tool_call(
+                            candidate, tool_msg.tool_call_id
+                        ):
+                            existing = getattr(candidate, "usage_metadata", None) or {}
+                            merged = {
+                                **existing,
+                                "input_tokens": existing.get("input_tokens", 0)
+                                + subagent_usage["input_tokens"],
+                                "output_tokens": existing.get("output_tokens", 0)
+                                + subagent_usage["output_tokens"],
+                                "total_tokens": existing.get("total_tokens", 0)
+                                + subagent_usage["total_tokens"],
+                            }
+                            state_updates.append(
+                                candidate.model_copy(
+                                    update={"usage_metadata": merged}
+                                )
+                            )
+                            break
+                        dispatch_idx -= 1
+
         last = messages[-1]
         if not isinstance(last, AIMessage):
+            if state_updates:
+                return {"messages": state_updates}
             return None
 
         usage = getattr(last, "usage_metadata", None)
@@ -288,11 +339,12 @@ class TokenUsageMiddleware(AgentMiddleware):
         additional_kwargs = dict(getattr(last, "additional_kwargs", {}) or {})
 
         if additional_kwargs.get(TOKEN_USAGE_ATTRIBUTION_KEY) == attribution:
-            return None
+            return {"messages": state_updates} if state_updates else None
 
         additional_kwargs[TOKEN_USAGE_ATTRIBUTION_KEY] = attribution
         updated_msg = last.model_copy(update={"additional_kwargs": additional_kwargs})
-        return {"messages": [updated_msg]}
+        state_updates.append(updated_msg)
+        return {"messages": state_updates}
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
