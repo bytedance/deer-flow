@@ -4,11 +4,11 @@ from langchain.tools import BaseTool
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
-from deerflow.mcp.tools import _make_sync_tool_wrapper
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, task_tool, view_image_tool
 from deerflow.tools.builtins.tool_search import reset_deferred_registry
+from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ def _is_host_bash_tool(tool: object) -> bool:
 def _ensure_sync_invocable_tool(tool: BaseTool) -> BaseTool:
     """Attach a sync wrapper to async-only tools used by sync agent callers."""
     if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
-        tool.func = _make_sync_tool_wrapper(tool.coroutine, tool.name)
+        tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
     return tool
 
 

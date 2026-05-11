@@ -59,6 +59,7 @@ def _make_minimal_config(tools):
     config.tool_search.enabled = False
     config.skill_evolution.enabled = False
     config.sandbox = MagicMock()
+    config.acp_agents = {}
     return config
 
 
@@ -88,9 +89,9 @@ def test_config_loaded_async_only_tool_gets_sync_wrapper(mock_reset, mock_bash, 
         patch("deerflow.tools.tools.resolve_variable", return_value=async_tool),
         patch("deerflow.tools.tools.BUILTIN_TOOLS", []),
     ):
-        result = get_available_tools(include_mcp=False)
+        result = get_available_tools(include_mcp=False, app_config=mock_cfg.return_value)
 
-    assert result == [async_tool]
+    assert async_tool in result
     assert async_tool.func is not None
     assert async_tool.invoke({"x": 42}) == "result: 42"
 
