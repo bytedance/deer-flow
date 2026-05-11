@@ -48,6 +48,27 @@ MCP 服务器在 `extensions_config.json` 中配置，这个文件独立于 `con
 - `args`：命令参数数组
 - `enabled`：服务器是否激活（可切换而无需删除条目）
 - `env`：可选地注入到服务器进程中的环境变量
+- `type` / `url`：远程 `http` 或 `sse` MCP 服务器的传输配置
+- `headers`：远程 `http` 或 `sse` MCP 服务器的可选 HTTP 请求头
+
+`extensions_config.json` 中的字段值可以使用 `$VAR_NAME` 语法引用环境变量，这同样适用于 `headers.Authorization` 这类嵌套字段。
+
+下面是一个使用环境变量加载认证头的远程 MCP 服务器示例：
+
+```json
+{
+  "mcpServers": {
+    "github-remote": {
+      "enabled": true,
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer $GITHUB_MCP_AUTH_TOKEN"
+      }
+    }
+  }
+}
+```
 
 ## 工具如何加载
 

@@ -14,6 +14,25 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+For remote `http` and `sse` MCP servers, you can also provide `url` and `headers`. Environment variable interpolation is applied recursively across `extensions_config.json`, so nested values such as `headers.Authorization` can use `$VAR_NAME` placeholders.
+
+Example:
+
+```json
+{
+  "mcpServers": {
+    "github-remote": {
+      "enabled": true,
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer $GITHUB_MCP_AUTH_TOKEN"
+      }
+    }
+  }
+}
+```
+
 ## OAuth Support (HTTP/SSE MCP Servers)
 
 For `http` and `sse` MCP servers, DeerFlow supports OAuth token acquisition and automatic token refresh.
