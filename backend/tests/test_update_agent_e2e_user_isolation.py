@@ -1,17 +1,21 @@
 """End-to-end verification for update_agent's user_id resolution.
 
-The setup_agent path was hardened by PR #2784 to prefer runtime.context["user_id"]
-over the contextvar. update_agent did NOT receive the same treatment — it still
-unconditionally calls get_effective_user_id() at module level. That means: in
-any scenario where the contextvar is unavailable but runtime.context carries
-user_id (e.g. a future change that drives the graph from a worker pool, or a
-checkpoint resume on a different task), update_agent will silently route writes
-to users/default/agents/...
+PR #2784 hardened setup_agent to prefer runtime.context["user_id"] over the
+contextvar. update_agent had the same latent gap: it unconditionally called
+get_effective_user_id() at module level, so any scenario where the contextvar
+was unavailable while runtime.context carried user_id (a background task
+scheduled outside the request task, a worker pool that doesn't copy_context,
+checkpoint resume on a different task) would silently route writes to
+users/default/agents/...
 
-These tests are intentionally load-bearing under @no_auto_user (contextvar
-empty). The negative-control test confirms the fixture actually puts the tool
-in the buggy regime, then the positive test demonstrates the desired behaviour
-(currently expected to FAIL, driving the fix in update_agent_tool.py).
+These tests are load-bearing under @no_auto_user (contextvar empty):
+
+- The negative-control test confirms the fixture actually puts the tool in
+  the regime where the contextvar fallback would land in users/default/.
+  Without that, the positive test would be vacuously satisfied.
+- The positive test verifies update_agent honours runtime.context["user_id"]
+  injected by inject_authenticated_user_context in the gateway. Before the
+  fix in this PR, this test failed; now it passes.
 """
 
 from __future__ import annotations
@@ -173,18 +177,19 @@ def test_update_agent_falls_back_to_default_when_no_inject_and_no_contextvar(tmp
 
 
 # ---------------------------------------------------------------------------
-# THE BUG — currently expected to FAIL until update_agent is fixed.
+# Regression guard — passes on this branch, would fail on main before the fix.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.no_auto_user
 def test_update_agent_should_use_runtime_context_user_id_when_contextvar_missing(tmp_path: Path):
-    """update_agent must prefer the authenticated user_id carried in
+    """update_agent prefers the authenticated user_id carried in
     runtime.context (placed there by inject_authenticated_user_context)
     over the contextvar — same contract as setup_agent (PR #2784).
 
-    Without the fix, this test FAILS because update_agent unconditionally
-    calls get_effective_user_id() and lands in default/.
+    Before this PR's fix, update_agent unconditionally called
+    get_effective_user_id() and landed in default/ whenever the contextvar
+    was unavailable. This test pins the corrected behaviour.
     """
     from langgraph.runtime import Runtime
 
@@ -223,8 +228,8 @@ def test_update_agent_should_use_runtime_context_user_id_when_contextvar_missing
     auth_soul = (auth_dir / "SOUL.md").read_text()
     default_soul = (default_dir / "SOUL.md").read_text()
 
-    assert auth_soul == "# Auth Updated", f"BUG: update_agent ignored runtime.context['user_id']={auth_uid!r} and instead routed the write to users/default/. auth_soul={auth_soul!r}, default_soul={default_soul!r}"
-    assert default_soul == "# Default Original", "BUG: update_agent corrupted the shared default-user agent. It should have written under the authenticated user's path."
+    assert auth_soul == "# Auth Updated", f"REGRESSION: update_agent ignored runtime.context['user_id']={auth_uid!r} and routed the write to users/default/ instead. auth_soul={auth_soul!r}, default_soul={default_soul!r}"
+    assert default_soul == "# Default Original", "REGRESSION: update_agent corrupted the shared default-user agent. It should have written under the authenticated user's path."
 
 
 # ---------------------------------------------------------------------------

@@ -126,11 +126,29 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
     return app
 
 
-def _drain_stream(response) -> str:
-    """Consume an SSE response body fully and return the concatenated text."""
+def _drain_stream(response, *, timeout: float = 30.0, max_bytes: int = 4 * 1024 * 1024) -> str:
+    """Consume an SSE response body until the run terminates and return the text.
+
+    Bounded to keep the test fail-fast:
+      - Stops as soon as an ``event: end`` SSE frame is observed (the gateway
+        sends this when the background run finishes — see ``services.format_sse``
+        and ``StreamBridge.publish_end``).
+      - Stops at ``timeout`` seconds wall-clock so a stuck run / runaway heartbeat
+        loop surfaces a real failure instead of hanging pytest.
+      - Stops at ``max_bytes`` so a runaway producer can't OOM the test process.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
     body = b""
     for chunk in response.iter_bytes():
         body += chunk
+        if b"event: end" in body:
+            break
+        if len(body) >= max_bytes:
+            break
+        if _time.monotonic() >= deadline:
+            break
     return body.decode("utf-8", errors="replace")
 
 
@@ -165,10 +183,11 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
     4. Assert SOUL.md exists under users/<authenticated_uid>/agents/<name>/.
     5. Assert NOTHING exists under users/default/agents/<name>/.
     """
-    # We need to patch create_chat_model in both module aliases used by lead_agent.
-    # Lead agent imports it via `from deerflow.models import create_chat_model`,
-    # so we patch at the deerflow.models module level — that's where lookup
-    # happens at the moment lead_agent.agent is imported afresh inside lifespan.
+    # ``deerflow.agents.lead_agent.agent`` imports ``create_chat_model`` with
+    # ``from deerflow.models import create_chat_model`` at module load time,
+    # rebinding the symbol into its own namespace. So the only patch that
+    # intercepts the call is the bound name on ``lead_agent.agent`` — patching
+    # ``deerflow.models.create_chat_model`` would be too late.
     agent_name = "real-http-agent"
 
     from starlette.testclient import TestClient
