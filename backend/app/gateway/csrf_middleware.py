@@ -6,7 +6,7 @@ State-changing operations require CSRF protection.
 
 import os
 import secrets
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
 
 from fastapi import Request, Response
@@ -106,6 +106,11 @@ def _configured_cors_origins() -> set[str]:
     return origins
 
 
+def get_configured_cors_origins() -> set[str]:
+    """Return normalized explicit browser origins from GATEWAY_CORS_ORIGINS."""
+    return _configured_cors_origins()
+
+
 def _first_header_value(value: str | None) -> str | None:
     """Return the first value from a comma-separated proxy header."""
     if not value:
@@ -172,7 +177,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         _is_auth = is_auth_endpoint(request)
 
         if should_check_csrf(request) and _is_auth and not is_allowed_auth_origin(request):

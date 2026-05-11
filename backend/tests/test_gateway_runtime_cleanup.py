@@ -70,9 +70,9 @@ def test_gateway_cors_configuration_uses_gateway_allowlist():
     gateway_app = _read("backend/app/gateway/app.py")
     csrf_middleware = _read("backend/app/gateway/csrf_middleware.py")
 
-    assert "CORS_ORIGINS" not in gateway_config
+    assert not re.search(r"(?<!GATEWAY_)[\"']CORS_ORIGINS[\"']", gateway_config)
     assert "cors_origins" not in gateway_config
-    assert "GATEWAY_CORS_ORIGINS" in gateway_app
+    assert "get_configured_cors_origins" in gateway_app
     assert "GATEWAY_CORS_ORIGINS" in csrf_middleware
 
 

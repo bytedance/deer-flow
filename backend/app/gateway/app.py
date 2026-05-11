@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -9,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
-from app.gateway.csrf_middleware import CSRFMiddleware
+from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
     agents,
@@ -241,8 +240,8 @@ API Gateway for DeerFlow - A LangGraph-based AI agent backend with sandbox execu
 
 ### Architecture
 
-LangGraph requests are handled by nginx reverse proxy.
-This gateway provides custom endpoints for models, MCP configuration, skills, and artifacts.
+LangGraph-compatible requests are routed through nginx to this gateway.
+This gateway provides runtime endpoints for agent runs plus custom endpoints for models, MCP configuration, skills, and artifacts.
         """,
         version="0.1.0",
         lifespan=lifespan,
@@ -314,23 +313,15 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # CORS: the unified nginx endpoint is same-origin by default. Split-origin
     # browser clients must opt in with this explicit Gateway allowlist so CORS
     # and CSRF origin checks share the same source of truth.
-    cors_origins_env = os.environ.get("GATEWAY_CORS_ORIGINS", "")
-    if cors_origins_env:
-        cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
-        # Validate: wildcard origin with credentials is a security misconfiguration
-        for origin in cors_origins:
-            if origin == "*":
-                logger.error("GATEWAY_CORS_ORIGINS contains wildcard '*' with allow_credentials=True. This is a security misconfiguration — browsers will reject the response. Use explicit scheme://host:port origins instead.")
-                cors_origins = [o for o in cors_origins if o != "*"]
-                break
-        if cors_origins:
-            app.add_middleware(
-                CORSMiddleware,
-                allow_origins=cors_origins,
-                allow_credentials=True,
-                allow_methods=["*"],
-                allow_headers=["*"],
-            )
+    cors_origins = sorted(get_configured_cors_origins())
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # Include routers
     # Models API is mounted at /api/models
