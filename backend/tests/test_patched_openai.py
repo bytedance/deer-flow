@@ -1,16 +1,22 @@
 """Tests for deerflow.models.patched_openai.PatchedChatOpenAI.
 
-These tests verify that _restore_tool_call_signatures correctly re-injects
-``thought_signature`` onto tool-call objects stored in
-``additional_kwargs["tool_calls"]``, covering id-based matching, positional
-fallback, camelCase keys, and several edge-cases.
+These tests cover:
+- Model-level payload behavior via PatchedChatOpenAI._get_request_payload
+- tool-call ``thought_signature`` restoration helpers
+- Gemini compatibility schema fixes for arrays and integer enums
 """
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
-from deerflow.models.patched_openai import _restore_tool_call_signatures
+from deerflow.models.patched_openai import (
+    PatchedChatOpenAI,
+    _fix_array_schemas,
+    _fix_integer_enum_schemas,
+    _restore_tool_call_signatures,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,8 +52,74 @@ def _ai_msg_with_raw_tool_calls(raw_tool_calls: list[dict]) -> AIMessage:
     return AIMessage(content="", additional_kwargs={"tool_calls": raw_tool_calls})
 
 
+def _make_model(**kwargs) -> PatchedChatOpenAI:
+    return PatchedChatOpenAI(
+        model="gpt-4o-mini",
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        **kwargs,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Core: signed tool-call restoration
+# Core: model-call integration behavior
+# ---------------------------------------------------------------------------
+
+
+def test_get_request_payload_restores_signature_with_real_model_call():
+    """Model payload generation restores thought_signature on assistant tool calls."""
+    model = _make_model()
+
+    assistant_msg = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "web_fetch",
+                "args": {"url": "http://example.com"},
+                "id": "call_1",
+                "type": "tool_call",
+            }
+        ],
+        additional_kwargs={"tool_calls": [RAW_TC_SIGNED]},
+    )
+
+    payload = model._get_request_payload([HumanMessage(content="hello"), assistant_msg])
+
+    assistant_payload = next(msg for msg in payload["messages"] if msg.get("role") == "assistant")
+    assert assistant_payload["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+
+def test_get_request_payload_sanitizes_tool_schema_with_real_model_call():
+    """Model payload generation fixes array/items and integer enum constraints."""
+    model = _make_model()
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "calc",
+                "description": "demo tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "modes": {"type": "array"},
+                        "retry": {"type": "integer", "enum": [1, 2, 4]},
+                    },
+                },
+            },
+        }
+    ]
+
+    payload = model._get_request_payload([HumanMessage(content="run")], tools=tools)
+
+    params = payload["tools"][0]["function"]["parameters"]
+    assert params["properties"]["modes"]["items"] == {"type": "string"}
+    assert "enum" not in params["properties"]["retry"]
+    assert params["properties"]["retry"]["description"] == "Valid values: 1, 2, 4"
+
+
+# ---------------------------------------------------------------------------
+# Core: signed tool-call restoration helpers
 # ---------------------------------------------------------------------------
 
 
@@ -171,6 +243,71 @@ def test_tool_call_multiple_sequential_signatures():
     assert payload_tc_a["thought_signature"] == "SIG_STEP1=="
     assert payload_tc_b["thought_signature"] == "SIG_STEP2=="
 
+# ---------------------------------------------------------------------------
+# Schema Fixes (Gemini Compatibility)
+# ---------------------------------------------------------------------------
 
-# Integration behavior for PatchedChatOpenAI is validated indirectly via
-# _restore_tool_call_signatures unit coverage above.
+@pytest.mark.parametrize(
+    "schema, expected",
+    [
+        (
+            {"type": "array"},
+            {"type": "array", "items": {"type": "string"}},
+        ),
+        (
+            {"type": ["array", "null"]},
+            {"type": ["array", "null"], "items": {"type": "string"}},
+        ),
+        # Array that already has items (should not be overwritten)
+        (
+            {"type": "array", "items": {"type": "integer"}},
+            {"type": "array", "items": {"type": "integer"}},
+        ),
+        # Nested structural test (properties)
+        (
+            {"type": "object", "properties": {"tags": {"type": "array"}}},
+            {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}},
+        ),
+    ],
+)
+def test_fix_array_schemas(schema, expected):
+    """Test that array schemas missing 'items' receive a default string item type."""
+    _fix_array_schemas(schema)
+    assert schema == expected
+
+
+@pytest.mark.parametrize(
+    "schema, expected",
+    [
+        # Basic integer enum with existing description
+        (
+            {"type": "integer", "description": "Retry count", "enum": [1, 2, 3]},
+            {"type": "integer", "description": "Retry count (valid values: 1, 2, 3)"},
+        ),
+        # Pure string enum (should be left alone)
+        (
+            {"type": "string", "enum": ["a", "b", "c"]},
+            {"type": "string", "enum": ["a", "b", "c"]},
+        ),
+        # Number enum without previous description
+        (
+            {"type": "number", "enum": [0, 1.5]},
+            {"type": "number", "description": "Valid values: 0, 1.5"},
+        ),
+        # Mixed enum types (contains at least one non-string)
+        (
+            {"type": "string", "enum": ["a", 2, "c"]},
+            {"type": "string", "description": "Valid values: a, 2, c"},
+        ),
+        # Nested structural test (allOf)
+        (
+            {"type": "object", "properties": {"nested": {"allOf": [{"type": "integer", "enum": [200, 404]}]}}},
+            {"type": "object", "properties": {"nested": {"allOf": [{"type": "integer", "description": "Valid values: 200, 404"}]}}},
+        ),
+    ],
+)
+def test_fix_integer_enum_schemas(schema, expected):
+    """Test that non-string enums are extracted into descriptions to satisfy Gemini."""
+    _fix_integer_enum_schemas(schema)
+    assert schema == expected
+
