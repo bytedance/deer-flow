@@ -678,3 +678,54 @@ class TestChatModelStartHumanMessage:
         j.on_chat_model_start({}, [], run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
         assert j._first_human_msg is None
+
+
+class TestModelNameExtraction:
+    """Tests for on_chat_model_start extracting the model name."""
+
+    @pytest.mark.anyio
+    async def test_extracts_model_name_from_serialized_kwargs(self, journal_setup):
+        """Model name is extracted from serialized.kwargs.model_name."""
+        j, _ = journal_setup
+        serialized = {"kwargs": {"model_name": "gpt-4o"}, "name": "ChatOpenAI"}
+        j.on_chat_model_start(serialized, [], run_id=uuid4())
+        assert j._model_name == "gpt-4o"
+
+    @pytest.mark.anyio
+    async def test_extracts_model_name_from_serialized_kwargs_model(self, journal_setup):
+        """Model name is extracted from serialized.kwargs.model (Anthropic format)."""
+        j, _ = journal_setup
+        serialized = {"kwargs": {"model": "claude-sonnet-4-6"}, "name": "ClaudeChatModel"}
+        j.on_chat_model_start(serialized, [], run_id=uuid4())
+        assert j._model_name == "claude-sonnet-4-6"
+
+    @pytest.mark.anyio
+    async def test_extracts_model_name_from_serialized_name(self, journal_setup):
+        """Falls back to serialized.name when kwargs has no model info."""
+        j, _ = journal_setup
+        serialized = {"name": "ChatAnthropic"}
+        j.on_chat_model_start(serialized, [], run_id=uuid4())
+        assert j._model_name == "ChatAnthropic"
+
+    @pytest.mark.anyio
+    async def test_model_name_not_overwritten(self, journal_setup):
+        """First model name wins; subsequent calls do not overwrite."""
+        j, _ = journal_setup
+        j.on_chat_model_start({"kwargs": {"model_name": "gpt-4o"}}, [], run_id=uuid4())
+        j.on_chat_model_start({"kwargs": {"model_name": "gpt-4o-mini"}}, [], run_id=uuid4())
+        assert j._model_name == "gpt-4o"
+
+    @pytest.mark.anyio
+    async def test_model_name_none_when_not_in_serialized(self, journal_setup):
+        """Model name stays None when serialized has no model info."""
+        j, _ = journal_setup
+        j.on_chat_model_start({}, [], run_id=uuid4())
+        assert j._model_name is None
+
+    @pytest.mark.anyio
+    async def test_completion_data_includes_model_name(self, journal_setup):
+        """get_completion_data returns the extracted model name."""
+        j, _ = journal_setup
+        j.on_chat_model_start({"kwargs": {"model_name": "claude-sonnet-4-20250514"}}, [], run_id=uuid4())
+        data = j.get_completion_data()
+        assert data["model_name"] == "claude-sonnet-4-20250514"

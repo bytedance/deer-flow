@@ -181,6 +181,7 @@ class RunRepository(RunStore):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        model_name: str | None = None,
     ) -> None:
         """Update status + token usage + convenience fields on run completion."""
         values: dict[str, Any] = {
@@ -201,6 +202,8 @@ class RunRepository(RunStore):
             values["first_human_message"] = first_human_message[:2000]
         if error is not None:
             values["error"] = error
+        if model_name is not None:
+            values["model_name"] = model_name
         async with self._sf() as session:
             await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
             await session.commit()

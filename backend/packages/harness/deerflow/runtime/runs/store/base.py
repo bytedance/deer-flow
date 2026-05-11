@@ -77,6 +77,7 @@ class RunStore(abc.ABC):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        model_name: str | None = None,
     ) -> None:
         pass
 

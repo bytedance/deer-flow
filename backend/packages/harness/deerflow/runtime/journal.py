@@ -68,6 +68,9 @@ class RunJournal(BaseCallbackHandler):
         self._subagent_tokens = 0
         self._middleware_tokens = 0
 
+        # Model tracking (first LLM call wins)
+        self._model_name: str | None = None
+
         # Dedup: LangChain may fire on_llm_end multiple times for the same run_id
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
@@ -150,6 +153,15 @@ class RunJournal(BaseCallbackHandler):
             len(messages),
             [len(batch) for batch in messages],
         )
+
+        # Extract model name from serialized config (e.g. ChatOpenAI → "gpt-4o").
+        if not self._model_name:
+            kwargs = serialized.get("kwargs") or {}
+            self._model_name = (
+                kwargs.get("model_name")
+                or kwargs.get("model")
+                or serialized.get("name")
+            )
 
         # Capture the first human message sent to any LLM in this run.
         if not self._first_human_msg and messages:
@@ -443,4 +455,5 @@ class RunJournal(BaseCallbackHandler):
             "message_count": self._msg_count,
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,
+            "model_name": self._model_name,
         }
