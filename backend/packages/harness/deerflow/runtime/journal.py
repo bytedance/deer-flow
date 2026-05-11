@@ -223,6 +223,12 @@ class RunJournal(BaseCallbackHandler):
                 },
             )
 
+            # Message-level convenience fields (last AI text, total message count)
+            content = getattr(message, "content", None)
+            if isinstance(content, str) and content:
+                self._last_ai_msg = content
+            self._msg_count += 1
+
             # Token accumulation (dedup by langchain run_id to avoid double-counting
             # when the callback fires more than once for the same response)
             if self._track_tokens:
