@@ -269,11 +269,27 @@ class DiscordChannel(Channel):
             if self._mention_only and not has_mention and channel_id not in self._allowed_channels:
                 logger.debug("[Discord] skipping message without mention in existing thread channel %s", channel_id)
                 return
-            # Existing session → route to the existing thread
-            target_thread_id = self._active_threads[channel_id]
-            logger.debug("[Discord] routing message in channel %s to existing thread %s", channel_id, target_thread_id)
-            thread_id = target_thread_id
-            chat_id = channel_id
+            # mention_only + fresh @ → create new thread instead of routing to existing one
+            if self._mention_only and has_mention:
+                thread_obj = await self._create_thread(message)
+                if thread_obj is not None:
+                    target_thread_id = str(thread_obj.id)
+                    self._active_threads[channel_id] = target_thread_id
+                    thread_id = target_thread_id
+                    chat_id = channel_id
+                    typing_target = thread_obj
+                    logger.info("[Discord] created new thread %s in channel %s on mention (replacing existing thread)", target_thread_id, channel_id)
+                else:
+                    logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
+                    thread_id = channel_id
+                    chat_id = channel_id
+                    typing_target = message.channel
+            else:
+                # Existing session → route to the existing thread
+                target_thread_id = self._active_threads[channel_id]
+                logger.debug("[Discord] routing message in channel %s to existing thread %s", channel_id, target_thread_id)
+                thread_id = target_thread_id
+                chat_id = channel_id
         elif self._mention_only and not has_mention and channel_id not in self._allowed_channels:
             # Not mentioned and not in an allowed channel → skip
             logger.debug("[Discord] skipping message without mention in channel %s", channel_id)
