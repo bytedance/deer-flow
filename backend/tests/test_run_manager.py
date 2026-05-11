@@ -5,6 +5,7 @@ import re
 import pytest
 
 from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -141,3 +142,53 @@ async def test_create_defaults(manager: RunManager):
     assert record.kwargs == {}
     assert record.multitask_strategy == "reject"
     assert record.assistant_id is None
+
+
+@pytest.mark.anyio
+async def test_model_name_create_or_reject():
+    """create_or_reject should accept and persist model_name."""
+    from deerflow.runtime.runs.schemas import DisconnectMode
+
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+
+    record = await mgr.create_or_reject(
+        "thread-1",
+        assistant_id="lead_agent",
+        on_disconnect=DisconnectMode.cancel,
+        metadata={"key": "val"},
+        kwargs={"input": {}},
+        multitask_strategy="reject",
+        model_name="anthropic.claude-sonnet-4-20250514-v1:0",
+    )
+    assert record.model_name == "anthropic.claude-sonnet-4-20250514-v1:0"
+    assert record.status == RunStatus.pending
+
+    # Verify model_name was persisted to store
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["model_name"] == "anthropic.claude-sonnet-4-20250514-v1:0"
+
+    # Verify retrieval returns the model_name via in-memory record
+    fetched = mgr.get(record.run_id)
+    assert fetched is not None
+    assert fetched.model_name == "anthropic.claude-sonnet-4-20250514-v1:0"
+
+
+@pytest.mark.anyio
+async def test_model_name_default_is_none():
+    """create_or_reject without model_name should default to None."""
+    from deerflow.runtime.runs.schemas import DisconnectMode
+
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+
+    record = await mgr.create_or_reject(
+        "thread-1",
+        on_disconnect=DisconnectMode.cancel,
+        model_name=None,
+    )
+    assert record.model_name is None
+
+    stored = await store.get(record.run_id)
+    assert stored["model_name"] is None

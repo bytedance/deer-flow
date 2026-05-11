@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.utils import sanitize_log_param
+from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -267,6 +268,23 @@ async def start_run(
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
+    body_context = getattr(body, "context", None) or {}
+    model_name = body_context.get("model_name")
+
+    # Coerce non-string model_name values to str before truncation.
+    if model_name is not None and not isinstance(model_name, str):
+        model_name = str(model_name)
+
+    # Validate model against the allowlist when a model_name is provided.
+    if model_name:
+        app_config = get_app_config()
+        resolved = app_config.get_model_config(model_name)
+        if resolved is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name!r} is not in the configured model allowlist",
+            )
+
     try:
         record = await run_mgr.create_or_reject(
             thread_id,
@@ -275,6 +293,7 @@ async def start_run(
             metadata=body.metadata or {},
             kwargs={"input": body.input, "config": body.config},
             multitask_strategy=body.multitask_strategy,
+            model_name=model_name,
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

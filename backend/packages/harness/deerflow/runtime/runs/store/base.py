@@ -23,6 +23,7 @@ class RunStore(abc.ABC):
         thread_id: str,
         assistant_id: str | None = None,
         user_id: str | None = None,
+        model_name: str | None = None,
         status: str = "pending",
         multitask_strategy: str = "reject",
         metadata: dict[str, Any] | None = None,
