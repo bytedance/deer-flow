@@ -294,14 +294,18 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     (SQL-backed for sqlite/postgres, Store-backed for memory mode).
     """
     from app.gateway.deps import get_thread_store
+    from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 
     repo = get_thread_store(request)
-    rows = await repo.search(
-        metadata=body.metadata or None,
-        status=body.status,
-        limit=body.limit,
-        offset=body.offset,
-    )
+    try:
+        rows = await repo.search(
+            metadata=body.metadata or None,
+            status=body.status,
+            limit=body.limit,
+            offset=body.offset,
+        )
+    except InvalidMetadataFilterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return [
         ThreadResponse(
             thread_id=r["thread_id"],

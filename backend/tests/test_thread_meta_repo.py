@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from deerflow.persistence.thread_meta import ThreadMetaRepository
+from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaRepository
 
 
 @pytest.fixture
@@ -234,14 +234,16 @@ class TestThreadMetaRepository:
 
     @pytest.mark.anyio
     async def test_search_metadata_all_unsafe_keys_raises(self, repo, caplog):
-        """When ALL metadata keys are unsafe, raises ValueError (not silent unfiltered results)."""
+        """When ALL metadata keys are unsafe, raises InvalidMetadataFilterError."""
         await repo.create("t1", metadata={"env": "prod"})
         await repo.create("t2", metadata={"env": "staging"})
 
         with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
-            with pytest.raises(ValueError, match="rejected"):
+            with pytest.raises(InvalidMetadataFilterError, match="rejected") as exc_info:
                 await repo.search(metadata={"bad;key": "x"})
         assert any("bad;key" in r.message for r in caplog.records)
+        # Subclass of ValueError for backward compatibility
+        assert isinstance(exc_info.value, ValueError)
 
     @pytest.mark.anyio
     async def test_search_metadata_partial_unsafe_key_skipped(self, repo, caplog):
@@ -285,7 +287,7 @@ class TestThreadMetaRepository:
         await repo.create("t2", metadata={"env": "staging"})
 
         with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
-            with pytest.raises(ValueError, match="rejected"):
+            with pytest.raises(InvalidMetadataFilterError, match="rejected"):
                 await repo.search(metadata={1: "x"})
         assert any("1" in r.message for r in caplog.records)
 
@@ -296,7 +298,7 @@ class TestThreadMetaRepository:
         await repo.create("t2", metadata={"env": "staging"})
 
         with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
-            with pytest.raises(ValueError, match="rejected"):
+            with pytest.raises(InvalidMetadataFilterError, match="rejected"):
                 await repo.search(metadata={"env": ["prod", "staging"]})
 
     @pytest.mark.anyio
@@ -306,7 +308,7 @@ class TestThreadMetaRepository:
         await repo.create("t2", metadata={"env": "staging"})
 
         with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
-            with pytest.raises(ValueError, match="rejected"):
+            with pytest.raises(InvalidMetadataFilterError, match="rejected"):
                 await repo.search(metadata={"a.b": "anything"})
         assert any("a.b" in r.message for r in caplog.records)
 

@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.json_compat import json_match
-from deerflow.persistence.thread_meta.base import ThreadMetaStore
+from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 
@@ -135,7 +135,7 @@ class ThreadMetaRepository(ThreadMetaStore):
                 except (ValueError, TypeError) as exc:
                     logger.warning("Skipping metadata filter key %r: %s", key, exc)
             if applied == 0:
-                raise ValueError(f"All metadata filter keys were rejected as unsafe: {list(metadata)!r}")
+                raise InvalidMetadataFilterError(f"All metadata filter keys were rejected as unsafe: {list(metadata)!r}")
 
         stmt = stmt.limit(limit).offset(offset)
         async with self._sf() as session:

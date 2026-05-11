@@ -20,6 +20,10 @@ from typing import Any
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
 
+class InvalidMetadataFilterError(ValueError):
+    """Raised when all client-supplied metadata filter keys are rejected."""
+
+
 class ThreadMetaStore(abc.ABC):
     @abc.abstractmethod
     async def create(

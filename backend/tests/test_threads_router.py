@@ -10,6 +10,7 @@ from langgraph.store.memory import InMemoryStore
 
 from app.gateway.routers import threads
 from deerflow.config.paths import Paths
+from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -431,3 +432,34 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     assert entries, "expected at least one history entry"
     for entry in entries:
         assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
+
+
+# ── InvalidMetadataFilterError → HTTP 400 ────────────────────────────────────
+
+
+def test_search_threads_returns_400_for_invalid_metadata_filters() -> None:
+    """When the store raises InvalidMetadataFilterError, the handler must
+    return HTTP 400 instead of letting it bubble up as a 500.
+    """
+    app, _store, _checkpointer = _build_thread_app()
+    thread_store = app.state.thread_store
+
+    async def _raise_on_bad_filter(**kwargs):
+        raise InvalidMetadataFilterError("All metadata filter keys were rejected as unsafe: ['bad;key']")
+
+    with TestClient(app) as client:
+        with patch.object(thread_store, "search", side_effect=_raise_on_bad_filter):
+            response = client.post("/api/threads/search", json={"metadata": {"bad;key": "x"}})
+
+    assert response.status_code == 400
+    assert "rejected" in response.json()["detail"]
+
+
+def test_search_threads_succeeds_with_valid_metadata() -> None:
+    """Sanity check: valid metadata passes through without 400."""
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"metadata": {"env": "prod"}})
+
+    assert response.status_code == 200
