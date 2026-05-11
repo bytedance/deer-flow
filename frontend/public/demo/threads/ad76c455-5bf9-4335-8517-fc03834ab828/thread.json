@@ -1,0 +1,584 @@
+{
+  "values": {
+    "messages": [
+      {
+        "content": [
+          {
+            "type": "text",
+            "text": "What interesting findings can be made from this dataset?"
+          }
+        ],
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": "ac8f27cd-0f2e-4a82-a432-f4b37d18a846"
+      },
+      {
+        "content": "<uploaded_files>\nThe following files have been uploaded and are available for use:\n\n- titanic.csv (58.9 KB)\n  Path: /mnt/user-data/uploads/titanic.csv\n\nYou can read these files using the `read_file` tool with the paths shown above.\n</uploaded_files>",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "system",
+        "name": null,
+        "id": "915c3f95-01d0-4308-b284-ddb5edc74728"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "I need to examine the Titanic dataset first to understand its structure and then perform analysis to find interesting findings. Let me start by reading the uploaded CSV file."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0c9-2299-73c3-ab06-a4cbfac799f6",
+        "tool_calls": [
+          {
+            "name": "read_file",
+            "args": {
+              "description": "Read the Titanic dataset to understand its structure",
+              "path": "/mnt/user-data/uploads/titanic.csv"
+            },
+            "id": "call_h10krmevrts6zx0xf41ltctx",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "PassengerId,Survived,Pclass,Name,Sex,Age,SibSp,Parch,Ticket,Fare,Cabin,Embarked\n1,0,3,\"Braund, Mr. Owen Harris\",male,22,1,0,A/5 21171,7.25,,S\n2,1,1,\"Cumings, Mrs. John Bradley (Florence Briggs Thayer)\",female,38,1,0,PC 17599,71.2833,C85,C\n3,1,3,\"Heikkinen, Miss. Laina\",female,26,0,0,STON/O2. 3101282,7.925,,S\n4,1,1,\"Futrelle, Mrs. Jacques Heath (Lily May Peel)\",female,35,1,0,113803,53.1,C123,S\n5,0,3,\"Allen, Mr. William Henry\",male,35,0,0,373450,8.05,,S\n6,0,3,\"Moran, Mr. James\",male,,0,0,330877,8.4583,,Q\n7,0,1,\"McCarthy, Mr. Timothy J\",male,54,0,0,17463,51.8625,E46,S\n8,0,3,\"Palsson, Master. Gosta Leonard\",male,2,3,1,349909,21.075,,S\n9,1,3,\"Johnson, Mrs. Oscar W (Elisabeth Vilhelmina Berg)\",female,27,0,2,347742,11.1333,,S\n10,1,2,\"Nasser, Mrs. Nicholas (Adele Achem)\",female,14,1,0,237736,30.0708,,C\n11,1,3,\"Sandstrom, Miss. Marguerite Rut\",female,4,1,1,PP 9549,16.7,G6,S\n12,1,1,\"Bonnell, Miss. Elizabeth\",female,58,0,0,113783,26.55,C103,S\n13,0,3,\"Saundercock, Mr. William Henry\",male,20,0,0,A/5. 2151,8.05,,S\n14,0,3,\"Andersson, Mr. Anders Johan\",male,39,1,5,347082,31.275,,S\n15,0,3,\"Vestrom, Miss. Hulda Amanda Adolfina\",female,14,0,0,350406,7.8542,,S\n16,1,2,\"Hewlett, Mrs. (Mary D Kingcome) \",female,55,0,0,248706,16,,S\n17,0,3,\"Rice, Master. Eugene\",male,2,4,1,382652,29.125,,Q\n18,1,2,\"Williams, Mr. Charles Eugene\",male,,0,0,244373,13,,S\n19,0,3,\"Vander Planke, Mrs. Julius (Emelia Maria Vandemoortele)\",female,31,1,0,345763,18,,S\n20,1,3,\"Masselmani, Mrs. Fatima\",female,,0,0,2649,7.225,,C\n21,0,2,\"Fynney, Mr. Joseph J\",male,35,0,0,239865,26,,S\n22,1,2,\"Beesley, Mr. Lawrence\",male,34,0,0,248698,13,D56,S\n23,1,3,\"McGowan, Miss. Anna \"\"Annie\"\"\",female,15,0,0,330923,8.0292,,Q\n24,1,1,\"Sloper, Mr. William Thompson\",male,28,0,0,113788,35.5,A6,S\n25,0,3,\"Palsson, Miss. Torborg Danira\",female,8,3,1,349909,21.075,,S\n26,1,3,\"Asplund, Mrs. Carl Oscar (Selma Augusta Emilia Johansson)\",female,38,1,5,347077,31.3875,,S\n27,0,3,\"Emir, Mr. Farred Chehab\",male,,0,0,2631,7.225,,C\n28,0,1,\"Fortune, Mr. Charles Alexander\",male,19,3,2,19950,263,C23 C25 C27,S\n29,1,3,\"O'Dwyer, Miss. Ellen \"\"Nellie\"\"\",female,,0,0,330959,7.8792,,Q\n30,0,3,\"Todoroff, Mr. Lalio\",male,,0,0,349216,7.8958,,S\n31,0,1,\"Uruchurtu, Don. Manuel E\",male,40,0,0,PC 17601,27.7208,,C\n32,1,1,\"Spencer, Mrs. William Augustus (Marie Eugenie)\",female,,1,0,PC 17569,146.5208,B78,C\n33,1,3,\"Glynn, Miss. Mary Agatha\",female,,0,0,335677,7.75,,Q\n34,0,2,\"Wheadon, Mr. Edward H\",male,66,0,0,C.A. 24579,10.5,,S\n35,0,1,\"Meyer, Mr. Edgar Joseph\",male,28,1,0,PC 17604,82.1708,,C\n36,0,1,\"Holverson, Mr. Alexander Oskar\",male,42,1,0,113789,52,,S\n37,1,3,\"Mamee, Mr. Hanna\",male,,0,0,2677,7.2292,,C\n38,0,3,\"Cann, Mr. Ernest Charles\",male,21,0,0,A./5. 2152,8.05,,S\n39,0,3,\"Vander Planke, Miss. Augusta Maria\",female,18,2,0,345764,18,,S\n40,1,3,\"Nicola-Yarred, Miss. Jamila\",female,14,1,0,2651,11.2417,,C\n41,0,3,\"Ahlin, Mrs. Johan (Johanna Persdotter Larsson)\",female,40,1,0,7546,9.475,,S\n42,0,2,\"Turpin, Mrs. William John Robert (Dorothy Ann Wonnacott)\",female,27,1,0,11668,21,,S\n43,0,3,\"Kraeff, Mr. Theodor\",male,,0,0,349253,7.8958,,C\n44,1,2,\"Laroche, Miss. Simonne Marie Anne Andree\",female,3,1,2,SC/Paris 2123,41.5792,,C\n45,1,3,\"Devaney, Miss. Margaret Delia\",female,19,0,0,330958,7.8792,,Q\n46,0,3,\"Rogers, Mr. William John\",male,,0,0,S.C./A.4. 23567,8.05,,S\n47,0,3,\"Lennon, Mr. Denis\",male,,1,0,370371,15.5,,Q\n48,1,3,\"O'Driscoll, Miss. Bridget\",female,,0,0,14311,7.75,,Q\n49,0,3,\"Samaan, Mr. Youssef\",male,,2,0,2662,21.6792,,C\n50,0,3,\"Arnold-Franchi, Mrs. Josef (Josefine Franchi)\",female,18,1,0,349237,17.8,,S\n51,0,3,\"Panula, Master. Juha Niilo\",male,7,4,1,3101295,39.6875,,S\n52,0,3,\"Nosworthy, Mr. Richard Cater\",male,21,0,0,A/4. 39886,7.8,,S\n53,1,1,\"Harper, Mrs. Henry Sleeper (Myna Haxtun)\",female,49,1,0,PC 17572,76.7292,D33,C\n54,1,2,\"Faunthorpe, Mrs. Lizzie (Elizabeth Anne Wilkinson)\",female,29,1,0,2926,26,,S\n55,0,1,\"Ostby, Mr. Engelhart Cornelius\",male,65,0,1,113509,61.9792,B30,C\n56,1,1,\"Woolner, Mr. Hugh\",male,,0,0,19947,35.5,C52,S\n57,1,2,\"Rugg, Miss. Emily\",female,21,0,0,C.A. 31026,10.5,,S\n58,0,3,\"Novel, Mr. Mansouer\",male,28.5,0,0,2697,7.2292,,C\n59,1,2,\"West, Miss. Constance Mirium\",female,5,1,2,C.A. 34651,27.75,,S\n60,0,3,\"Goodwin, Master. William Frederick\",male,11,5,2,CA 2144,46.9,,S\n61,0,3,\"Sirayanian, Mr. Orsen\",male,22,0,0,2669,7.2292,,C\n62,1,1,\"Icard, Miss. Amelie\",female,38,0,0,113572,80,B28,\n63,0,1,\"Harris, Mr. Henry Birkhardt\",male,45,1,0,36973,83.475,C83,S\n64,0,3,\"Skoog, Master. Harald\",male,4,3,2,347088,27.9,,S\n65,0,1,\"Stewart, Mr. Albert A\",male,,0,0,PC 17605,27.7208,,C\n66,1,3,\"Moubarek, Master. Gerios\",male,,1,1,2661,15.2458,,C\n67,1,2,\"Nye, Mrs. (Elizabeth Ramell)\",female,29,0,0,C.A. 29395,10.5,F33,S\n68,0,3,\"Crease, Mr. Ernest James\",male,19,0,0,S.P. 3464,8.1583,,S\n69,1,3,\"Andersson, Miss. Erna Alexandra\",female,17,4,2,3101281,7.925,,S\n70,0,3,\"Kink, Mr. Vincenz\",male,26,2,0,315151,8.6625,,S\n71,0,2,\"Jenkin, Mr. Stephen Curnow\",male,32,0,0,C.A. 33111,10.5,,S\n72,0,3,\"Goodwin, Miss. Lillian Amy\",female,16,5,2,CA 2144,46.9,,S\n73,0,2,\"Hood, Mr. Ambrose Jr\",male,21,0,0,S.O.C. 14879,73.5,,S\n74,0,3,\"Chronopoulos, Mr. Apostolos\",male,26,1,0,2680,14.4542,,C\n75,1,3,\"Bing, Mr. Lee\",male,32,0,0,1601,56.4958,,S\n76,0,3,\"Moen, Mr. Sigurd Hansen\",male,25,0,0,348123,7.65,F G73,S\n77,0,3,\"Staneff, Mr. Ivan\",male,,0,0,349208,7.8958,,S\n78,0,3,\"Moutal, Mr. Rahamin Haim\",male,,0,0,374746,8.05,,S\n79,1,2,\"Caldwell, Master. Alden Gates\",male,0.83,0,2,248738,29,,S\n80,1,3,\"Dowdell, Miss. Elizabeth\",female,30,0,0,364516,12.475,,S\n81,0,3,\"Waelens, Mr. Achille\",male,22,0,0,345767,9,,S\n82,1,3,\"Sheerlinck, Mr. Jan Baptist\",male,29,0,0,345779,9.5,,S\n83,1,3,\"McDermott, Miss. Brigdet Delia\",female,,0,0,330932,7.7875,,Q\n84,0,1,\"Carrau, Mr. Francisco M\",male,28,0,0,113059,47.1,,S\n85,1,2,\"Ilett, Miss. Bertha\",female,17,0,0,SO/C 14885,10.5,,S\n86,1,3,\"Backstrom, Mrs. Karl Alfred (Maria Mathilda Gustafsson)\",female,33,3,0,3101278,15.85,,S\n87,0,3,\"Ford, Mr. William Neal\",male,16,1,3,W./C. 6608,34.375,,S\n88,0,3,\"Slocovski, Mr. Selman Francis\",male,,0,0,SOTON/OQ 392086,8.05,,S\n89,1,1,\"Fortune, Miss. Mabel Helen\",female,23,3,2,19950,263,C23 C25 C27,S\n90,0,3,\"Celotti, Mr. Francesco\",male,24,0,0,343275,8.05,,S\n91,0,3,\"Christmann, Mr. Emil\",male,29,0,0,343276,8.05,,S\n92,0,3,\"Andreasson, Mr. Paul Edvin\",male,20,0,0,347466,7.8542,,S\n93,0,1,\"Chaffee, Mr. Herbert Fuller\",male,46,1,0,W.E.P. 5734,61.175,E31,S\n94,0,3,\"Dean, Mr. Bertram Frank\",male,26,1,2,C.A. 2315,20.575,,S\n95,0,3,\"Coxon, Mr. Daniel\",male,59,0,0,364500,7.25,,S\n96,0,3,\"Shorney, Mr. Charles Joseph\",male,,0,0,374910,8.05,,S\n97,0,1,\"Goldschmidt, Mr. George B\",male,71,0,0,PC 17754,34.6542,A5,C\n98,1,1,\"Greenfield, Mr. William Bertram\",male,23,0,1,PC 17759,63.3583,D10 D12,C\n99,1,2,\"Doling, Mrs. John T (Ada Julia Bone)\",female,34,0,1,231919,23,,S\n100,0,2,\"Kantor, Mr. Sinai\",male,34,1,0,244367,26,,S\n101,0,3,\"Petranec, Miss. Matilda\",female,28,0,0,349245,7.8958,,S\n102,0,3,\"Petroff, Mr. Pastcho (\"\"Pentcho\"\")\",male,,0,0,349215,7.8958,,S\n103,0,1,\"White, Mr. Richard Frasar\",male,21,0,1,35281,77.2875,D26,S\n104,0,3,\"Johansson, Mr. Gustaf Joel\",male,33,0,0,7540,8.6542,,S\n105,0,3,\"Gustafsson, Mr. Anders Vilhelm\",male,37,2,0,3101276,7.925,,S\n106,0,3,\"Mionoff, Mr. Stoytcho\",male,28,0,0,349207,7.8958,,S\n107,1,3,\"Salkjelsvik, Miss. Anna Kristine\",female,21,0,0,343120,7.65,,S\n108,1,3,\"Moss, Mr. Albert Johan\",male,,0,0,312991,7.775,,S\n109,0,3,\"Rekic, Mr. Tido\",male,38,0,0,349249,7.8958,,S\n110,1,3,\"Moran, Miss. Bertha\",female,,1,0,371110,24.15,,Q\n111,0,1,\"Porter, Mr. Walter Chamberlain\",male,47,0,0,110465,52,C110,S\n112,0,3,\"Zabour, Miss. Hileni\",female,14.5,1,0,2665,14.4542,,C\n113,0,3,\"Barton, Mr. David John\",male,22,0,0,324669,8.05,,S\n114,0,3,\"Jussila, Miss. Katriina\",female,20,1,0,4136,9.825,,S\n115,0,3,\"Attalah, Miss. Malake\",female,17,0,0,2627,14.4583,,C\n116,0,3,\"Pekoniemi, Mr. Edvard\",male,21,0,0,STON/O 2. 3101294,7.925,,S\n117,0,3,\"Connors, Mr. Patrick\",male,70.5,0,0,370369,7.75,,Q\n118,0,2,\"Turpin, Mr. William John Robert\",male,29,1,0,11668,21,,S\n119,0,1,\"Baxter, Mr. Quigg Edmond\",male,24,0,1,PC 17558,247.5208,B58 B60,C\n120,0,3,\"Andersson, Miss. Ellis Anna Maria\",female,2,4,2,347082,31.275,,S\n121,0,2,\"Hickman, Mr. Stanley George\",male,21,2,0,S.O.C. 14879,73.5,,S\n122,0,3,\"Moore, Mr. Leonard Charles\",male,,0,0,A4. 54510,8.05,,S\n123,0,2,\"Nasser, Mr. Nicholas\",male,32.5,1,0,237736,30.0708,,C\n124,1,2,\"Webber, Miss. Susan\",female,32.5,0,0,27267,13,E101,S\n125,0,1,\"White, Mr. Percival Wayland\",male,54,0,1,35281,77.2875,D26,S\n126,1,3,\"Nicola-Yarred, Master. Elias\",male,12,1,0,2651,11.2417,,C\n127,0,3,\"McMahon, Mr. Martin\",male,,0,0,370372,7.75,,Q\n128,1,3,\"Madsen, Mr. Fridtjof Arne\",male,24,0,0,C 17369,7.1417,,S\n129,1,3,\"Peter, Miss. Anna\",female,,1,1,2668,22.3583,F E69,C\n130,0,3,\"Ekstrom, Mr. Johan\",male,45,0,0,347061,6.975,,S\n131,0,3,\"Drazenoic, Mr. Jozef\",male,33,0,0,349241,7.8958,,C\n132,0,3,\"Coelho, Mr. Domingos Fernandeo\",male,20,0,0,SOTON/O.Q. 3101307,7.05,,S\n133,0,3,\"Robins, Mrs. Alexander A (Grace Charity Laury)\",female,47,1,0,A/5. 3337,14.5,,S\n134,1,2,\"Weisz, Mrs. Leopold (Mathilde Francoise Pede)\",female,29,1,0,228414,26,,S\n135,0,2,\"Sobey, Mr. Samuel James Hayden\",male,25,0,0,C.A. 29178,13,,S\n136,0,2,\"Richard, Mr. Emile\",male,23,0,0,SC/PARIS 2133,15.0458,,C\n137,1,1,\"Newsom, Miss. Helen Monypeny\",female,19,0,2,11752,26.2833,D47,S\n138,0,1,\"Futrelle, Mr. Jacques Heath\",male,37,1,0,113803,53.1,C123,S\n139,0,3,\"Osen, Mr. Olaf Elon\",male,16,0,0,7534,9.2167,,S\n140,0,1,\"Giglio, Mr. Victor\",male,24,0,0,PC 17593,79.2,B86,C\n141,0,3,\"Boulos, Mrs. Joseph (Sultana)\",female,,0,2,2678,15.2458,,C\n142,1,3,\"Nysten, Miss. Anna Sofia\",female,22,0,0,347081,7.75,,S\n143,1,3,\"Hakkarainen, Mrs. Pekka Pietari (Elin Matilda Dolck)\",female,24,1,0,STON/O2. 3101279,15.85,,S\n144,0,3,\"Burke, Mr. Jeremiah\",male,19,0,0,365222,6.75,,Q\n145,0,2,\"Andrew, Mr. Edgardo Samuel\",male,18,0,0,231945,11.5,,S\n146,0,2,\"Nicholls, Mr. Joseph Charles\",male,19,1,1,C.A. 33112,36.75,,S\n147,1,3,\"Andersson, Mr. August Edvard (\"\"Wennerstrom\"\")\",male,27,0,0,350043,7.7958,,S\n148,0,3,\"Ford, Miss. Robina Maggie \"\"Ruby\"\"\",female,9,2,2,W./C. 6608,34.375,,S\n149,0,2,\"Navratil, Mr. Michel (\"\"Louis M Hoffman\"\")\",male,36.5,0,2,230080,26,F2,S\n150,0,2,\"Byles, Rev. Thomas Roussel Davids\",male,42,0,0,244310,13,,S\n151,0,2,\"Bateman, Rev. Robert James\",male,51,0,0,S.O.P. 1166,12.525,,S\n152,1,1,\"Pears, Mrs. Thomas (Edith Wearne)\",female,22,1,0,113776,66.6,C2,S\n153,0,3,\"Meo, Mr. Alfonzo\",male,55.5,0,0,A.5. 11206,8.05,,S\n154,0,3,\"van Billiard, Mr. Austin Blyler\",male,40.5,0,2,A/5. 851,14.5,,S\n155,0,3,\"Olsen, Mr. Ole Martin\",male,,0,0,Fa 265302,7.3125,,S\n156,0,1,\"Williams, Mr. Charles Duane\",male,51,0,1,PC 17597,61.3792,,C\n157,1,3,\"Gilnagh, Miss. Katherine \"\"Katie\"\"\",female,16,0,0,35851,7.7333,,Q\n158,0,3,\"Corn, Mr. Harry\",male,30,0,0,SOTON/OQ 392090,8.05,,S\n159,0,3,\"Smiljanic, Mr. Mile\",male,,0,0,315037,8.6625,,S\n160,0,3,\"Sage, Master. Thomas Henry\",male,,8,2,CA. 2343,69.55,,S\n161,0,3,\"Cribb, Mr. John Hatfield\",male,44,0,1,371362,16.1,,S\n162,1,2,\"Watt, Mrs. James (Elizabeth \"\"Bessie\"\" Inglis Milne)\",female,40,0,0,C.A. 33595,15.75,,S\n163,0,3,\"Bengtsson, Mr. John Viktor\",male,26,0,0,347068,7.775,,S\n164,0,3,\"Calic, Mr. Jovo\",male,17,0,0,315093,8.6625,,S\n165,0,3,\"Panula, Master. Eino Viljami\",male,1,4,1,3101295,39.6875,,S\n166,1,3,\"Goldsmith, Master. Frank John William \"\"Frankie\"\"\",male,9,0,2,363291,20.525,,S\n167,1,1,\"Chibnall, Mrs. (Edith Martha Bowerman)\",female,,0,1,113505,55,E33,S\n168,0,3,\"Skoog, Mrs. William (Anna Bernhardina Karlsson)\",female,45,1,4,347088,27.9,,S\n169,0,1,\"Baumann, Mr. John D\",male,,0,0,PC 17318,25.925,,S\n170,0,3,\"Ling, Mr. Lee\",male,28,0,0,1601,56.4958,,S\n171,0,1,\"Van der hoef, Mr. Wyckoff\",male,61,0,0,111240,33.5,B19,S\n172,0,3,\"Rice, Master. Arthur\",male,4,4,1,382652,29.125,,Q\n173,1,3,\"Johnson, Miss. Eleanor Ileen\",female,1,1,1,347742,11.1333,,S\n174,0,3,\"Sivola, Mr. Antti Wilhelm\",male,21,0,0,STON/O 2. 3101280,7.925,,S\n175,0,1,\"Smith, Mr. James Clinch\",male,56,0,0,17764,30.6958,A7,C\n176,0,3,\"Klasen, Mr. Klas Albin\",male,18,1,1,350404,7.8542,,S\n177,0,3,\"Lefebre, Master. Henry Forbes\",male,,3,1,4133,25.4667,,S\n178,0,1,\"Isham, Miss. Ann Elizabeth\",female,50,0,0,PC 17595,28.7125,C49,C\n179,0,2,\"Hale, Mr. Reginald\",male,30,0,0,250653,13,,S\n180,0,3,\"Leonard, Mr. Lionel\",male,36,0,0,LINE,0,,S\n181,0,3,\"Sage, Miss. Constance Gladys\",female,,8,2,CA. 2343,69.55,,S\n182,0,2,\"Pernot, Mr. Rene\",male,,0,0,SC/PARIS 2131,15.05,,C\n183,0,3,\"Asplund, Master. Clarence Gustaf Hugo\",male,9,4,2,347077,31.3875,,S\n184,1,2,\"Becker, Master. Richard F\",male,1,2,1,230136,39,F4,S\n185,1,3,\"Kink-Heilmann, Miss. Luise Gretchen\",female,4,0,2,315153,22.025,,S\n186,0,1,\"Rood, Mr. Hugh Roscoe\",male,,0,0,113767,50,A32,S\n187,1,3,\"O'Brien, Mrs. Thomas (Johanna \"\"Hannah\"\" Godfrey)\",female,,1,0,370365,15.5,,Q\n188,1,1,\"Romaine, Mr. Charles Hallace (\"\"Mr C Rolmane\"\")\",male,45,0,0,111428,26.55,,S\n189,0,3,\"Bourke, Mr. John\",male,40,1,1,364849,15.5,,Q\n190,0,3,\"Turcin, Mr. Stjepan\",male,36,0,0,349247,7.8958,,S\n191,1,2,\"Pinsky, Mrs. (Rosa)\",female,32,0,0,234604,13,,S\n192,0,2,\"Carbines, Mr. William\",male,19,0,0,28424,13,,S\n193,1,3,\"Andersen-Jensen, Miss. Carla Christine Nielsine\",female,19,1,0,350046,7.8542,,S\n194,1,2,\"Navratil, Master. Michel M\",male,3,1,1,230080,26,F2,S\n195,1,1,\"Brown, Mrs. James Joseph (Margaret Tobin)\",female,44,0,0,PC 17610,27.7208,B4,C\n196,1,1,\"Lurette, Miss. Elise\",female,58,0,0,PC 17569,146.5208,B80,C\n197,0,3,\"Mernagh, Mr. Robert\",male,,0,0,368703,7.75,,Q\n198,0,3,\"Olsen, Mr. Karl Siegwart Andreas\",male,42,0,1,4579,8.4042,,S\n199,1,3,\"Madigan, Miss. Margaret \"\"Maggie\"\"\",female,,0,0,370370,7.75,,Q\n200,0,2,\"Yrois, Miss. Henriette (\"\"Mrs Harbeck\"\")\",female,24,0,0,248747,13,,S\n201,0,3,\"Vande Walle, Mr. Nestor Cyriel\",male,28,0,0,345770,9.5,,S\n202,0,3,\"Sage, Mr. Frederick\",male,,8,2,CA. 2343,69.55,,S\n203,0,3,\"Johanson, Mr. Jakob Alfred\",male,34,0,0,3101264,6.4958,,S\n204,0,3,\"Youseff, Mr. Gerious\",male,45.5,0,0,2628,7.225,,C\n205,1,3,\"Cohen, Mr. Gurshon \"\"Gus\"\"\",male,18,0,0,A/5 3540,8.05,,S\n206,0,3,\"Strom, Miss. Telma Matilda\",female,2,0,1,347054,10.4625,G6,S\n207,0,3,\"Backstrom, Mr. Karl Alfred\",male,32,1,0,3101278,15.85,,S\n208,1,3,\"Albimona, Mr. Nassef Cassem\",male,26,0,0,2699,18.7875,,C\n209,1,3,\"Carr, Miss. Helen \"\"Ellen\"\"\",female,16,0,0,367231,7.75,,Q\n210,1,1,\"Blank, Mr. Henry\",male,40,0,0,112277,31,A31,C\n211,0,3,\"Ali, Mr. Ahmed\",male,24,0,0,SOTON/O.Q. 3101311,7.05,,S\n212,1,2,\"Cameron, Miss. Clear Annie\",female,35,0,0,F.C.C. 13528,21,,S\n213,0,3,\"Perkin, Mr. John Henry\",male,22,0,0,A/5 21174,7.25,,S\n214,0,2,\"Givard, Mr. Hans Kristensen\",male,30,0,0,250646,13,,S\n215,0,3,\"Kiernan, Mr. Philip\",male,,1,0,367229,7.75,,Q\n216,1,1,\"Newell, Miss. Madeleine\",female,31,1,0,35273,113.275,D36,C\n217,1,3,\"Honkanen, Miss. Eliina\",female,27,0,0,STON/O2. 3101283,7.925,,S\n218,0,2,\"Jacobsohn, Mr. Sidney Samuel\",male,42,1,0,243847,27,,S\n219,1,1,\"Bazzani, Miss. Albina\",female,32,0,0,11813,76.2917,D15,C\n220,0,2,\"Harris, Mr. Walter\",male,30,0,0,W/C 14208,10.5,,S\n221,1,3,\"Sunderland, Mr. Victor Francis\",male,16,0,0,SOTON/OQ 392089,8.05,,S\n222,0,2,\"Bracken, Mr. James H\",male,27,0,0,220367,13,,S\n223,0,3,\"Green, Mr. George Henry\",male,51,0,0,21440,8.05,,S\n224,0,3,\"Nenkoff, Mr. Christo\",male,,0,0,349234,7.8958,,S\n225,1,1,\"Hoyt, Mr. Frederick Maxfield\",male,38,1,0,19943,90,C93,S\n226,0,3,\"Berglund, Mr. Karl Ivar Sven\",male,22,0,0,PP 4348,9.35,,S\n227,1,2,\"Mellors, Mr. William John\",male,19,0,0,SW/PP 751,10.5,,S\n228,0,3,\"Lovell, Mr. John Hall (\"\"Henry\"\")\",male,20.5,0,0,A/5 21173,7.25,,S\n229,0,2,\"Fahlstrom, Mr. Arne Jonas\",male,18,0,0,236171,13,,S\n230,0,3,\"Lefebre, Miss. Mathilde\",female,,3,1,4133,25.4667,,S\n231,1,1,\"Harris, Mrs. Henry Birkhardt (Irene Wallach)\",female,35,1,0,36973,83.475,C83,S\n232,0,3,\"Larsson, Mr. Bengt Edvin\",male,29,0,0,347067,7.775,,S\n233,0,2,\"Sjostedt, Mr. Ernst Adolf\",male,59,0,0,237442,13.5,,S\n234,1,3,\"Asplund, Miss. Lillian Gertrud\",female,5,4,2,347077,31.3875,,S\n235,0,2,\"Leyson, Mr. Robert William Norman\",male,24,0,0,C.A. 29566,10.5,,S\n236,0,3,\"Harknett, Miss. Alice Phoebe\",female,,0,0,W./C. 6609,7.55,,S\n237,0,2,\"Hold, Mr. Stephen\",male,44,1,0,26707,26,,S\n238,1,2,\"Collyer, Miss. Marjorie \"\"Lottie\"\"\",female,8,0,2,C.A. 31921,26.25,,S\n239,0,2,\"Pengelly, Mr. Frederick William\",male,19,0,0,28665,10.5,,S\n240,0,2,\"Hunt, Mr. George Henry\",male,33,0,0,SCO/W 1585,12.275,,S\n241,0,3,\"Zabour, Miss. Thamine\",female,,1,0,2665,14.4542,,C\n242,1,3,\"Murphy, Miss. Katherine \"\"Kate\"\"\",female,,1,0,367230,15.5,,Q\n243,0,2,\"Coleridge, Mr. Reginald Charles\",male,29,0,0,W./C. 14263,10.5,,S\n244,0,3,\"Maenpaa, Mr. Matti Alexanteri\",male,22,0,0,STON/O 2. 3101275,7.125,,S\n245,0,3,\"Attalah, Mr. Sleiman\",male,30,0,0,2694,7.225,,C\n246,0,1,\"Minahan, Dr. William Edward\",male,44,2,0,19928,90,C78,Q\n247,0,3,\"Lindahl, Miss. Agda Thorilda Viktoria\",female,25,0,0,347071,7.775,,S\n248,1,2,\"Hamalainen, Mrs. William (Anna)\",female,24,0,2,250649,14.5,,S\n249,1,1,\"Beckwith, Mr. Richard Leonard\",male,37,1,1,11751,52.5542,D35,S\n250,0,2,\"Carter, Rev. Ernest Courtenay\",male,54,1,0,244252,26,,S\n251,0,3,\"Reed, Mr. James George\",male,,0,0,362316,7.25,,S\n252,0,3,\"Strom, Mrs. Wilhelm (Elna Matilda Persson)\",female,29,1,1,347054,10.4625,G6,S\n253,0,1,\"Stead, Mr. William Thomas\",male,62,0,0,113514,26.55,C87,S\n254,0,3,\"Lobb, Mr. William Arthur\",male,30,1,0,A/5. 3336,16.1,,S\n255,0,3,\"Rosblom, Mrs. Viktor (Helena Wilhelmina)\",female,41,0,2,370129,20.2125,,S\n256,1,3,\"Touma, Mrs. Darwis (Hanne Youssef Razi)\",female,29,0,2,2650,15.2458,,C\n257,1,1,\"Thorne, Mrs. Gertrude Maybelle\",female,,0,0,PC 17585,79.2,,C\n258,1,1,\"Cherry, Miss. Gladys\",female,30,0,0,110152,86.5,B77,S\n259,1,1,\"Ward, Miss. Anna\",female,35,0,0,PC 17755,512.3292,,C\n260,1,2,\"Parrish, Mrs. (Lutie Davis)\",female,50,0,1,230433,26,,S\n261,0,3,\"Smith, Mr. Thomas\",male,,0,0,384461,7.75,,Q\n262,1,3,\"Asplund, Master. Edvin Rojj Felix\",male,3,4,2,347077,31.3875,,S\n263,0,1,\"Taussig, Mr. Emil\",male,52,1,1,110413,79.65,E67,S\n264,0,1,\"Harrison, Mr. William\",male,40,0,0,112059,0,B94,S\n265,0,3,\"Henry, Miss. Delia\",female,,0,0,382649,7.75,,Q\n266,0,2,\"Reeves, Mr. David\",male,36,0,0,C.A. 17248,10.5,,S\n267,0,3,\"Panula, Mr. Ernesti Arvid\",male,16,4,1,3101295,39.6875,,S\n268,1,3,\"Persson, Mr. Ernst Ulrik\",male,25,1,0,347083,7.775,,S\n269,1,1,\"Graham, Mrs. William Thompson (Edith Junkins)\",female,58,0,1,PC 17582,153.4625,C125,S\n270,1,1,\"Bissette, Miss. Amelia\",female,35,0,0,PC 17760,135.6333,C99,S\n271,0,1,\"Cairns, Mr. Alexander\",male,,0,0,113798,31,,S\n272,1,3,\"Tornquist, Mr. William Henry\",male,25,0,0,LINE,0,,S\n273,1,2,\"Mellinger, Mrs. (Elizabeth Anne Maidment)\",female,41,0,1,250644,19.5,,S\n274,0,1,\"Natsch, Mr. Charles H\",male,37,0,1,PC 17596,29.7,C118,C\n275,1,3,\"Healy, Miss. Hanora \"\"Nora\"\"\",female,,0,0,370375,7.75,,Q\n276,1,1,\"Andrews, Miss. Kornelia Theodosia\",female,63,1,0,13502,77.9583,D7,S\n277,0,3,\"Lindblom, Miss. Augusta Charlotta\",female,45,0,0,347073,7.75,,S\n278,0,2,\"Parkes, Mr. Francis \"\"Frank\"\"\",male,,0,0,239853,0,,S\n279,0,3,\"Rice, Master. Eric\",male,7,4,1,382652,29.125,,Q\n280,1,3,\"Abbott, Mrs. Stanton (Rosa Hunt)\",female,35,1,1,C.A. 2673,20.25,,S\n281,0,3,\"Duane, Mr. Frank\",male,65,0,0,336439,7.75,,Q\n282,0,3,\"Olsson, Mr. Nils Johan Goransson\",male,28,0,0,347464,7.8542,,S\n283,0,3,\"de Pelsmaeker, Mr. Alfons\",male,16,0,0,345778,9.5,,S\n284,1,3,\"Dorking, Mr. Edward Arthur\",male,19,0,0,A/5. 10482,8.05,,S\n285,0,1,\"Smith, Mr. Richard William\",male,,0,0,113056,26,A19,S\n286,0,3,\"Stankovic, Mr. Ivan\",male,33,0,0,349239,8.6625,,C\n287,1,3,\"de Mulder, Mr. Theodore\",male,30,0,0,345774,9.5,,S\n288,0,3,\"Naidenoff, Mr. Penko\",male,22,0,0,349206,7.8958,,S\n289,1,2,\"Hosono, Mr. Masabumi\",male,42,0,0,237798,13,,S\n290,1,3,\"Connolly, Miss. Kate\",female,22,0,0,370373,7.75,,Q\n291,1,1,\"Barber, Miss. Ellen \"\"Nellie\"\"\",female,26,0,0,19877,78.85,,S\n292,1,1,\"Bishop, Mrs. Dickinson H (Helen Walton)\",female,19,1,0,11967,91.0792,B49,C\n293,0,2,\"Levy, Mr. Rene Jacques\",male,36,0,0,SC/Paris 2163,12.875,D,C\n294,0,3,\"Haas, Miss. Aloisia\",female,24,0,0,349236,8.85,,S\n295,0,3,\"Mineff, Mr. Ivan\",male,24,0,0,349233,7.8958,,S\n296,0,1,\"Lewy, Mr. Ervin G\",male,,0,0,PC 17612,27.7208,,C\n297,0,3,\"Hanna, Mr. Mansour\",male,23.5,0,0,2693,7.2292,,C\n298,0,1,\"Allison, Miss. Helen Loraine\",female,2,1,2,113781,151.55,C22 C26,S\n299,1,1,\"Saalfeld, Mr. Adolphe\",male,,0,0,19988,30.5,C106,S\n300,1,1,\"Baxter, Mrs. James (Helene DeLaudeniere Chaput)\",female,50,0,1,PC 17558,247.5208,B58 B60,C\n301,1,3,\"Kelly, Miss. Anna Katherine \"\"Annie Kate\"\"\",female,,0,0,9234,7.75,,Q\n302,1,3,\"McCoy, Mr. Bernard\",male,,2,0,367226,23.25,,Q\n303,0,3,\"Johnson, Mr. William Cahoone Jr\",male,19,0,0,LINE,0,,S\n304,1,2,\"Keane, Miss. Nora A\",female,,0,0,226593,12.35,E101,Q\n305,0,3,\"Williams, Mr. Howard Hugh \"\"Harry\"\"\",male,,0,0,A/5 2466,8.05,,S\n306,1,1,\"Allison, Master. Hudson Trevor\",male,0.92,1,2,113781,151.55,C22 C26,S\n307,1,1,\"Fleming, Miss. Margaret\",female,,0,0,17421,110.8833,,C\n308,1,1,\"Penasco y Castellana, Mrs. Victor de Satode (Maria Josefa Perez de Soto y Vallejo)\",female,17,1,0,PC 17758,108.9,C65,C\n309,0,2,\"Abelson, Mr. Samuel\",male,30,1,0,P/PP 3381,24,,C\n310,1,1,\"Francatelli, Miss. Laura Mabel\",female,30,0,0,PC 17485,56.9292,E36,C\n311,1,1,\"Hays, Miss. Margaret Bechstein\",female,24,0,0,11767,83.1583,C54,C\n312,1,1,\"Ryerson, Miss. Emily Borie\",female,18,2,2,PC 17608,262.375,B57 B59 B63 B66,C\n313,0,2,\"Lahtinen, Mrs. William (Anna Sylfven)\",female,26,1,1,250651,26,,S\n314,0,3,\"Hendekovic, Mr. Ignjac\",male,28,0,0,349243,7.8958,,S\n315,0,2,\"Hart, Mr. Benjamin\",male,43,1,1,F.C.C. 13529,26.25,,S\n316,1,3,\"Nilsson, Miss. Helmina Josefina\",female,26,0,0,347470,7.8542,,S\n317,1,2,\"Kantor, Mrs. Sinai (Miriam Sternin)\",female,24,1,0,244367,26,,S\n318,0,2,\"Moraweck, Dr. Ernest\",male,54,0,0,29011,14,,S\n319,1,1,\"Wick, Miss. Mary Natalie\",female,31,0,2,36928,164.8667,C7,S\n320,1,1,\"Spedden, Mrs. Frederic Oakley (Margaretta Corning Stone)\",female,40,1,1,16966,134.5,E34,C\n321,0,3,\"Dennis, Mr. Samuel\",male,22,0,0,A/5 21172,7.25,,S\n322,0,3,\"Danoff, Mr. Yoto\",male,27,0,0,349219,7.8958,,S\n323,1,2,\"Slayter, Miss. Hilda Mary\",female,30,0,0,234818,12.35,,Q\n324,1,2,\"Caldwell, Mrs. Albert Francis (Sylvia Mae Harbaugh)\",female,22,1,1,248738,29,,S\n325,0,3,\"Sage, Mr. George John Jr\",male,,8,2,CA. 2343,69.55,,S\n326,1,1,\"Young, Miss. Marie Grice\",female,36,0,0,PC 17760,135.6333,C32,C\n327,0,3,\"Nysveen, Mr. Johan Hansen\",male,61,0,0,345364,6.2375,,S\n328,1,2,\"Ball, Mrs. (Ada E Hall)\",female,36,0,0,28551,13,D,S\n329,1,3,\"Goldsmith, Mrs. Frank John (Emily Alice Brown)\",female,31,1,1,363291,20.525,,S\n330,1,1,\"Hippach, Miss. Jean Gertrude\",female,16,0,1,111361,57.9792,B18,C\n331,1,3,\"McCoy, Miss. Agnes\",female,,2,0,367226,23.25,,Q\n332,0,1,\"Partner, Mr. Austen\",male,45.5,0,0,113043,28.5,C124,S\n333,0,1,\"Graham, Mr. George Edward\",male,38,0,1,PC 17582,153.4625,C91,S\n334,0,3,\"Vander Planke, Mr. Leo Edmondus\",male,16,2,0,345764,18,,S\n335,1,1,\"Frauenthal, Mrs. Henry William (Clara Heinsheimer)\",female,,1,0,PC 17611,133.65,,S\n336,0,3,\"Denkoff, Mr. Mitto\",male,,0,0,349225,7.8958,,S\n337,0,1,\"Pears, Mr. Thomas Clinton\",male,29,1,0,113776,66.6,C2,S\n338,1,1,\"Burns, Miss. Elizabeth Margaret\",female,41,0,0,16966,134.5,E40,C\n339,1,3,\"Dahl, Mr. Karl Edwart\",male,45,0,0,7598,8.05,,S\n340,0,1,\"Blackwell, Mr. Stephen Weart\",male,45,0,0,113784,35.5,T,S\n341,1,2,\"Navratil, Master. Edmond Roger\",male,2,1,1,230080,26,F2,S\n342,1,1,\"Fortune, Miss. Alice Elizabeth\",female,24,3,2,19950,263,C23 C25 C27,S\n343,0,2,\"Collander, Mr. Erik Gustaf\",male,28,0,0,248740,13,,S\n344,0,2,\"Sedgwick, Mr. Charles Frederick Waddington\",male,25,0,0,244361,13,,S\n345,0,2,\"Fox, Mr. Stanley Hubert\",male,36,0,0,229236,13,,S\n346,1,2,\"Brown, Miss. Amelia \"\"Mildred\"\"\",female,24,0,0,248733,13,F33,S\n347,1,2,\"Smith, Miss. Marion Elsie\",female,40,0,0,31418,13,,S\n348,1,3,\"Davison, Mrs. Thomas Henry (Mary E Finck)\",female,,1,0,386525,16.1,,S\n349,1,3,\"Coutts, Master. William Loch \"\"William\"\"\",male,3,1,1,C.A. 37671,15.9,,S\n350,0,3,\"Dimic, Mr. Jovan\",male,42,0,0,315088,8.6625,,S\n351,0,3,\"Odahl, Mr. Nils Martin\",male,23,0,0,7267,9.225,,S\n352,0,1,\"Williams-Lambert, Mr. Fletcher Fellows\",male,,0,0,113510,35,C128,S\n353,0,3,\"Elias, Mr. Tannous\",male,15,1,1,2695,7.2292,,C\n354,0,3,\"Arnold-Franchi, Mr. Josef\",male,25,1,0,349237,17.8,,S\n355,0,3,\"Yousif, Mr. Wazli\",male,,0,0,2647,7.225,,C\n356,0,3,\"Vanden Steen, Mr. Leo Peter\",male,28,0,0,345783,9.5,,S\n357,1,1,\"Bowerman, Miss. Elsie Edith\",female,22,0,1,113505,55,E33,S\n358,0,2,\"Funk, Miss. Annie Clemmer\",female,38,0,0,237671,13,,S\n359,1,3,\"McGovern, Miss. Mary\",female,,0,0,330931,7.8792,,Q\n360,1,3,\"Mockler, Miss. Helen Mary \"\"Ellie\"\"\",female,,0,0,330980,7.8792,,Q\n361,0,3,\"Skoog, Mr. Wilhelm\",male,40,1,4,347088,27.9,,S\n362,0,2,\"del Carlo, Mr. Sebastiano\",male,29,1,0,SC/PARIS 2167,27.7208,,C\n363,0,3,\"Barbara, Mrs. (Catherine David)\",female,45,0,1,2691,14.4542,,C\n364,0,3,\"Asim, Mr. Adola\",male,35,0,0,SOTON/O.Q. 3101310,7.05,,S\n365,0,3,\"O'Brien, Mr. Thomas\",male,,1,0,370365,15.5,,Q\n366,0,3,\"Adahl, Mr. Mauritz Nils Martin\",male,30,0,0,C 7076,7.25,,S\n367,1,1,\"Warren, Mrs. Frank Manley (Anna Sophia Atkinson)\",female,60,1,0,110813,75.25,D37,C\n368,1,3,\"Moussa, Mrs. (Mantoura Boulos)\",female,,0,0,2626,7.2292,,C\n369,1,3,\"Jermyn, Miss. Annie\",female,,0,0,14313,7.75,,Q\n370,1,1,\"Aubart, Mme. Leontine Pauline\",female,24,0,0,PC 17477,69.3,B35,C\n371,1,1,\"Harder, Mr. George Achilles\",male,25,1,0,11765,55.4417,E50,C\n372,0,3,\"Wiklund, Mr. Jakob Alfred\",male,18,1,0,3101267,6.4958,,S\n373,0,3,\"Beavan, Mr. William Thomas\",male,19,0,0,323951,8.05,,S\n374,0,1,\"Ringhini, Mr. Sante\",male,22,0,0,PC 17760,135.6333,,C\n375,0,3,\"Palsson, Miss. Stina Viola\",female,3,3,1,349909,21.075,,S\n376,1,1,\"Meyer, Mrs. Edgar Joseph (Leila Saks)\",female,,1,0,PC 17604,82.1708,,C\n377,1,3,\"Landergren, Miss. Aurora Adelia\",female,22,0,0,C 7077,7.25,,S\n378,0,1,\"Widener, Mr. Harry Elkins\",male,27,0,2,113503,211.5,C82,C\n379,0,3,\"Betros, Mr. Tannous\",male,20,0,0,2648,4.0125,,C\n380,0,3,\"Gustafsson, Mr. Karl Gideon\",male,19,0,0,347069,7.775,,S\n381,1,1,\"Bidois, Miss. Rosalie\",female,42,0,0,PC 17757,227.525,,C\n382,1,3,\"Nakid, Miss. Maria (\"\"Mary\"\")\",female,1,0,2,2653,15.7417,,C\n383,0,3,\"Tikkanen, Mr. Juho\",male,32,0,0,STON/O 2. 3101293,7.925,,S\n384,1,1,\"Holverson, Mrs. Alexander Oskar (Mary Aline Towner)\",female,35,1,0,113789,52,,S\n385,0,3,\"Plotcharsky, Mr. Vasil\",male,,0,0,349227,7.8958,,S\n386,0,2,\"Davies, Mr. Charles Henry\",male,18,0,0,S.O.C. 14879,73.5,,S\n387,0,3,\"Goodwin, Master. Sidney Leonard\",male,1,5,2,CA 2144,46.9,,S\n388,1,2,\"Buss, Miss. Kate\",female,36,0,0,27849,13,,S\n389,0,3,\"Sadlier, Mr. Matthew\",male,,0,0,367655,7.7292,,Q\n390,1,2,\"Lehmann, Miss. Bertha\",female,17,0,0,SC 1748,12,,C\n391,1,1,\"Carter, Mr. William Ernest\",male,36,1,2,113760,120,B96 B98,S\n392,1,3,\"Jansson, Mr. Carl Olof\",male,21,0,0,350034,7.7958,,S\n393,0,3,\"Gustafsson, Mr. Johan Birger\",male,28,2,0,3101277,7.925,,S\n394,1,1,\"Newell, Miss. Marjorie\",female,23,1,0,35273,113.275,D36,C\n395,1,3,\"Sandstrom, Mrs. Hjalmar (Agnes Charlotta Bengtsson)\",female,24,0,2,PP 9549,16.7,G6,S\n396,0,3,\"Johansson, Mr. Erik\",male,22,0,0,350052,7.7958,,S\n397,0,3,\"Olsson, Miss. Elina\",female,31,0,0,350407,7.8542,,S\n398,0,2,\"McKane, Mr. Peter David\",male,46,0,0,28403,26,,S\n399,0,2,\"Pain, Dr. Alfred\",male,23,0,0,244278,10.5,,S\n400,1,2,\"Trout, Mrs. William H (Jessie L)\",female,28,0,0,240929,12.65,,S\n401,1,3,\"Niskanen, Mr. Juha\",male,39,0,0,STON/O 2. 3101289,7.925,,S\n402,0,3,\"Adams, Mr. John\",male,26,0,0,341826,8.05,,S\n403,0,3,\"Jussila, Miss. Mari Aina\",female,21,1,0,4137,9.825,,S\n404,0,3,\"Hakkarainen, Mr. Pekka Pietari\",male,28,1,0,STON/O2. 3101279,15.85,,S\n405,0,3,\"Oreskovic, Miss. Marija\",female,20,0,0,315096,8.6625,,S\n406,0,2,\"Gale, Mr. Shadrach\",male,34,1,0,28664,21,,S\n407,0,3,\"Widegren, Mr. Carl/Charles Peter\",male,51,0,0,347064,7.75,,S\n408,1,2,\"Richards, Master. William Rowe\",male,3,1,1,29106,18.75,,S\n409,0,3,\"Birkeland, Mr. Hans Martin Monsen\",male,21,0,0,312992,7.775,,S\n410,0,3,\"Lefebre, Miss. Ida\",female,,3,1,4133,25.4667,,S\n411,0,3,\"Sdycoff, Mr. Todor\",male,,0,0,349222,7.8958,,S\n412,0,3,\"Hart, Mr. Henry\",male,,0,0,394140,6.8583,,Q\n413,1,1,\"Minahan, Miss. Daisy E\",female,33,1,0,19928,90,C78,Q\n414,0,2,\"Cunningham, Mr. Alfred Fleming\",male,,0,0,239853,0,,S\n415,1,3,\"Sundman, Mr. Johan Julian\",male,44,0,0,STON/O 2. 3101269,7.925,,S\n416,0,3,\"Meek, Mrs. Thomas (Annie Louise Rowley)\",female,,0,0,343095,8.05,,S\n417,1,2,\"Drew, Mrs. James Vivian (Lulu Thorne Christian)\",female,34,1,1,28220,32.5,,S\n418,1,2,\"Silven, Miss. Lyyli Karoliina\",female,18,0,2,250652,13,,S\n419,0,2,\"Matthews, Mr. William John\",male,30,0,0,28228,13,,S\n420,0,3,\"Van Impe, Miss. Catharina\",female,10,0,2,345773,24.15,,S\n421,0,3,\"Gheorgheff, Mr. Stanio\",male,,0,0,349254,7.8958,,C\n422,0,3,\"Charters, Mr. David\",male,21,0,0,A/5. 13032,7.7333,,Q\n423,0,3,\"Zimmerman, Mr. Leo\",male,29,0,0,315082,7.875,,S\n424,0,3,\"Danbom, Mrs. Ernst Gilbert (Anna Sigrid Maria Brogren)\",female,28,1,1,347080,14.4,,S\n425,0,3,\"Rosblom, Mr. Viktor Richard\",male,18,1,1,370129,20.2125,,S\n426,0,3,\"Wiseman, Mr. Phillippe\",male,,0,0,A/4. 34244,7.25,,S\n427,1,2,\"Clarke, Mrs. Charles V (Ada Maria Winfield)\",female,28,1,0,2003,26,,S\n428,1,2,\"Phillips, Miss. Kate Florence (\"\"Mrs Kate Louise Phillips Marshall\"\")\",female,19,0,0,250655,26,,S\n429,0,3,\"Flynn, Mr. James\",male,,0,0,364851,7.75,,Q\n430,1,3,\"Pickard, Mr. Berk (Berk Trembisky)\",male,32,0,0,SOTON/O.Q. 392078,8.05,E10,S\n431,1,1,\"Bjornstrom-Steffansson, Mr. Mauritz Hakan\",male,28,0,0,110564,26.55,C52,S\n432,1,3,\"Thorneycroft, Mrs. Percival (Florence Kate White)\",female,,1,0,376564,16.1,,S\n433,1,2,\"Louch, Mrs. Charles Alexander (Alice Adelaide Slow)\",female,42,1,0,SC/AH 3085,26,,S\n434,0,3,\"Kallio, Mr. Nikolai Erland\",male,17,0,0,STON/O 2. 3101274,7.125,,S\n435,0,1,\"Silvey, Mr. William Baird\",male,50,1,0,13507,55.9,E44,S\n436,1,1,\"Carter, Miss. Lucile Polk\",female,14,1,2,113760,120,B96 B98,S\n437,0,3,\"Ford, Miss. Doolina Margaret \"\"Daisy\"\"\",female,21,2,2,W./C. 6608,34.375,,S\n438,1,2,\"Richards, Mrs. Sidney (Emily Hocking)\",female,24,2,3,29106,18.75,,S\n439,0,1,\"Fortune, Mr. Mark\",male,64,1,4,19950,263,C23 C25 C27,S\n440,0,2,\"Kvillner, Mr. Johan Henrik Johannesson\",male,31,0,0,C.A. 18723,10.5,,S\n441,1,2,\"Hart, Mrs. Benjamin (Esther Ada Bloomfield)\",female,45,1,1,F.C.C. 13529,26.25,,S\n442,0,3,\"Hampe, Mr. Leon\",male,20,0,0,345769,9.5,,S\n443,0,3,\"Petterson, Mr. Johan Emil\",male,25,1,0,347076,7.775,,S\n444,1,2,\"Reynaldo, Ms. Encarnacion\",female,28,0,0,230434,13,,S\n445,1,3,\"Johannesen-Bratthammer, Mr. Bernt\",male,,0,0,65306,8.1125,,S\n446,1,1,\"Dodge, Master. Washington\",male,4,0,2,33638,81.8583,A34,S\n447,1,2,\"Mellinger, Miss. Madeleine Violet\",female,13,0,1,250644,19.5,,S\n448,1,1,\"Seward, Mr. Frederic Kimber\",male,34,0,0,113794,26.55,,S\n449,1,3,\"Baclini, Miss. Marie Catherine\",female,5,2,1,2666,19.2583,,C\n450,1,1,\"Peuchen, Major. Arthur Godfrey\",male,52,0,0,113786,30.5,C104,S\n451,0,2,\"West, Mr. Edwy Arthur\",male,36,1,2,C.A. 34651,27.75,,S\n452,0,3,\"Hagland, Mr. Ingvald Olai Olsen\",male,,1,0,65303,19.9667,,S\n453,0,1,\"Foreman, Mr. Benjamin Laventall\",male,30,0,0,113051,27.75,C111,C\n454,1,1,\"Goldenberg, Mr. Samuel L\",male,49,1,0,17453,89.1042,C92,C\n455,0,3,\"Peduzzi, Mr. Joseph\",male,,0,0,A/5 2817,8.05,,S\n456,1,3,\"Jalsevac, Mr. Ivan\",male,29,0,0,349240,7.8958,,C\n457,0,1,\"Millet, Mr. Francis Davis\",male,65,0,0,13509,26.55,E38,S\n458,1,1,\"Kenyon, Mrs. Frederick R (Marion)\",female,,1,0,17464,51.8625,D21,S\n459,1,2,\"Toomey, Miss. Ellen\",female,50,0,0,F.C.C. 13531,10.5,,S\n460,0,3,\"O'Connor, Mr. Maurice\",male,,0,0,371060,7.75,,Q\n461,1,1,\"Anderson, Mr. Harry\",male,48,0,0,19952,26.55,E12,S\n462,0,3,\"Morley, Mr. William\",male,34,0,0,364506,8.05,,S\n463,0,1,\"Gee, Mr. Arthur H\",male,47,0,0,111320,38.5,E63,S\n464,0,2,\"Milling, Mr. Jacob Christian\",male,48,0,0,234360,13,,S\n465,0,3,\"Maisner, Mr. Simon\",male,,0,0,A/S 2816,8.05,,S\n466,0,3,\"Goncalves, Mr. Manuel Estanslas\",male,38,0,0,SOTON/O.Q. 3101306,7.05,,S\n467,0,2,\"Campbell, Mr. William\",male,,0,0,239853,0,,S\n468,0,1,\"Smart, Mr. John Montgomery\",male,56,0,0,113792,26.55,,S\n469,0,3,\"Scanlan, Mr. James\",male,,0,0,36209,7.725,,Q\n470,1,3,\"Baclini, Miss. Helene Barbara\",female,0.75,2,1,2666,19.2583,,C\n471,0,3,\"Keefe, Mr. Arthur\",male,,0,0,323592,7.25,,S\n472,0,3,\"Cacic, Mr. Luka\",male,38,0,0,315089,8.6625,,S\n473,1,2,\"West, Mrs. Edwy Arthur (Ada Mary Worth)\",female,33,1,2,C.A. 34651,27.75,,S\n474,1,2,\"Jerwan, Mrs. Amin S (Marie Marthe Thuillard)\",female,23,0,0,SC/AH Basle 541,13.7917,D,C\n475,0,3,\"Strandberg, Miss. Ida Sofia\",female,22,0,0,7553,9.8375,,S\n476,0,1,\"Clifford, Mr. George Quincy\",male,,0,0,110465,52,A14,S\n477,0,2,\"Renouf, Mr. Peter Henry\",male,34,1,0,31027,21,,S\n478,0,3,\"Braund, Mr. Lewis Richard\",male,29,1,0,3460,7.0458,,S\n479,0,3,\"Karlsson, Mr. Nils August\",male,22,0,0,350060,7.5208,,S\n480,1,3,\"Hirvonen, Miss. Hildur E\",female,2,0,1,3101298,12.2875,,S\n481,0,3,\"Goodwin, Master. Harold Victor\",male,9,5,2,CA 2144,46.9,,S\n482,0,2,\"Frost, Mr. Anthony Wood \"\"Archie\"\"\",male,,0,0,239854,0,,S\n483,0,3,\"Rouse, Mr. Richard Henry\",male,50,0,0,A/5 3594,8.05,,S\n484,1,3,\"Turkula, Mrs. (Hedwig)\",female,63,0,0,4134,9.5875,,S\n485,1,1,\"Bishop, Mr. Dickinson H\",male,25,1,0,11967,91.0792,B49,C\n486,0,3,\"Lefebre, Miss. Jeannie\",female,,3,1,4133,25.4667,,S\n487,1,1,\"Hoyt, Mrs. Frederick Maxfield (Jane Anne Forby)\",female,35,1,0,19943,90,C93,S\n488,0,1,\"Kent, Mr. Edward Austin\",male,58,0,0,11771,29.7,B37,C\n489,0,3,\"Somerton, Mr. Francis William\",male,30,0,0,A.5. 18509,8.05,,S\n490,1,3,\"Coutts, Master. Eden Leslie \"\"Neville\"\"\",male,9,1,1,C.A. 37671,15.9,,S\n491,0,3,\"Hagland, Mr. Konrad Mathias Reiersen\",male,,1,0,65304,19.9667,,S\n492,0,3,\"Windelov, Mr. Einar\",male,21,0,0,SOTON/OQ 3101317,7.25,,S\n493,0,1,\"Molson, Mr. Harry Markland\",male,55,0,0,113787,30.5,C30,S\n494,0,1,\"Artagaveytia, Mr. Ramon\",male,71,0,0,PC 17609,49.5042,,C\n495,0,3,\"Stanley, Mr. Edward Roland\",male,21,0,0,A/4 45380,8.05,,S\n496,0,3,\"Yousseff, Mr. Gerious\",male,,0,0,2627,14.4583,,C\n497,1,1,\"Eustis, Miss. Elizabeth Mussey\",female,54,1,0,36947,78.2667,D20,C\n498,0,3,\"Shellard, Mr. Frederick William\",male,,0,0,C.A. 6212,15.1,,S\n499,0,1,\"Allison, Mrs. Hudson J C (Bessie Waldo Daniels)\",female,25,1,2,113781,151.55,C22 C26,S\n500,0,3,\"Svensson, Mr. Olof\",male,24,0,0,350035,7.7958,,S\n501,0,3,\"Calic, Mr. Petar\",male,17,0,0,315086,8.6625,,S\n502,0,3,\"Canavan, Miss. Mary\",female,21,0,0,364846,7.75,,Q\n503,0,3,\"O'Sullivan, Miss. Bridget Mary\",female,,0,0,330909,7.6292,,Q\n504,0,3,\"Laitinen, Miss. Kristina Sofia\",female,37,0,0,4135,9.5875,,S\n505,1,1,\"Maioni, Miss. Roberta\",female,16,0,0,110152,86.5,B79,S\n506,0,1,\"Penasco y Castellana, Mr. Victor de Satode\",male,18,1,0,PC 17758,108.9,C65,C\n507,1,2,\"Quick, Mrs. Frederick Charles (Jane Richards)\",female,33,0,2,26360,26,,S\n508,1,1,\"Bradley, Mr. George (\"\"George Arthur Brayton\"\")\",male,,0,0,111427,26.55,,S\n509,0,3,\"Olsen, Mr. Henry Margido\",male,28,0,0,C 4001,22.525,,S\n510,1,3,\"Lang, Mr. Fang\",male,26,0,0,1601,56.4958,,S\n511,1,3,\"Daly, Mr. Eugene Patrick\",male,29,0,0,382651,7.75,,Q\n512,0,3,\"Webber, Mr. James\",male,,0,0,SOTON/OQ 3101316,8.05,,S\n513,1,1,\"McGough, Mr. James Robert\",male,36,0,0,PC 17473,26.2875,E25,S\n514,1,1,\"Rothschild, Mrs. Martin (Elizabeth L. Barrett)\",female,54,1,0,PC 17603,59.4,,C\n515,0,3,\"Coleff, Mr. Satio\",male,24,0,0,349209,7.4958,,S\n516,0,1,\"Walker, Mr. William Anderson\",male,47,0,0,36967,34.0208,D46,S\n517,1,2,\"Lemore, Mrs. (Amelia Milley)\",female,34,0,0,C.A. 34260,10.5,F33,S\n518,0,3,\"Ryan, Mr. Patrick\",male,,0,0,371110,24.15,,Q\n519,1,2,\"Angle, Mrs. William A (Florence \"\"Mary\"\" Agnes Hughes)\",female,36,1,0,226875,26,,S\n520,0,3,\"Pavlovic, Mr. Stefo\",male,32,0,0,349242,7.8958,,S\n521,1,1,\"Perreault, Miss. Anne\",female,30,0,0,12749,93.5,B73,S\n522,0,3,\"Vovk, Mr. Janko\",male,22,0,0,349252,7.8958,,S\n523,0,3,\"Lahoud, Mr. Sarkis\",male,,0,0,2624,7.225,,C\n524,1,1,\"Hippach, Mrs. Louis Albert (Ida Sophia Fischer)\",female,44,0,1,111361,57.9792,B18,C\n525,0,3,\"Kassem, Mr. Fared\",male,,0,0,2700,7.2292,,C\n526,0,3,\"Farrell, Mr. James\",male,40.5,0,0,367232,7.75,,Q\n527,1,2,\"Ridsdale, Miss. Lucy\",female,50,0,0,W./C. 14258,10.5,,S\n528,0,1,\"Farthing, Mr. John\",male,,0,0,PC 17483,221.7792,C95,S\n529,0,3,\"Salonen, Mr. Johan Werner\",male,39,0,0,3101296,7.925,,S\n530,0,2,\"Hocking, Mr. Richard George\",male,23,2,1,29104,11.5,,S\n531,1,2,\"Quick, Miss. Phyllis May\",female,2,1,1,26360,26,,S\n532,0,3,\"Toufik, Mr. Nakli\",male,,0,0,2641,7.2292,,C\n533,0,3,\"Elias, Mr. Joseph Jr\",male,17,1,1,2690,7.2292,,C\n534,1,3,\"Peter, Mrs. Catherine (Catherine Rizk)\",female,,0,2,2668,22.3583,,C\n535,0,3,\"Cacic, Miss. Marija\",female,30,0,0,315084,8.6625,,S\n536,1,2,\"Hart, Miss. Eva Miriam\",female,7,0,2,F.C.C. 13529,26.25,,S\n537,0,1,\"Butt, Major. Archibald Willingham\",male,45,0,0,113050,26.55,B38,S\n538,1,1,\"LeRoy, Miss. Bertha\",female,30,0,0,PC 17761,106.425,,C\n539,0,3,\"Risien, Mr. Samuel Beard\",male,,0,0,364498,14.5,,S\n540,1,1,\"Frolicher, Miss. Hedwig Margaritha\",female,22,0,2,13568,49.5,B39,C\n541,1,1,\"Crosby, Miss. Harriet R\",female,36,0,2,WE/P 5735,71,B22,S\n542,0,3,\"Andersson, Miss. Ingeborg Constanzia\",female,9,4,2,347082,31.275,,S\n543,0,3,\"Andersson, Miss. Sigrid Elisabeth\",female,11,4,2,347082,31.275,,S\n544,1,2,\"Beane, Mr. Edward\",male,32,1,0,2908,26,,S\n545,0,1,\"Douglas, Mr. Walter Donald\",male,50,1,0,PC 17761,106.425,C86,C\n546,0,1,\"Nicholson, Mr. Arthur Ernest\",male,64,0,0,693,26,,S\n547,1,2,\"Beane, Mrs. Edward (Ethel Clarke)\",female,19,1,0,2908,26,,S\n548,1,2,\"Padro y Manent, Mr. Julian\",male,,0,0,SC/PARIS 2146,13.8625,,C\n549,0,3,\"Goldsmith, Mr. Frank John\",male,33,1,1,363291,20.525,,S\n550,1,2,\"Davies, Master. John Morgan Jr\",male,8,1,1,C.A. 33112,36.75,,S\n551,1,1,\"Thayer, Mr. John Borland Jr\",male,17,0,2,17421,110.8833,C70,C\n552,0,2,\"Sharp, Mr. Percival James R\",male,27,0,0,244358,26,,S\n553,0,3,\"O'Brien, Mr. Timothy\",male,,0,0,330979,7.8292,,Q\n554,1,3,\"Leeni, Mr. Fahim (\"\"Philip Zenni\"\")\",male,22,0,0,2620,7.225,,C\n555,1,3,\"Ohman, Miss. Velin\",female,22,0,0,347085,7.775,,S\n556,0,1,\"Wright, Mr. George\",male,62,0,0,113807,26.55,,S\n557,1,1,\"Duff Gordon, Lady. (Lucille Christiana Sutherland) (\"\"Mrs Morgan\"\")\",female,48,1,0,11755,39.6,A16,C\n558,0,1,\"Robbins, Mr. Victor\",male,,0,0,PC 17757,227.525,,C\n559,1,1,\"Taussig, Mrs. Emil (Tillie Mandelbaum)\",female,39,1,1,110413,79.65,E67,S\n560,1,3,\"de Messemaeker, Mrs. Guillaume Joseph (Emma)\",female,36,1,0,345572,17.4,,S\n561,0,3,\"Morrow, Mr. Thomas Rowan\",male,,0,0,372622,7.75,,Q\n562,0,3,\"Sivic, Mr. Husein\",male,40,0,0,349251,7.8958,,S\n563,0,2,\"Norman, Mr. Robert Douglas\",male,28,0,0,218629,13.5,,S\n564,0,3,\"Simmons, Mr. John\",male,,0,0,SOTON/OQ 392082,8.05,,S\n565,0,3,\"Meanwell, Miss. (Marion Ogden)\",female,,0,0,SOTON/O.Q. 392087,8.05,,S\n566,0,3,\"Davies, Mr. Alfred J\",male,24,2,0,A/4 48871,24.15,,S\n567,0,3,\"Stoytcheff, Mr. Ilia\",male,19,0,0,349205,7.8958,,S\n568,0,3,\"Palsson, Mrs. Nils (Alma Cornelia Berglund)\",female,29,0,4,349909,21.075,,S\n569,0,3,\"Doharr, Mr. Tannous\",male,,0,0,2686,7.2292,,C\n570,1,3,\"Jonsson, Mr. Carl\",male,32,0,0,350417,7.8542,,S\n571,1,2,\"Harris, Mr. George\",male,62,0,0,S.W./PP 752,10.5,,S\n572,1,1,\"Appleton, Mrs. Edward Dale (Charlotte Lamson)\",female,53,2,0,11769,51.4792,C101,S\n573,1,1,\"Flynn, Mr. John Irwin (\"\"Irving\"\")\",male,36,0,0,PC 17474,26.3875,E25,S\n574,1,3,\"Kelly, Miss. Mary\",female,,0,0,14312,7.75,,Q\n575,0,3,\"Rush, Mr. Alfred George John\",male,16,0,0,A/4. 20589,8.05,,S\n576,0,3,\"Patchett, Mr. George\",male,19,0,0,358585,14.5,,S\n577,1,2,\"Garside, Miss. Ethel\",female,34,0,0,243880,13,,S\n578,1,1,\"Silvey, Mrs. William Baird (Alice Munger)\",female,39,1,0,13507,55.9,E44,S\n579,0,3,\"Caram, Mrs. Joseph (Maria Elias)\",female,,1,0,2689,14.4583,,C\n580,1,3,\"Jussila, Mr. Eiriik\",male,32,0,0,STON/O 2. 3101286,7.925,,S\n581,1,2,\"Christy, Miss. Julie Rachel\",female,25,1,1,237789,30,,S\n582,1,1,\"Thayer, Mrs. John Borland (Marian Longstreth Morris)\",female,39,1,1,17421,110.8833,C68,C\n583,0,2,\"Downton, Mr. William James\",male,54,0,0,28403,26,,S\n584,0,1,\"Ross, Mr. John Hugo\",male,36,0,0,13049,40.125,A10,C\n585,0,3,\"Paulner, Mr. Uscher\",male,,0,0,3411,8.7125,,C\n586,1,1,\"Taussig, Miss. Ruth\",female,18,0,2,110413,79.65,E68,S\n587,0,2,\"Jarvis, Mr. John Denzil\",male,47,0,0,237565,15,,S\n588,1,1,\"Frolicher-Stehli, Mr. Maxmillian\",male,60,1,1,13567,79.2,B41,C\n589,0,3,\"Gilinski, Mr. Eliezer\",male,22,0,0,14973,8.05,,S\n590,0,3,\"Murdlin, Mr. Joseph\",male,,0,0,A./5. 3235,8.05,,S\n591,0,3,\"Rintamaki, Mr. Matti\",male,35,0,0,STON/O 2. 3101273,7.125,,S\n592,1,1,\"Stephenson, Mrs. Walter Bertram (Martha Eustis)\",female,52,1,0,36947,78.2667,D20,C\n593,0,3,\"Elsbury, Mr. William James\",male,47,0,0,A/5 3902,7.25,,S\n594,0,3,\"Bourke, Miss. Mary\",female,,0,2,364848,7.75,,Q\n595,0,2,\"Chapman, Mr. John Henry\",male,37,1,0,SC/AH 29037,26,,S\n596,0,3,\"Van Impe, Mr. Jean Baptiste\",male,36,1,1,345773,24.15,,S\n597,1,2,\"Leitch, Miss. Jessie Wills\",female,,0,0,248727,33,,S\n598,0,3,\"Johnson, Mr. Alfred\",male,49,0,0,LINE,0,,S\n599,0,3,\"Boulos, Mr. Hanna\",male,,0,0,2664,7.225,,C\n600,1,1,\"Duff Gordon, Sir. Cosmo Edmund (\"\"Mr Morgan\"\")\",male,49,1,0,PC 17485,56.9292,A20,C\n601,1,2,\"Jacobsohn, Mrs. Sidney Samuel (Amy Frances Christy)\",female,24,2,1,243847,27,,S\n602,0,3,\"Slabenoff, Mr. Petco\",male,,0,0,349214,7.8958,,S\n603,0,1,\"Harrington, Mr. Charles H\",male,,0,0,113796,42.4,,S\n604,0,3,\"Torber, Mr. Ernst William\",male,44,0,0,364511,8.05,,S\n605,1,1,\"Homer, Mr. Harry (\"\"Mr E Haven\"\")\",male,35,0,0,111426,26.55,,C\n606,0,3,\"Lindell, Mr. Edvard Bengtsson\",male,36,1,0,349910,15.55,,S\n607,0,3,\"Karaic, Mr. Milan\",male,30,0,0,349246,7.8958,,S\n608,1,1,\"Daniel, Mr. Robert Williams\",male,27,0,0,113804,30.5,,S\n609,1,2,\"Laroche, Mrs. Joseph (Juliette Marie Louise Lafargue)\",female,22,1,2,SC/Paris 2123,41.5792,,C\n610,1,1,\"Shutes, Miss. Elizabeth W\",female,40,0,0,PC 17582,153.4625,C125,S\n611,0,3,\"Andersson, Mrs. Anders Johan (Alfrida Konstantia Brogren)\",female,39,1,5,347082,31.275,,S\n612,0,3,\"Jardin, Mr. Jose Neto\",male,,0,0,SOTON/O.Q. 3101305,7.05,,S\n613,1,3,\"Murphy, Miss. Margaret Jane\",female,,1,0,367230,15.5,,Q\n614,0,3,\"Horgan, Mr. John\",male,,0,0,370377,7.75,,Q\n615,0,3,\"Brocklebank, Mr. William Alfred\",male,35,0,0,364512,8.05,,S\n616,1,2,\"Herman, Miss. Alice\",female,24,1,2,220845,65,,S\n617,0,3,\"Danbom, Mr. Ernst Gilbert\",male,34,1,1,347080,14.4,,S\n618,0,3,\"Lobb, Mrs. William Arthur (Cordelia K Stanlick)\",female,26,1,0,A/5. 3336,16.1,,S\n619,1,2,\"Becker, Miss. Marion Louise\",female,4,2,1,230136,39,F4,S\n620,0,2,\"Gavey, Mr. Lawrence\",male,26,0,0,31028,10.5,,S\n621,0,3,\"Yasbeck, Mr. Antoni\",male,27,1,0,2659,14.4542,,C\n622,1,1,\"Kimball, Mr. Edwin Nelson Jr\",male,42,1,0,11753,52.5542,D19,S\n623,1,3,\"Nakid, Mr. Sahid\",male,20,1,1,2653,15.7417,,C\n624,0,3,\"Hansen, Mr. Henry Damsgaard\",male,21,0,0,350029,7.8542,,S\n625,0,3,\"Bowen, Mr. David John \"\"Dai\"\"\",male,21,0,0,54636,16.1,,S\n626,0,1,\"Sutton, Mr. Frederick\",male,61,0,0,36963,32.3208,D50,S\n627,0,2,\"Kirkland, Rev. Charles Leonard\",male,57,0,0,219533,12.35,,Q\n628,1,1,\"Longley, Miss. Gretchen Fiske\",female,21,0,0,13502,77.9583,D9,S\n629,0,3,\"Bostandyeff, Mr. Guentcho\",male,26,0,0,349224,7.8958,,S\n630,0,3,\"O'Connell, Mr. Patrick D\",male,,0,0,334912,7.7333,,Q\n631,1,1,\"Barkworth, Mr. Algernon Henry Wilson\",male,80,0,0,27042,30,A23,S\n632,0,3,\"Lundahl, Mr. Johan Svensson\",male,51,0,0,347743,7.0542,,S\n633,1,1,\"Stahelin-Maeglin, Dr. Max\",male,32,0,0,13214,30.5,B50,C\n634,0,1,\"Parr, Mr. William Henry Marsh\",male,,0,0,112052,0,,S\n635,0,3,\"Skoog, Miss. Mabel\",female,9,3,2,347088,27.9,,S\n636,1,2,\"Davis, Miss. Mary\",female,28,0,0,237668,13,,S\n637,0,3,\"Leinonen, Mr. Antti Gustaf\",male,32,0,0,STON/O 2. 3101292,7.925,,S\n638,0,2,\"Collyer, Mr. Harvey\",male,31,1,1,C.A. 31921,26.25,,S\n639,0,3,\"Panula, Mrs. Juha (Maria Emilia Ojala)\",female,41,0,5,3101295,39.6875,,S\n640,0,3,\"Thorneycroft, Mr. Percival\",male,,1,0,376564,16.1,,S\n641,0,3,\"Jensen, Mr. Hans Peder\",male,20,0,0,350050,7.8542,,S\n642,1,1,\"Sagesser, Mlle. Emma\",female,24,0,0,PC 17477,69.3,B35,C\n643,0,3,\"Skoog, Miss. Margit Elizabeth\",female,2,3,2,347088,27.9,,S\n644,1,3,\"Foo, Mr. Choong\",male,,0,0,1601,56.4958,,S\n645,1,3,\"Baclini, Miss. Eugenie\",female,0.75,2,1,2666,19.2583,,C\n646,1,1,\"Harper, Mr. Henry Sleeper\",male,48,1,0,PC 17572,76.7292,D33,C\n647,0,3,\"Cor, Mr. Liudevit\",male,19,0,0,349231,7.8958,,S\n648,1,1,\"Simonius-Blumer, Col. Oberst Alfons\",male,56,0,0,13213,35.5,A26,C\n649,0,3,\"Willey, Mr. Edward\",male,,0,0,S.O./P.P. 751,7.55,,S\n650,1,3,\"Stanley, Miss. Amy Zillah Elsie\",female,23,0,0,CA. 2314,7.55,,S\n651,0,3,\"Mitkoff, Mr. Mito\",male,,0,0,349221,7.8958,,S\n652,1,2,\"Doling, Miss. Elsie\",female,18,0,1,231919,23,,S\n653,0,3,\"Kalvik, Mr. Johannes Halvorsen\",male,21,0,0,8475,8.4333,,S\n654,1,3,\"O'Leary, Miss. Hanora \"\"Norah\"\"\",female,,0,0,330919,7.8292,,Q\n655,0,3,\"Hegarty, Miss. Hanora \"\"Nora\"\"\",female,18,0,0,365226,6.75,,Q\n656,0,2,\"Hickman, Mr. Leonard Mark\",male,24,2,0,S.O.C. 14879,73.5,,S\n657,0,3,\"Radeff, Mr. Alexander\",male,,0,0,349223,7.8958,,S\n658,0,3,\"Bourke, Mrs. John (Catherine)\",female,32,1,1,364849,15.5,,Q\n659,0,2,\"Eitemiller, Mr. George Floyd\",male,23,0,0,29751,13,,S\n660,0,1,\"Newell, Mr. Arthur Webster\",male,58,0,2,35273,113.275,D48,C\n661,1,1,\"Frauenthal, Dr. Henry William\",male,50,2,0,PC 17611,133.65,,S\n662,0,3,\"Badt, Mr. Mohamed\",male,40,0,0,2623,7.225,,C\n663,0,1,\"Colley, Mr. Edward Pomeroy\",male,47,0,0,5727,25.5875,E58,S\n664,0,3,\"Coleff, Mr. Peju\",male,36,0,0,349210,7.4958,,S\n665,1,3,\"Lindqvist, Mr. Eino William\",male,20,1,0,STON/O 2. 3101285,7.925,,S\n666,0,2,\"Hickman, Mr. Lewis\",male,32,2,0,S.O.C. 14879,73.5,,S\n667,0,2,\"Butler, Mr. Reginald Fenton\",male,25,0,0,234686,13,,S\n668,0,3,\"Rommetvedt, Mr. Knud Paust\",male,,0,0,312993,7.775,,S\n669,0,3,\"Cook, Mr. Jacob\",male,43,0,0,A/5 3536,8.05,,S\n670,1,1,\"Taylor, Mrs. Elmer Zebley (Juliet Cummins Wright)\",female,,1,0,19996,52,C126,S\n671,1,2,\"Brown, Mrs. Thomas William Solomon (Elizabeth Catherine Ford)\",female,40,1,1,29750,39,,S\n672,0,1,\"Davidson, Mr. Thornton\",male,31,1,0,F.C. 12750,52,B71,S\n673,0,2,\"Mitchell, Mr. Henry Michael\",male,70,0,0,C.A. 24580,10.5,,S\n674,1,2,\"Wilhelms, Mr. Charles\",male,31,0,0,244270,13,,S\n675,0,2,\"Watson, Mr. Ennis Hastings\",male,,0,0,239856,0,,S\n676,0,3,\"Edvardsson, Mr. Gustaf Hjalmar\",male,18,0,0,349912,7.775,,S\n677,0,3,\"Sawyer, Mr. Frederick Charles\",male,24.5,0,0,342826,8.05,,S\n678,1,3,\"Turja, Miss. Anna Sofia\",female,18,0,0,4138,9.8417,,S\n679,0,3,\"Goodwin, Mrs. Frederick (Augusta Tyler)\",female,43,1,6,CA 2144,46.9,,S\n680,1,1,\"Cardeza, Mr. Thomas Drake Martinez\",male,36,0,1,PC 17755,512.3292,B51 B53 B55,C\n681,0,3,\"Peters, Miss. Katie\",female,,0,0,330935,8.1375,,Q\n682,1,1,\"Hassab, Mr. Hammad\",male,27,0,0,PC 17572,76.7292,D49,C\n683,0,3,\"Olsvigen, Mr. Thor Anderson\",male,20,0,0,6563,9.225,,S\n684,0,3,\"Goodwin, Mr. Charles Edward\",male,14,5,2,CA 2144,46.9,,S\n685,0,2,\"Brown, Mr. Thomas William Solomon\",male,60,1,1,29750,39,,S\n686,0,2,\"Laroche, Mr. Joseph Philippe Lemercier\",male,25,1,2,SC/Paris 2123,41.5792,,C\n687,0,3,\"Panula, Mr. Jaako Arnold\",male,14,4,1,3101295,39.6875,,S\n688,0,3,\"Dakic, Mr. Branko\",male,19,0,0,349228,10.1708,,S\n689,0,3,\"Fischer, Mr. Eberhard Thelander\",male,18,0,0,350036,7.7958,,S\n690,1,1,\"Madill, Miss. Georgette Alexandra\",female,15,0,1,24160,211.3375,B5,S\n691,1,1,\"Dick, Mr. Albert Adrian\",male,31,1,0,17474,57,B20,S\n692,1,3,\"Karun, Miss. Manca\",female,4,0,1,349256,13.4167,,C\n693,1,3,\"Lam, Mr. Ali\",male,,0,0,1601,56.4958,,S\n694,0,3,\"Saad, Mr. Khalil\",male,25,0,0,2672,7.225,,C\n695,0,1,\"Weir, Col. John\",male,60,0,0,113800,26.55,,S\n696,0,2,\"Chapman, Mr. Charles Henry\",male,52,0,0,248731,13.5,,S\n697,0,3,\"Kelly, Mr. James\",male,44,0,0,363592,8.05,,S\n698,1,3,\"Mullens, Miss. Katherine \"\"Katie\"\"\",female,,0,0,35852,7.7333,,Q\n699,0,1,\"Thayer, Mr. John Borland\",male,49,1,1,17421,110.8833,C68,C\n700,0,3,\"Humblen, Mr. Adolf Mathias Nicolai Olsen\",male,42,0,0,348121,7.65,F G63,S\n701,1,1,\"Astor, Mrs. John Jacob (Madeleine Talmadge Force)\",female,18,1,0,PC 17757,227.525,C62 C64,C\n702,1,1,\"Silverthorne, Mr. Spencer Victor\",male,35,0,0,PC 17475,26.2875,E24,S\n703,0,3,\"Barbara, Miss. Saiide\",female,18,0,1,2691,14.4542,,C\n704,0,3,\"Gallagher, Mr. Martin\",male,25,0,0,36864,7.7417,,Q\n705,0,3,\"Hansen, Mr. Henrik Juul\",male,26,1,0,350025,7.8542,,S\n706,0,2,\"Morley, Mr. Henry Samuel (\"\"Mr Henry Marshall\"\")\",male,39,0,0,250655,26,,S\n707,1,2,\"Kelly, Mrs. Florence \"\"Fannie\"\"\",female,45,0,0,223596,13.5,,S\n708,1,1,\"Calderhead, Mr. Edward Pennington\",male,42,0,0,PC 17476,26.2875,E24,S\n709,1,1,\"Cleaver, Miss. Alice\",female,22,0,0,113781,151.55,,S\n710,1,3,\"Moubarek, Master. Halim Gonios (\"\"William George\"\")\",male,,1,1,2661,15.2458,,C\n711,1,1,\"Mayne, Mlle. Berthe Antonine (\"\"Mrs de Villiers\"\")\",female,24,0,0,PC 17482,49.5042,C90,C\n712,0,1,\"Klaber, Mr. Herman\",male,,0,0,113028,26.55,C124,S\n713,1,1,\"Taylor, Mr. Elmer Zebley\",male,48,1,0,19996,52,C126,S\n714,0,3,\"Larsson, Mr. August Viktor\",male,29,0,0,7545,9.4833,,S\n715,0,2,\"Greenberg, Mr. Samuel\",male,52,0,0,250647,13,,S\n716,0,3,\"Soholt, Mr. Peter Andreas Lauritz Andersen\",male,19,0,0,348124,7.65,F G73,S\n717,1,1,\"Endres, Miss. Caroline Louise\",female,38,0,0,PC 17757,227.525,C45,C\n718,1,2,\"Troutt, Miss. Edwina Celia \"\"Winnie\"\"\",female,27,0,0,34218,10.5,E101,S\n719,0,3,\"McEvoy, Mr. Michael\",male,,0,0,36568,15.5,,Q\n720,0,3,\"Johnson, Mr. Malkolm Joackim\",male,33,0,0,347062,7.775,,S\n721,1,2,\"Harper, Miss. Annie Jessie \"\"Nina\"\"\",female,6,0,1,248727,33,,S\n722,0,3,\"Jensen, Mr. Svend Lauritz\",male,17,1,0,350048,7.0542,,S\n723,0,2,\"Gillespie, Mr. William Henry\",male,34,0,0,12233,13,,S\n724,0,2,\"Hodges, Mr. Henry Price\",male,50,0,0,250643,13,,S\n725,1,1,\"Chambers, Mr. Norman Campbell\",male,27,1,0,113806,53.1,E8,S\n726,0,3,\"Oreskovic, Mr. Luka\",male,20,0,0,315094,8.6625,,S\n727,1,2,\"Renouf, Mrs. Peter Henry (Lillian Jefferys)\",female,30,3,0,31027,21,,S\n728,1,3,\"Mannion, Miss. Margareth\",female,,0,0,36866,7.7375,,Q\n729,0,2,\"Bryhl, Mr. Kurt Arnold Gottfrid\",male,25,1,0,236853,26,,S\n730,0,3,\"Ilmakangas, Miss. Pieta Sofia\",female,25,1,0,STON/O2. 3101271,7.925,,S\n731,1,1,\"Allen, Miss. Elisabeth Walton\",female,29,0,0,24160,211.3375,B5,S\n732,0,3,\"Hassan, Mr. Houssein G N\",male,11,0,0,2699,18.7875,,C\n733,0,2,\"Knight, Mr. Robert J\",male,,0,0,239855,0,,S\n734,0,2,\"Berriman, Mr. William John\",male,23,0,0,28425,13,,S\n735,0,2,\"Troupiansky, Mr. Moses Aaron\",male,23,0,0,233639,13,,S\n736,0,3,\"Williams, Mr. Leslie\",male,28.5,0,0,54636,16.1,,S\n737,0,3,\"Ford, Mrs. Edward (Margaret Ann Watson)\",female,48,1,3,W./C. 6608,34.375,,S\n738,1,1,\"Lesurer, Mr. Gustave J\",male,35,0,0,PC 17755,512.3292,B101,C\n739,0,3,\"Ivanoff, Mr. Kanio\",male,,0,0,349201,7.8958,,S\n740,0,3,\"Nankoff, Mr. Minko\",male,,0,0,349218,7.8958,,S\n741,1,1,\"Hawksford, Mr. Walter James\",male,,0,0,16988,30,D45,S\n742,0,1,\"Cavendish, Mr. Tyrell William\",male,36,1,0,19877,78.85,C46,S\n743,1,1,\"Ryerson, Miss. Susan Parker \"\"Suzette\"\"\",female,21,2,2,PC 17608,262.375,B57 B59 B63 B66,C\n744,0,3,\"McNamee, Mr. Neal\",male,24,1,0,376566,16.1,,S\n745,1,3,\"Stranden, Mr. Juho\",male,31,0,0,STON/O 2. 3101288,7.925,,S\n746,0,1,\"Crosby, Capt. Edward Gifford\",male,70,1,1,WE/P 5735,71,B22,S\n747,0,3,\"Abbott, Mr. Rossmore Edward\",male,16,1,1,C.A. 2673,20.25,,S\n748,1,2,\"Sinkkonen, Miss. Anna\",female,30,0,0,250648,13,,S\n749,0,1,\"Marvin, Mr. Daniel Warner\",male,19,1,0,113773,53.1,D30,S\n750,0,3,\"Connaghton, Mr. Michael\",male,31,0,0,335097,7.75,,Q\n751,1,2,\"Wells, Miss. Joan\",female,4,1,1,29103,23,,S\n752,1,3,\"Moor, Master. Meier\",male,6,0,1,392096,12.475,E121,S\n753,0,3,\"Vande Velde, Mr. Johannes Joseph\",male,33,0,0,345780,9.5,,S\n754,0,3,\"Jonkoff, Mr. Lalio\",male,23,0,0,349204,7.8958,,S\n755,1,2,\"Herman, Mrs. Samuel (Jane Laver)\",female,48,1,2,220845,65,,S\n756,1,2,\"Hamalainen, Master. Viljo\",male,0.67,1,1,250649,14.5,,S\n757,0,3,\"Carlsson, Mr. August Sigfrid\",male,28,0,0,350042,7.7958,,S\n758,0,2,\"Bailey, Mr. Percy Andrew\",male,18,0,0,29108,11.5,,S\n759,0,3,\"Theobald, Mr. Thomas Leonard\",male,34,0,0,363294,8.05,,S\n760,1,1,\"Rothes, the Countess. of (Lucy Noel Martha Dyer-Edwards)\",female,33,0,0,110152,86.5,B77,S\n761,0,3,\"Garfirth, Mr. John\",male,,0,0,358585,14.5,,S\n762,0,3,\"Nirva, Mr. Iisakki Antino Aijo\",male,41,0,0,SOTON/O2 3101272,7.125,,S\n763,1,3,\"Barah, Mr. Hanna Assi\",male,20,0,0,2663,7.2292,,C\n764,1,1,\"Carter, Mrs. William Ernest (Lucile Polk)\",female,36,1,2,113760,120,B96 B98,S\n765,0,3,\"Eklund, Mr. Hans Linus\",male,16,0,0,347074,7.775,,S\n766,1,1,\"Hogeboom, Mrs. John C (Anna Andrews)\",female,51,1,0,13502,77.9583,D11,S\n767,0,1,\"Brewe, Dr. Arthur Jackson\",male,,0,0,112379,39.6,,C\n768,0,3,\"Mangan, Miss. Mary\",female,30.5,0,0,364850,7.75,,Q\n769,0,3,\"Moran, Mr. Daniel J\",male,,1,0,371110,24.15,,Q\n770,0,3,\"Gronnestad, Mr. Daniel Danielsen\",male,32,0,0,8471,8.3625,,S\n771,0,3,\"Lievens, Mr. Rene Aime\",male,24,0,0,345781,9.5,,S\n772,0,3,\"Jensen, Mr. Niels Peder\",male,48,0,0,350047,7.8542,,S\n773,0,2,\"Mack, Mrs. (Mary)\",female,57,0,0,S.O./P.P. 3,10.5,E77,S\n774,0,3,\"Elias, Mr. Dibo\",male,,0,0,2674,7.225,,C\n775,1,2,\"Hocking, Mrs. Elizabeth (Eliza Needs)\",female,54,1,3,29105,23,,S\n776,0,3,\"Myhrman, Mr. Pehr Fabian Oliver Malkolm\",male,18,0,0,347078,7.75,,S\n777,0,3,\"Tobin, Mr. Roger\",male,,0,0,383121,7.75,F38,Q\n778,1,3,\"Emanuel, Miss. Virginia Ethel\",female,5,0,0,364516,12.475,,S\n779,0,3,\"Kilgannon, Mr. Thomas J\",male,,0,0,36865,7.7375,,Q\n780,1,1,\"Robert, Mrs. Edward Scott (Elisabeth Walton McMillan)\",female,43,0,1,24160,211.3375,B3,S\n781,1,3,\"Ayoub, Miss. Banoura\",female,13,0,0,2687,7.2292,,C\n782,1,1,\"Dick, Mrs. Albert Adrian (Vera Gillespie)\",female,17,1,0,17474,57,B20,S\n783,0,1,\"Long, Mr. Milton Clyde\",male,29,0,0,113501,30,D6,S\n784,0,3,\"Johnston, Mr. Andrew G\",male,,1,2,W./C. 6607,23.45,,S\n785,0,3,\"Ali, Mr. William\",male,25,0,0,SOTON/O.Q. 3101312,7.05,,S\n786,0,3,\"Harmer, Mr. Abraham (David Lishin)\",male,25,0,0,374887,7.25,,S\n787,1,3,\"Sjoblom, Miss. Anna Sofia\",female,18,0,0,3101265,7.4958,,S\n788,0,3,\"Rice, Master. George Hugh\",male,8,4,1,382652,29.125,,Q\n789,1,3,\"Dean, Master. Bertram Vere\",male,1,1,2,C.A. 2315,20.575,,S\n790,0,1,\"Guggenheim, Mr. Benjamin\",male,46,0,0,PC 17593,79.2,B82 B84,C\n791,0,3,\"Keane, Mr. Andrew \"\"Andy\"\"\",male,,0,0,12460,7.75,,Q\n792,0,2,\"Gaskell, Mr. Alfred\",male,16,0,0,239865,26,,S\n793,0,3,\"Sage, Miss. Stella Anna\",female,,8,2,CA. 2343,69.55,,S\n794,0,1,\"Hoyt, Mr. William Fisher\",male,,0,0,PC 17600,30.6958,,C\n795,0,3,\"Dantcheff, Mr. Ristiu\",male,25,0,0,349203,7.8958,,S\n796,0,2,\"Otter, Mr. Richard\",male,39,0,0,28213,13,,S\n797,1,1,\"Leader, Dr. Alice (Farnham)\",female,49,0,0,17465,25.9292,D17,S\n798,1,3,\"Osman, Mrs. Mara\",female,31,0,0,349244,8.6833,,S\n799,0,3,\"Ibrahim Shawah, Mr. Yousseff\",male,30,0,0,2685,7.2292,,C\n800,0,3,\"Van Impe, Mrs. Jean Baptiste (Rosalie Paula Govaert)\",female,30,1,1,345773,24.15,,S\n801,0,2,\"Ponesell, Mr. Martin\",male,34,0,0,250647,13,,S\n802,1,2,\"Collyer, Mrs. Harvey (Charlotte Annie Tate)\",female,31,1,1,C.A. 31921,26.25,,S\n803,1,1,\"Carter, Master. William Thornton II\",male,11,1,2,113760,120,B96 B98,S\n804,1,3,\"Thomas, Master. Assad Alexander\",male,0.42,0,1,2625,8.5167,,C\n805,1,3,\"Hedman, Mr. Oskar Arvid\",male,27,0,0,347089,6.975,,S\n806,0,3,\"Johansson, Mr. Karl Johan\",male,31,0,0,347063,7.775,,S\n807,0,1,\"Andrews, Mr. Thomas Jr\",male,39,0,0,112050,0,A36,S\n808,0,3,\"Pettersson, Miss. Ellen Natalia\",female,18,0,0,347087,7.775,,S\n809,0,2,\"Meyer, Mr. August\",male,39,0,0,248723,13,,S\n810,1,1,\"Chambers, Mrs. Norman Campbell (Bertha Griggs)\",female,33,1,0,113806,53.1,E8,S\n811,0,3,\"Alexander, Mr. William\",male,26,0,0,3474,7.8875,,S\n812,0,3,\"Lester, Mr. James\",male,39,0,0,A/4 48871,24.15,,S\n813,0,2,\"Slemen, Mr. Richard James\",male,35,0,0,28206,10.5,,S\n814,0,3,\"Andersson, Miss. Ebba Iris Alfrida\",female,6,4,2,347082,31.275,,S\n815,0,3,\"Tomlin, Mr. Ernest Portage\",male,30.5,0,0,364499,8.05,,S\n816,0,1,\"Fry, Mr. Richard\",male,,0,0,112058,0,B102,S\n817,0,3,\"Heininen, Miss. Wendla Maria\",female,23,0,0,STON/O2. 3101290,7.925,,S\n818,0,2,\"Mallet, Mr. Albert\",male,31,1,1,S.C./PARIS 2079,37.0042,,C\n819,0,3,\"Holm, Mr. John Fredrik Alexander\",male,43,0,0,C 7075,6.45,,S\n820,0,3,\"Skoog, Master. Karl Thorsten\",male,10,3,2,347088,27.9,,S\n821,1,1,\"Hays, Mrs. Charles Melville (Clara Jennings Gregg)\",female,52,1,1,12749,93.5,B69,S\n822,1,3,\"Lulic, Mr. Nikola\",male,27,0,0,315098,8.6625,,S\n823,0,1,\"Reuchlin, Jonkheer. John George\",male,38,0,0,19972,0,,S\n824,1,3,\"Moor, Mrs. (Beila)\",female,27,0,1,392096,12.475,E121,S\n825,0,3,\"Panula, Master. Urho Abraham\",male,2,4,1,3101295,39.6875,,S\n826,0,3,\"Flynn, Mr. John\",male,,0,0,368323,6.95,,Q\n827,0,3,\"Lam, Mr. Len\",male,,0,0,1601,56.4958,,S\n828,1,2,\"Mallet, Master. Andre\",male,1,0,2,S.C./PARIS 2079,37.0042,,C\n829,1,3,\"McCormack, Mr. Thomas Joseph\",male,,0,0,367228,7.75,,Q\n830,1,1,\"Stone, Mrs. George Nelson (Martha Evelyn)\",female,62,0,0,113572,80,B28,\n831,1,3,\"Yasbeck, Mrs. Antoni (Selini Alexander)\",female,15,1,0,2659,14.4542,,C\n832,1,2,\"Richards, Master. George Sibley\",male,0.83,1,1,29106,18.75,,S\n833,0,3,\"Saad, Mr. Amin\",male,,0,0,2671,7.2292,,C\n834,0,3,\"Augustsson, Mr. Albert\",male,23,0,0,347468,7.8542,,S\n835,0,3,\"Allum, Mr. Owen George\",male,18,0,0,2223,8.3,,S\n836,1,1,\"Compton, Miss. Sara Rebecca\",female,39,1,1,PC 17756,83.1583,E49,C\n837,0,3,\"Pasic, Mr. Jakob\",male,21,0,0,315097,8.6625,,S\n838,0,3,\"Sirota, Mr. Maurice\",male,,0,0,392092,8.05,,S\n839,1,3,\"Chip, Mr. Chang\",male,32,0,0,1601,56.4958,,S\n840,1,1,\"Marechal, Mr. Pierre\",male,,0,0,11774,29.7,C47,C\n841,0,3,\"Alhomaki, Mr. Ilmari Rudolf\",male,20,0,0,SOTON/O2 3101287,7.925,,S\n842,0,2,\"Mudd, Mr. Thomas Charles\",male,16,0,0,S.O./P.P. 3,10.5,,S\n843,1,1,\"Serepeca, Miss. Augusta\",female,30,0,0,113798,31,,C\n844,0,3,\"Lemberopolous, Mr. Peter L\",male,34.5,0,0,2683,6.4375,,C\n845,0,3,\"Culumovic, Mr. Jeso\",male,17,0,0,315090,8.6625,,S\n846,0,3,\"Abbing, Mr. Anthony\",male,42,0,0,C.A. 5547,7.55,,S\n847,0,3,\"Sage, Mr. Douglas Bullen\",male,,8,2,CA. 2343,69.55,,S\n848,0,3,\"Markoff, Mr. Marin\",male,35,0,0,349213,7.8958,,C\n849,0,2,\"Harper, Rev. John\",male,28,0,1,248727,33,,S\n850,1,1,\"Goldenberg, Mrs. Samuel L (Edwiga Grabowska)\",female,,1,0,17453,89.1042,C92,C\n851,0,3,\"Andersson, Master. Sigvard Harald Elias\",male,4,4,2,347082,31.275,,S\n852,0,3,\"Svensson, Mr. Johan\",male,74,0,0,347060,7.775,,S\n853,0,3,\"Boulos, Miss. Nourelain\",female,9,1,1,2678,15.2458,,C\n854,1,1,\"Lines, Miss. Mary Conover\",female,16,0,1,PC 17592,39.4,D28,S\n855,0,2,\"Carter, Mrs. Ernest Courtenay (Lilian Hughes)\",female,44,1,0,244252,26,,S\n856,1,3,\"Aks, Mrs. Sam (Leah Rosen)\",female,18,0,1,392091,9.35,,S\n857,1,1,\"Wick, Mrs. George Dennick (Mary Hitchcock)\",female,45,1,1,36928,164.8667,,S\n858,1,1,\"Daly, Mr. Peter Denis \",male,51,0,0,113055,26.55,E17,S\n859,1,3,\"Baclini, Mrs. Solomon (Latifa Qurban)\",female,24,0,3,2666,19.2583,,C\n860,0,3,\"Razi, Mr. Raihed\",male,,0,0,2629,7.2292,,C\n861,0,3,\"Hansen, Mr. Claus Peter\",male,41,2,0,350026,14.1083,,S\n862,0,2,\"Giles, Mr. Frederick Edward\",male,21,1,0,28134,11.5,,S\n863,1,1,\"Swift, Mrs. Frederick Joel (Margaret Welles Barron)\",female,48,0,0,17466,25.9292,D17,S\n864,0,3,\"Sage, Miss. Dorothy Edith \"\"Dolly\"\"\",female,,8,2,CA. 2343,69.55,,S\n865,0,2,\"Gill, Mr. John William\",male,24,0,0,233866,13,,S\n866,1,2,\"Bystrom, Mrs. (Karolina)\",female,42,0,0,236852,13,,S\n867,1,2,\"Duran y More, Miss. Asuncion\",female,27,1,0,SC/PARIS 2149,13.8583,,C\n868,0,1,\"Roebling, Mr. Washington Augustus II\",male,31,0,0,PC 17590,50.4958,A24,S\n869,0,3,\"van Melkebeke, Mr. Philemon\",male,,0,0,345777,9.5,,S\n870,1,3,\"Johnson, Master. Harold Theodor\",male,4,1,1,347742,11.1333,,S\n871,0,3,\"Balkic, Mr. Cerin\",male,26,0,0,349248,7.8958,,S\n872,1,1,\"Beckwith, Mrs. Richard Leonard (Sallie Monypeny)\",female,47,1,1,11751,52.5542,D35,S\n873,0,1,\"Carlsson, Mr. Frans Olof\",male,33,0,0,695,5,B51 B53 B55,S\n874,0,3,\"Vander Cruyssen, Mr. Victor\",male,47,0,0,345765,9,,S\n875,1,2,\"Abelson, Mrs. Samuel (Hannah Wizosky)\",female,28,1,0,P/PP 3381,24,,C\n876,1,3,\"Najib, Miss. Adele Kiamie \"\"Jane\"\"\",female,15,0,0,2667,7.225,,C\n877,0,3,\"Gustafsson, Mr. Alfred Ossian\",male,20,0,0,7534,9.8458,,S\n878,0,3,\"Petroff, Mr. Nedelio\",male,19,0,0,349212,7.8958,,S\n879,0,3,\"Laleff, Mr. Kristo\",male,,0,0,349217,7.8958,,S\n880,1,1,\"Potter, Mrs. Thomas Jr (Lily Alexenia Wilson)\",female,56,0,1,11767,83.1583,C50,C\n881,1,2,\"Shelley, Mrs. William (Imanita Parrish Hall)\",female,25,0,1,230433,26,,S\n882,0,3,\"Markun, Mr. Johann\",male,33,0,0,349257,7.8958,,S\n883,0,3,\"Dahlberg, Miss. Gerda Ulrika\",female,22,0,0,7552,10.5167,,S\n884,0,2,\"Banfield, Mr. Frederick James\",male,28,0,0,C.A./SOTON 34068,10.5,,S\n885,0,3,\"Sutehall, Mr. Henry Jr\",male,25,0,0,SOTON/OQ 392076,7.05,,S\n886,0,3,\"Rice, Mrs. William (Margaret Norton)\",female,39,0,5,382652,29.125,,Q\n887,0,2,\"Montvila, Rev. Juozas\",male,27,0,0,211536,13,,S\n888,1,1,\"Graham, Miss. Margaret Edith\",female,19,0,0,112053,30,B42,S\n889,0,3,\"Johnston, Miss. Catherine Helen \"\"Carrie\"\"\",female,,1,2,W./C. 6607,23.45,,S\n890,1,1,\"Behr, Mr. Karl Howell\",male,26,0,0,111369,30,C148,C\n891,0,3,\"Dooley, Mr. Patrick\",male,32,0,0,370376,7.75,,Q\n",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "read_file",
+        "id": "e30c5c7f-8416-4ca7-a9e7-8c25175aa347",
+        "tool_call_id": "call_h10krmevrts6zx0xf41ltctx",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "I can see this is the Titanic dataset. I need to analyze it to find interesting findings. Let me first check the full dataset size and then run some analysis using Python. Let me start by listing the workspace and then writing a Python script to analyze the data."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0c9-3e06-7cf0-a5ac-8a4e3a05107a",
+        "tool_calls": [
+          {
+            "name": "ls",
+            "args": {
+              "description": "Check workspace directory structure",
+              "path": "/mnt/user-data/workspace"
+            },
+            "id": "call_tnspi0a92f5xf9viqr9o9kew",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "/mnt/user-data/workspace",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "ls",
+        "id": "ec49e5f8-29be-4365-b318-a5cf43a0a221",
+        "tool_call_id": "call_tnspi0a92f5xf9viqr9o9kew",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I need to analyze the Titanic dataset to find interesting findings. I'll write a Python script to explore the data and generate insights. First, let me create a workspace and analyze the data."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0c9-6741-7952-ad2a-e03471bb6d48",
+        "tool_calls": [
+          {
+            "name": "write_file",
+            "args": {
+              "description": "Create Python script to analyze Titanic dataset",
+              "path": "/mnt/user-data/workspace/analyze_titanic.py",
+              "content": "import pandas as pd\nimport numpy as np\nimport matplotlib.pyplot as plt\nimport seaborn as sns\nfrom pathlib import Path\n\n# Load the dataset\ndf = pd.read_csv('/mnt/user-data/uploads/titanic.csv')\n\nprint(\"=== TITANIC DATASET ANALYSIS ===\\n\")\nprint(f\"Dataset shape: {df.shape}\")\nprint(f\"Columns: {list(df.columns)}\")\nprint(\"\\nFirst 5 rows:\")\nprint(df.head())\nprint(\"\\nBasic info:\")\nprint(df.info())\n\n# Check for missing values\nprint(\"\\n=== MISSING VALUES ===\")\nmissing = df.isnull().sum()\nmissing_pct = (missing / len(df)) * 100\nmissing_df = pd.DataFrame({'missing_count': missing, 'missing_percentage': missing_pct})\nprint(missing_df[missing_df['missing_count'] > 0])\n\n# Basic statistics\nprint(\"\\n=== BASIC STATISTICS ===\")\nprint(df.describe(include='all'))\n\n# Survival rate overall\nprint(\"\\n=== SURVIVAL ANALYSIS ===\")\nsurvival_rate = df['Survived'].mean() * 100\nprint(f\"Overall survival rate: {survival_rate:.2f}% ({df['Survived'].sum()} out of {len(df)})\")\n\n# Survival by gender\nprint(\"\\n--- Survival by Gender ---\")\ngender_survival = df.groupby('Sex')['Survived'].agg(['mean', 'count', 'sum'])\ngender_survival['mean'] = gender_survival['mean'] * 100\nprint(gender_survival)\n\n# Survival by passenger class\nprint(\"\\n--- Survival by Passenger Class ---\")\nclass_survival = df.groupby('Pclass')['Survived'].agg(['mean', 'count', 'sum'])\nclass_survival['mean'] = class_survival['mean'] * 100\nprint(class_survival)\n\n# Survival by age groups\nprint(\"\\n--- Survival by Age Groups ---\")\ndf['AgeGroup'] = pd.cut(df['Age'], bins=[0, 12, 18, 30, 50, 80], \n                        labels=['Child (0-12)', 'Teen (13-18)', 'Young Adult (19-30)', \n                                'Adult (31-50)', 'Senior (51+)'])\nage_survival = df.groupby('AgeGroup')['Survived'].agg(['mean', 'count', 'sum'])\nage_survival['mean'] = age_survival['mean'] * 100\nprint(age_survival)\n\n# Survival by embarkation port\nprint(\"\\n--- Survival by Embarkation Port ---\")\nembark_survival = df.groupby('Embarked')['Survived'].agg(['mean', 'count', 'sum'])\nembark_survival['mean'] = embark_survival['mean'] * 100\nprint(embark_survival)\n\n# Family size analysis\nprint(\"\\n--- Survival by Family Size ---\")\ndf['FamilySize'] = df['SibSp'] + df['Parch'] + 1\ndf['IsAlone'] = df['FamilySize'] == 1\nfamily_survival = df.groupby('IsAlone')['Survived'].agg(['mean', 'count', 'sum'])\nfamily_survival['mean'] = family_survival['mean'] * 100\nprint(family_survival)\n\n# Fare analysis\nprint(\"\\n--- Fare Analysis ---\")\nprint(f\"Average fare: ${df['Fare'].mean():.2f}\")\nprint(f\"Median fare: ${df['Fare'].median():.2f}\")\nprint(f\"Maximum fare: ${df['Fare'].max():.2f}\")\nprint(f\"Minimum fare: ${df['Fare'].min():.2f}\")\n\n# Fare by class\nprint(\"\\n--- Fare by Passenger Class ---\")\nfare_by_class = df.groupby('Pclass')['Fare'].agg(['mean', 'median', 'min', 'max'])\nprint(fare_by_class)\n\n# Cabin analysis (only 204 out of 891 have cabin info)\nprint(\"\\n--- Cabin Analysis ---\")\ndf['HasCabin'] = df['Cabin'].notna()\ncabin_survival = df.groupby('HasCabin')['Survived'].agg(['mean', 'count', 'sum'])\ncabin_survival['mean'] = cabin_survival['mean'] * 100\nprint(cabin_survival)\n\n# Interesting combinations\nprint(\"\\n=== INTERESTING COMBINATIONS ===\")\n\n# Women and children first?\nprint(\"\\n--- 'Women and Children First' Hypothesis ---\")\ndf['IsChild'] = df['Age'] < 18\ndf['IsFemale'] = df['Sex'] == 'female'\ndf['IsFemaleOrChild'] = df['IsFemale'] | df['IsChild']\n\ngroup_survival = df.groupby('IsFemaleOrChild')['Survived'].agg(['mean', 'count', 'sum'])\ngroup_survival['mean'] = group_survival['mean'] * 100\nprint(group_survival)\n\n# Class and gender interaction\nprint(\"\\n--- Survival by Class and Gender ---\")\nclass_gender_survival = df.groupby(['Pclass', 'Sex'])['Survived'].agg(['mean', 'count', 'sum'])\nclass_gender_survival['mean'] = class_gender_survival['mean'] * 100\nprint(class_gender_survival)\n\n# Age and class interaction\nprint(\"\\n--- Average Age by Class and Survival ---\")\nage_class_survival = df.groupby(['Pclass', 'Survived'])['Age'].agg(['mean', 'median', 'count'])\nprint(age_class_survival)\n\n# Family survival patterns\nprint(\"\\n--- Family Survival Patterns ---\")\n# Check if having family members increased survival chances\nfamily_pattern = df.groupby('FamilySize')['Survived'].agg(['mean', 'count'])\nfamily_pattern['mean'] = family_pattern['mean'] * 100\nprint(family_pattern.sort_values('mean', ascending=False).head(10))\n\n# Titles from names\nprint(\"\\n--- Title Analysis from Names ---\")\ndf['Title'] = df['Name'].str.extract(' ([A-Za-z]+)\\.', expand=False)\ntitle_counts = df['Title'].value_counts()\nprint(f\"Unique titles: {df['Title'].nunique()}\")\nprint(f\"Most common titles:\\n{title_counts.head(10)}\")\n\n# Survival by title\ntitle_survival = df.groupby('Title')['Survived'].agg(['mean', 'count', 'sum'])\ntitle_survival['mean'] = title_survival['mean'] * 100\nprint(\"\\nSurvival by title (top 10 by count):\")\nprint(title_survival.sort_values('count', ascending=False).head(10))\n\n# Save summary to file\nsummary_path = '/mnt/user-data/workspace/titanic_summary.txt'\nwith open(summary_path, 'w') as f:\n    f.write(\"=== TITANIC DATASET ANALYSIS SUMMARY ===\\n\\n\")\n    f.write(f\"Dataset shape: {df.shape}\\n\")\n    f.write(f\"Total passengers: {len(df)}\\n\")\n    f.write(f\"Survivors: {df['Survived'].sum()} ({survival_rate:.2f}%)\\n\\n\")\n    \n    f.write(\"KEY FINDINGS:\\n\")\n    f.write(\"1. Gender disparity: Female survival rate was much higher than male.\\n\")\n    f.write(f\"   - Female: {gender_survival.loc['female', 'mean']:.2f}%\\n\")\n    f.write(f\"   - Male: {gender_survival.loc['male', 'mean']:.2f}%\\n\\n\")\n    \n    f.write(\"2. Class disparity: Higher classes had better survival rates.\\n\")\n    for pclass in [1, 2, 3]:\n        rate = class_survival.loc[pclass, 'mean']\n        count = class_survival.loc[pclass, 'sum']\n        total = class_survival.loc[pclass, 'count']\n        f.write(f\"   - Class {pclass}: {rate:.2f}% ({count}/{total})\\n\")\n    \n    f.write(\"\\n3. Children had better survival rates than adults.\\n\")\n    for age_group in age_survival.index:\n        if not pd.isna(age_group):\n            rate = age_survival.loc[age_group, 'mean']\n            count = age_survival.loc[age_group, 'sum']\n            total = age_survival.loc[age_group, 'count']\n            f.write(f\"   - {age_group}: {rate:.2f}% ({count}/{total})\\n\")\n    \n    f.write(\"\\n4. Passengers with cabins had much higher survival rates.\\n\")\n    f.write(f\"   - With cabin: {cabin_survival.loc[True, 'mean']:.2f}%\\n\")\n    f.write(f\"   - Without cabin: {cabin_survival.loc[False, 'mean']:.2f}%\\n\")\n    \n    f.write(\"\\n5. Family size affected survival.\\n\")\n    f.write(f\"   - Alone: {family_survival.loc[True, 'mean']:.2f}%\\n\")\n    f.write(f\"   - With family: {family_survival.loc[False, 'mean']:.2f}%\\n\")\n    \n    f.write(\"\\n6. Embarkation port correlated with survival.\\n\")\n    for port in ['C', 'Q', 'S']:\n        if port in embark_survival.index:\n            rate = embark_survival.loc[port, 'mean']\n            count = embark_survival.loc[port, 'sum']\n            total = embark_survival.loc[port, 'count']\n            f.write(f\"   - Port {port}: {rate:.2f}% ({count}/{total})\\n\")\n\nprint(f\"\\nSummary saved to: {summary_path}\")"
+            },
+            "id": "call_lg6r7qzq95zz7y54hle3e5ez",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "OK",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_file",
+        "id": "287af69b-3c5a-48a5-ac74-3ad20d159753",
+        "tool_call_id": "call_lg6r7qzq95zz7y54hle3e5ez",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I need to run the analysis script to generate insights. Let me execute it."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0ca-9d40-7c32-bac0-86acd72cd6fe",
+        "tool_calls": [
+          {
+            "name": "bash",
+            "args": {
+              "description": "Run Titanic dataset analysis",
+              "command": "cd /mnt/user-data/workspace && python analyze_titanic.py"
+            },
+            "id": "call_et2tzk37y8hlljtfbgdc39hv",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "=== TITANIC DATASET ANALYSIS ===\n\nDataset shape: (891, 12)\nColumns: ['PassengerId', 'Survived', 'Pclass', 'Name', 'Sex', 'Age', 'SibSp', 'Parch', 'Ticket', 'Fare', 'Cabin', 'Embarked']\n\nFirst 5 rows:\n   PassengerId  Survived  Pclass                                               Name     Sex   Age  SibSp  Parch            Ticket     Fare Cabin Embarked\n0            1         0       3                            Braund, Mr. Owen Harris    male  22.0      1      0         A/5 21171   7.2500   NaN        S\n1            2         1       1  Cumings, Mrs. John Bradley (Florence Briggs Th...  female  38.0      1      0          PC 17599  71.2833   C85        C\n2            3         1       3                             Heikkinen, Miss. Laina  female  26.0      0      0  STON/O2. 3101282   7.9250   NaN        S\n3            4         1       1       Futrelle, Mrs. Jacques Heath (Lily May Peel)  female  35.0      1      0            113803  53.1000  C123        S\n4            5         0       3                           Allen, Mr. William Henry    male  35.0      0      0            373450   8.0500   NaN        S\n\nBasic info:\n<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 891 entries, 0 to 890\nData columns (total 12 columns):\n #   Column       Non-Null Count  Dtype\n---  ------       --------------  -----\n 0   PassengerId  891 non-null    int64\n 1   Survived     891 non-null    int64\n 2   Pclass       891 non-null    int64\n 3   Name         891 non-null    object\n 4   Sex          891 non-null    object\n 5   Age          714 non-null    float64\n 6   SibSp        891 non-null    int64\n 7   Parch        891 non-null    int64\n 8   Ticket       891 non-null    object\n 9   Fare         891 non-null    float64\n 10  Cabin        204 non-null    object\n 11  Embarked     889 non-null    object\ndtypes: float64(2), int64(5), object(5)\nmemory usage: 83.7+ KB\nNone\n\n=== MISSING VALUES ===\n          missing_count  missing_percentage\nAge                 177           19.865320\nCabin               687           77.104377\nEmbarked              2            0.224467\n\n=== BASIC STATISTICS ===\n        PassengerId    Survived      Pclass                     Name   Sex         Age       SibSp       Parch  Ticket        Fare    Cabin Embarked\ncount    891.000000  891.000000  891.000000                      891   891  714.000000  891.000000  891.000000     891  891.000000      204      889\nunique          NaN         NaN         NaN                      891     2         NaN         NaN         NaN     681         NaN      147        3\ntop             NaN         NaN         NaN  Braund, Mr. Owen Harris  male         NaN         NaN         NaN  347082         NaN  B96 B98        S\nfreq            NaN         NaN         NaN                        1   577         NaN         NaN         NaN       7         NaN        4      644\nmean     446.000000    0.383838    2.308642                      NaN   NaN   29.699118    0.523008    0.381594     NaN   32.204208      NaN      NaN\nstd      257.353842    0.486592    0.836071                      NaN   NaN   14.526497    1.102743    0.806057     NaN   49.693429      NaN      NaN\nmin        1.000000    0.000000    1.000000                      NaN   NaN    0.420000    0.000000    0.000000     NaN    0.000000      NaN      NaN\n25%      223.500000    0.000000    2.000000                      NaN   NaN   20.125000    0.000000    0.000000     NaN    7.910400      NaN      NaN\n50%      446.000000    0.000000    3.000000                      NaN   NaN   28.000000    0.000000    0.000000     NaN   14.454200      NaN      NaN\n75%      668.500000    1.000000    3.000000                      NaN   NaN   38.000000    1.000000    0.000000     NaN   31.000000      NaN      NaN\nmax      891.000000    1.000000    3.000000                      NaN   NaN   80.000000    8.000000    6.000000     NaN  512.329200      NaN      NaN\n\n=== SURVIVAL ANALYSIS ===\nOverall survival rate: 38.38% (342 out of 891)\n\n--- Survival by Gender ---\n             mean  count  sum\nSex\nfemale  74.203822    314  233\nmale    18.890815    577  109\n\n--- Survival by Passenger Class ---\n             mean  count  sum\nPclass\n1       62.962963    216  136\n2       47.282609    184   87\n3       24.236253    491  119\n\n--- Survival by Age Groups ---\n                          mean  count  sum\nAgeGroup\nChild (0-12)         57.971014     69   40\nTeen (13-18)         42.857143     70   30\nYoung Adult (19-30)  35.555556    270   96\nAdult (31-50)        42.323651    241  102\nSenior (51+)         34.375000     64   22\n\n--- Survival by Embarkation Port ---\n               mean  count  sum\nEmbarked\nC         55.357143    168   93\nQ         38.961039     77   30\nS         33.695652    644  217\n\n--- Survival by Family Size ---\n              mean  count  sum\nIsAlone\nFalse    50.564972    354  179\nTrue     30.353818    537  163\n\n--- Fare Analysis ---\nAverage fare: $32.20\nMedian fare: $14.45\nMaximum fare: $512.33\nMinimum fare: $0.00\n\n--- Fare by Passenger Class ---\n             mean   median  min       max\nPclass\n1       84.154687  60.2875  0.0  512.3292\n2       20.662183  14.2500  0.0   73.5000\n3       13.675550   8.0500  0.0   69.5500\n\n--- Cabin Analysis ---\n               mean  count  sum\nHasCabin\nFalse     29.985444    687  206\nTrue      66.666667    204  136\n\n=== INTERESTING COMBINATIONS ===\n\n--- 'Women and Children First' Hypothesis ---\n                      mean  count  sum\nIsFemaleOrChild\nFalse            16.570328    519   86\nTrue             68.817204    372  256\n\n--- Survival by Class and Gender ---\n                    mean  count  sum\nPclass Sex\n1      female  96.808511     94   91\n       male    36.885246    122   45\n2      female  92.105263     76   70\n       male    15.740741    108   17\n3      female  50.000000    144   72\n       male    13.544669    347   47\n\n--- Average Age by Class and Survival ---\n                      mean  median  count\nPclass Survived\n1      0         43.695312   45.25     64\n       1         35.368197   35.00    122\n2      0         33.544444   30.50     90\n       1         25.901566   28.00     83\n3      0         26.555556   25.00    270\n       1         20.646118   22.00     85\n\n--- Family Survival Patterns ---\n                 mean  count\nFamilySize\n4           72.413793     29\n3           57.843137    102\n2           55.279503    161\n7           33.333333     12\n1           30.353818    537\n5           20.000000     15\n6           13.636364     22\n8            0.000000      6\n11           0.000000      7\n\n--- Title Analysis from Names ---\nUnique titles: 17\nMost common titles:\nTitle\nMr          517\nMiss        182\nMrs         125\nMaster       40\nDr            7\nRev           6\nMlle          2\nMajor         2\nCol           2\nCountess      1\nName: count, dtype: int64\n\nSurvival by title (top 10 by count):\n              mean  count  sum\nTitle\nMr       15.667311    517   81\nMiss     69.780220    182  127\nMrs      79.200000    125   99\nMaster   57.500000     40   23\nDr       42.857143      7    3\nRev       0.000000      6    0\nMajor    50.000000      2    1\nCol      50.000000      2    1\nMlle    100.000000      2    2\nMme     100.000000      1    1\n\nSummary saved to: /mnt/user-data/workspace/titanic_summary.txt",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "bash",
+        "id": "4ff1ccf1-c606-44af-a457-2679d76fc3c4",
+        "tool_call_id": "call_et2tzk37y8hlljtfbgdc39hv",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I'll create a visualization script to generate some charts and then present the findings. Let me create visualizations first."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0ca-c59e-7fe2-9e08-8fdff0919575",
+        "tool_calls": [
+          {
+            "name": "write_file",
+            "args": {
+              "description": "Create visualization script for Titanic dataset",
+              "path": "/mnt/user-data/workspace/visualize_titanic.py",
+              "content": "import pandas as pd\nimport numpy as np\nimport matplotlib.pyplot as plt\nimport seaborn as sns\nfrom pathlib import Path\n\n# Set style\nplt.style.use('seaborn-v0_8-darkgrid')\nsns.set_palette(\"husl\")\n\n# Load the dataset\ndf = pd.read_csv('/mnt/user-data/uploads/titanic.csv')\n\n# Create output directory\noutput_dir = Path('/mnt/user-data/workspace/visualizations')\noutput_dir.mkdir(exist_ok=True)\n\n# Prepare some derived columns\ndf['AgeGroup'] = pd.cut(df['Age'], bins=[0, 12, 18, 30, 50, 80], \n                        labels=['Child (0-12)', 'Teen (13-18)', 'Young Adult (19-30)', \n                                'Adult (31-50)', 'Senior (51+)'])\ndf['FamilySize'] = df['SibSp'] + df['Parch'] + 1\ndf['IsAlone'] = df['FamilySize'] == 1\ndf['HasCabin'] = df['Cabin'].notna()\ndf['Title'] = df['Name'].str.extract(' ([A-Za-z]+)\\.', expand=False)\n\n# 1. Overall Survival Pie Chart\nfig, axes = plt.subplots(1, 2, figsize=(12, 5))\n\nsurvival_counts = df['Survived'].value_counts()\ncolors = ['#ff6b6b', '#4ecdc4']\naxes[0].pie(survival_counts, labels=['Perished', 'Survived'], autopct='%1.1f%%', \n           colors=colors, startangle=90)\naxes[0].set_title('Overall Survival Rate (n=891)')\n\n# 2. Survival by Gender\ngender_survival = df.groupby('Sex')['Survived'].mean() * 100\nbars = axes[1].bar(gender_survival.index, gender_survival.values, color=['#ff6b6b', '#4ecdc4'])\naxes[1].set_title('Survival Rate by Gender')\naxes[1].set_ylabel('Survival Rate (%)')\naxes[1].set_ylim(0, 100)\nfor bar, value in zip(bars, gender_survival.values):\n    axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2, \n                f'{value:.1f}%', ha='center', va='bottom')\n\nplt.tight_layout()\nplt.savefig(output_dir / 'survival_overview.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 3. Survival by Passenger Class\nfig, axes = plt.subplots(1, 2, figsize=(12, 5))\n\n# Bar chart\nclass_survival = df.groupby('Pclass')['Survived'].mean() * 100\nbars = axes[0].bar([f'Class {c}' for c in class_survival.index], class_survival.values, \n                   color=['#ffd166', '#06d6a0', '#118ab2'])\naxes[0].set_title('Survival Rate by Passenger Class')\naxes[0].set_ylabel('Survival Rate (%)')\naxes[0].set_ylim(0, 100)\nfor bar, value in zip(bars, class_survival.values):\n    axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2, \n                f'{value:.1f}%', ha='center', va='bottom')\n\n# Stacked bar chart\nclass_survival_counts = pd.crosstab(df['Pclass'], df['Survived'])\nclass_survival_counts.columns = ['Perished', 'Survived']\nclass_survival_counts.plot(kind='bar', stacked=True, ax=axes[1], \n                           color=['#ff6b6b', '#4ecdc4'])\naxes[1].set_title('Passenger Count by Class and Survival')\naxes[1].set_ylabel('Number of Passengers')\naxes[1].set_xlabel('Passenger Class')\naxes[1].legend(title='Outcome')\n\nplt.tight_layout()\nplt.savefig(output_dir / 'survival_by_class.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 4. Survival by Age Groups\nfig, axes = plt.subplots(1, 2, figsize=(12, 5))\n\n# Age distribution by survival\naxes[0].hist([df[df['Survived'] == 0]['Age'].dropna(), \n             df[df['Survived'] == 1]['Age'].dropna()], \n            bins=20, stacked=True, label=['Perished', 'Survived'],\n            color=['#ff6b6b', '#4ecdc4'], alpha=0.7)\naxes[0].set_title('Age Distribution by Survival Status')\naxes[0].set_xlabel('Age')\naxes[0].set_ylabel('Number of Passengers')\naxes[0].legend()\n\n# Survival rate by age group\nage_survival = df.groupby('AgeGroup')['Survived'].mean() * 100\nbars = axes[1].bar(age_survival.index.astype(str), age_survival.values, \n                  color='#118ab2')\naxes[1].set_title('Survival Rate by Age Group')\naxes[1].set_ylabel('Survival Rate (%)')\naxes[1].set_ylim(0, 100)\naxes[1].tick_params(axis='x', rotation=45)\nfor bar, value in zip(bars, age_survival.values):\n    if not pd.isna(value):\n        axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2, \n                    f'{value:.1f}%', ha='center', va='bottom')\n\nplt.tight_layout()\nplt.savefig(output_dir / 'survival_by_age.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 5. Fare vs Survival\nfig, axes = plt.subplots(1, 2, figsize=(12, 5))\n\n# Box plot of fare by survival\nsns.boxplot(x='Survived', y='Fare', data=df, ax=axes[0], \n            palette={0: '#ff6b6b', 1: '#4ecdc4'})\naxes[0].set_title('Fare Distribution by Survival')\naxes[0].set_xlabel('Survived (0=No, 1=Yes)')\naxes[0].set_ylabel('Fare ($)')\naxes[0].set_xticklabels(['Perished', 'Survived'])\n\n# Fare by class and survival\nsns.boxplot(x='Pclass', y='Fare', hue='Survived', data=df, ax=axes[1],\n           palette={0: '#ff6b6b', 1: '#4ecdc4'})\naxes[1].set_title('Fare by Class and Survival')\naxes[1].set_xlabel('Passenger Class')\naxes[1].set_ylabel('Fare ($)')\naxes[1].legend(title='Survived', labels=['Perished', 'Survived'])\n\nplt.tight_layout()\nplt.savefig(output_dir / 'fare_analysis.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Family Size Analysis\nfig, ax = plt.subplots(figsize=(10, 6))\n\nfamily_survival = df.groupby('FamilySize')['Survived'].mean() * 100\ncounts = df.groupby('FamilySize').size()\n\n# Create scatter plot with size proportional to count\nscatter = ax.scatter(family_survival.index, family_survival.values, \n                     s=counts * 10, alpha=0.6, color='#118ab2')\nax.set_title('Survival Rate by Family Size (Bubble size = passenger count)')\nax.set_xlabel('Family Size')\nax.set_ylabel('Survival Rate (%)')\nax.set_ylim(0, 100)\nax.grid(True, alpha=0.3)\n\n# Add labels for some points\nfor size in [1, 2, 3, 4]:\n    if size in family_survival.index:\n        ax.annotate(f'{counts[size]} passengers', \n                   xy=(size, family_survival[size]),\n                   xytext=(size, family_survival[size] + 5),\n                   ha='center', fontsize=9)\n\nplt.tight_layout()\nplt.savefig(output_dir / 'family_size_analysis.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 7. Correlation Heatmap\nfig, ax = plt.subplots(figsize=(10, 8))\n\n# Select numeric columns\nnumeric_cols = ['Survived', 'Pclass', 'Age', 'SibSp', 'Parch', 'Fare']\ncorr_df = df[numeric_cols].corr()\n\n# Create heatmap\nmask = np.triu(np.ones_like(corr_df, dtype=bool))\nsns.heatmap(corr_df, mask=mask, annot=True, fmt='.2f', cmap='coolwarm',\n           center=0, square=True, linewidths=0.5, cbar_kws={\"shrink\": 0.8}, ax=ax)\nax.set_title('Correlation Heatmap of Titanic Dataset Features')\n\nplt.tight_layout()\nplt.savefig(output_dir / 'correlation_heatmap.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 8. Combined Factors: Class, Gender, and Survival\nfig, ax = plt.subplots(figsize=(10, 6))\n\n# Create a grouped bar chart\nclass_gender_data = df.groupby(['Pclass', 'Sex'])['Survived'].mean().unstack() * 100\nclass_gender_data.plot(kind='bar', ax=ax, color=['#ff6b6b', '#4ecdc4'])\nax.set_title('Survival Rate by Class and Gender')\nax.set_xlabel('Passenger Class')\nax.set_ylabel('Survival Rate (%)')\nax.set_ylim(0, 105)\nax.legend(title='Gender')\nax.grid(True, alpha=0.3)\n\n# Add value labels\nfor i, (idx, row) in enumerate(class_gender_data.iterrows()):\n    for j, (col, value) in enumerate(row.items()):\n        if not pd.isna(value):\n            ax.text(i + j*0.15 - 0.15, value + 2, f'{value:.1f}%', \n                   ha='center', fontsize=9)\n\nplt.tight_layout()\nplt.savefig(output_dir / 'class_gender_survival.png', dpi=150, bbox_inches='tight')\nplt.close()\n\nprint(f\"Visualizations saved to: {output_dir}\")\nprint(f\"Generated {len(list(output_dir.glob('*.png')))} charts\")"
+            },
+            "id": "call_ffn7cu7r1buz2s7r2bwmzvcu",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "OK",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_file",
+        "id": "fe372950-5cdf-4cb3-88c8-1a1b0f5f56c2",
+        "tool_call_id": "call_ffn7cu7r1buz2s7r2bwmzvcu",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0cb-ebb4-75e1-bedf-2b52792a093a",
+        "tool_calls": [
+          {
+            "name": "bash",
+            "args": {
+              "description": "Run visualization script",
+              "command": "cd /mnt/user-data/workspace && python visualize_titanic.py"
+            },
+            "id": "call_pq1p48mo0rc3p2tzxm6u6y9g",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Traceback (most recent call last):\n  File \"/mnt/user-data/workspace/visualize_titanic.py\", line 112, in <module>\n    sns.boxplot(x='Survived', y='Fare', data=df, ax=axes[0],\n  File \"/usr/local/lib/python3.10/dist-packages/seaborn/categorical.py\", line 1626, in boxplot\n    p.map_hue(palette=palette, order=hue_order, norm=hue_norm, saturation=saturation)\n  File \"/usr/local/lib/python3.10/dist-packages/seaborn/_base.py\", line 838, in map_hue\n    mapping = HueMapping(self, palette, order, norm, saturation)\n  File \"/usr/local/lib/python3.10/dist-packages/seaborn/_base.py\", line 150, in __init__\n    levels, lookup_table = self.categorical_mapping(\n  File \"/usr/local/lib/python3.10/dist-packages/seaborn/_base.py\", line 234, in categorical_mapping\n    raise ValueError(err.format(missing))\nValueError: The palette dictionary is missing keys: {'1', '0'}",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "bash",
+        "id": "4006e44c-8578-4bca-a0fa-f16dfa863336",
+        "tool_call_id": "call_pq1p48mo0rc3p2tzxm6u6y9g",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Let me fix the visualization script. The issue is with the palette dictionary format. Let me correct it."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0cc-13f2-7843-841e-282dc2d02077",
+        "tool_calls": [
+          {
+            "name": "str_replace",
+            "args": {
+              "description": "Fix palette dictionary in visualization script",
+              "path": "/mnt/user-data/workspace/visualize_titanic.py",
+              "old_str": "# Box plot of fare by survival\nsns.boxplot(x='Survived', y='Fare', data=df, ax=axes[0], \n            palette={0: '#ff6b6b', 1: '#4ecdc4'})\naxes[0].set_title('Fare Distribution by Survival')\naxes[0].set_xlabel('Survived (0=No, 1=Yes)')\naxes[0].set_ylabel('Fare ($)')\naxes[0].set_xticklabels(['Perished', 'Survived'])\n\n# Fare by class and survival\nsns.boxplot(x='Pclass', y='Fare', hue='Survived', data=df, ax=axes[1],\n           palette={0: '#ff6b6b', 1: '#4ecdc4'})\naxes[1].set_title('Fare by Class and Survival')\naxes[1].set_xlabel('Passenger Class')\naxes[1].set_ylabel('Fare ($)')\naxes[1].legend(title='Survived', labels=['Perished', 'Survived'])",
+              "new_str": "# Box plot of fare by survival\nsns.boxplot(x='Survived', y='Fare', data=df, ax=axes[0], \n            palette=['#ff6b6b', '#4ecdc4'])\naxes[0].set_title('Fare Distribution by Survival')\naxes[0].set_xlabel('Survived (0=No, 1=Yes)')\naxes[0].set_ylabel('Fare ($)')\naxes[0].set_xticklabels(['Perished', 'Survived'])\n\n# Fare by class and survival\nsns.boxplot(x='Pclass', y='Fare', hue='Survived', data=df, ax=axes[1],\n           palette=['#ff6b6b', '#4ecdc4'])\naxes[1].set_title('Fare by Class and Survival')\naxes[1].set_xlabel('Passenger Class')\naxes[1].set_ylabel('Fare ($)')\naxes[1].legend(title='Survived', labels=['Perished', 'Survived'])"
+            },
+            "id": "call_coijhabwevm34rhr2acg8pca",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "OK",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "str_replace",
+        "id": "3003236c-9ae3-4ec5-be94-faa8d17327bf",
+        "tool_call_id": "call_coijhabwevm34rhr2acg8pca",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0cc-70d3-7bb2-8e5f-39e773ee45f3",
+        "tool_calls": [
+          {
+            "name": "bash",
+            "args": {
+              "description": "Run fixed visualization script",
+              "command": "cd /mnt/user-data/workspace && python visualize_titanic.py"
+            },
+            "id": "call_olncm3wpicf49t3dfyql7z7j",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Visualizations saved to: /mnt/user-data/workspace/visualizations\nGenerated 7 charts",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "bash",
+        "id": "fefb94c3-f8bc-4c83-bad7-cac3e3896542",
+        "tool_call_id": "call_olncm3wpicf49t3dfyql7z7j",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now let me create a comprehensive report with the findings. First, let me copy the summary and visualizations to the output directory."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0cc-99da-75d3-9a03-94606f814539",
+        "tool_calls": [
+          {
+            "name": "bash",
+            "args": {
+              "description": "Copy analysis results to output directory",
+              "command": "mkdir -p /mnt/user-data/outputs && cp /mnt/user-data/workspace/titanic_summary.txt /mnt/user-data/outputs/ && cp -r /mnt/user-data/workspace/visualizations /mnt/user-data/outputs/"
+            },
+            "id": "call_9ewxwg2uun7ucbq3bfqhm9he",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "(no output)",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "bash",
+        "id": "af30c03d-8b0d-46e0-b7de-3cb3a038c84a",
+        "tool_call_id": "call_9ewxwg2uun7ucbq3bfqhm9he",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I need to present the findings. Let me read the summary file and provide a comprehensive analysis."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0cc-c9bd-7760-8af0-fc9a02080c1e",
+        "tool_calls": [
+          {
+            "name": "read_file",
+            "args": {
+              "description": "Read the summary file to present findings",
+              "path": "/mnt/user-data/outputs/titanic_summary.txt"
+            },
+            "id": "call_nuod544uawfl4b66y3ebzw2w",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "=== TITANIC DATASET ANALYSIS SUMMARY ===\n\nDataset shape: (891, 20)\nTotal passengers: 891\nSurvivors: 342 (38.38%)\n\nKEY FINDINGS:\n1. Gender disparity: Female survival rate was much higher than male.\n   - Female: 74.20%\n   - Male: 18.89%\n\n2. Class disparity: Higher classes had better survival rates.\n   - Class 1: 62.96% (136/216)\n   - Class 2: 47.28% (87/184)\n   - Class 3: 24.24% (119/491)\n\n3. Children had better survival rates than adults.\n   - Child (0-12): 57.97% (40/69)\n   - Teen (13-18): 42.86% (30/70)\n   - Young Adult (19-30): 35.56% (96/270)\n   - Adult (31-50): 42.32% (102/241)\n   - Senior (51+): 34.38% (22/64)\n\n4. Passengers with cabins had much higher survival rates.\n   - With cabin: 66.67%\n   - Without cabin: 29.99%\n\n5. Family size affected survival.\n   - Alone: 30.35%\n   - With family: 50.56%\n\n6. Embarkation port correlated with survival.\n   - Port C: 55.36% (93/168)\n   - Port Q: 38.96% (30/77)\n   - Port S: 33.70% (217/644)\n",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "read_file",
+        "id": "47e53865-18cd-4304-b872-087b36c585a4",
+        "tool_call_id": "call_nuod544uawfl4b66y3ebzw2w",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I'll present the findings from the Titanic dataset analysis. Let me also check what visualizations were created."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0cc-ed2a-76d2-87ac-5458fbad1908",
+        "tool_calls": [
+          {
+            "name": "ls",
+            "args": {
+              "description": "List generated visualizations",
+              "path": "/mnt/user-data/outputs/visualizations"
+            },
+            "id": "call_wghrbpjy1afgclgsdd5sbvqj",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "/mnt/user-data/outputs/visualizations\n/mnt/user-data/outputs/visualizations/survival_by_class.png\n/mnt/user-data/outputs/visualizations/fare_analysis.png\n/mnt/user-data/outputs/visualizations/class_gender_survival.png\n/mnt/user-data/outputs/visualizations/family_size_analysis.png\n/mnt/user-data/outputs/visualizations/correlation_heatmap.png\n/mnt/user-data/outputs/visualizations/survival_by_age.png\n/mnt/user-data/outputs/visualizations/survival_overview.png",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "ls",
+        "id": "d56d6486-238e-4d16-a716-0c40e5f9d4a3",
+        "tool_call_id": "call_wghrbpjy1afgclgsdd5sbvqj",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "Based on my analysis of the Titanic dataset (891 passengers), here are the most interesting findings:\n\n## **Key Survival Patterns**\n\n### **1. Dramatic Gender Disparity**\n- **Female survival rate: 74.2%** (233 out of 314 women survived)\n- **Male survival rate: 18.9%** (109 out of 577 men survived)\n- This confirms the \"women and children first\" protocol was strongly followed\n\n### **2. Strong Class Hierarchy**\n- **First Class: 63.0%** survival rate (136/216)\n- **Second Class: 47.3%** survival rate (87/184)  \n- **Third Class: 24.2%** survival rate (119/491)\n- Higher socioeconomic status significantly increased survival chances\n\n### **3. Age Matters, But Not Uniformly**\n- **Children (0-12): 58.0%** survival - highest among age groups\n- **Teens (13-18): 42.9%** survival\n- **Young Adults (19-30): 35.6%** survival\n- **Adults (31-50): 42.3%** survival\n- **Seniors (51+): 34.4%** survival\n\n### **4. Cabin Privilege**\n- **With cabin: 66.7%** survival rate (136/204)\n- **Without cabin: 30.0%** survival rate (206/687)\n- Having a cabin (typically upper decks) nearly doubled survival chances\n\n## **Interesting Interactions**\n\n### **Class × Gender Combination**\n- **First Class Women: 96.8%** survival (91/94) - nearly guaranteed survival\n- **Third Class Men: 13.5%** survival (47/347) - worst odds\n- **First Class Men: 36.9%** survival (45/122) - better than average male\n\n### **Family Dynamics**\n- **Alone: 30.4%** survival (163/537)\n- **With family: 50.6%** survival (179/354)\n- **Optimal family size: 4 members** with 72.4% survival rate\n- Large families (6+ members) had poor survival rates\n\n### **Embarkation Port Correlation**\n- **Cherbourg (C): 55.4%** survival - highest\n- **Queenstown (Q): 39.0%** survival  \n- **Southampton (S): 33.7%** survival - lowest\n- Port may correlate with passenger class composition\n\n## **Statistical Insights**\n\n### **Fare Analysis**\n- **Average fare: $32.20** (median: $14.45)\n- **Class 1 average: $84.15** vs **Class 3 average: $13.68**\n- Survivors paid significantly higher fares on average\n\n### **Title Analysis**\n- **\"Miss\": 69.8%** survival (127/182)\n- **\"Mrs\": 79.2%** survival (99/125)  \n- **\"Mr\": 15.7%** survival (81/517)\n- **\"Master\" (boys): 57.5%** survival (23/40)\n- Titles reveal social status and age information\n\n### **Missing Data Patterns**\n- **Age: 19.9%** missing (177 passengers)\n- **Cabin: 77.1%** missing (687 passengers) - mostly 3rd class\n- **Embarked: 0.2%** missing (2 passengers)\n\n## **Most Surprising Findings**\n\n1. **The \"First Class Female\" advantage**: Nearly all first-class women survived (96.8%), suggesting class and gender combined for near-certain survival.\n\n2. **Family size sweet spot**: Families of 4 had the highest survival rate (72.4%), while very large families fared poorly.\n\n3. **Cabin vs No-Cabin gap**: The survival difference (66.7% vs 30.0%) suggests cabin location was critical, likely due to proximity to lifeboats.\n\n4. **Port C advantage**: Cherbourg passengers had significantly better survival rates, possibly due to different passenger demographics.\n\n5. **\"Master\" title survival**: Boys with the \"Master\" title had 57.5% survival - much higher than adult males, supporting the \"children first\" protocol.\n\nThe dataset reveals a clear hierarchy: **First Class Women > First Class Men/Children > Second Class > Third Class Women/Children > Third Class Men**, with socioeconomic factors playing a decisive role in survival outcomes.\n\n",
+        "additional_kwargs": {
+          "reasoning_content": "Now I'll present my findings from the Titanic dataset analysis. Let me create a comprehensive response summarizing the interesting discoveries."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0cd-16fa-7432-a728-b8a071167a56",
+        "tool_calls": [
+          {
+            "name": "present_files",
+            "args": {
+              "filepaths": [
+                "/mnt/user-data/outputs/titanic_summary.txt",
+                "/mnt/user-data/outputs/visualizations/survival_overview.png",
+                "/mnt/user-data/outputs/visualizations/survival_by_class.png",
+                "/mnt/user-data/outputs/visualizations/class_gender_survival.png",
+                "/mnt/user-data/outputs/visualizations/survival_by_age.png",
+                "/mnt/user-data/outputs/visualizations/fare_analysis.png",
+                "/mnt/user-data/outputs/visualizations/family_size_analysis.png",
+                "/mnt/user-data/outputs/visualizations/correlation_heatmap.png"
+              ]
+            },
+            "id": "call_zgfi5cqd5691kd4v5u672h9b",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Successfully presented files",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "present_files",
+        "id": "e4d7ccc5-55a3-4d39-85bc-68d884f6c5a8",
+        "tool_call_id": "call_zgfi5cqd5691kd4v5u672h9b",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "I've analyzed the Titanic dataset and identified several compelling findings. The analysis reveals clear survival hierarchies based on gender, class, age, and socioeconomic factors. \n\nThe most striking patterns include the dramatic gender disparity (74.2% female vs 18.9% male survival), strong class hierarchy (63% first class vs 24% third class survival), and the advantage of having a cabin (66.7% vs 30.0% survival). \n\nI've provided a detailed summary file and seven visualizations that illustrate these patterns, including survival rates by class and gender, age distributions, fare analysis, family size impacts, and correlation patterns. The visualizations clearly show how different factors interacted to determine survival outcomes during the Titanic disaster.",
+        "response_metadata": {
+          "finish_reason": "stop",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf0cd-b5c4-7011-bee3-8686eb70a719",
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    ],
+    "thread_data": {
+      "workspace_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/ad76c455-5bf9-4335-8517-fc03834ab828/user-data/workspace",
+      "uploads_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/ad76c455-5bf9-4335-8517-fc03834ab828/user-data/uploads",
+      "outputs_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/ad76c455-5bf9-4335-8517-fc03834ab828/user-data/outputs"
+    },
+    "uploaded_files": [
+      {
+        "filename": "titanic.csv",
+        "size": 60302,
+        "path": "/mnt/user-data/uploads/titanic.csv",
+        "extension": ".csv"
+      }
+    ],
+    "title": "Analyzing Dataset Insights",
+    "artifacts": [
+      "/mnt/user-data/outputs/titanic_summary.txt",
+      "/mnt/user-data/outputs/visualizations/survival_overview.png",
+      "/mnt/user-data/outputs/visualizations/survival_by_class.png",
+      "/mnt/user-data/outputs/visualizations/class_gender_survival.png",
+      "/mnt/user-data/outputs/visualizations/survival_by_age.png",
+      "/mnt/user-data/outputs/visualizations/fare_analysis.png",
+      "/mnt/user-data/outputs/visualizations/family_size_analysis.png",
+      "/mnt/user-data/outputs/visualizations/correlation_heatmap.png"
+    ]
+  },
+  "next": [],
+  "tasks": [],
+  "metadata": {
+    "model_name": "deepseek-v3.2",
+    "thinking_enabled": true,
+    "is_plan_mode": false,
+    "graph_id": "lead_agent",
+    "assistant_id": "bee7d354-5df5-5f26-a978-10ea053f620d",
+    "user_id": "",
+    "created_by": "system",
+    "thread_id": "ad76c455-5bf9-4335-8517-fc03834ab828",
+    "run_id": "019bf0c9-1f49-71c3-8946-9b83e096c871",
+    "run_attempt": 1,
+    "langgraph_version": "1.0.6",
+    "langgraph_api_version": "0.6.38",
+    "langgraph_plan": "developer",
+    "langgraph_host": "self-hosted",
+    "langgraph_api_url": "http://127.0.0.1:2024",
+    "source": "loop",
+    "step": 29,
+    "parents": {},
+    "langgraph_auth_user_id": "",
+    "langgraph_request_id": "4fc937d9-bd72-4c3c-83c8-1ba45a2d348a"
+  },
+  "created_at": "2026-01-24T16:19:44.462829+00:00",
+  "checkpoint": {
+    "checkpoint_id": "1f0f9407-e893-605a-801d-30fcc723c15d",
+    "thread_id": "ad76c455-5bf9-4335-8517-fc03834ab828",
+    "checkpoint_ns": ""
+  },
+  "parent_checkpoint": {
+    "checkpoint_id": "1f0f9407-de99-66f8-801c-dd739053eadc",
+    "thread_id": "ad76c455-5bf9-4335-8517-fc03834ab828",
+    "checkpoint_ns": ""
+  },
+  "interrupts": [],
+  "checkpoint_id": "1f0f9407-e893-605a-801d-30fcc723c15d",
+  "parent_checkpoint_id": "1f0f9407-de99-66f8-801c-dd739053eadc"
+}

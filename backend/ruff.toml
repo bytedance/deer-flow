@@ -1,0 +1,13 @@
+line-length = 240
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP"]
+ignore = []
+
+[lint.isort]
+known-first-party = ["deerflow", "app"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

@@ -1,0 +1,71 @@
+.env
+Dockerfile
+.dockerignore
+.git
+.gitignore
+docker/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+
+# Web
+node_modules
+npm-debug.log
+.next
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+conf.yaml
+web/
+docs/
+examples/
+assets/
+tests/
+*.log
+
+# Exclude directories not needed in Docker context
+# Frontend build only needs frontend/
+# Backend build only needs backend/
+scripts/
+logs/
+docker/
+skills/
+frontend/.next
+frontend/node_modules
+backend/.venv
+backend/htmlcov
+backend/.coverage
+*.md
+!README.md
+!frontend/README.md
+!backend/README.md
