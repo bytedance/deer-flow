@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.thread_meta.base import ThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+
+logger = logging.getLogger(__name__)
+
+_SAFE_JSON_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+
+
+def _is_safe_json_key(key: str) -> bool:
+    """Reject keys that could alter the JSON-path expression."""
+    return bool(_SAFE_JSON_KEY_RE.match(key))
 
 
 class ThreadMetaRepository(ThreadMetaStore):
@@ -123,20 +134,23 @@ class ThreadMetaRepository(ThreadMetaStore):
             stmt = stmt.where(ThreadMetaRow.status == status)
 
         if metadata:
-            # When metadata filter is active, fetch a larger window and filter
-            # in Python. TODO(Phase 2): use JSON DB operators (Postgres @>,
-            # SQLite json_extract) for server-side filtering.
-            stmt = stmt.limit(limit * 5 + offset)
-            async with self._sf() as session:
-                result = await session.execute(stmt)
-                rows = [self._row_to_dict(r) for r in result.scalars()]
-            rows = [r for r in rows if all(r.get("metadata", {}).get(k) == v for k, v in metadata.items())]
-            return rows[offset : offset + limit]
-        else:
-            stmt = stmt.limit(limit).offset(offset)
-            async with self._sf() as session:
-                result = await session.execute(stmt)
-                return [self._row_to_dict(r) for r in result.scalars()]
+            for key, value in metadata.items():
+                if not _is_safe_json_key(key):
+                    logger.warning("Skipping unsafe metadata filter key: %s", key)
+                    continue
+                json_val = func.json_extract(ThreadMetaRow.metadata_json, f"$.{key}")
+                if isinstance(value, bool):
+                    # SQLite stores JSON booleans as 1/0; compare via json() literal.
+                    stmt = stmt.where(json_val == func.json(str(value).lower()))
+                elif isinstance(value, (int, float)):
+                    stmt = stmt.where(json_val == value)
+                else:
+                    stmt = stmt.where(json_val == str(value))
+
+        stmt = stmt.limit(limit).offset(offset)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
 
     async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None) -> bool:
         """Return True if the row exists and is owned (or filter bypassed)."""

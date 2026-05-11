@@ -1,5 +1,7 @@
 """Tests for ThreadMetaRepository (SQLAlchemy-backed)."""
 
+import asyncio
+
 import pytest
 
 from deerflow.persistence.thread_meta import ThreadMetaRepository
@@ -175,4 +177,132 @@ class TestThreadMetaRepository:
     async def test_update_metadata_nonexistent_is_noop(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.update_metadata("nonexistent", {"k": "v"})  # should not raise
+        await _cleanup()
+
+    # --- search with metadata filter (SQL push-down) ---
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_string(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+        await repo.create("t3", metadata={"env": "prod", "region": "us"})
+
+        results = await repo.search(metadata={"env": "prod"})
+        ids = {r["thread_id"] for r in results}
+        assert ids == {"t1", "t3"}
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_numeric(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"priority": 1})
+        await repo.create("t2", metadata={"priority": 2})
+        await repo.create("t3", metadata={"priority": 1, "extra": "x"})
+
+        results = await repo.search(metadata={"priority": 1})
+        ids = {r["thread_id"] for r in results}
+        assert ids == {"t1", "t3"}
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_multiple_keys(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"env": "prod", "region": "us"})
+        await repo.create("t2", metadata={"env": "prod", "region": "eu"})
+        await repo.create("t3", metadata={"env": "staging", "region": "us"})
+
+        results = await repo.search(metadata={"env": "prod", "region": "us"})
+        assert len(results) == 1
+        assert results[0]["thread_id"] == "t1"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_no_match(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"env": "prod"})
+
+        results = await repo.search(metadata={"env": "dev"})
+        assert results == []
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_pagination_correct(self, tmp_path):
+        """Ensure limit/offset work correctly when many rows don't match.
+
+        This is the core regression test: the old Python-side filtering
+        with a 5x overfetch window could miss matching rows beyond the
+        fetched window. SQL push-down makes pagination exact.
+        """
+        repo = await _make_repo(tmp_path)
+        for i in range(30):
+            meta = {"target": "yes"} if i % 3 == 0 else {"target": "no"}
+            await repo.create(f"t{i:03d}", metadata=meta)
+            await asyncio.sleep(0.01)  # ensure distinct updated_at
+
+        # Total matching rows: i in {0,3,6,9,12,15,18,21,24,27} = 10 rows
+        all_matches = await repo.search(metadata={"target": "yes"}, limit=100)
+        assert len(all_matches) == 10
+
+        # Paginate: first page
+        page1 = await repo.search(metadata={"target": "yes"}, limit=3, offset=0)
+        assert len(page1) == 3
+
+        # Paginate: second page
+        page2 = await repo.search(metadata={"target": "yes"}, limit=3, offset=3)
+        assert len(page2) == 3
+
+        # No overlap between pages
+        page1_ids = {r["thread_id"] for r in page1}
+        page2_ids = {r["thread_id"] for r in page2}
+        assert page1_ids.isdisjoint(page2_ids)
+
+        # Last page
+        page_last = await repo.search(metadata={"target": "yes"}, limit=3, offset=9)
+        assert len(page_last) == 1
+
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_with_status_filter(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "prod"})
+        await repo.update_status("t1", "busy")
+
+        results = await repo.search(metadata={"env": "prod"}, status="busy")
+        assert len(results) == 1
+        assert results[0]["thread_id"] == "t1"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_without_metadata_still_works(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2")
+
+        results = await repo.search(limit=10)
+        assert len(results) == 2
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_missing_key_no_match(self, tmp_path):
+        """Rows without the requested metadata key should not match."""
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"other": "val"})
+        await repo.create("t2", metadata={"env": "prod"})
+
+        results = await repo.search(metadata={"env": "prod"})
+        assert len(results) == 1
+        assert results[0]["thread_id"] == "t2"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_unsafe_key_ignored(self, tmp_path):
+        """Keys with special characters are silently skipped, returning all rows."""
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"env": "prod"})
+
+        results = await repo.search(metadata={"bad;key": "x"})
+        assert len(results) == 1
         await _cleanup()
