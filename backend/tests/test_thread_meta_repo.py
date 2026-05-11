@@ -1,6 +1,7 @@
 """Tests for ThreadMetaRepository (SQLAlchemy-backed)."""
 
 import asyncio
+import logging
 
 import pytest
 
@@ -228,12 +229,7 @@ class TestThreadMetaRepository:
 
     @pytest.mark.anyio
     async def test_search_metadata_pagination_correct(self, tmp_path):
-        """Ensure limit/offset work correctly when many rows don't match.
-
-        This is the core regression test: the old Python-side filtering
-        with a 5x overfetch window could miss matching rows beyond the
-        fetched window. SQL push-down makes pagination exact.
-        """
+        """Regression: SQL push-down makes limit/offset exact even when most rows don't match."""
         repo = await _make_repo(tmp_path)
         for i in range(30):
             meta = {"target": "yes"} if i % 3 == 0 else {"target": "no"}
@@ -298,11 +294,236 @@ class TestThreadMetaRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_search_metadata_unsafe_key_ignored(self, tmp_path):
-        """Keys with special characters are silently skipped, returning all rows."""
+    async def test_search_metadata_unsafe_key_ignored(self, tmp_path, caplog):
+        """Unsafe keys are skipped (with warning), so the filter has no effect."""
         repo = await _make_repo(tmp_path)
         await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
 
-        results = await repo.search(metadata={"bad;key": "x"})
-        assert len(results) == 1
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
+            results = await repo.search(metadata={"bad;key": "x"})
+        assert len(results) == 2
+        assert any("bad;key" in r.message for r in caplog.records)
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_boolean(self, tmp_path):
+        """True matches only boolean true, not integer 1."""
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"active": True})
+        await repo.create("t2", metadata={"active": False})
+        await repo.create("t3", metadata={"active": True, "extra": "x"})
+        await repo.create("t4", metadata={"active": 1})
+
+        results = await repo.search(metadata={"active": True})
+        ids = {r["thread_id"] for r in results}
+        assert ids == {"t1", "t3"}
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_none(self, tmp_path):
+        """Only rows with explicit JSON null match; missing key does not."""
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"tag": None})
+        await repo.create("t2", metadata={"tag": "present"})
+        await repo.create("t3", metadata={"other": "val"})
+
+        results = await repo.search(metadata={"tag": None})
+        ids = {r["thread_id"] for r in results}
+        assert ids == {"t1"}
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_safe_json_key_accepts_identifier(self):
+        from deerflow.persistence.thread_meta.sql import _is_safe_json_key
+
+        assert _is_safe_json_key("env") is True
+        assert _is_safe_json_key("region_us") is True
+        assert _is_safe_json_key("_private") is True
+        assert _is_safe_json_key("key123") is True
+
+    @pytest.mark.anyio
+    async def test_safe_json_key_rejects_non_identifier(self):
+        from deerflow.persistence.thread_meta.sql import _is_safe_json_key
+
+        assert _is_safe_json_key("a.b") is False
+        assert _is_safe_json_key("a.b.c") is False
+        assert _is_safe_json_key("a..b") is False
+        assert _is_safe_json_key("bad;key") is False
+        assert _is_safe_json_key("with space") is False
+        assert _is_safe_json_key("") is False
+        assert _is_safe_json_key("1leading_digit") is False
+
+    @pytest.mark.anyio
+    async def test_search_metadata_dotted_key_ignored(self, tmp_path, caplog):
+        """Dotted keys are rejected and the filter is skipped, not interpreted as nested paths."""
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
+            results = await repo.search(metadata={"a.b": "anything"})
+        assert len(results) == 2
+        assert any("a.b" in r.message for r in caplog.records)
+        await _cleanup()
+
+    # --- dialect-aware type-safe filtering edge cases ---
+
+    @pytest.mark.anyio
+    async def test_search_metadata_bool_vs_int_distinction(self, tmp_path):
+        """True must not match 1; False must not match 0."""
+        repo = await _make_repo(tmp_path)
+        await repo.create("bool_true", metadata={"flag": True})
+        await repo.create("bool_false", metadata={"flag": False})
+        await repo.create("int_one", metadata={"flag": 1})
+        await repo.create("int_zero", metadata={"flag": 0})
+
+        true_hits = {r["thread_id"] for r in await repo.search(metadata={"flag": True})}
+        assert true_hits == {"bool_true"}
+
+        false_hits = {r["thread_id"] for r in await repo.search(metadata={"flag": False})}
+        assert false_hits == {"bool_false"}
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_int_does_not_match_bool(self, tmp_path):
+        """Integer 1 must not match boolean True."""
+        repo = await _make_repo(tmp_path)
+        await repo.create("bool_true", metadata={"val": True})
+        await repo.create("int_one", metadata={"val": 1})
+
+        hits = {r["thread_id"] for r in await repo.search(metadata={"val": 1})}
+        assert hits == {"int_one"}
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_none_excludes_missing_key(self, tmp_path):
+        """Filtering by None matches explicit JSON null only, not missing key or empty {}."""
+        repo = await _make_repo(tmp_path)
+        await repo.create("explicit_null", metadata={"k": None})
+        await repo.create("missing_key", metadata={"other": "x"})
+        await repo.create("empty_obj", metadata={})
+
+        hits = {r["thread_id"] for r in await repo.search(metadata={"k": None})}
+        assert hits == {"explicit_null"}
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_float_value(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.create("t1", metadata={"score": 3.14})
+        await repo.create("t2", metadata={"score": 2.71})
+        await repo.create("t3", metadata={"score": 3.14})
+
+        hits = {r["thread_id"] for r in await repo.search(metadata={"score": 3.14})}
+        assert hits == {"t1", "t3"}
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_search_metadata_mixed_types_same_key(self, tmp_path):
+        """Each type query only matches its own type, even when the key is shared."""
+        repo = await _make_repo(tmp_path)
+        await repo.create("str_row", metadata={"x": "hello"})
+        await repo.create("int_row", metadata={"x": 42})
+        await repo.create("bool_row", metadata={"x": True})
+        await repo.create("null_row", metadata={"x": None})
+
+        assert {r["thread_id"] for r in await repo.search(metadata={"x": "hello"})} == {"str_row"}
+        assert {r["thread_id"] for r in await repo.search(metadata={"x": 42})} == {"int_row"}
+        assert {r["thread_id"] for r in await repo.search(metadata={"x": True})} == {"bool_row"}
+        assert {r["thread_id"] for r in await repo.search(metadata={"x": None})} == {"null_row"}
+        await _cleanup()
+
+
+class TestJsonMatchCompilation:
+    """Verify compiled SQL for both SQLite and PostgreSQL dialects."""
+
+    def test_json_match_compiles_sqlite(self):
+        from sqlalchemy import Column, MetaData, String, Table, create_engine
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+        engine = create_engine("sqlite://")
+
+        cases = [
+            (None, "json_type(t.data, '$.\"k\"') = 'null'"),
+            (True, "json_type(t.data, '$.\"k\"') = 'true'"),
+            (False, "json_type(t.data, '$.\"k\"') = 'false'"),
+        ]
+        for value, expected_fragment in cases:
+            expr = json_match(t.c.data, "k", value)
+            sql = expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})
+            assert str(sql) == expected_fragment, f"value={value!r}: {sql}"
+
+        int_expr = json_match(t.c.data, "k", 42)
+        sql = str(int_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
+        assert "json_type" in sql
+        assert "IN ('integer', 'real')" in sql
+        assert "CAST" in sql
+
+        str_expr = json_match(t.c.data, "k", "hello")
+        sql = str(str_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
+        assert "json_type" in sql
+        assert "'text'" in sql
+
+    def test_json_match_compiles_pg(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+        dialect = postgresql.dialect()
+
+        cases = [
+            (None, "jsonb_typeof(t.data -> 'k') = 'null'"),
+            (True, "(jsonb_typeof(t.data -> 'k') = 'boolean' AND (t.data ->> 'k') = 'true')"),
+            (False, "(jsonb_typeof(t.data -> 'k') = 'boolean' AND (t.data ->> 'k') = 'false')"),
+        ]
+        for value, expected_fragment in cases:
+            expr = json_match(t.c.data, "k", value)
+            sql = expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True})
+            assert str(sql) == expected_fragment, f"value={value!r}: {sql}"
+
+        int_expr = json_match(t.c.data, "k", 42)
+        sql = str(int_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+        assert "jsonb_typeof" in sql
+        assert "'number'" in sql
+        assert "DOUBLE PRECISION" in sql
+
+        str_expr = json_match(t.c.data, "k", "hello")
+        sql = str(str_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+        assert "jsonb_typeof" in sql
+        assert "'string'" in sql
+
+    def test_json_match_rejects_unsafe_key(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+
+        for bad_key in ["a.b", "with space", "bad'quote", 'bad"quote', "back\\slash", "semi;colon", ""]:
+            with pytest.raises(ValueError, match="JsonMatch key must match"):
+                json_match(t.c.data, bad_key, "x")
+
+    def test_json_match_unsupported_dialect_raises(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.dialects import mysql
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+        expr = json_match(t.c.data, "k", "v")
+
+        with pytest.raises(NotImplementedError, match="mysql"):
+            str(expr.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True}))
