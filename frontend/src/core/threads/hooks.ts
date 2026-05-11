@@ -11,7 +11,11 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
-import type { FileInMessage } from "../messages/utils";
+import {
+  filterVisibleMessages,
+  isHiddenFromUIMessage,
+  type FileInMessage,
+} from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
@@ -80,6 +84,13 @@ function mergeMessages(
     ...threadMessages,
     ...optimisticMessages,
   ];
+}
+
+function visibleMessageIdentities(messages: Message[]) {
+  return messages
+    .filter((message) => !isHiddenFromUIMessage(message))
+    .map(messageIdentity)
+    .filter((id): id is string => Boolean(id));
 }
 
 function messageIdentity(message: Message): string | undefined {
@@ -228,7 +239,10 @@ export function useThreadStream({
           if (m.id !== undefined && m.id === _lastKeepMessage?.id) {
             break;
           }
-          if (!summarizedRef.current?.has(m.id ?? "")) {
+          if (
+            !isHiddenFromUIMessage(m) &&
+            !summarizedRef.current?.has(m.id ?? "")
+          ) {
             _movedMessages.push(m);
           }
         }
@@ -318,7 +332,8 @@ export function useThreadStream({
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [isUploading, setIsUploading] = useState(false);
-  const humanMessageCount = thread.messages.filter(
+  const visibleThreadMessages = filterVisibleMessages(thread.messages);
+  const humanMessageCount = visibleThreadMessages.filter(
     (m) => m.type === "human",
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
@@ -353,9 +368,7 @@ export function useThreadStream({
       pendingUsageBaselineMessageIdsRef.current.size === 0
     ) {
       pendingUsageBaselineMessageIdsRef.current = new Set(
-        thread.messages
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
+        visibleMessageIdentities(thread.messages),
       );
     }
   }, [thread.isLoading, thread.messages]);
@@ -395,9 +408,7 @@ export function useThreadStream({
       // messages so we can wait for the server's copy of the user input.
       prevHumanMsgCountRef.current = humanMessageCount;
       pendingUsageBaselineMessageIdsRef.current = new Set(
-        thread.messages
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
+        visibleMessageIdentities(thread.messages),
       );
 
       // Build optimistic files list with uploading status
@@ -579,14 +590,16 @@ export function useThreadStream({
     messagesRef.current = thread.messages;
   }
 
+  const visibleHistory = filterVisibleMessages(history);
+  const visibleOptimisticMessages = filterVisibleMessages(optimisticMessages);
   const mergedMessages = mergeMessages(
-    history,
-    thread.messages,
-    optimisticMessages,
+    visibleHistory,
+    visibleThreadMessages,
+    visibleOptimisticMessages,
   );
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
-        thread.messages,
+        visibleThreadMessages,
         pendingUsageBaselineMessageIdsRef.current,
       )
     : [];
