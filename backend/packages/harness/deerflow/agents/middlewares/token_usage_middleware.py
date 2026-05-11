@@ -275,40 +275,64 @@ class TokenUsageMiddleware(AgentMiddleware):
         # Annotate subagent token usage onto the AIMessage that dispatched it.
         # When a task tool completes, its usage is cached by tool_call_id.  Detect
         # the ToolMessage → search backward for the corresponding AIMessage → merge.
+        # Walk backward through consecutive ToolMessages before the new AIMessage
+        # so that multiple concurrent task tool calls all get their subagent tokens
+        # written back to the same dispatch message (merging into one update).
         state_updates: list = []
         if len(messages) >= 2:
-            tool_msg = messages[-2]
-            if isinstance(tool_msg, ToolMessage) and tool_msg.tool_call_id:
-                from deerflow.tools.builtins.task_tool import pop_cached_subagent_usage
+            from deerflow.tools.builtins.task_tool import pop_cached_subagent_usage
+
+            idx = len(messages) - 2
+            while idx >= 0:
+                tool_msg = messages[idx]
+                if not isinstance(tool_msg, ToolMessage) or not tool_msg.tool_call_id:
+                    break
 
                 subagent_usage = pop_cached_subagent_usage(tool_msg.tool_call_id)
                 if subagent_usage:
                     # Search backward from the ToolMessage to find the AIMessage
                     # that dispatched it.  A single model response can dispatch
                     # multiple task tool calls, so we can't assume a fixed offset.
-                    dispatch_idx = len(messages) - 3
+                    dispatch_idx = idx - 1
                     while dispatch_idx >= 0:
                         candidate = messages[dispatch_idx]
                         if isinstance(candidate, AIMessage) and _has_tool_call(
                             candidate, tool_msg.tool_call_id
                         ):
-                            existing = getattr(candidate, "usage_metadata", None) or {}
+                            # Accumulate into an existing update for the same
+                            # AIMessage (multiple task calls in one response),
+                            # or merge fresh from the original message.
+                            existing_update = next(
+                                (u for u in state_updates if u.id == candidate.id),
+                                None,
+                            )
+                            prev = (
+                                existing_update.usage_metadata
+                                if existing_update
+                                else (getattr(candidate, "usage_metadata", None) or {})
+                            )
                             merged = {
-                                **existing,
-                                "input_tokens": existing.get("input_tokens", 0)
+                                **prev,
+                                "input_tokens": prev.get("input_tokens", 0)
                                 + subagent_usage["input_tokens"],
-                                "output_tokens": existing.get("output_tokens", 0)
+                                "output_tokens": prev.get("output_tokens", 0)
                                 + subagent_usage["output_tokens"],
-                                "total_tokens": existing.get("total_tokens", 0)
+                                "total_tokens": prev.get("total_tokens", 0)
                                 + subagent_usage["total_tokens"],
                             }
-                            state_updates.append(
-                                candidate.model_copy(
-                                    update={"usage_metadata": merged}
-                                )
+                            updated = candidate.model_copy(
+                                update={"usage_metadata": merged}
                             )
+                            if existing_update:
+                                state_updates = [
+                                    updated if u.id == candidate.id else u
+                                    for u in state_updates
+                                ]
+                            else:
+                                state_updates.append(updated)
                             break
                         dispatch_idx -= 1
+                idx -= 1
 
         last = messages[-1]
         if not isinstance(last, AIMessage):
