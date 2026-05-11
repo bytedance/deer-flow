@@ -49,7 +49,7 @@ class DiscordChannel(Channel):
 
         # Session tracking: channel_id -> thread_id
         self._active_threads: dict[str, str] = {}
-        
+
         # Typing indicator management
         self._typing_tasks: dict[str, asyncio.Task] = {}
 
@@ -122,7 +122,7 @@ class DiscordChannel(Channel):
     async def send(self, msg: OutboundMessage) -> None:
         # Stop typing indicator once we're sending the response
         self._stop_typing(msg.chat_id, msg.thread_ts)
-        
+
         target = await self._resolve_target(msg)
         if target is None:
             logger.error("[Discord] target not found for chat_id=%s thread_ts=%s", msg.chat_id, msg.thread_ts)
@@ -213,11 +213,7 @@ class DiscordChannel(Channel):
             bot_mention = None
             alt_mention = None
             standard_mention = ""
-        has_mention = (
-            bot_mention in message.content
-            or alt_mention in message.content
-            or standard_mention in message.content
-        )
+        has_mention = bot_mention in message.content or alt_mention in message.content or standard_mention in message.content
 
         # Strip mention from text for processing
         if has_mention:
