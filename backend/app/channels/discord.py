@@ -181,6 +181,13 @@ class DiscordChannel(Channel):
             task.cancel()
             logger.debug("[Discord] stopped typing indicator for target %s", target_id)
 
+    async def _add_reaction(self, message) -> None:
+        """Add a checkmark reaction to acknowledge the message was received."""
+        try:
+            await message.add_reaction("✅")
+        except Exception:
+            logger.debug("[Discord] failed to add reaction to message %s", message.id, exc_info=True)
+
     async def _on_message(self, message) -> None:
         if not self._running or not self._client:
             return
@@ -252,6 +259,7 @@ class DiscordChannel(Channel):
                 # Start typing indicator in the thread
                 if typing_target:
                     asyncio.create_task(self._start_typing(typing_target, chat_id, thread_id))
+                asyncio.create_task(self._add_reaction(message))
                 return
 
             # Thread not tracked (orphaned) — create new thread and handle below
@@ -353,6 +361,7 @@ class DiscordChannel(Channel):
             asyncio.create_task(self._start_typing(typing_target, chat_id, thread_id))
 
         self._publish(inbound)
+        asyncio.create_task(self._add_reaction(message))
 
     def _publish(self, inbound) -> None:
         """Publish an inbound message to the main event loop."""
