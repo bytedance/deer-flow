@@ -286,11 +286,13 @@ class SubagentExecutor:
         # Reuse shared middleware composition with lead agent.
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True)
 
+        # system_prompt is included in initial state messages (see _build_initial_state)
+        # to avoid multiple SystemMessages which some LLM APIs don't support.
         return create_agent(
             model=model,
             tools=tools if tools is not None else self.tools,
             middleware=middlewares,
-            system_prompt=self.config.system_prompt,
+            system_prompt=None,
             state_schema=ThreadState,
         )
 
@@ -365,14 +367,25 @@ class SubagentExecutor:
         Returns:
             Initial state dictionary and tools filtered by loaded skill metadata.
         """
+
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
         filtered_tools = self._apply_skill_allowed_tools(skills)
         skill_messages = await self._load_skill_messages(skills)
 
+        # Combine system_prompt and skills into a single SystemMessage.
+        # Some LLM APIs reject multiple SystemMessages with
+        # "System message must be at the beginning."
+        system_parts: list[str] = []
+        if self.config.system_prompt:
+            system_parts.append(self.config.system_prompt)
+        for skill_msg in skill_messages:
+            system_parts.append(skill_msg.content)
+
         messages: list[Any] = []
-        # Skill content injected as developer/system messages before the task
-        messages.extend(skill_messages)
+        if system_parts:
+            messages.append(SystemMessage(content="\n\n".join(system_parts)))
+
         # Then the actual task
         messages.append(HumanMessage(content=task))
 
