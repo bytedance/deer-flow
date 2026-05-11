@@ -56,6 +56,11 @@ def _make_llm_response(content="Hello", usage=None, tool_calls=None, additional_
     return response
 
 
+def _make_llm_response_with_raw_content(content):
+    """Create a mock LLM response preserving raw message.content shape."""
+    return _make_llm_response(content=content)
+
+
 class TestLlmCallbacks:
     @pytest.mark.anyio
     async def test_on_llm_end_produces_trace_event(self, journal_setup):
@@ -338,6 +343,80 @@ class TestConvenienceFields:
         j.set_first_human_message("What is AI?")
         data = j.get_completion_data()
         assert data["first_human_message"] == "What is AI?"
+
+    @pytest.mark.anyio
+    async def test_completion_data_counts_human_ai_and_tool_messages(self, journal_setup):
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        j, _ = journal_setup
+        j.on_chat_model_start({}, [[HumanMessage(content="Question")]], run_id=uuid4(), tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Answer"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_tool_end(ToolMessage(content="Tool result", tool_call_id="call_1", name="search"), run_id=uuid4())
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 3
+        assert data["first_human_message"] == "Question"
+        assert data["last_ai_message"] == "Answer"
+
+    @pytest.mark.anyio
+    async def test_tool_call_only_ai_does_not_clear_last_ai_message(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(_make_llm_response("Useful answer"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_1", "name": "search", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 2
+        assert data["last_ai_message"] == "Useful answer"
+
+    @pytest.mark.anyio
+    async def test_last_ai_message_extracts_mixed_content_without_extra_newlines(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(
+            _make_llm_response_with_raw_content(
+                [
+                    {"type": "text", "text": "First "},
+                    {"type": "text", "content": "second"},
+                    " third",
+                    {"type": "image", "url": "ignored"},
+                ]
+            ),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 1
+        assert data["last_ai_message"] == "First second third"
+
+    @pytest.mark.anyio
+    async def test_last_ai_message_extracts_mapping_content(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(_make_llm_response_with_raw_content({"content": "Nested answer"}), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 1
+        assert data["last_ai_message"] == "Nested answer"
+
+    @pytest.mark.anyio
+    async def test_subagent_ai_does_not_overwrite_lead_last_ai_message(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(_make_llm_response("Lead answer"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Subagent detail"), run_id=uuid4(), parent_run_id=None, tags=["subagent:research"])
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 2
+        assert data["last_ai_message"] == "Lead answer"
 
     @pytest.mark.anyio
     async def test_get_completion_data(self, journal_setup):
