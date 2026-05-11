@@ -1,7 +1,7 @@
 """Tests for TodoMiddleware context-loss detection."""
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -9,6 +9,7 @@ from deerflow.agents.middlewares.todo_middleware import (
     TodoMiddleware,
     _completion_reminder_count,
     _format_todos,
+    _has_tool_call_intent_or_error,
     _reminder_in_messages,
     _todos_in_messages,
 )
@@ -24,7 +25,7 @@ def _reminder_msg():
 
 def _make_runtime():
     runtime = MagicMock()
-    runtime.context = {"thread_id": "test-thread"}
+    runtime.context = {"thread_id": "test-thread", "run_id": "test-run"}
     return runtime
 
 
@@ -165,6 +166,50 @@ def _ai_no_tool_calls():
     return AIMessage(content="I'm done!")
 
 
+def _ai_with_invalid_tool_calls():
+    return AIMessage(
+        content="",
+        tool_calls=[],
+        invalid_tool_calls=[
+            {
+                "type": "invalid_tool_call",
+                "id": "write_file:36",
+                "name": "write_file",
+                "args": "{invalid",
+                "error": "Failed to parse tool arguments",
+            }
+        ],
+    )
+
+
+def _ai_with_raw_provider_tool_calls():
+    return AIMessage(
+        content="",
+        tool_calls=[],
+        invalid_tool_calls=[],
+        additional_kwargs={
+            "tool_calls": [
+                {
+                    "id": "raw-tool-call",
+                    "type": "function",
+                    "function": {"name": "write_file", "arguments": '{"path":"report.md"}'},
+                }
+            ]
+        },
+    )
+
+
+def _ai_with_legacy_function_call():
+    return AIMessage(
+        content="",
+        additional_kwargs={"function_call": {"name": "write_file", "arguments": '{"path":"report.md"}'}},
+    )
+
+
+def _ai_with_tool_finish_reason():
+    return AIMessage(content="", response_metadata={"finish_reason": "tool_calls"})
+
+
 def _incomplete_todos():
     return [
         {"status": "completed", "content": "Step 1"},
@@ -192,6 +237,40 @@ class TestCompletionReminderCount:
     def test_does_not_count_todo_reminders(self):
         msgs = [_reminder_msg(), _completion_reminder_msg()]
         assert _completion_reminder_count(msgs) == 1
+
+
+class TestToolCallIntentOrError:
+    def test_false_for_plain_final_answer(self):
+        assert _has_tool_call_intent_or_error(_ai_no_tool_calls()) is False
+
+    def test_true_for_structured_tool_calls(self):
+        assert _has_tool_call_intent_or_error(_ai_with_write_todos()) is True
+
+    def test_true_for_invalid_tool_calls(self):
+        assert _has_tool_call_intent_or_error(_ai_with_invalid_tool_calls()) is True
+
+    def test_true_for_raw_provider_tool_calls(self):
+        assert _has_tool_call_intent_or_error(_ai_with_raw_provider_tool_calls()) is True
+
+    def test_true_for_legacy_function_call(self):
+        assert _has_tool_call_intent_or_error(_ai_with_legacy_function_call()) is True
+
+    def test_true_for_tool_finish_reason(self):
+        assert _has_tool_call_intent_or_error(_ai_with_tool_finish_reason()) is True
+
+    def test_langchain_ai_message_tool_fields_are_explicitly_handled(self):
+        # Sentinel for LangChain compatibility: if future AIMessage versions add
+        # new top-level tool/function-call fields, this test should fail. When
+        # it does, update `_has_tool_call_intent_or_error()` so the completion
+        # reminder guard explicitly decides whether each new field means "not a
+        # clean final answer"; the helper has a matching comment pointing back
+        # to this sentinel.
+        tool_related_fields = {
+            name
+            for name in AIMessage.model_fields
+            if "tool" in name.lower() or ("function" in name.lower() and "call" in name.lower())
+        }
+        assert tool_related_fields <= {"tool_calls", "invalid_tool_calls"}
 
 
 class TestAfterModel:
@@ -235,68 +314,185 @@ class TestAfterModel:
         }
         assert mw.after_model(state, _make_runtime()) is None
 
-    def test_injects_reminder_and_jumps_to_model_when_incomplete(self):
+    def test_queues_reminder_and_jumps_to_model_when_incomplete(self):
         mw = TodoMiddleware()
+        runtime = _make_runtime()
         state = {
             "messages": [HumanMessage(content="hi"), _ai_no_tool_calls()],
             "todos": _incomplete_todos(),
         }
-        result = mw.after_model(state, _make_runtime())
+        result = mw.after_model(state, runtime)
         assert result is not None
         assert result["jump_to"] == "model"
-        assert len(result["messages"]) == 1
-        reminder = result["messages"][0]
+        assert "messages" not in result
+
+        request = MagicMock()
+        request.runtime = runtime
+        request.messages = state["messages"]
+        request.override.return_value = "patched-request"
+        handler = MagicMock(return_value="response")
+
+        assert mw.wrap_model_call(request, handler) == "response"
+        request.override.assert_called_once()
+        reminder = request.override.call_args.kwargs["messages"][-1]
         assert isinstance(reminder, HumanMessage)
         assert reminder.name == "todo_completion_reminder"
+        assert reminder.additional_kwargs["hide_from_ui"] is True
         assert "Step 2" in reminder.content
         assert "Step 3" in reminder.content
+        handler.assert_called_once_with("patched-request")
 
     def test_reminder_lists_only_incomplete_items(self):
         mw = TodoMiddleware()
+        runtime = _make_runtime()
         state = {
             "messages": [_ai_no_tool_calls()],
             "todos": _incomplete_todos(),
         }
-        result = mw.after_model(state, _make_runtime())
-        content = result["messages"][0].content
+        result = mw.after_model(state, runtime)
+        assert result is not None
+
+        request = MagicMock()
+        request.runtime = runtime
+        request.messages = state["messages"]
+        request.override.return_value = "patched-request"
+        mw.wrap_model_call(request, MagicMock(return_value="response"))
+        content = request.override.call_args.kwargs["messages"][-1].content
         assert "Step 1" not in content  # completed — should not appear
         assert "Step 2" in content
         assert "Step 3" in content
 
     def test_allows_exit_after_max_reminders(self):
         mw = TodoMiddleware()
+        runtime = _make_runtime()
         state = {
             "messages": [
-                _completion_reminder_msg(),
-                _completion_reminder_msg(),
                 _ai_no_tool_calls(),
             ],
+            "todos": _incomplete_todos(),
+        }
+        assert mw.after_model(state, runtime) is not None
+        assert mw.after_model(state, runtime) is not None
+        assert mw.after_model(state, runtime) is None
+
+    def test_still_sends_reminder_before_cap(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {
+            "messages": [
+                _ai_no_tool_calls(),
+            ],
+            "todos": _incomplete_todos(),
+        }
+        assert mw.after_model(state, runtime) is not None
+        result = mw.after_model(state, runtime)
+        assert result is not None
+        assert result["jump_to"] == "model"
+
+    def test_does_not_trigger_for_invalid_tool_calls(self):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [_ai_with_invalid_tool_calls()],
             "todos": _incomplete_todos(),
         }
         assert mw.after_model(state, _make_runtime()) is None
 
-    def test_still_sends_reminder_before_cap(self):
+    def test_does_not_trigger_for_raw_provider_tool_calls(self):
         mw = TodoMiddleware()
         state = {
-            "messages": [
-                _completion_reminder_msg(),  # 1 reminder so far
-                _ai_no_tool_calls(),
-            ],
+            "messages": [_ai_with_raw_provider_tool_calls()],
             "todos": _incomplete_todos(),
         }
-        result = mw.after_model(state, _make_runtime())
-        assert result is not None
-        assert result["jump_to"] == "model"
+        assert mw.after_model(state, _make_runtime()) is None
+
+    def test_does_not_trigger_for_legacy_function_call(self):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [_ai_with_legacy_function_call()],
+            "todos": _incomplete_todos(),
+        }
+        assert mw.after_model(state, _make_runtime()) is None
+
+    def test_does_not_trigger_for_tool_finish_reason(self):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [_ai_with_tool_finish_reason()],
+            "todos": _incomplete_todos(),
+        }
+        assert mw.after_model(state, _make_runtime()) is None
 
 
 class TestAafterModel:
     def test_delegates_to_sync(self):
         mw = TodoMiddleware()
+        runtime = _make_runtime()
         state = {
             "messages": [_ai_no_tool_calls()],
             "todos": _incomplete_todos(),
         }
-        result = asyncio.run(mw.aafter_model(state, _make_runtime()))
+        result = asyncio.run(mw.aafter_model(state, runtime))
         assert result is not None
         assert result["jump_to"] == "model"
-        assert result["messages"][0].name == "todo_completion_reminder"
+        assert "messages" not in result
+
+
+class TestWrapModelCall:
+    def test_no_pending_reminder_passthrough(self):
+        mw = TodoMiddleware()
+        request = MagicMock()
+        request.runtime = _make_runtime()
+        request.messages = [HumanMessage(content="hi")]
+        handler = MagicMock(return_value="response")
+
+        assert mw.wrap_model_call(request, handler) == "response"
+        request.override.assert_not_called()
+        handler.assert_called_once_with(request)
+
+    def test_pending_reminder_is_injected_once(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {
+            "messages": [_ai_no_tool_calls()],
+            "todos": _incomplete_todos(),
+        }
+        mw.after_model(state, runtime)
+
+        request = MagicMock()
+        request.runtime = runtime
+        request.messages = state["messages"]
+        request.override.return_value = "patched-request"
+        handler = MagicMock(return_value="response")
+
+        assert mw.wrap_model_call(request, handler) == "response"
+        injected_messages = request.override.call_args.kwargs["messages"]
+        assert injected_messages[-1].name == "todo_completion_reminder"
+
+        request.override.reset_mock()
+        handler.reset_mock()
+        handler.return_value = "second-response"
+        assert mw.wrap_model_call(request, handler) == "second-response"
+        request.override.assert_not_called()
+        handler.assert_called_once_with(request)
+
+
+class TestAwrapModelCall:
+    def test_async_pending_reminder_is_injected(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {
+            "messages": [_ai_no_tool_calls()],
+            "todos": _incomplete_todos(),
+        }
+        mw.after_model(state, runtime)
+
+        request = MagicMock()
+        request.runtime = runtime
+        request.messages = state["messages"]
+        request.override.return_value = "patched-request"
+        handler = AsyncMock(return_value="response")
+
+        result = asyncio.run(mw.awrap_model_call(request, handler))
+        assert result == "response"
+        injected_messages = request.override.call_args.kwargs["messages"]
+        assert injected_messages[-1].name == "todo_completion_reminder"
+        handler.assert_awaited_once_with("patched-request")
