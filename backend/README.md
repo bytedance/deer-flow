@@ -14,28 +14,31 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
                                 │                  │
               /api/langgraph/*  │                  │  /api/* (other)
                                 ▼                  ▼
-               ┌────────────────────┐  ┌────────────────────────┐
-               │ LangGraph Server   │  │   Gateway API (8001)   │
-               │    (Port 2024)     │  │   FastAPI REST         │
-               │                    │  │                        │
-               │ ┌────────────────┐ │  │ Models, MCP, Skills,   │
-               │ │  Lead Agent    │ │  │ Memory, Uploads,       │
-               │ │  ┌──────────┐  │ │  │ Artifacts              │
-               │ │  │Middleware│  │ │  └────────────────────────┘
-               │ │  │  Chain   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │  Tools   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │Subagents │  │ │
-               │ │  └──────────┘  │ │
-               │ └────────────────┘ │
-               └────────────────────┘
+               ┌──────────────────────────────────────────────┐
+               │             Gateway API (8001)               │
+               │  FastAPI REST + LangGraph-compatible runtime │
+               │                                              │
+               │ Models, MCP, Skills, Memory, Uploads,       │
+               │ Artifacts, Threads, Runs, Streaming          │
+               │                                              │
+               │ ┌────────────────┐                           │
+               │ │  Lead Agent    │                           │
+               │ │  ┌──────────┐  │                           │
+               │ │  │Middleware│  │                           │
+               │ │  │  Chain   │  │                           │
+               │ │  └──────────┘  │                           │
+               │ │  ┌──────────┐  │                           │
+               │ │  │  Tools   │  │                           │
+               │ │  └──────────┘  │                           │
+               │ │  ┌──────────┐  │                           │
+               │ │  │Subagents │  │                           │
+               │ │  └──────────┘  │                           │
+               │ └────────────────┘                           │
+               └──────────────────────────────────────────────┘
 ```
 
 **Request Routing** (via Nginx):
-- `/api/langgraph/*` → LangGraph Server - agent interactions, threads, streaming
+- `/api/langgraph/*` → Gateway API - LangGraph-compatible agent interactions, threads, runs, and streaming translated to native `/api/*` routers
 - `/api/*` (other) → Gateway API - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
 - `/` (non-API) → Frontend - Next.js web interface
 

@@ -245,6 +245,8 @@ make down   # Stop and remove containers
 
 Access: http://localhost:2026
 
+The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 #### Option 2: Local Development

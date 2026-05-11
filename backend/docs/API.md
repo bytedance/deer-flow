@@ -6,16 +6,16 @@ This document provides a complete reference for the DeerFlow backend APIs.
 
 DeerFlow backend exposes two sets of APIs:
 
-1. **LangGraph API** - Agent interactions, threads, and streaming (`/api/langgraph/*`)
+1. **LangGraph-compatible API** - Agent interactions, threads, and streaming (`/api/langgraph/*`)
 2. **Gateway API** - Models, MCP, skills, uploads, and artifacts (`/api/*`)
 
 All APIs are accessed through the Nginx reverse proxy at port 2026.
 
-## LangGraph API
+## LangGraph-compatible API
 
 Base URL: `/api/langgraph`
 
-The LangGraph API is provided by the LangGraph server and follows the LangGraph SDK conventions.
+The public LangGraph-compatible API follows LangGraph SDK conventions. In the unified nginx deployment, Gateway owns `/api/langgraph/*` and translates those paths to its native `/api/*` run, thread, and streaming routers.
 
 ### Threads
 
@@ -104,17 +104,11 @@ Content-Type: application/json
 **Recursion Limit:**
 
 `config.recursion_limit` caps the number of graph steps LangGraph will execute
-in a single run. The `/api/langgraph/*` endpoints go straight to the LangGraph
-server and therefore inherit LangGraph's native default of **25**, which is
-too low for plan-mode or subagent-heavy runs — the agent typically errors out
-with `GraphRecursionError` after the first round of subagent results comes
-back, before the lead agent can synthesize the final answer.
-
-DeerFlow's own Gateway and IM-channel paths mitigate this by defaulting to
-`100` in `build_run_config` (see `backend/app/gateway/services.py`), but
-clients calling the LangGraph API directly must set `recursion_limit`
-explicitly in the request body. `100` matches the Gateway default and is a
-safe starting point; increase it if you run deeply nested subagent graphs.
+in a single run. The unified Gateway path defaults to `100` in
+`build_run_config` (see `backend/app/gateway/services.py`), which is a safer
+starting point for plan-mode or subagent-heavy runs. Clients can still set
+`recursion_limit` explicitly in the request body; increase it if you run deeply
+nested subagent graphs.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -649,7 +643,7 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs \
   }'
 ```
 
-> The `/api/langgraph/*` endpoints bypass DeerFlow's Gateway and inherit
-> LangGraph's native `recursion_limit` default of 25, which is too low for
-> plan-mode or subagent runs. Set `config.recursion_limit` explicitly — see
-> the [Create Run](#create-run) section for details.
+> The unified Gateway path defaults `config.recursion_limit` to 100 for
+> plan-mode and subagent-heavy runs. Clients may still set
+> `config.recursion_limit` explicitly — see the [Create Run](#create-run)
+> section for details.

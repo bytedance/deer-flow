@@ -122,3 +122,45 @@ def test_health_still_works_when_docs_disabled():
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "healthy"
+
+
+# ---------------------------------------------------------------------------
+# Runtime CORS behavior
+# ---------------------------------------------------------------------------
+
+
+def _make_gateway_client(cors_origins: str) -> TestClient:
+    with patch.dict(os.environ, {"GATEWAY_CORS_ORIGINS": cors_origins}):
+        _reset_gateway_config()
+        from app.gateway.app import create_app
+
+        return TestClient(create_app())
+
+
+def test_gateway_cors_allows_configured_origin():
+    """GATEWAY_CORS_ORIGINS should control actual browser CORS responses."""
+    client = _make_gateway_client("https://app.example")
+
+    response = client.get("/health", headers={"Origin": "https://app.example"})
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://app.example"
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_gateway_cors_rejects_unconfigured_origin():
+    client = _make_gateway_client("https://app.example")
+
+    response = client.get("/health", headers={"Origin": "https://evil.example"})
+
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_gateway_cors_normalizes_configured_default_port():
+    client = _make_gateway_client("https://app.example:443")
+
+    response = client.get("/health", headers={"Origin": "https://app.example"})
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://app.example"
