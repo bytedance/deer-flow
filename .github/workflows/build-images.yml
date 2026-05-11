@@ -27,43 +27,57 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       services: ${{ steps.set.outputs.services }}
+      build_matrix: ${{ steps.set.outputs.build_matrix }}
     steps:
       - name: Pick services
         id: set
+        env:
+          INPUT_SERVICE: ${{ github.event.inputs.service }}
         run: |
-          if [[ "${{ github.event.inputs.service }}" == "" || "${{ github.event.inputs.service }}" == "all" ]]; then
-            echo 'services=["gateway","frontend","provisioner"]' >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [[ -z "$INPUT_SERVICE" || "$INPUT_SERVICE" == "all" ]]; then
+            services='["gateway","frontend","provisioner"]'
           else
-            echo "services=[\"${{ github.event.inputs.service }}\"]" >> "$GITHUB_OUTPUT"
+            services="[\"$INPUT_SERVICE\"]"
           fi
+          echo "services=$services" >> "$GITHUB_OUTPUT"
+
+          # Generate full cartesian (service × arch) with per-service Dockerfile
+          # metadata baked in. Avoids `matrix.include` phantom-row gotcha when
+          # `service` is dynamic.
+          export SERVICES="$services"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          services = json.loads(os.environ["SERVICES"])
+          meta = {
+              "gateway":     {"build_context": ".",                  "dockerfile_dir": "backend",            "dockerfile": "Dockerfile"},
+              "frontend":    {"build_context": ".",                  "dockerfile_dir": "frontend",           "dockerfile": "Dockerfile"},
+              "provisioner": {"build_context": "docker/provisioner", "dockerfile_dir": "docker/provisioner", "dockerfile": "Dockerfile"},
+          }
+          platforms = [
+              {"arch": "amd64", "runner": "stax-builder"},
+              {"arch": "arm64", "runner": "stax-arm64"},
+          ]
+          rows = []
+          for svc in services:
+              for p in platforms:
+                  row = {"service": svc, "arch": p["arch"], "runner": p["runner"]}
+                  row.update(meta[svc])
+                  rows.append(row)
+          print("build_matrix=" + json.dumps({"include": rows}))
+          PY
 
   build:
-    name: Build ${{ matrix.service }}
+    # Native per-arch builds — NO QEMU emulation.
+    # stax-builder is amd64-pinned in devops/pulumi/__main__.py;
+    # stax-arm64 is arm64-pinned. Building linux/amd64 on an arm64 runner via
+    # QEMU silently hangs buildkit's lfstack (~90 min wedge, no error).
+    name: Build ${{ matrix.service }} (${{ matrix.arch }})
     needs: matrix
-    runs-on: stax-builder
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix:
-        service: ${{ fromJSON(needs.matrix.outputs.services) }}
-        # build_context: dir passed to buildx as build context (`.` = repo root).
-        #   Backend/frontend Dockerfiles do `COPY backend ./backend` and
-        #   `COPY frontend ./frontend` so they need the repo-root layout.
-        # dockerfile_dir: dir used to construct the dockerfile path.
-        include:
-          - service: gateway
-            build_context: .
-            dockerfile_dir: backend
-            dockerfile: Dockerfile
-          - service: frontend
-            build_context: .
-            dockerfile_dir: frontend
-            dockerfile: Dockerfile
-          - service: provisioner
-            # Provisioner Dockerfile does `COPY app.py .` — needs its own dir
-            # as context so app.py resolves against docker/provisioner/app.py.
-            build_context: docker/provisioner
-            dockerfile_dir: docker/provisioner
-            dockerfile: Dockerfile
+      matrix: ${{ fromJSON(needs.matrix.outputs.build_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -84,24 +98,68 @@ jobs:
         id: tag
         run: echo "sha=sha-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Build and push (${{ matrix.arch }})
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: ${{ matrix.build_context }}
           file: ${{ matrix.dockerfile_dir }}/${{ matrix.dockerfile }}
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          # Push to anomalous-ventures (local Harbor project) — `ghcr` is a
-          # proxy project and rejects pushes (denied: can not push artifact
-          # to a proxy project: ghcr).
+          # Per-arch tag — combined into the canonical :sha-XXX and :latest
+          # manifest by the manifest job below.
           tags: |
-            ${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}
-            ${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:latest
-          cache-from: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache
-          cache-to: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache,mode=max
+            ${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:buildcache-${{ matrix.arch }},mode=max
 
       - name: Summary
         run: |
-          echo "### Built deer-flow-${{ matrix.service }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Tag: \`${{ steps.tag.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Built deer-flow-${{ matrix.service }} (${{ matrix.arch }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tag: \`${{ steps.tag.outputs.sha }}-${{ matrix.arch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}-${{ matrix.arch }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  manifest:
+    name: Combine multiarch manifest (${{ matrix.service }})
+    needs: [matrix, build]
+    runs-on: stax-builder
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.matrix.outputs.services) }}
+    steps:
+      - name: Log in to Harbor
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          driver-opts: network=host
+
+      - name: Compute tag
+        id: tag
+        run: echo "sha=sha-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Combine per-arch tags into multiarch manifest
+        env:
+          REG: ${{ secrets.HARBOR_REGISTRY }}
+          SVC: ${{ matrix.service }}
+          SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for tag in "$SHA" "latest"; do
+            docker buildx imagetools create \
+              -t "${REG}/anomalous-ventures/deer-flow-${SVC}:${tag}" \
+              "${REG}/anomalous-ventures/deer-flow-${SVC}:${SHA}-amd64" \
+              "${REG}/anomalous-ventures/deer-flow-${SVC}:${SHA}-arm64"
+          done
+          docker buildx imagetools inspect "${REG}/anomalous-ventures/deer-flow-${SVC}:${SHA}"
+
+      - name: Summary
+        run: |
+          echo "### Multiarch manifest deer-flow-${{ matrix.service }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tag: \`${{ steps.tag.outputs.sha }}\` (linux/amd64 + linux/arm64)" >> "$GITHUB_STEP_SUMMARY"
           echo "- Image: \`${{ secrets.HARBOR_REGISTRY }}/anomalous-ventures/deer-flow-${{ matrix.service }}:${{ steps.tag.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
