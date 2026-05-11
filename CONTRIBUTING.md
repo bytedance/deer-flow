@@ -46,12 +46,12 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    All services will start with hot-reload enabled:
    - Frontend changes are automatically reloaded
    - Backend changes trigger automatic restart
-   - LangGraph server supports hot-reload
+   - Gateway-hosted LangGraph-compatible runtime supports hot-reload
 
 4. **Access the application**:
    - Web Interface: http://localhost:2026
    - API Gateway: http://localhost:2026/api/*
-   - LangGraph: http://localhost:2026/api/langgraph/*
+   - LangGraph-compatible API: http://localhost:2026/api/langgraph/*
 
 #### Docker Commands
 
@@ -94,7 +94,7 @@ Use these as practical starting points for development and review environments:
 If `make docker-init`, `make docker-start`, or `make docker-stop` fails on Linux with an error like below, your current user likely does not have permission to access the Docker daemon socket:
 
 ```text
-unable to get image 'deer-flow-dev-langgraph': permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
+unable to get image 'deer-flow-gateway': permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
 ```
 
 Recommended fix: add your current user to the `docker` group so Docker commands work without `sudo`.
@@ -131,9 +131,8 @@ Host Machine
 Docker Compose (deer-flow-dev)
   ├→ nginx (port 2026) ← Reverse proxy
   ├→ web (port 3000) ← Frontend with hot-reload
-  ├→ api (port 8001) ← Gateway API with hot-reload
-   ├→ langgraph (port 2024) ← LangGraph server with hot-reload
-   └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
+  ├→ gateway (port 8001) ← Gateway API + LangGraph-compatible runtime with hot-reload
+  └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
 ```
 
 **Benefits of Docker Development**:
@@ -184,17 +183,13 @@ Required tools:
 
 If you need to start services individually:
 
-1. **Start backend services**:
+1. **Start backend service**:
    ```bash
-   # Terminal 1: Start LangGraph Server (port 2024)
-   cd backend
-   make dev
-
-   # Terminal 2: Start Gateway API (port 8001)
+   # Terminal 1: Start Gateway API and embedded LangGraph-compatible runtime (port 8001)
    cd backend
    make gateway
 
-   # Terminal 3: Start Frontend (port 3000)
+   # Terminal 2: Start Frontend (port 3000)
    cd frontend
    pnpm dev
    ```
@@ -212,10 +207,10 @@ If you need to start services individually:
 
 The nginx configuration provides:
 - Unified entry point on port 2026
-- Routes `/api/langgraph/*` to LangGraph Server (2024)
+- Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx
 - Routes other `/api/*` endpoints to Gateway API (8001)
 - Routes non-API requests to Frontend (3000)
-- Centralized CORS handling
+- Same-origin API routing; split-origin or port-forwarded browser clients should use the Gateway `GATEWAY_CORS_ORIGINS` allowlist
 - SSE/streaming support for real-time agent responses
 - Optimized timeouts for long-running operations
 
@@ -235,8 +230,8 @@ deer-flow/
 │       └── nginx.local.conf # Nginx config for local dev
 ├── backend/                 # Backend application
 │   ├── src/
-│   │   ├── gateway/        # Gateway API (port 8001)
-│   │   ├── agents/         # LangGraph agents (port 2024)
+│   │   ├── gateway/        # Gateway API and LangGraph-compatible runtime (port 8001)
+│   │   ├── agents/         # LangGraph agent definitions
 │   │   ├── mcp/            # Model Context Protocol integration
 │   │   ├── skills/         # Skills system
 │   │   └── sandbox/        # Sandbox execution
@@ -256,8 +251,7 @@ Browser
   ↓
 Nginx (port 2026) ← Unified entry point
   ├→ Frontend (port 3000) ← / (non-API requests)
-  ├→ Gateway API (port 8001) ← /api/models, /api/mcp, /api/skills, /api/threads/*/artifacts
-  └→ LangGraph Server (port 2024) ← /api/langgraph/* (agent interactions)
+  └→ Gateway API (port 8001) ← /api/* and /api/langgraph/* (LangGraph-compatible agent interactions)
 ```
 
 ## Development Workflow
