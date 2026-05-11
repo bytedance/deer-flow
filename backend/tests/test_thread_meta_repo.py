@@ -279,6 +279,27 @@ class TestThreadMetaRepository:
         assert ids == {"t1"}
 
     @pytest.mark.anyio
+    async def test_search_metadata_non_string_key_skipped(self, repo, caplog):
+        """Non-string keys raise TypeError from re.match; should be warned and skipped."""
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
+            with pytest.raises(ValueError, match="rejected"):
+                await repo.search(metadata={1: "x"})
+        assert any("1" in r.message for r in caplog.records)
+
+    @pytest.mark.anyio
+    async def test_search_metadata_unsupported_value_type_skipped(self, repo, caplog):
+        """Unsupported value types (list, dict) raise TypeError; should be warned and skipped."""
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
+            with pytest.raises(ValueError, match="rejected"):
+                await repo.search(metadata={"env": ["prod", "staging"]})
+
+    @pytest.mark.anyio
     async def test_search_metadata_dotted_key_raises(self, repo, caplog):
         """Dotted keys are rejected; when ALL keys are dotted, raises ValueError."""
         await repo.create("t1", metadata={"env": "prod"})
@@ -452,6 +473,19 @@ class TestJsonMatchCompilation:
         for bad_key in ["a.b", "with space", "bad'quote", 'bad"quote', "back\\slash", "semi;colon", ""]:
             with pytest.raises(ValueError, match="JsonMatch key must match"):
                 json_match(t.c.data, bad_key, "x")
+
+    def test_json_match_rejects_unsupported_value_type(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+
+        for bad_value in [[], {}, object()]:
+            with pytest.raises(TypeError, match="JsonMatch value must be"):
+                json_match(t.c.data, "k", bad_value)
 
     def test_json_match_unsupported_dialect_raises(self):
         from sqlalchemy import Column, MetaData, String, Table

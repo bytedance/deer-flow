@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Float, Integer, String, bindparam
+from sqlalchemy import BigInteger, Float, String, bindparam
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy.sql.expression import ColumnElement
@@ -40,6 +40,8 @@ class JsonMatch(ColumnElement):
     def __init__(self, column: ColumnElement, key: str, value: object) -> None:
         if not _KEY_CHARSET_RE.match(key):
             raise ValueError(f"JsonMatch key must match {_KEY_CHARSET_RE.pattern!r}; got: {key!r}")
+        if not isinstance(value, (type(None), bool, int, float, str)):
+            raise TypeError(f"JsonMatch value must be None, bool, int, float, or str; got: {type(value).__name__!r}")
         self.column = column
         self.key = key
         self.value = value
@@ -104,7 +106,7 @@ def _build_clause(compiler: SQLCompiler, typeof: str, extract: str, value: objec
             return f"{typeof} = '{bool_str}'"
         return f"({typeof} = '{dialect.bool_type}' AND {extract} = '{bool_str}')"
     if isinstance(value, int):
-        bp = _bind(compiler, value, Integer(), **kw)
+        bp = _bind(compiler, value, BigInteger(), **kw)
         return f"({_type_check(typeof, dialect.int_types)} AND CAST({extract} AS {dialect.int_cast}) = {bp})"
     if isinstance(value, float):
         bp = _bind(compiler, value, Float(), **kw)
