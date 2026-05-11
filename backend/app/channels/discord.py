@@ -264,6 +264,11 @@ class DiscordChannel(Channel):
 
         # Check if there's an active thread for this channel
         if channel_id in self._active_threads:
+            # respect mention_only: if enabled, only process messages that mention the bot
+            # (unless the channel is in allowed_channels)
+            if self._mention_only and not has_mention and channel_id not in self._allowed_channels:
+                logger.debug("[Discord] skipping message without mention in existing thread channel %s", channel_id)
+                return
             # Existing session → route to the existing thread
             target_thread_id = self._active_threads[channel_id]
             logger.debug("[Discord] routing message in channel %s to existing thread %s", channel_id, target_thread_id)
