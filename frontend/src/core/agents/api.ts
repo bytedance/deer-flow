@@ -111,3 +111,36 @@ export async function checkAgentName(
   }
   return res.json() as Promise<{ available: boolean; name: string }>;
 }
+
+export async function setAgentEnabled(
+  name: string,
+  enabled: boolean,
+): Promise<{ name: string; enabled: boolean }> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/agents/${name}/enabled`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to set agent enabled: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<{ name: string; enabled: boolean }>;
+}
+
+export async function forkAgent(name: string): Promise<Agent> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/agents/fork/${name}`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(err.detail ?? `Failed to fork agent: ${res.statusText}`);
+  }
+  return res.json() as Promise<Agent>;
+}

@@ -37,10 +37,12 @@ def _is_host_bash_tool(tool: object) -> bool:
 def get_available_tools(
     groups: list[str] | None = None,
     include_mcp: bool = True,
+    mcp_servers: list[str] | None = None,
     model_name: str | None = None,
     subagent_enabled: bool = False,
     *,
     app_config: AppConfig | None = None,
+    tenant_mcp_configs: dict[str, dict] | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -50,8 +52,15 @@ def get_available_tools(
     Args:
         groups: Optional list of tool groups to filter by.
         include_mcp: Whether to include tools from MCP servers (default: True).
+        mcp_servers: Optional list of MCP server names to include. When set,
+            only tools from these servers are included (matched via name prefix).
+            None means include all MCP tools.
         model_name: Optional model name to determine if vision tools should be included.
         subagent_enabled: Whether to include subagent tools (task, task_status).
+        tenant_mcp_configs: Optional dict of tenant MCP server configs to merge
+            with global configs. Keys are server names, values are config dicts
+            (same format as extensions_config mcpServers entries). Tenant configs
+            override global configs with the same server name.
 
     Returns:
         List of available tools.
@@ -120,6 +129,20 @@ def get_available_tools(
             if extensions_config.get_enabled_mcp_servers():
                 mcp_tools = get_cached_mcp_tools()
                 if mcp_tools:
+                    # Merge tenant MCP tools if tenant configs are provided
+                    if tenant_mcp_configs:
+                        from deerflow.mcp.cache import get_tenant_mcp_tools
+
+                        tenant_tools = get_tenant_mcp_tools(tenant_mcp_configs)
+                        if tenant_tools:
+                            # Tenant tools override global tools with same server prefix
+                            tenant_prefixes = tuple(f"{s}__" for s in tenant_mcp_configs)
+                            mcp_tools = [t for t in mcp_tools if not t.name.startswith(tenant_prefixes)]
+                            mcp_tools.extend(tenant_tools)
+
+                    if mcp_servers is not None:
+                        server_prefixes = tuple(f"{s}__" for s in mcp_servers)
+                        mcp_tools = [t for t in mcp_tools if t.name.startswith(server_prefixes)]
                     logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 
                     # When tool_search is enabled, register MCP tools in the

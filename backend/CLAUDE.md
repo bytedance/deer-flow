@@ -222,6 +222,9 @@ FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWA
 | **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /../messages` - thread messages with feedback; `GET /../token-usage` - aggregate tokens |
 | **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
 | **Runs** (`/api/runs`) | `POST /stream` - stateless run + SSE; `POST /wait` - stateless run + block; `GET /{rid}/messages` - paginated messages by run_id `{data, has_more}` (cursor: `after_seq`/`before_seq`); `GET /{rid}/feedback` - list feedback by run_id |
+| **Agents** (`/api/agents`) | `GET /` - three-level merged listing; `GET /mine` - user's agents; `PUT /{name}/enabled` - enable/disable; `POST /fork/{name}` - fork to user; `POST /{name}/usage` - record usage; `GET /stats` - tenant counts; `GET /stats/mine` - user counts; `GET /recommend?q=` - recommendations |
+| **Tenant Agents** (`/api/tenants/{id}/agents`) | `POST /` - create; `GET /` - list; `GET /{name}` - details; `PUT /{name}` - update; `DELETE /{name}` - delete; `PUT /{name}/enabled` - enable/disable; `POST /{name}/permissions` - set permissions |
+| **Tenant MCP Servers** (`/api/tenants/{id}/mcp-servers`) | `POST /` - create; `GET /` - list; `GET /{name}` - details; `PUT /{name}` - update; `DELETE /{name}` - delete; `PUT /{name}/enabled` - enable/disable |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
 
@@ -253,6 +256,69 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 **Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 3` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`), 15-minute timeout
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
+
+### Multi-Level Agent System
+
+Three-tier agent discovery with priority-based override: **user > tenant > builtin**.
+
+**Levels**:
+
+- **Builtin** (`packages/harness/deerflow/agents/builtin/`): Shipped with the platform, read-only. Discovered via `scan_builtin_agents()`.
+- **Tenant** (`{base_dir}/tenants/{tenant_id}/agents/{name}/`): Shared within a tenant org. Managed via CRUD API + filesystem sync. Discovered via `scan_tenant_agents(tenant_id)`.
+- **User** (`{base_dir}/users/{user_id}/agents/{name}/`): Per-user custom agents. Created via fork or bootstrap.
+
+**Discovery** (`deerflow/config/agents_config.py`):
+
+- `list_available_agents(tenant_id, user_id)` — merges all three levels, higher priority wins on name collision
+- `load_agent_config(name)` — resolves user → tenant → builtin fallback chain
+- `scan_tenant_agents(tenant_id)` / `load_tenant_agent_soul(tenant_id, name)` — tenant-level filesystem scan
+
+**Agent Config** (`AgentConfig` Pydantic model):
+
+- Fields: `name`, `description`, `display_name`, `icon`, `model`, `tool_groups`, `skills`, `mcp_servers`, `tags`, `visibility`
+- `mcp_servers` filters MCP tools by server name prefix (`server_name__tool_name`)
+
+**Tenant Agent CRUD** (`app/gateway/routers/tenant_agents.py`):
+
+- `POST /api/tenants/{tenant_id}/agents` — create (writes config.yaml + SOUL.md to filesystem)
+- `GET /api/tenants/{tenant_id}/agents` — list tenant agents
+- `PUT /api/tenants/{tenant_id}/agents/{name}` — update
+- `DELETE /api/tenants/{tenant_id}/agents/{name}` — delete (removes DB row + filesystem dir)
+- `PUT /api/tenants/{tenant_id}/agents/{name}/enabled` — enable/disable
+- `POST /api/tenants/{tenant_id}/agents/{name}/permissions` — set permissions
+- Requires tenant admin role (`superadmin` or `tenant_admin`)
+
+**Agent API Extensions** (`app/gateway/routers/agents.py`):
+
+- `GET /api/agents` — three-level merged listing with disabled state
+- `GET /api/agents/mine` — user's own agents only
+- `PUT /api/agents/{name}/enabled` — per-user enable/disable (stored in `disabled_agents.json`)
+- `POST /api/agents/fork/{name}` — fork builtin/tenant agent to user directory
+- `POST /api/agents/{name}/usage` — record usage event
+- `GET /api/agents/stats` — tenant-wide usage counts
+- `GET /api/agents/stats/mine` — user's usage counts
+- `GET /api/agents/recommend?q=` — keyword-based top-3 recommendations
+
+**Tenant MCP Servers** (`app/gateway/routers/tenant_mcp_servers.py`):
+
+- CRUD at `/api/tenants/{tenant_id}/mcp-servers`
+- Config validation: type must be `stdio`/`sse`/`http`; stdio requires `command`, sse/http requires `url`
+- Tenant MCP tools merged into `get_available_tools()` — tenant tools override global tools with same server prefix
+
+**Persistence** (`packages/harness/deerflow/persistence/`):
+
+- `agent/repository.py` — `AgentRepository` (SQLAlchemy async, tenant-level agent rows)
+- `agent/usage_repository.py` — `AgentUsageRepository` (record/count usage events)
+- `agent/tenant_init.py` — `initialize_tenant_agents()` (auto-fork builtin agents to new tenants)
+- `mcp_server/repository.py` — `TenantMcpServerRepository` (CRUD for tenant MCP server configs)
+
+**MCP Tool Merge** (`deerflow/tools/tools.py`):
+
+- `get_available_tools()` accepts optional `tenant_mcp_configs` parameter
+- Tenant tools replace global tools sharing the same server name prefix
+- Agent-level `mcp_servers` filter applies after merge
+
+**Tests**: `tests/test_multi_level_agents.py` (59 tests covering all levels, isolation, security, recommendations)
 
 ### Tool System (`packages/harness/deerflow/tools/`)
 

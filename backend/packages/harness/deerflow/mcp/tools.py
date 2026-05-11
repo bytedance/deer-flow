@@ -133,3 +133,66 @@ async def get_mcp_tools() -> list[BaseTool]:
     except Exception as e:
         logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
         return []
+
+
+async def get_mcp_tools_from_configs(server_configs: dict[str, dict]) -> list[BaseTool]:
+    """Load MCP tools from raw server config dicts (used for tenant MCP servers).
+
+    Each config entry should have the same structure as extensions_config mcpServers:
+    - type: "stdio" | "sse" | "http"
+    - command/url and other transport-specific fields
+
+    Args:
+        server_configs: Dict of server_name -> config dict.
+
+    Returns:
+        List of tools loaded from the provided server configs.
+    """
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+    except ImportError:
+        logger.warning("langchain-mcp-adapters not installed for tenant MCP tools")
+        return []
+
+    if not server_configs:
+        return []
+
+    # Convert tenant configs to the format expected by MultiServerMCPClient
+    servers_config: dict = {}
+    for name, cfg in server_configs.items():
+        server_type = cfg.get("type", "stdio")
+        if server_type == "stdio":
+            entry = {
+                "command": cfg.get("command", ""),
+                "args": cfg.get("args", []),
+                "env": cfg.get("env"),
+                "transport": "stdio",
+            }
+        elif server_type in ("sse", "http"):
+            entry = {
+                "url": cfg.get("url", ""),
+                "headers": cfg.get("headers", {}),
+                "transport": server_type,
+            }
+        else:
+            logger.warning(f"Unknown MCP server type '{server_type}' for tenant server '{name}', skipping")
+            continue
+        servers_config[name] = entry
+
+    if not servers_config:
+        return []
+
+    try:
+        logger.info(f"Loading tenant MCP tools from {len(servers_config)} server(s)")
+        client = MultiServerMCPClient(servers_config, tool_name_prefix=True)
+        tools = await client.get_tools()
+
+        for tool in tools:
+            if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
+                tool.func = _make_sync_tool_wrapper(tool.coroutine, tool.name)
+
+        logger.info(f"Loaded {len(tools)} tenant MCP tool(s)")
+        return tools
+    except Exception as e:
+        logger.error(f"Failed to load tenant MCP tools: {e}", exc_info=True)
+        return []

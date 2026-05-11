@@ -352,6 +352,52 @@ def _build_middlewares(
     return middlewares
 
 
+def _load_tenant_mcp_configs(tenant_id: str) -> dict[str, dict] | None:
+    """Load enabled MCP server configs for a tenant from the persistence layer.
+
+    Returns a dict of server_name -> config suitable for passing to
+    get_available_tools(tenant_mcp_configs=...). Returns None if the
+    persistence engine is not available or no servers are configured.
+    """
+    try:
+        import asyncio
+
+        from deerflow.persistence.engine import get_session_factory
+
+        sf = get_session_factory()
+        if sf is None:
+            return None
+
+        from deerflow.persistence.mcp_server import TenantMcpServerRepository
+
+        repo = TenantMcpServerRepository(sf)
+
+        async def _fetch():
+            return await repo.list_by_tenant(tenant_id, include_disabled=False)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    servers = executor.submit(asyncio.run, _fetch()).result()
+            else:
+                servers = loop.run_until_complete(_fetch())
+        except RuntimeError:
+            servers = asyncio.run(_fetch())
+
+        if not servers:
+            return None
+
+        return {s["server_name"]: s["config"] for s in servers}
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).debug("Failed to load tenant MCP configs", exc_info=True)
+        return None
+
+
 def make_lead_agent(config: RunnableConfig):
     """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
     runtime_config = _get_runtime_config(config)
@@ -391,7 +437,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     if not tc.is_active:
         raise PermissionError(f"Tenant {tenant_id!r} is disabled")
 
-    agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    agent_config = load_agent_config(agent_name, tenant_id=tenant_id) if not is_bootstrap else None
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -453,13 +499,18 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # The default agent (no agent_name) does not see this tool.
     extra_tools = [update_agent] if agent_name else []
     # Default lead agent (unchanged behavior)
+    # Load tenant MCP server configs for merging with global MCP tools
+    tenant_mcp_configs = _load_tenant_mcp_configs(tenant_id) if tenant_id and tenant_id != "default" else None
+
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config),
         tools=get_available_tools(
             model_name=model_name,
             groups=agent_config.tool_groups if agent_config else None,
+            mcp_servers=agent_config.mcp_servers if agent_config else None,
             subagent_enabled=subagent_enabled,
             app_config=resolved_app_config,
+            tenant_mcp_configs=tenant_mcp_configs,
         )
         + extra_tools,
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),

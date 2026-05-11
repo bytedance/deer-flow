@@ -140,3 +140,44 @@ def reset_mcp_tools_cache() -> None:
     _cache_initialized = False
     _config_mtime = None
     logger.info("MCP tools cache reset")
+
+
+def get_tenant_mcp_tools(tenant_mcp_configs: dict[str, dict]) -> list[BaseTool]:
+    """Load MCP tools for tenant-specific server configurations.
+
+    Unlike global MCP tools which are cached, tenant tools are loaded
+    on-demand since they vary per tenant. The configs are in the same
+    format as extensions_config mcpServers entries.
+
+    Args:
+        tenant_mcp_configs: Dict of server_name -> config dict.
+            Each config must have 'type' and relevant connection fields.
+
+    Returns:
+        List of tools from the tenant's MCP servers.
+        Returns empty list on failure (non-fatal).
+    """
+    if not tenant_mcp_configs:
+        return []
+
+    try:
+        from deerflow.mcp.tools import get_mcp_tools_from_configs
+
+        import concurrent.futures
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, get_mcp_tools_from_configs(tenant_mcp_configs))
+                    return future.result()
+            else:
+                return loop.run_until_complete(get_mcp_tools_from_configs(tenant_mcp_configs))
+        except RuntimeError:
+            return asyncio.run(get_mcp_tools_from_configs(tenant_mcp_configs))
+    except ImportError:
+        logger.warning("MCP module not available for tenant tools")
+        return []
+    except Exception:
+        logger.exception("Failed to load tenant MCP tools")
+        return []

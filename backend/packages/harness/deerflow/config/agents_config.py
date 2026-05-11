@@ -16,6 +16,7 @@ import yaml
 from pydantic import BaseModel
 
 from deerflow.config.paths import get_paths
+from deerflow.config.runtime_paths import project_root
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -40,13 +41,54 @@ class AgentConfig(BaseModel):
 
     name: str
     description: str = ""
+    display_name: str | None = None
+    icon: str | None = None
     model: str | None = None
+    visibility: str = "public"
     tool_groups: list[str] | None = None
     # skills controls which skills are loaded into the agent's prompt:
     # - None (or omitted): load all enabled skills (default fallback behavior)
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    mcp_servers: list[str] | None = None
+    tags: list[str] | None = None
+    advanced: dict[str, Any] | None = None
+
+
+class AgentInfo(BaseModel):
+    """API response model for agent listings (includes runtime metadata)."""
+
+    name: str
+    description: str = ""
+    display_name: str | None = None
+    icon: str | None = None
+    source: str = "user"
+    tenant_id: str | None = None
+    editable: bool = True
+    enabled: bool = True
+    tags: list[str] | None = None
+    tool_groups: list[str] | None = None
+    skills: list[str] | None = None
+    mcp_servers: list[str] | None = None
+
+
+def to_agent_info(config: AgentConfig, *, source: str = "user", editable: bool = True, enabled: bool = True, tenant_id: str | None = None) -> AgentInfo:
+    """Convert an AgentConfig to an AgentInfo with runtime metadata."""
+    return AgentInfo(
+        name=config.name,
+        description=config.description,
+        display_name=config.display_name,
+        icon=config.icon,
+        source=source,
+        tenant_id=tenant_id,
+        editable=editable,
+        enabled=enabled,
+        tags=config.tags,
+        tool_groups=config.tool_groups,
+        skills=config.skills,
+        mcp_servers=config.mcp_servers,
+    )
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
@@ -77,22 +119,28 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
     return user_path
 
 
-def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentConfig | None:
+def load_agent_config(name: str | None, *, user_id: str | None = None, tenant_id: str | None = None) -> AgentConfig | None:
     """Load the custom or default agent's config from its directory.
 
-    Reads from the per-user layout first; falls back to the legacy shared layout
-    for installations that have not yet been migrated.
+    Reads from the per-user layout first; falls back to tenant then builtin agents.
+
+    Resolution order:
+    1. User agent (per-user layout, then legacy shared layout)
+    2. Tenant agent ({base_dir}/tenants/{tenant_id}/agents/{name}/)
+    3. Builtin agent (project_root/agents/builtin/)
 
     Args:
         name: The agent name.
         user_id: Owner of the agent. Defaults to the effective user from the
             current request context.
+        tenant_id: Tenant scope for agent lookup.
 
     Returns:
         AgentConfig instance, or ``None`` if ``name`` is ``None``.
 
     Raises:
-        FileNotFoundError: If the agent directory or config.yaml does not exist.
+        FileNotFoundError: If the agent directory or config.yaml does not exist
+            in any of the searched locations.
         ValueError: If config.yaml cannot be parsed.
     """
 
@@ -100,30 +148,61 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
         return None
 
     name = validate_agent_name(name)
+
+    # 1. User agent (existing logic)
     agent_dir = resolve_agent_dir(name, user_id=user_id)
     config_file = agent_dir / "config.yaml"
 
-    if not agent_dir.exists():
-        raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
+    if agent_dir.exists() and config_file.exists():
+        try:
+            with open(config_file, encoding="utf-8") as f:
+                data: dict[str, Any] = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            raise ValueError(f"Failed to parse agent config {config_file}: {e}") from e
 
-    if not config_file.exists():
-        raise FileNotFoundError(f"Agent config not found: {config_file}")
+        if "name" not in data:
+            data["name"] = name
 
-    try:
-        with open(config_file, encoding="utf-8") as f:
-            data: dict[str, Any] = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        raise ValueError(f"Failed to parse agent config {config_file}: {e}") from e
+        known_fields = set(AgentConfig.model_fields.keys())
+        data = {k: v for k, v in data.items() if k in known_fields}
+        return AgentConfig(**data)
 
-    # Ensure name is set from directory name if not in file
-    if "name" not in data:
-        data["name"] = name
+    # 2. Tenant agent (filesystem-based lookup)
+    if tenant_id:
+        tenant_agent_dir = get_paths().base_dir / "tenants" / tenant_id / "agents" / name
+        tenant_config_file = tenant_agent_dir / "config.yaml"
+        if tenant_agent_dir.exists() and tenant_config_file.exists():
+            try:
+                with open(tenant_config_file, encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+            except yaml.YAMLError as e:
+                raise ValueError(f"Failed to parse tenant agent config {tenant_config_file}: {e}") from e
 
-    # Strip unknown fields before passing to Pydantic (e.g. legacy prompt_file)
-    known_fields = set(AgentConfig.model_fields.keys())
-    data = {k: v for k, v in data.items() if k in known_fields}
+            if "name" not in data:
+                data["name"] = name
 
-    return AgentConfig(**data)
+            known_fields = set(AgentConfig.model_fields.keys())
+            data = {k: v for k, v in data.items() if k in known_fields}
+            return AgentConfig(**data)
+
+    # 3. Builtin agent
+    builtin_dir = _get_builtin_agents_dir() / name
+    builtin_config = builtin_dir / "config.yaml"
+    if builtin_dir.exists() and builtin_config.exists():
+        try:
+            with open(builtin_config, encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            raise ValueError(f"Failed to parse builtin agent config {builtin_config}: {e}") from e
+
+        if "name" not in data:
+            data["name"] = name
+
+        known_fields = set(AgentConfig.model_fields.keys())
+        data = {k: v for k, v in data.items() if k in known_fields}
+        return AgentConfig(**data)
+
+    raise FileNotFoundError(f"Agent '{name}' not found in user, tenant, or builtin locations")
 
 
 def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str | None:
@@ -198,3 +277,164 @@ def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:
 
     agents.sort(key=lambda a: a.name)
     return agents
+
+
+def _get_builtin_agents_dir() -> Path:
+    """Return the path to the builtin agents directory at project root."""
+    return project_root() / "agents" / "builtin"
+
+
+def scan_builtin_agents() -> list[AgentConfig]:
+    """Scan the builtin agents directory and return all valid builtin agents.
+
+    Builtin agents are stored at ``{project_root}/agents/builtin/{name}/``
+    alongside the ``skills/`` directory. They are git-tracked and ship with
+    the application.
+
+    Returns:
+        List of AgentConfig for each valid builtin agent found.
+        Returns an empty list if the directory does not exist.
+    """
+    builtin_dir = _get_builtin_agents_dir()
+    if not builtin_dir.exists():
+        return []
+
+    agents: list[AgentConfig] = []
+    for entry in sorted(builtin_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        config_file = entry / "config.yaml"
+        if not config_file.exists():
+            logger.debug(f"Skipping builtin agent {entry.name}: no config.yaml")
+            continue
+
+        try:
+            with open(config_file, encoding="utf-8") as f:
+                data: dict[str, Any] = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            logger.warning(f"Skipping builtin agent '{entry.name}': {e}")
+            continue
+
+        if "name" not in data:
+            data["name"] = entry.name
+
+        known_fields = set(AgentConfig.model_fields.keys())
+        data = {k: v for k, v in data.items() if k in known_fields}
+
+        try:
+            agents.append(AgentConfig(**data))
+        except Exception as e:
+            logger.warning(f"Skipping builtin agent '{entry.name}': {e}")
+
+    agents.sort(key=lambda a: a.name)
+    return agents
+
+
+def load_builtin_agent_soul(name: str) -> str | None:
+    """Read the SOUL.md for a builtin agent."""
+    soul_path = _get_builtin_agents_dir() / name / SOUL_FILENAME
+    if not soul_path.exists():
+        return None
+    content = soul_path.read_text(encoding="utf-8").strip()
+    return content or None
+
+
+def load_tenant_agent_soul(tenant_id: str, name: str) -> str | None:
+    """Read the SOUL.md for a tenant agent."""
+    soul_path = get_paths().base_dir / "tenants" / tenant_id / "agents" / name / SOUL_FILENAME
+    if not soul_path.exists():
+        return None
+    content = soul_path.read_text(encoding="utf-8").strip()
+    return content or None
+
+
+def scan_tenant_agents(tenant_id: str) -> list[AgentConfig]:
+    """Scan the tenant agents directory and return all valid tenant agents.
+
+    Tenant agents are stored at ``{base_dir}/tenants/{tenant_id}/agents/{name}/``.
+    They are managed via the tenant admin CRUD API.
+
+    Args:
+        tenant_id: The tenant whose agents to scan.
+
+    Returns:
+        List of AgentConfig for each valid tenant agent found.
+        Returns an empty list if the directory does not exist.
+    """
+    tenant_agents_dir = get_paths().base_dir / "tenants" / tenant_id / "agents"
+    if not tenant_agents_dir.exists():
+        return []
+
+    agents: list[AgentConfig] = []
+    for entry in sorted(tenant_agents_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        config_file = entry / "config.yaml"
+        if not config_file.exists():
+            continue
+
+        try:
+            with open(config_file, encoding="utf-8") as f:
+                data: dict[str, Any] = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            logger.warning(f"Skipping tenant agent '{entry.name}': {e}")
+            continue
+
+        if "name" not in data:
+            data["name"] = entry.name
+
+        known_fields = set(AgentConfig.model_fields.keys())
+        data = {k: v for k, v in data.items() if k in known_fields}
+
+        try:
+            agents.append(AgentConfig(**data))
+        except Exception as e:
+            logger.warning(f"Skipping tenant agent '{entry.name}': {e}")
+
+    agents.sort(key=lambda a: a.name)
+    return agents
+
+
+def list_available_agents(*, tenant_id: str | None = None, user_id: str | None = None) -> list[AgentInfo]:
+    """Return the merged list of agents visible to a user, with priority dedup.
+
+    Discovery priority (higher overrides lower):
+    1. User agents (highest — user's own customizations)
+    2. Tenant agents (tenant-level shared agents)
+    3. Builtin agents (lowest — shipped defaults)
+
+    When the same agent name exists at multiple levels, the highest-priority
+    version wins. This allows users to override tenant agents, and tenant
+    agents to override builtins.
+
+    Args:
+        tenant_id: The tenant scope. If None, tenant agents are skipped.
+        user_id: The user whose agents to include. Defaults to effective user.
+
+    Returns:
+        Deduplicated list of AgentInfo sorted by name.
+    """
+    seen: set[str] = set()
+    result: list[AgentInfo] = []
+
+    # 1. User agents (highest priority)
+    for cfg in list_custom_agents(user_id=user_id):
+        if cfg.name not in seen:
+            seen.add(cfg.name)
+            result.append(to_agent_info(cfg, source="user", editable=True, tenant_id=tenant_id))
+
+    # 2. Tenant agents
+    if tenant_id:
+        for cfg in scan_tenant_agents(tenant_id):
+            if cfg.name not in seen:
+                seen.add(cfg.name)
+                result.append(to_agent_info(cfg, source="tenant", editable=False, tenant_id=tenant_id))
+
+    # 3. Builtin agents (lowest priority)
+    for cfg in scan_builtin_agents():
+        if cfg.name not in seen:
+            seen.add(cfg.name)
+            result.append(to_agent_info(cfg, source="builtin", editable=False))
+
+    result.sort(key=lambda a: a.name)
+    return result

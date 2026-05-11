@@ -5,13 +5,16 @@ import re
 import shutil
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul, load_builtin_agent_soul, load_tenant_agent_soul, scan_builtin_agents, scan_tenant_agents
 from deerflow.config.paths import get_paths
+from deerflow.config.tenant import get_current_tenant_id
 from deerflow.runtime.user_context import get_effective_user_id
+
+from app.gateway.deps import get_agent_usage_repo
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -24,9 +27,16 @@ class AgentResponse(BaseModel):
 
     name: str = Field(..., description="Agent name (hyphen-case)")
     description: str = Field(default="", description="Agent description")
+    display_name: str | None = Field(default=None, description="Human-readable display name")
+    icon: str | None = Field(default=None, description="Icon identifier")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
+    mcp_servers: list[str] | None = Field(default=None, description="Optional MCP server whitelist")
+    tags: list[str] | None = Field(default=None, description="Agent tags for filtering")
+    source: str = Field(default="user", description="Agent source: builtin | tenant | user")
+    editable: bool = Field(default=True, description="Whether the current user can edit this agent")
+    enabled: bool = Field(default=True, description="Whether the agent is enabled")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -87,18 +97,29 @@ def _require_agents_api_enabled() -> None:
         )
 
 
-def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False, *, user_id: str | None = None) -> AgentResponse:
+def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False, *, user_id: str | None = None, source: str = "user", editable: bool = True, tenant_id: str | None = None) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
     if include_soul:
-        soul = load_agent_soul(agent_cfg.name, user_id=user_id) or ""
+        if source == "builtin":
+            soul = load_builtin_agent_soul(agent_cfg.name) or ""
+        elif source == "tenant" and tenant_id:
+            soul = load_tenant_agent_soul(tenant_id, agent_cfg.name) or ""
+        else:
+            soul = load_agent_soul(agent_cfg.name, user_id=user_id) or ""
 
     return AgentResponse(
         name=agent_cfg.name,
         description=agent_cfg.description,
+        display_name=agent_cfg.display_name,
+        icon=agent_cfg.icon,
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
+        mcp_servers=agent_cfg.mcp_servers,
+        tags=agent_cfg.tags,
+        source=source,
+        editable=editable,
         soul=soul,
     )
 
@@ -106,24 +127,87 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
 @router.get(
     "/agents",
     response_model=AgentsListResponse,
-    summary="List Custom Agents",
-    description="List all custom agents available in the agents directory, including their soul content.",
+    summary="List Available Agents",
+    description="List all available agents (builtin + user), with optional tag and enabled filtering.",
 )
-async def list_agents() -> AgentsListResponse:
-    """List all custom agents.
+async def list_agents(tags: str | None = None, enabled: bool | None = None) -> AgentsListResponse:
+    """List all available agents, merging builtin and user agents.
+
+    User agents override builtin agents with the same name.
+
+    Args:
+        tags: Comma-separated tag filter (e.g. "research,writing").
+        enabled: Filter by enabled status.
 
     Returns:
-        List of all custom agents with their metadata and soul content.
+        Merged list of agents with source metadata.
+    """
+    _require_agents_api_enabled()
+
+    user_id = get_effective_user_id()
+    tenant_id = get_current_tenant_id()
+    try:
+        disabled_agents = _load_disabled_agents(user_id)
+        merged: dict[str, AgentResponse] = {}
+
+        # 3. Builtin agents (lowest priority — added first, overridden by higher)
+        for agent_cfg in scan_builtin_agents():
+            resp = _agent_config_to_response(agent_cfg, include_soul=True, source="builtin", editable=False)
+            resp.enabled = resp.name not in disabled_agents
+            merged[agent_cfg.name] = resp
+
+        # 2. Tenant agents (middle priority)
+        if tenant_id:
+            for agent_cfg in scan_tenant_agents(tenant_id):
+                resp = _agent_config_to_response(agent_cfg, include_soul=True, source="tenant", editable=False, tenant_id=tenant_id)
+                resp.enabled = resp.name not in disabled_agents
+                merged[agent_cfg.name] = resp
+
+        # 1. User agents (highest priority — overrides all)
+        for agent_cfg in list_custom_agents(user_id=user_id):
+            resp = _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id, source="user", editable=True)
+            resp.enabled = resp.name not in disabled_agents
+            merged[agent_cfg.name] = resp
+
+        result = sorted(merged.values(), key=lambda a: a.display_name or a.name)
+
+        if tags:
+            tag_set = {t.strip() for t in tags.split(",")}
+            result = [a for a in result if a.tags and tag_set.intersection(a.tags)]
+
+        if enabled is not None:
+            result = [a for a in result if a.enabled == enabled]
+
+        return AgentsListResponse(agents=result)
+    except Exception as e:
+        logger.error(f"Failed to list agents: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
+
+
+@router.get(
+    "/agents/mine",
+    response_model=AgentsListResponse,
+    summary="List My Agents",
+    description="List only the current user's own custom agents (excludes builtin and tenant agents).",
+)
+async def list_my_agents() -> AgentsListResponse:
+    """List only the current user's own custom agents.
+
+    Returns:
+        List of user-owned agents sorted by name.
     """
     _require_agents_api_enabled()
 
     user_id = get_effective_user_id()
     try:
-        agents = list_custom_agents(user_id=user_id)
-        return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True, user_id=user_id) for a in agents])
+        agents = [
+            _agent_config_to_response(cfg, include_soul=True, user_id=user_id, source="user", editable=True)
+            for cfg in list_custom_agents(user_id=user_id)
+        ]
+        return AgentsListResponse(agents=agents)
     except Exception as e:
-        logger.error(f"Failed to list agents: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
+        logger.error(f"Failed to list user agents: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list user agents: {str(e)}")
 
 
 @router.get(
@@ -177,10 +261,27 @@ async def get_agent(name: str) -> AgentResponse:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
+    tenant_id = get_current_tenant_id()
 
     try:
-        agent_cfg = load_agent_config(name, user_id=user_id)
-        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
+        agent_cfg = load_agent_config(name, user_id=user_id, tenant_id=tenant_id)
+        # Determine source based on where the agent was found
+        source = "user"
+        editable = True
+        paths = get_paths()
+        if not paths.user_agent_dir(user_id, name).exists() and not paths.agent_dir(name).exists():
+            if tenant_id:
+                tenant_dir = paths.base_dir / "tenants" / tenant_id / "agents" / name
+                if tenant_dir.exists():
+                    source = "tenant"
+                    editable = False
+                else:
+                    source = "builtin"
+                    editable = False
+            else:
+                source = "builtin"
+                editable = False
+        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id, source=source, editable=editable, tenant_id=tenant_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
@@ -444,3 +545,264 @@ async def delete_agent(name: str) -> None:
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
+
+
+class AgentEnabledRequest(BaseModel):
+    """Request body for enabling/disabling an agent."""
+
+    enabled: bool = Field(..., description="Whether the agent should be enabled")
+
+
+@router.put(
+    "/agents/{name}/enabled",
+    summary="Enable/Disable Agent",
+    description="Enable or disable an agent for the current user. Works for builtin, tenant, and user agents.",
+)
+async def set_agent_enabled(name: str, body: AgentEnabledRequest) -> dict:
+    """Enable or disable an agent for the current user.
+
+    Disabled agents are excluded from the agent list and cannot be selected.
+    The state is stored per-user in a JSON file.
+
+    Args:
+        name: The agent name.
+        body: The enable/disable request.
+
+    Returns:
+        Updated enabled state.
+    """
+    _require_agents_api_enabled()
+    _validate_agent_name(name)
+    name = _normalize_agent_name(name)
+    user_id = get_effective_user_id()
+
+    disabled_agents = _load_disabled_agents(user_id)
+
+    if body.enabled:
+        disabled_agents.discard(name)
+    else:
+        disabled_agents.add(name)
+
+    _save_disabled_agents(user_id, disabled_agents)
+    return {"name": name, "enabled": body.enabled}
+
+
+def _get_disabled_agents_path(user_id: str):
+    """Return the path to the user's disabled agents JSON file."""
+    paths = get_paths()
+    return paths.base_dir / "users" / user_id / "disabled_agents.json"
+
+
+def _load_disabled_agents(user_id: str) -> set[str]:
+    """Load the set of disabled agent names for a user."""
+    import json
+
+    path = _get_disabled_agents_path(user_id)
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return set(data) if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+
+def _save_disabled_agents(user_id: str, disabled: set[str]) -> None:
+    """Persist the set of disabled agent names for a user."""
+    import json
+
+    path = _get_disabled_agents_path(user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted(disabled)), encoding="utf-8")
+
+
+@router.post(
+    "/agents/fork/{name}",
+    response_model=AgentResponse,
+    status_code=201,
+    summary="Fork Agent",
+    description="Copy a builtin or tenant agent to the user's own agents directory for customization.",
+)
+async def fork_agent(name: str) -> AgentResponse:
+    """Fork a builtin or tenant agent into the user's personal agents.
+
+    Creates a copy of the agent's config and SOUL.md in the user's
+    agent directory, allowing customization without affecting the original.
+
+    Args:
+        name: The agent name to fork.
+
+    Returns:
+        The forked agent details.
+
+    Raises:
+        HTTPException: 404 if source agent not found, 409 if user already has an agent with that name.
+    """
+    _require_agents_api_enabled()
+    _validate_agent_name(name)
+    name = _normalize_agent_name(name)
+    user_id = get_effective_user_id()
+    tenant_id = get_current_tenant_id()
+    paths = get_paths()
+
+    user_agent_dir = paths.user_agent_dir(user_id, name)
+    if user_agent_dir.exists():
+        raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists in your agents. Delete it first to re-fork.")
+
+    try:
+        source_config = load_agent_config(name, user_id=user_id, tenant_id=tenant_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    # Load SOUL from the source
+    from deerflow.config.agents_config import load_builtin_agent_soul, load_tenant_agent_soul
+
+    soul: str = ""
+    # Determine source: check tenant first, then builtin
+    tenant_dir = paths.base_dir / "tenants" / (tenant_id or "") / "agents" / name
+    if tenant_id and tenant_dir.exists():
+        soul = load_tenant_agent_soul(tenant_id, name) or ""
+    else:
+        soul = load_builtin_agent_soul(name) or ""
+
+    # Write forked agent to user directory
+    user_agent_dir.mkdir(parents=True, exist_ok=True)
+
+    config_data: dict = {"name": name}
+    if source_config.description:
+        config_data["description"] = source_config.description
+    if source_config.display_name:
+        config_data["display_name"] = source_config.display_name
+    if source_config.icon:
+        config_data["icon"] = source_config.icon
+    if source_config.model:
+        config_data["model"] = source_config.model
+    if source_config.tool_groups:
+        config_data["tool_groups"] = source_config.tool_groups
+    if source_config.skills is not None:
+        config_data["skills"] = source_config.skills
+    if source_config.mcp_servers:
+        config_data["mcp_servers"] = source_config.mcp_servers
+    if source_config.tags:
+        config_data["tags"] = source_config.tags
+
+    config_file = user_agent_dir / "config.yaml"
+    with open(config_file, "w", encoding="utf-8") as f:
+        yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
+
+    soul_file = user_agent_dir / "SOUL.md"
+    soul_file.write_text(soul, encoding="utf-8")
+
+    logger.info(f"Forked agent '{name}' to user '{user_id}'")
+
+    forked_config = load_agent_config(name, user_id=user_id)
+    return _agent_config_to_response(forked_config, include_soul=True, user_id=user_id, source="user", editable=True)
+
+
+@router.post(
+    "/agents/{name}/usage",
+    summary="Record Agent Usage",
+    description="Record that the current user used an agent (called when starting a conversation).",
+)
+async def record_agent_usage(
+    name: str,
+    request: Request,
+    usage_repo=Depends(get_agent_usage_repo),
+) -> dict:
+    """Record an agent usage event."""
+    if usage_repo is None:
+        return {"recorded": False}
+    user_id = get_effective_user_id()
+    tenant_id = get_current_tenant_id() or "default"
+    await usage_repo.record(tenant_id=tenant_id, agent_name=name, user_id=user_id)
+    return {"recorded": True}
+
+
+@router.get(
+    "/agents/stats",
+    summary="Get Agent Usage Stats",
+    description="Get usage counts for all agents visible to the current user.",
+)
+async def get_agent_usage_stats(
+    request: Request,
+    usage_repo=Depends(get_agent_usage_repo),
+) -> dict:
+    """Return usage counts grouped by agent name for the current user's tenant."""
+    if usage_repo is None:
+        return {"stats": []}
+    tenant_id = get_current_tenant_id() or "default"
+    stats = await usage_repo.count_by_tenant(tenant_id)
+    return {"stats": stats}
+
+
+@router.get(
+    "/agents/stats/mine",
+    summary="Get My Agent Usage Stats",
+    description="Get usage counts for agents used by the current user.",
+)
+async def get_my_agent_usage_stats(
+    request: Request,
+    usage_repo=Depends(get_agent_usage_repo),
+) -> dict:
+    """Return usage counts for the current user."""
+    if usage_repo is None:
+        return {"stats": []}
+    user_id = get_effective_user_id()
+    stats = await usage_repo.count_by_user(user_id)
+    return {"stats": stats}
+
+
+@router.get(
+    "/agents/recommend",
+    summary="Recommend Agents",
+    description="Recommend top-3 agents based on keyword matching against tags and descriptions.",
+)
+async def recommend_agents(q: str) -> dict:
+    """Return top-3 agent recommendations based on keyword matching.
+
+    Matches the query against agent names, descriptions, and tags.
+    Returns enabled agents only, sorted by relevance score.
+
+    Args:
+        q: The user's input text to match against.
+
+    Returns:
+        List of up to 3 recommended agents with scores.
+    """
+    _require_agents_api_enabled()
+
+    user_id = get_effective_user_id()
+    tenant_id = get_current_tenant_id()
+
+    from deerflow.config.agents_config import list_available_agents
+
+    all_agents = list_available_agents(tenant_id=tenant_id, user_id=user_id)
+
+    query_words = set(q.lower().split())
+    if not query_words:
+        return {"recommendations": []}
+
+    scored: list[tuple[float, dict]] = []
+    for agent in all_agents:
+        if not agent.enabled:
+            continue
+        score = 0.0
+        name_lower = agent.name.lower()
+        desc_lower = (agent.description or "").lower()
+        display_lower = (agent.display_name or "").lower()
+        tags_lower = [t.lower() for t in (agent.tags or [])]
+
+        for word in query_words:
+            if word in name_lower or word in display_lower:
+                score += 3.0
+            if word in desc_lower:
+                score += 1.0
+            for tag in tags_lower:
+                if word in tag:
+                    score += 2.0
+
+        if score > 0:
+            scored.append((score, {"name": agent.name, "display_name": agent.display_name, "description": agent.description, "source": agent.source, "score": score}))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return {"recommendations": [item[1] for item in scored[:3]]}

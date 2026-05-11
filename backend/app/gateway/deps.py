@@ -105,6 +105,26 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         else:
             app.state.tenant_store = None
 
+        # Agent repository (tenant-level agents)
+        if sf is not None:
+            from deerflow.persistence.agent import AgentPermissionRepository, AgentRepository, AgentUsageRepository
+
+            app.state.agent_repo = AgentRepository(sf)
+            app.state.agent_permission_repo = AgentPermissionRepository(sf)
+            app.state.agent_usage_repo = AgentUsageRepository(sf)
+        else:
+            app.state.agent_repo = None
+            app.state.agent_permission_repo = None
+            app.state.agent_usage_repo = None
+
+        # Tenant MCP Server repository
+        if sf is not None:
+            from deerflow.persistence.mcp_server import TenantMcpServerRepository
+
+            app.state.tenant_mcp_repo = TenantMcpServerRepository(sf)
+        else:
+            app.state.tenant_mcp_repo = None
+
         # Knowledge base service
         if sf is not None:
             from deerflow.knowledge_base.service import KnowledgeBaseService
@@ -166,6 +186,26 @@ get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+
+
+def get_agent_repo(request: Request):
+    """Return the agent repository (may be None if DB not available)."""
+    return getattr(request.app.state, "agent_repo", None)
+
+
+def get_agent_permission_repo(request: Request):
+    """Return the agent permission repository (may be None if DB not available)."""
+    return getattr(request.app.state, "agent_permission_repo", None)
+
+
+def get_tenant_mcp_repo(request: Request):
+    """Return the tenant MCP server repository (may be None if DB not available)."""
+    return getattr(request.app.state, "tenant_mcp_repo", None)
+
+
+def get_agent_usage_repo(request: Request):
+    """Return the agent usage repository (may be None if DB not available)."""
+    return getattr(request.app.state, "agent_usage_repo", None)
 
 
 def get_store(request: Request):
