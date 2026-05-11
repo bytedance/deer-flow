@@ -135,7 +135,8 @@ class ThreadMetaRepository(ThreadMetaStore):
                 except (ValueError, TypeError) as exc:
                     logger.warning("Skipping metadata filter key %s: %s", ascii(key), exc)
             if applied == 0:
-                raise InvalidMetadataFilterError(f"All metadata filter keys were rejected as unsafe: {[ascii(k) for k in metadata]}")
+                rejected_keys = sorted(str(k) for k in metadata)
+                raise InvalidMetadataFilterError(f"All metadata filter keys were rejected as unsafe: {rejected_keys}")
 
         stmt = stmt.limit(limit).offset(offset)
         async with self._sf() as session:
