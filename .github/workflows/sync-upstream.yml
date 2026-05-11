@@ -1,0 +1,46 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # 每天北京时间 8:00（UTC 0:00）自动执行
+    - cron: "0 0 * * *"
+  # 支持手动触发
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/bytedance/deer-flow.git
+
+      - name: Fetch upstream
+        run: git fetch upstream
+
+      - name: Merge upstream/main
+        run: |
+          UPSTREAM_COMMITS=$(git rev-list HEAD..upstream/main --count)
+          if [ "$UPSTREAM_COMMITS" -eq 0 ]; then
+            echo "✅ Already up to date with upstream."
+            exit 0
+          fi
+          echo "📦 Found $UPSTREAM_COMMITS new commit(s) from upstream, merging..."
+          git merge upstream/main --no-edit --allow-unrelated-histories
+
+      - name: Push changes
+        run: git push origin main
