@@ -68,7 +68,7 @@ DeerFlow ships with the following public skills:
 
 ### Discovery and loading
 
-`load_skills()` in `skills/loader.py` scans both `public/` and `custom/` directories under the configured skills path. It re-reads `ExtensionsConfig.from_file()` on every call, which means enabling or disabling a skill through the Gateway API takes effect immediately in the running LangGraph server without a restart.
+`load_skills()` in `skills/loader.py` scans both `public/` and `custom/` directories under the configured skills path. It re-reads `ExtensionsConfig.from_file()` on every call, which means enabling or disabling a skill through the Gateway API takes effect immediately in the running agent runtime without a restart.
 
 ### Parsing
 

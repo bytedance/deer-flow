@@ -46,7 +46,7 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    All services will start with hot-reload enabled:
    - Frontend changes are automatically reloaded
    - Backend changes trigger automatic restart
-   - LangGraph server supports hot-reload
+   - Gateway embedded agent runtime restarts with backend changes
 
 4. **Access the application**:
    - Web Interface: http://localhost:2026
@@ -131,9 +131,8 @@ Host Machine
 Docker Compose (deer-flow-dev)
   ├→ nginx (port 2026) ← Reverse proxy
   ├→ web (port 3000) ← Frontend with hot-reload
-  ├→ api (port 8001) ← Gateway API with hot-reload
-   ├→ langgraph (port 2024) ← LangGraph server with hot-reload
-   └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
+  ├→ gateway (port 8001) ← Gateway API + embedded agent runtime with hot-reload
+  └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
 ```
 
 **Benefits of Docker Development**:
@@ -184,17 +183,13 @@ Required tools:
 
 If you need to start services individually:
 
-1. **Start backend services**:
+1. **Start backend service**:
    ```bash
-   # Terminal 1: Start LangGraph Server (port 2024)
+   # Terminal 1: Start Gateway API + embedded agent runtime (port 8001)
    cd backend
    make dev
 
-   # Terminal 2: Start Gateway API (port 8001)
-   cd backend
-   make gateway
-
-   # Terminal 3: Start Frontend (port 3000)
+   # Terminal 2: Start Frontend (port 3000)
    cd frontend
    pnpm dev
    ```
@@ -212,7 +207,7 @@ If you need to start services individually:
 
 The nginx configuration provides:
 - Unified entry point on port 2026
-- Routes `/api/langgraph/*` to LangGraph Server (2024)
+- Rewrites `/api/langgraph/*` to Gateway's LangGraph-compatible API (8001)
 - Routes other `/api/*` endpoints to Gateway API (8001)
 - Routes non-API requests to Frontend (3000)
 - Centralized CORS handling
@@ -236,7 +231,7 @@ deer-flow/
 ├── backend/                 # Backend application
 │   ├── src/
 │   │   ├── gateway/        # Gateway API (port 8001)
-│   │   ├── agents/         # LangGraph agents (port 2024)
+│   │   ├── agents/         # LangGraph agent runtime used by Gateway
 │   │   ├── mcp/            # Model Context Protocol integration
 │   │   ├── skills/         # Skills system
 │   │   └── sandbox/        # Sandbox execution
@@ -256,8 +251,7 @@ Browser
   ↓
 Nginx (port 2026) ← Unified entry point
   ├→ Frontend (port 3000) ← / (non-API requests)
-  ├→ Gateway API (port 8001) ← /api/models, /api/mcp, /api/skills, /api/threads/*/artifacts
-  └→ LangGraph Server (port 2024) ← /api/langgraph/* (agent interactions)
+  └→ Gateway API (port 8001) ← /api/* and /api/langgraph/* (agent interactions)
 ```
 
 ## Development Workflow

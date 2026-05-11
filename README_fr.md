@@ -228,7 +228,7 @@ make down   # Stop and remove containers
 ```
 
 > [!NOTE]
-> Le serveur d'agents LangGraph fonctionne actuellement via `langgraph dev` (le serveur CLI open source).
+> Le runtime d'agent s'exécute actuellement dans la Gateway. nginx réécrit `/api/langgraph/*` vers l'API compatible LangGraph servie par la Gateway.
 
 Accès : http://localhost:2026
 
@@ -296,8 +296,8 @@ DeerFlow peut recevoir des tâches depuis des applications de messagerie. Les ca
 
 ```yaml
 channels:
-  # LangGraph Server URL (default: http://localhost:2024)
-  langgraph_url: http://localhost:2024
+  # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)
+  langgraph_url: http://localhost:8001/api
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
 

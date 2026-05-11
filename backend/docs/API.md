@@ -15,7 +15,7 @@ All APIs are accessed through the Nginx reverse proxy at port 2026.
 
 Base URL: `/api/langgraph`
 
-The LangGraph API is provided by the LangGraph server and follows the LangGraph SDK conventions.
+The LangGraph-compatible API is provided by Gateway's embedded agent runtime and follows the LangGraph SDK conventions.
 
 ### Threads
 
@@ -104,17 +104,10 @@ Content-Type: application/json
 **Recursion Limit:**
 
 `config.recursion_limit` caps the number of graph steps LangGraph will execute
-in a single run. The `/api/langgraph/*` endpoints go straight to the LangGraph
-server and therefore inherit LangGraph's native default of **25**, which is
-too low for plan-mode or subagent-heavy runs — the agent typically errors out
-with `GraphRecursionError` after the first round of subagent results comes
-back, before the lead agent can synthesize the final answer.
-
-DeerFlow's own Gateway and IM-channel paths mitigate this by defaulting to
-`100` in `build_run_config` (see `backend/app/gateway/services.py`), but
-clients calling the LangGraph API directly must set `recursion_limit`
-explicitly in the request body. `100` matches the Gateway default and is a
-safe starting point; increase it if you run deeply nested subagent graphs.
+in a single run. Gateway defaults to `100` in `build_run_config` (see
+`backend/app/gateway/services.py`), which is a safe starting point for plan-mode
+or subagent-heavy runs. Clients may still set a higher `recursion_limit`
+explicitly in the request body for deeply nested subagent graphs.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -567,12 +560,13 @@ location /api/ {
 
 ---
 
-## WebSocket Support
+## Streaming Support
 
-The LangGraph server supports WebSocket connections for real-time streaming. Connect to:
+Gateway's LangGraph-compatible API streams run events with Server-Sent Events (SSE):
 
-```
-ws://localhost:2026/api/langgraph/threads/{thread_id}/runs/stream
+```http
+POST /api/langgraph/threads/{thread_id}/runs/stream
+Accept: text/event-stream
 ```
 
 ---
@@ -608,13 +602,21 @@ const response = await fetch('/api/models');
 const data = await response.json();
 console.log(data.models);
 
-// Using EventSource for streaming
-const eventSource = new EventSource(
-  `/api/langgraph/threads/${threadId}/runs/stream`
-);
-eventSource.onmessage = (event) => {
-  console.log(JSON.parse(event.data));
-};
+// Create a run and stream SSE events
+const streamResponse = await fetch(`/api/langgraph/threads/${threadId}/runs/stream`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  },
+  body: JSON.stringify({
+    input: { messages: [{ role: "user", content: "Hello" }] },
+    stream_mode: ["values", "messages-tuple", "custom"],
+  }),
+});
+
+const reader = streamResponse.body?.getReader();
+// Decode and parse SSE frames from reader in your client code.
 ```
 
 ### cURL Examples
@@ -649,7 +651,6 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs \
   }'
 ```
 
-> The `/api/langgraph/*` endpoints bypass DeerFlow's Gateway and inherit
-> LangGraph's native `recursion_limit` default of 25, which is too low for
-> plan-mode or subagent runs. Set `config.recursion_limit` explicitly — see
-> the [Create Run](#create-run) section for details.
+> The `/api/langgraph/*` endpoints are served by DeerFlow's Gateway embedded
+> runtime. Gateway defaults `config.recursion_limit` to 100; set a higher value
+> only when you intentionally run deeply nested subagent graphs.

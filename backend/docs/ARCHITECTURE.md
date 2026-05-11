@@ -14,30 +14,28 @@ This document provides a comprehensive overview of the DeerFlow backend architec
 │                          Nginx (Port 2026)                               │
 │                    Unified Reverse Proxy Entry Point                      │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  /api/langgraph/*  →  LangGraph Server (2024)                      │  │
+│  │  /api/langgraph/*  →  Gateway LangGraph-compatible API (8001)      │  │
 │  │  /api/*            →  Gateway API (8001)                           │  │
 │  │  /*                →  Frontend (3000)                               │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────┬────────────────────────────────────────┘
                                   │
-          ┌───────────────────────┼───────────────────────┐
-          │                       │                       │
-          ▼                       ▼                       ▼
-┌─────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
-│   LangGraph Server  │ │    Gateway API      │ │     Frontend        │
-│     (Port 2024)     │ │    (Port 8001)      │ │    (Port 3000)      │
-│                     │ │                     │ │                     │
-│  - Agent Runtime    │ │  - Models API       │ │  - Next.js App      │
-│  - Thread Mgmt      │ │  - MCP Config       │ │  - React UI         │
-│  - SSE Streaming    │ │  - Skills Mgmt      │ │  - Chat Interface   │
-│  - Checkpointing    │ │  - File Uploads     │ │                     │
-│                     │ │  - Thread Cleanup   │ │                     │
-│                     │ │  - Artifacts        │ │                     │
-└─────────────────────┘ └─────────────────────┘ └─────────────────────┘
-          │                       │
-          │     ┌─────────────────┘
-          │     │
-          ▼     ▼
+          ┌───────────────────────┴───────────────────────┐
+          │                                               │
+          ▼                                               ▼
+┌─────────────────────────────────────────────┐ ┌─────────────────────┐
+│              Gateway API                    │ │     Frontend        │
+│              (Port 8001)                    │ │    (Port 3000)      │
+│                                             │ │                     │
+│  - LangGraph-compatible runs/threads API    │ │  - Next.js App      │
+│  - Embedded Agent Runtime                   │ │  - React UI         │
+│  - SSE Streaming                            │ │  - Chat Interface   │
+│  - Checkpointing                            │ │                     │
+│  - Models, MCP, Skills, Uploads, Artifacts  │ │                     │
+│  - Thread Cleanup                           │ │                     │
+└─────────────────────────────────────────────┘ └─────────────────────┘
+          │
+          ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                         Shared Configuration                              │
 │  ┌─────────────────────────┐  ┌────────────────────────────────────────┐ │
@@ -52,9 +50,9 @@ This document provides a comprehensive overview of the DeerFlow backend architec
 
 ## Component Details
 
-### LangGraph Server
+### Gateway Embedded Agent Runtime
 
-The LangGraph server is the core agent runtime, built on LangGraph for robust multi-agent workflow orchestration.
+The agent runtime is embedded in the FastAPI Gateway and built on LangGraph for robust multi-agent workflow orchestration. Nginx rewrites `/api/langgraph/*` to Gateway's native `/api/*` routes, so the public API remains compatible with LangGraph SDK clients without running a separate LangGraph server.
 
 **Entry Point**: `packages/harness/deerflow/agents/lead_agent/agent.py:make_lead_agent`
 
@@ -65,7 +63,7 @@ The LangGraph server is the core agent runtime, built on LangGraph for robust mu
 - Tool execution orchestration
 - SSE streaming for real-time responses
 
-**Configuration**: `langgraph.json`
+**Graph registry**: `langgraph.json` remains available for tooling and Studio compatibility.
 
 ```json
 {
@@ -78,12 +76,13 @@ The LangGraph server is the core agent runtime, built on LangGraph for robust mu
 
 ### Gateway API
 
-FastAPI application providing REST endpoints for non-agent operations.
+FastAPI application providing REST endpoints for both agent runs and non-agent operations.
 
 **Entry Point**: `app/gateway/app.py`
 
 **Routers**:
 - `models.py` - `/api/models` - Model listing and details
+- `thread_runs.py` / `runs.py` - `/api/threads/{id}/runs`, `/api/runs/*` - LangGraph-compatible runs and streaming
 - `mcp.py` - `/api/mcp` - MCP server configuration
 - `skills.py` - `/api/skills` - Skills management
 - `uploads.py` - `/api/threads/{id}/uploads` - File upload
@@ -91,7 +90,7 @@ FastAPI application providing REST endpoints for non-agent operations.
 - `artifacts.py` - `/api/threads/{id}/artifacts` - Artifact serving
 - `suggestions.py` - `/api/threads/{id}/suggestions` - Follow-up suggestion generation
 
-The web conversation delete flow is now split across both backend surfaces: LangGraph handles `DELETE /api/langgraph/threads/{thread_id}` for thread state, then the Gateway `threads.py` router removes DeerFlow-managed filesystem data via `Paths.delete_thread_dir()`.
+The web conversation delete flow first deletes Gateway-managed thread state through the LangGraph-compatible route, then the Gateway `threads.py` router removes DeerFlow-managed filesystem data via `Paths.delete_thread_dir()`.
 
 ### Agent Architecture
 
@@ -353,10 +352,10 @@ SKILL.md Format:
    POST /api/langgraph/threads/{thread_id}/runs
    {"input": {"messages": [{"role": "user", "content": "Hello"}]}}
 
-2. Nginx → LangGraph Server (2024)
-   Proxied to LangGraph server
+2. Nginx → Gateway API (8001)
+   `/api/langgraph/*` is rewritten to Gateway's LangGraph-compatible `/api/*` routes
 
-3. LangGraph Server
+3. Gateway embedded runtime
    a. Load/create thread state
    b. Execute middleware chain:
       - ThreadDataMiddleware: Set up paths
@@ -412,7 +411,7 @@ SKILL.md Format:
 ### Thread Cleanup Flow
 
 ```
-1. Client deletes conversation via LangGraph
+1. Client deletes conversation via the LangGraph-compatible Gateway route
    DELETE /api/langgraph/threads/{thread_id}
 
 2. Web UI follows up with Gateway cleanup
