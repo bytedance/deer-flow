@@ -46,12 +46,12 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    All services will start with hot-reload enabled:
    - Frontend changes are automatically reloaded
    - Backend changes trigger automatic restart
-   - Gateway embedded agent runtime restarts with backend changes
+   - Gateway-hosted LangGraph-compatible runtime supports hot-reload
 
 4. **Access the application**:
    - Web Interface: http://localhost:2026
    - API Gateway: http://localhost:2026/api/*
-   - LangGraph: http://localhost:2026/api/langgraph/*
+   - LangGraph-compatible API: http://localhost:2026/api/langgraph/*
 
 #### Docker Commands
 
@@ -94,7 +94,7 @@ Use these as practical starting points for development and review environments:
 If `make docker-init`, `make docker-start`, or `make docker-stop` fails on Linux with an error like below, your current user likely does not have permission to access the Docker daemon socket:
 
 ```text
-unable to get image 'deer-flow-dev-langgraph': permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
+unable to get image 'deer-flow-gateway': permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
 ```
 
 Recommended fix: add your current user to the `docker` group so Docker commands work without `sudo`.
@@ -131,7 +131,7 @@ Host Machine
 Docker Compose (deer-flow-dev)
   ├→ nginx (port 2026) ← Reverse proxy
   ├→ web (port 3000) ← Frontend with hot-reload
-  ├→ gateway (port 8001) ← Gateway API + embedded agent runtime with hot-reload
+  ├→ gateway (port 8001) ← Gateway API + LangGraph-compatible runtime with hot-reload
   └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
 ```
 
@@ -210,7 +210,7 @@ The nginx configuration provides:
 - Rewrites `/api/langgraph/*` to Gateway's LangGraph-compatible API (8001)
 - Routes other `/api/*` endpoints to Gateway API (8001)
 - Routes non-API requests to Frontend (3000)
-- Centralized CORS handling
+- Same-origin API routing; split-origin or port-forwarded browser clients should use the Gateway `GATEWAY_CORS_ORIGINS` allowlist
 - SSE/streaming support for real-time agent responses
 - Optimized timeouts for long-running operations
 
@@ -230,7 +230,7 @@ deer-flow/
 │       └── nginx.local.conf # Nginx config for local dev
 ├── backend/                 # Backend application
 │   ├── src/
-│   │   ├── gateway/        # Gateway API (port 8001)
+│   │   ├── gateway/        # Gateway API and LangGraph-compatible runtime (port 8001)
 │   │   ├── agents/         # LangGraph agent runtime used by Gateway
 │   │   ├── mcp/            # Model Context Protocol integration
 │   │   ├── skills/         # Skills system
@@ -251,7 +251,7 @@ Browser
   ↓
 Nginx (port 2026) ← Unified entry point
   ├→ Frontend (port 3000) ← / (non-API requests)
-  └→ Gateway API (port 8001) ← /api/* and /api/langgraph/* (agent interactions)
+  └→ Gateway API (port 8001) ← /api/* and /api/langgraph/* (LangGraph-compatible agent interactions)
 ```
 
 ## Development Workflow

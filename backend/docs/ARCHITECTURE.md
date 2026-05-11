@@ -14,8 +14,8 @@ This document provides a comprehensive overview of the DeerFlow backend architec
 │                          Nginx (Port 2026)                               │
 │                    Unified Reverse Proxy Entry Point                      │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  /api/langgraph/*  →  Gateway LangGraph-compatible API (8001)      │  │
-│  │  /api/*            →  Gateway API (8001)                           │  │
+│  │  /api/langgraph/*  →  Gateway LangGraph-compatible runtime (8001)  │  │
+│  │  /api/*            →  Gateway REST APIs (8001)                     │  │
 │  │  /*                →  Frontend (3000)                               │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────┬────────────────────────────────────────┘
@@ -76,7 +76,7 @@ The agent runtime is embedded in the FastAPI Gateway and built on LangGraph for 
 
 ### Gateway API
 
-FastAPI application providing REST endpoints for both agent runs and non-agent operations.
+FastAPI application providing REST endpoints plus the public LangGraph-compatible `/api/langgraph/*` runtime routes.
 
 **Entry Point**: `app/gateway/app.py`
 

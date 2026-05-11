@@ -24,6 +24,18 @@ class RunRepository(RunStore):
         self._sf = session_factory
 
     @staticmethod
+    def _normalize_model_name(model_name: str | None) -> str | None:
+        """Normalize model_name for storage: strip whitespace, truncate to 128 chars."""
+        if model_name is None:
+            return None
+        if not isinstance(model_name, str):
+            model_name = str(model_name)
+        normalized = model_name.strip()
+        if len(normalized) > 128:
+            normalized = normalized[:128]
+        return normalized
+
+    @staticmethod
     def _safe_json(obj: Any) -> Any:
         """Ensure obj is JSON-serializable. Falls back to model_dump() or str()."""
         if obj is None:
@@ -70,6 +82,7 @@ class RunRepository(RunStore):
         thread_id,
         assistant_id=None,
         user_id: str | None | _AutoSentinel = AUTO,
+        model_name: str | None = None,
         status="pending",
         multitask_strategy="reject",
         metadata=None,
@@ -85,6 +98,7 @@ class RunRepository(RunStore):
             thread_id=thread_id,
             assistant_id=assistant_id,
             user_id=resolved_user_id,
+            model_name=self._normalize_model_name(model_name),
             status=status,
             multitask_strategy=multitask_strategy,
             metadata_json=self._safe_json(metadata) or {},
