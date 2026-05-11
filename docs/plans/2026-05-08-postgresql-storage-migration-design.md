@@ -15,14 +15,14 @@
 - 结构化业务数据默认走 SQLite：
   - `database.backend: sqlite`
   - 包括 `users`、`tenants`、`threads_meta`、`runs`、`knowledge_bases`、`knowledge_base_documents` 等 ORM 表
-- 线程状态持久化单独走 `checkpointer`：
-  - 当前默认 `checkpointer.type: sqlite`
-  - 与 `database` 配置分离
+- 线程状态持久化由 `database` 统一控制：
+  - Checkpointer/Store 后端已跟随 `database.backend` 自动选择
+  - 旧的独立 `checkpointer` 配置段已废弃（保留向后兼容）
 - 运行事件 `run_events` 当前默认走内存：
   - 重启后丢失
 - 成本统计 `token usage` 当前默认走 `token_usage.json`
 - 用户记忆 `memory` 当前默认走 `memory.json`
-- 用户反馈 `feedback` 当前网关路由仍走 `feedback.json`
+- 用户反馈 `feedback` 已切换到 SQL 仓储（`FeedbackRepository`）
 - RAG 向量索引当前默认走 Chroma
 - 上传文件、产物、线程工作目录走本地文件系统
 
@@ -38,12 +38,14 @@
   - `backend/packages/harness/deerflow/persistence/feedback/sql.py`
   - `backend/packages/harness/deerflow/rag/backends/pgvector.py`
 - 仍然分裂或未切流的能力：
-  - `feedback` 路由仍使用 JSON 文件版
   - `token usage` 虽有 `PgUsageStorage` 原型，但未纳入统一 ORM/Alembic 体系
   - `run_events` 默认仍为内存
-  - `memory` 默认仍为文件
+  - `memory` 默认仍为文件（`StoreMemoryStorage` 已实现但未设为默认）
   - `RAG` 默认仍为 Chroma
-  - `checkpointer` 与 `database` 配置仍是两套源头
+- 已完成切流的能力：
+  - `feedback` 路由已使用 `FeedbackRepository`（SQL 仓储）
+  - `checkpointer` 配置已收口到 `database` 段（旧 `checkpointer` 段已废弃）
+  - `database.backend` 支持 `memory`、`sqlite`、`postgres` 三种模式
 
 因此，本方案不是“新增 PostgreSQL 支持”，而是“把已有的局部 PostgreSQL 支持收口成统一存储架构”。
 
@@ -108,12 +110,12 @@
 | 存储域 | 当前实现 | 当前默认后端 | 现状问题 | 目标状态 |
 | --- | --- | --- | --- | --- |
 | 业务表 | SQLAlchemy ORM | SQLite | 单机友好，但不利于多实例和统一备份 | PostgreSQL |
-| Checkpointer | LangGraph Saver | SQLite | 与 `database` 配置分裂 | PostgreSQL |
-| LangGraph Store | memory/sqlite/postgres | 实际常随运行时配置变化 | 记忆与线程状态可能不一致 | PostgreSQL |
+| Checkpointer | LangGraph Saver | 跟随 `database.backend` | ~~已收口到 `database` 段~~ ✅ 已完成 | PostgreSQL |
+| LangGraph Store | memory/sqlite/postgres | 跟随 `database.backend` | 记忆与线程状态可能不一致 | PostgreSQL |
 | Run Events | memory/db/jsonl | memory | 重启丢失、无法稳定审计 | PostgreSQL |
-| Feedback | JSON 文件版已在路由使用；SQL 仓储已存在 | `feedback.json` | 实现割裂，跨实例不一致 | PostgreSQL |
+| Feedback | SQL 仓储（`FeedbackRepository`） | SQLite/PostgreSQL（跟随 `database`） | ~~已切换到 SQL~~ ✅ 已完成 | PostgreSQL |
 | Token Usage | JSON 文件版已上线；PG 原型已存在 | `token_usage.json` | 统计、查询、保留策略差 | PostgreSQL |
-| Memory | 文件版默认；Store 版已存在 | `memory.json` | 与线程存储割裂，迁移脚本复杂 | PostgreSQL Store |
+| Memory | 文件版默认；`StoreMemoryStorage` 已实现（首选） | `memory.json`（文件）或 LangGraph Store | 默认仍为文件，Store 版已就绪待切换 | PostgreSQL Store |
 | RAG 元数据 | ORM 表 | SQLite | 与主业务一起受 SQLite 限制 | PostgreSQL |
 | RAG 向量索引 | Chroma / pgvector 原型 | Chroma | 另一个持久化系统，备份与运维分裂 | pgvector |
 | 内容安全审计 | JSON 文件 | `content_safety_logs.json` | 审计检索能力有限 | 可选 Phase 2 迁移到 PostgreSQL |
@@ -213,9 +215,11 @@ database:
   pool_size: 20
   echo_sql: false
 
-checkpointer:
-  type: postgres
-  connection_string: ""   # 可选，默认继承 database.postgres_url
+# checkpointer 段已废弃，Checkpointer/Store 自动跟随 database.backend
+# 保留仅为向后兼容，新部署无需配置
+# checkpointer:
+#   type: postgres
+#   connection_string: ""
 
 run_events:
   backend: db
@@ -238,9 +242,10 @@ database:
   backend: sqlite
   sqlite_dir: .deer-flow/data
 
-checkpointer:
-  type: sqlite
-  connection_string: checkpoints.db
+# checkpointer 段已废弃，自动跟随 database.backend=sqlite
+# checkpointer:
+#   type: sqlite
+#   connection_string: checkpoints.db
 
 run_events:
   backend: db
@@ -255,17 +260,24 @@ rag:
   vector_store_backend: chroma
 ```
 
+Memory 模式（单元测试 / CI）：
+
+```yaml
+database:
+  backend: memory
+  # 无持久化，适合测试隔离
+```
+
 推荐规则：
 
-1. `database.backend=postgres` 时，若下列配置为空，则自动继承主库连接串：
-   - `checkpointer.connection_string`
-   - `rag.pgvector_connection_string`
-2. `database.backend=postgres` 时，启动期默认值改为：
+1. `database.backend=postgres` 时，Checkpointer/Store 自动使用 PostgreSQL（无需额外配置）。
+2. `database.backend=postgres` 时，若 `rag.pgvector_connection_string` 为空，则自动继承 `database.postgres_url`。
+3. `database.backend=postgres` 时，启动期默认值改为：
    - `run_events.backend = db`
    - `cost.storage_backend = postgres`
    - `memory.storage_class = StoreMemoryStorage`
-3. 保留旧配置一段过渡期，但启动时打印 deprecation warning。
-4. 启动自检必须拒绝以下“分裂组合”：
+4. 旧 `checkpointer` 配置段保留向后兼容，但启动时打印 deprecation warning。
+5. 启动自检必须拒绝以下”分裂组合”：
    - `database.backend=postgres` 但 `run_events.backend=memory`
    - `database.backend=postgres` 但 `cost.storage_backend=json`
    - `database.backend=postgres` 但 `memory` 仍强制文件版
@@ -299,22 +311,25 @@ rag:
 3. 由 `cost` 中间件统一写 PostgreSQL。
 4. JSON 文件导入逻辑保留为一次性迁移脚本，不保留在线 fallback。
 
-#### 6.2.4 Feedback 切换为 SQL 仓储
+#### 6.2.4 Feedback ✅ 已完成
 
-当前已经有：
+Feedback 已完成 SQL 仓储切换：
 
-- `deerflow.persistence.feedback.model.FeedbackRow`
-- `deerflow.persistence.feedback.sql.FeedbackRepository`
+- 网关路由已使用 `FeedbackRepository`（SQL）
+- ORM Model `FeedbackRow` 已纳入 `Base.metadata`
+- 不再存在 JSON 文件版后端
 
-因此反馈迁移不是“新设计表结构”，而是：
+剩余工作：
 
-1. 路由从 `FeedbackStorage` 切到 `FeedbackRepository`
-2. 增加 `feedback.json -> feedback` 导入脚本
-3. 过渡期可保留只读兼容导入，不再保留双写
+1. ~~路由从 `FeedbackStorage` 切到 `FeedbackRepository`~~ ✅
+2. 若存在历史 `feedback.json` 数据，仍需一次性导入脚本
+3. 无需保留双写或在线 fallback
 
 #### 6.2.5 Memory 统一到 Store
 
-当前 `StoreMemoryStorage` 已经可以把 memory 写到 LangGraph Store。建议：
+`StoreMemoryStorage` 已实现，可将 memory 写入 LangGraph Store（跟随 `database.backend` 自动选择 memory/sqlite/postgres）。当 Store factory 可用时，系统优先使用 Store-backed 存储，否则 fallback 到文件版。
+
+建议：
 
 1. PostgreSQL 模式下强制默认使用 `StoreMemoryStorage`
 2. `memory.json` 仅作为历史数据来源，不再作为主存储
@@ -390,6 +405,7 @@ RAG 需要拆成两部分看：
 - `feedback`
 - `knowledge_bases`
 - `knowledge_base_documents`
+- `index_jobs`
 
 ### 7.2 新增表
 
@@ -557,10 +573,10 @@ rag_chunks
 5. 触发知识库全量 reindex 到 `pgvector`。
 6. 更新配置：
    - `database.backend = postgres`
-   - `checkpointer.type = postgres`
    - `run_events.backend = db`
    - `memory.storage_class = StoreMemoryStorage`
    - `rag.vector_store_backend = pgvector`
+   - （注：`checkpointer` 已自动跟随 `database.backend`，无需单独配置）
 7. 重启或重部署服务。
 8. 完成切换后执行验收：
    - 线程可读取
@@ -615,7 +631,7 @@ rag_chunks
 
 - `backend/packages/harness/deerflow/config/app_config.py`
 - `backend/packages/harness/deerflow/config/database_config.py`
-- `backend/packages/harness/deerflow/config/checkpointer_config.py`
+- ~~`backend/packages/harness/deerflow/config/checkpointer_config.py`~~ ✅ 已废弃，收口到 database
 - `backend/packages/harness/deerflow/config/cost_config.py`
 - `backend/packages/harness/deerflow/config/rag_config.py`
 - `backend/packages/harness/deerflow/config/memory_config.py`
@@ -623,15 +639,15 @@ rag_chunks
 目标：
 
 - 统一默认值
-- 增加启动期一致性校验
-- 增加 deprecation warning
+- 增加启动期一致性校验（尚未实现）
+- 增加 deprecation warning（尚未实现）
 
 ### 10.2 持久化层
 
 需要重点改造：
 
 - 新增 `token_usage` model/repository
-- 将 `feedback` 路由切换到 `FeedbackRepository`
+- ~~将 `feedback` 路由切换到 `FeedbackRepository`~~ ✅ 已完成
 - 视 Phase 2 决定是否新增 `content_safety_logs` model/repository
 - 正式化 `pgvector` 表定义与索引策略
 
@@ -710,3 +726,41 @@ rag_chunks
 6. 充分复用现有 PostgreSQL 基础能力，重点解决“未切流”和“多套配置并存”问题，而不是重写存储框架。
 
 这条路径改动面可控、收益明确，也最符合当前项目已经具备的技术基础。
+
+---
+
+## 14. 实施进度跟踪
+
+> 最后更新：2026-05-11
+
+### 14.1 已完成
+
+| 项目 | 状态 | 说明 |
+| --- | --- | --- |
+| `database.backend` 支持 memory/sqlite/postgres | ✅ | `DatabaseConfig` 已实现三模式 |
+| Checkpointer 配置收口到 `database` 段 | ✅ | 旧 `checkpointer` 段保留向后兼容 |
+| Store Provider 跟随 `database.backend` | ✅ | memory/sqlite/postgres 三模式 |
+| Feedback 切换到 SQL 仓储 | ✅ | `FeedbackRepository` 已在路由使用 |
+| `StoreMemoryStorage` 实现 | ✅ | 可将 memory 写入 LangGraph Store |
+| `run_events` DB 后端实现 | ✅ | `runtime/events/store/db.py` |
+| `PgUsageStorage` 原型实现 | ✅ | 带 JSON fallback |
+| pgvector 后端原型实现 | ✅ | `rag/backends/pgvector.py` |
+| ORM 表定义完整 | ✅ | users, tenants, threads_meta, runs, run_events, feedback, knowledge_bases, knowledge_base_documents, index_jobs |
+
+### 14.2 待实施
+
+| 项目 | 优先级 | 对应章节 |
+| --- | --- | --- |
+| 启动期配置一致性校验（拒绝分裂组合） | P0 | §6.1 |
+| `database.backend=postgres` 时子系统默认值自动继承 | P0 | §6.1 |
+| `token_usage` 正式 ORM Model + Alembic | P1 | §6.2.3, §7.2.1 |
+| pgvector 表正式建模 + Alembic | P1 | §6.3.2, §7.2.2 |
+| `memory` 默认切换为 `StoreMemoryStorage`（postgres 模式） | P1 | §6.2.5 |
+| `run_events` 默认切换为 `db`（postgres 模式） | P1 | §6.1 |
+| 迁移脚本：`sqlite -> postgres` | P2 | §10.4 |
+| 迁移脚本：`feedback.json -> feedback`（历史数据） | P2 | §10.4 |
+| 迁移脚本：`token_usage.json -> token_usage` | P2 | §10.4 |
+| 迁移脚本：`memory.json -> Store` | P2 | §10.4 |
+| 迁移脚本：`reindex_rag_to_pgvector` | P2 | §10.4 |
+| `content_safety_logs` 表（可选） | P3 | §6.4, §7.2.3 |
+| Deprecation warning 输出 | P3 | §6.1 |

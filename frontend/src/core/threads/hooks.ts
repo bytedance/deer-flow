@@ -5,15 +5,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { GenUISSEManager } from "@/core/genui/sse-recovery";
 import { type UIBlock, useBlockStore } from "@/core/genui/store";
 
 import { fetchGateway, getAPIClient } from "../api";
 import { getBackendBaseURL } from "../config";
-import { getCurrentTenantId } from "../tenant";
 import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
+import { getCurrentTenantId } from "../tenant";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -114,6 +115,7 @@ export function useThreadStream({
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
+  const sseManagerRef = useRef<GenUISSEManager | null>(null);
   const listeners = useRef({
     onSend,
     onStart,
@@ -144,6 +146,15 @@ export function useThreadStream({
       setOnStreamThreadId(normalizedThreadId);
     }
     threadIdRef.current = normalizedThreadId;
+
+    sseManagerRef.current?.disconnect();
+    sseManagerRef.current = normalizedThreadId
+      ? new GenUISSEManager(normalizedThreadId)
+      : null;
+
+    return () => {
+      sseManagerRef.current?.disconnect();
+    };
   }, [threadId]);
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
@@ -281,6 +292,7 @@ export function useThreadStream({
     onError(error) {
       setOptimisticMessages([]);
       toast.error(getStreamErrorMessage(error));
+      sseManagerRef.current?.scheduleReconnect();
     },
     onFinish(state) {
       listeners.current.onFinish?.(state.values);
