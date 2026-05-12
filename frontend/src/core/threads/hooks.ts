@@ -692,7 +692,7 @@ export function useDeleteThread() {
         },
       );
 
-      if (!response.ok) {
+      if (!response.ok && response.status !== 404) {
         const error = await response
           .json()
           .catch(() => ({ detail: "Failed to delete thread." }));

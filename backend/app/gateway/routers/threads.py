@@ -26,6 +26,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.runtime import serialize_channel_values
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
 # ---------------------------------------------------------------------------
@@ -243,7 +244,7 @@ def _derive_thread_status(checkpoint_tuple) -> str:
 
 
 @router.delete("/{thread_id}", response_model=ThreadDeleteResponse)
-@require_permission("threads", "delete", owner_check=True, require_existing=True)
+@require_permission("threads", "delete", owner_check=True, require_existing=False)
 async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread.
 
@@ -334,6 +335,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             **body.metadata,
             "created_at": now,
             "tenant_id": get_current_tenant_id(),
+            "user_id": get_effective_user_id(),
         }
         await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
     except Exception:
@@ -410,6 +412,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     # Only includes threads belonging to the current tenant.
     # -----------------------------------------------------------------------
     current_tenant = get_current_tenant_id()
+    current_user = get_effective_user_id()
     try:
         async for checkpoint_tuple in checkpointer.alist(None):
             cfg = getattr(checkpoint_tuple, "config", {})
@@ -428,6 +431,13 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             # attaches tenant metadata to the checkpoint.
             ckpt_tenant = ckpt_meta.get("tenant_id")
             if ckpt_tenant is not None and ckpt_tenant != current_tenant:
+                continue
+
+            # User isolation: only show threads belonging to the current user.
+            # Threads without a user_id in metadata are legacy/unattributed —
+            # skip them to prevent cross-user visibility.
+            ckpt_user = ckpt_meta.get("user_id")
+            if ckpt_user is None or ckpt_user != current_user:
                 continue
 
             # Extract state values (title) from the checkpoint's channel_values
