@@ -208,6 +208,16 @@ async def _ensure_admin_user(app: FastAPI) -> None:
                         )
                         logger.info("Auto-created missing tenant %r (referenced by users table)", tid)
 
+            # Repair tenants with empty/null timestamps (caused by earlier migration bugs)
+            await conn.execute(
+                text("UPDATE tenants SET created_at = :now WHERE created_at IS NULL OR created_at = ''"),
+                {"now": now},
+            )
+            await conn.execute(
+                text("UPDATE tenants SET updated_at = :now WHERE updated_at IS NULL OR updated_at = ''"),
+                {"now": now},
+            )
+
     # Check session factory BEFORE trying get_local_provider(), which raises
     # a cryptic RuntimeError when the persistence engine isn't ready yet.
     sf = get_session_factory()
