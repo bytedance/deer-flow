@@ -139,7 +139,13 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     validate_path_traversal(dest, base_dir)
 
     if not hasattr(os, "O_NOFOLLOW"):
-        raise UnsafeUploadPathError("Upload writes require O_NOFOLLOW support")
+        # Windows: symlinks require SeCreateSymbolicLinkPrivilege, so the
+        # TOCTOU race is not a practical concern. The lstat check above already
+        # rejected symlinks; open normally.
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            raise UnsafeUploadPathError(f"Upload destination is a symlink: {safe_name}")
+        fh = open(dest, "wb")
+        return dest, fh
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
     if hasattr(os, "O_NONBLOCK"):

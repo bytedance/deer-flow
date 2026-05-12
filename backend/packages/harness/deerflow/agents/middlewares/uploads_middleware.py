@@ -163,6 +163,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """
         kwargs_files = (message.additional_kwargs or {}).get("files")
         if not isinstance(kwargs_files, list) or not kwargs_files:
+            logger.debug("UploadsMiddleware._files_from_kwargs: no files in additional_kwargs (keys=%s)", list((message.additional_kwargs or {}).keys()))
             return None
 
         files = []
@@ -173,6 +174,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if not filename or Path(filename).name != filename:
                 continue
             if uploads_dir is not None and not (uploads_dir / filename).is_file():
+                logger.warning("UploadsMiddleware: file %r not found at %s, skipping", filename, uploads_dir / filename)
                 continue
             files.append(
                 {
@@ -223,6 +225,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             except RuntimeError:
                 pass  # get_config() raises outside a runnable context (e.g. unit tests)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id()) if thread_id else None
+        logger.info("UploadsMiddleware.before_agent: thread_id=%s, uploads_dir=%s, exists=%s", thread_id, uploads_dir, uploads_dir.exists() if uploads_dir else None)
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
