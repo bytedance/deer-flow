@@ -83,10 +83,10 @@ python -m app.gateway.auth.reset_admin --email user@example.com
 
 ### 完全重置
 
-删除用户数据库，重启后重新访问 `/setup` 创建新 admin：
+删除统一 SQLite 数据库，重启后重新访问 `/setup` 创建新 admin：
 
 ```bash
-rm -f backend/.deer-flow/users.db
+rm -f backend/.deer-flow/data/deerflow.db
 # 重启服务后访问 http://localhost:2026/setup
 ```
 
@@ -94,7 +94,7 @@ rm -f backend/.deer-flow/users.db
 
 | 文件 | 内容 |
 |------|------|
-| `.deer-flow/users.db` | SQLite 用户数据库（密码哈希、角色） |
+| `.deer-flow/data/deerflow.db` | 统一 SQLite 数据库（users、threads_meta、runs、feedback 等应用数据） |
 | `.deer-flow/users/{user_id}/threads/{thread_id}/user-data/` | 用户线程的 workspace、uploads、outputs |
 | `.deer-flow/users/{user_id}/memory.json` | 用户级 memory |
 | `.deer-flow/users/{user_id}/agents/{agent_name}/` | 用户自定义 agent 配置、SOUL 和 agent memory |
@@ -126,7 +126,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 - **标准模式**（`make dev`）：完全兼容；无 admin 时访问 `/setup` 初始化
 - **Gateway 模式**（`make dev-pro`）：完全兼容
-- **Docker 部署**：完全兼容，`.deer-flow/users.db` 需持久化卷挂载
+- **Docker 部署**：完全兼容，`.deer-flow/data/deerflow.db` 需持久化卷挂载
 - **IM 渠道**（Feishu/Slack/Telegram）：通过 Gateway 内部认证通信，使用 `default` 用户桶
 - **DeerFlowClient**（嵌入式）：不经过 HTTP，不受认证影响
 

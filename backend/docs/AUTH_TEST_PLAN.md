@@ -19,7 +19,7 @@
 
 ```bash
 # 清除已有数据
-rm -f backend/.deer-flow/users.db
+rm -f backend/.deer-flow/data/deerflow.db
 
 # 选择模式启动
 make dev          # 标准模式
@@ -521,7 +521,7 @@ curl -s -X POST $BASE/api/v1/auth/register \
 
 ```bash
 # 检查数据库
-sqlite3 backend/.deer-flow/users.db "SELECT email, password_hash FROM users LIMIT 3;"
+sqlite3 backend/.deer-flow/data/deerflow.db "SELECT email, password_hash FROM users LIMIT 3;"
 ```
 
 **预期：** `password_hash` 以 `$2b$` 开头（bcrypt 格式）
@@ -631,7 +631,7 @@ sqlite3 backend/.deer-flow/users.db "SELECT email, password_hash FROM users LIMI
 #### TC-UI-15: reset_admin 后重新登录
 
 1. 执行 `cd backend && python -m app.gateway.auth.reset_admin`
-2. 使用新密码登录
+2. 从 `.deer-flow/admin_initial_credentials.txt` 读取新密码并登录
 3. **预期：** 跳转到 `/setup` 页面（`needs_setup` 被重置为 true）
 4. 旧 session 已失效
 
@@ -745,19 +745,19 @@ curl -s -X POST http://localhost:2026/api/threads/search \
 
 ### 5.3 数据库 Schema 兼容
 
-#### TC-UPG-05: 无 users.db 时创建 schema 但不创建默认用户
+#### TC-UPG-05: 无 deerflow.db 时创建 schema 但不创建默认用户
 
 ```bash
-ls -la backend/.deer-flow/users.db
-sqlite3 backend/.deer-flow/users.db "SELECT COUNT(*) FROM users;"
+ls -la backend/.deer-flow/data/deerflow.db
+sqlite3 backend/.deer-flow/data/deerflow.db "SELECT COUNT(*) FROM users;"
 ```
 
 **预期：** 文件存在，`sqlite3` 可查到 `users` 表含 `needs_setup`、`token_version` 列；未调用 `/initialize` 前用户数为 0
 
-#### TC-UPG-06: users.db WAL 模式
+#### TC-UPG-06: deerflow.db WAL 模式
 
 ```bash
-sqlite3 backend/.deer-flow/users.db "PRAGMA journal_mode;"
+sqlite3 backend/.deer-flow/data/deerflow.db "PRAGMA journal_mode;"
 ```
 
 **预期：** 返回 `wal`
@@ -808,9 +808,9 @@ make dev
 ```
 
 **预期：**
-- [ ] 服务正常启动（忽略 `users.db`，无 auth 相关代码不报错）
+- [ ] 服务正常启动（忽略 `deerflow.db`，无 auth 相关代码不报错）
 - [ ] 旧对话数据仍然可访问
-- [ ] `users.db` 文件残留但不影响运行
+- [ ] `deerflow.db` 文件残留但不影响运行
 
 #### TC-UPG-12: 再次升级到 auth 分支
 
@@ -821,8 +821,8 @@ make dev
 ```
 
 **预期：**
-- [ ] 识别已有 `users.db`，不重新创建 admin
-- [ ] 旧的 admin 账号仍可登录（如果回退期间未删 `users.db`）
+- [ ] 识别已有 `deerflow.db`，不重新创建 admin
+- [ ] 旧的 admin 账号仍可登录（如果回退期间未删 `deerflow.db`）
 
 ### 5.7 Admin 初始化与 reset_admin
 
@@ -831,7 +831,7 @@ make dev
 #### TC-UPG-13: 未初始化 admin 时重启不创建默认账号
 
 ```bash
-rm -f backend/.deer-flow/users.db
+rm -f backend/.deer-flow/data/deerflow.db
 make dev
 make stop
 
@@ -858,7 +858,7 @@ cat backend/.deer-flow/admin_initial_credentials.txt
 - [ ] 凭据文件包含 email + password 行
 - [ ] 该用户下次登录返回 `needs_setup=true`
 
-#### TC-UPG-15: 未初始化 admin 期间普通用户注册不可用
+#### TC-UPG-15: 未初始化 admin 期间普通用户注册策略边界
 
 ```bash
 # admin 尚不存在，普通用户尝试注册
@@ -945,7 +945,7 @@ for i in 1 2 3; do
 done
 
 # 检查 admin 数量
-sqlite3 backend/.deer-flow/users.db \
+sqlite3 backend/.deer-flow/data/deerflow.db \
   "SELECT COUNT(*) FROM users WHERE system_role='admin';"
 ```
 
@@ -1090,7 +1090,7 @@ curl -s -X POST $BASE/api/v1/auth/register \
 wait
 
 # 检查用户数
-sqlite3 backend/.deer-flow/users.db \
+sqlite3 backend/.deer-flow/data/deerflow.db \
   "SELECT COUNT(*) FROM users WHERE email='race@example.com';"
 ```
 
@@ -1200,13 +1200,16 @@ curl -s -w "%{http_code}" -X DELETE "$BASE/api/threads/$TID" \
 ```bash
 cd backend
 python -m app.gateway.auth.reset_admin
-# 记录密码 P1
+cp .deer-flow/admin_initial_credentials.txt /tmp/deerflow-reset-p1.txt
+P1=$(awk -F': ' '/^password:/ {print $2}' /tmp/deerflow-reset-p1.txt)
 
 python -m app.gateway.auth.reset_admin
-# 记录密码 P2
+cp .deer-flow/admin_initial_credentials.txt /tmp/deerflow-reset-p2.txt
+P2=$(awk -F': ' '/^password:/ {print $2}' /tmp/deerflow-reset-p2.txt)
 ```
 
 **预期：**
+- [ ] `.deer-flow/admin_initial_credentials.txt` 每次都会被重写，文件权限为 `0600`
 - [ ] P1 ≠ P2（每次生成新随机密码）
 - [ ] P1 不可用，只有 P2 有效
 - [ ] `token_version` 递增了 2
@@ -1359,7 +1362,8 @@ done
 ```bash
 GW=http://localhost:8001
 
-for path in /health /api/v1/auth/setup-status /api/v1/auth/login/local /api/v1/auth/register; do
+for path in /health /api/v1/auth/setup-status /api/v1/auth/login/local \
+            /api/v1/auth/register /api/v1/auth/initialize /api/v1/auth/logout; do
   echo "$path: $(curl -s -w '%{http_code}' -o /dev/null $GW$path)"
 done
 # 预期: 200 或 405/422（方法不对但不是 401）
@@ -1434,9 +1438,9 @@ done
 >
 > 前置条件：
 > - `.env` 中设置 `AUTH_JWT_SECRET`（否则每次容器重启 session 全部失效）
-> - `DEER_FLOW_HOME` 挂载到宿主机目录（持久化 `users.db`）
+> - `DEER_FLOW_HOME` 挂载到宿主机目录（持久化 `deerflow.db`）
 
-#### TC-DOCKER-01: users.db 通过 volume 持久化
+#### TC-DOCKER-01: deerflow.db 通过 volume 持久化
 
 ```bash
 # 启动容器
@@ -1451,13 +1455,13 @@ curl -s -X POST $BASE/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"docker-test@example.com","password":"DockerTest1!"}' -w "\nHTTP %{http_code}"
 
-# 检查宿主机上的 users.db
-ls -la ${DEER_FLOW_HOME:-backend/.deer-flow}/users.db
-sqlite3 ${DEER_FLOW_HOME:-backend/.deer-flow}/users.db \
+# 检查宿主机上的 deerflow.db
+ls -la ${DEER_FLOW_HOME:-backend/.deer-flow}/data/deerflow.db
+sqlite3 ${DEER_FLOW_HOME:-backend/.deer-flow}/data/deerflow.db \
   "SELECT email FROM users WHERE email='docker-test@example.com';"
 ```
 
-**预期：** users.db 在宿主机 `DEER_FLOW_HOME` 目录中，查询可见刚注册的用户。
+**预期：** deerflow.db 在宿主机 `DEER_FLOW_HOME` 目录中，查询可见刚注册的用户。
 
 #### TC-DOCKER-02: 重启容器后 session 保持
 
@@ -1625,13 +1629,15 @@ curl -s -D - -X POST $BASE/api/v1/auth/login/local \
 #### TC-EDGE-05: HTTP 无 max_age / HTTPS 有 max_age
 
 ```bash
+GW=http://localhost:8001
+
 # HTTP
-curl -s -D - -X POST $BASE/api/v1/auth/login/local \
+curl -s -D - -X POST $GW/api/v1/auth/login/local \
   -d "username=admin@example.com&password=正确密码" 2>/dev/null \
   | grep "access_token=" | grep -oi "max-age=[0-9]*" || echo "NO max-age (HTTP session cookie)"
 
-# HTTPS
-curl -s -D - -X POST $BASE/api/v1/auth/login/local \
+# HTTPS：直连 Gateway 才能用 X-Forwarded-Proto 模拟 HTTPS；nginx 会覆盖该 header
+curl -s -D - -X POST $GW/api/v1/auth/login/local \
   -H "X-Forwarded-Proto: https" \
   -d "username=admin@example.com&password=正确密码" 2>/dev/null \
   | grep "access_token=" | grep -oi "max-age=[0-9]*"
