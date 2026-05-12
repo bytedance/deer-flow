@@ -7,7 +7,7 @@ import {
   Conversation,
   ConversationContent,
 } from "@/components/ai-elements/conversation";
-import { GenUIBlockList } from "@/components/genui";
+
 import { Button } from "@/components/ui/button";
 import { submitInteraction } from "@/core/genui";
 import { useI18n } from "@/core/i18n/hooks";
@@ -485,7 +485,6 @@ export function MessageList({
           }
         })}
         {thread.isLoading && <StreamingIndicator className="my-4" />}
-        <GenUIBlockList threadId={threadId} onInteraction={handleInteraction} />
         <div style={{ height: `${paddingBottom}px` }} />
       </ConversationContent>
     </Conversation>

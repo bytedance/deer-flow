@@ -92,6 +92,17 @@ export default function ChatPage() {
     },
     [sendMessage, threadId],
   );
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { threadId: eventThreadId, callbackId, payload } = (e as CustomEvent).detail;
+      if (eventThreadId !== threadId) return;
+      const text = JSON.stringify({ type: "ui_interaction", callback_id: callbackId, payload });
+      void sendMessage(threadId, { text, files: [] }, undefined, { additionalKwargs: { hide_from_ui: true } });
+    };
+    window.addEventListener("genui:interaction-submitted", handler);
+    return () => window.removeEventListener("genui:interaction-submitted", handler);
+  }, [threadId, sendMessage]);
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);

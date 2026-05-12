@@ -2,7 +2,7 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -92,6 +92,17 @@ export default function AgentChatPage() {
     },
     [sendMessage, threadId, agent_name],
   );
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { threadId: eventThreadId, callbackId, payload } = (e as CustomEvent).detail;
+      if (eventThreadId !== threadId) return;
+      const text = JSON.stringify({ type: "ui_interaction", callback_id: callbackId, payload });
+      void sendMessage(threadId, { text, files: [] }, { agent_name }, { additionalKwargs: { hide_from_ui: true } });
+    };
+    window.addEventListener("genui:interaction-submitted", handler);
+    return () => window.removeEventListener("genui:interaction-submitted", handler);
+  }, [threadId, sendMessage, agent_name]);
 
   const handleStop = useCallback(async () => {
     await thread.stop();

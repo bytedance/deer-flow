@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
-from app.gateway.services import build_run_config, resolve_agent_factory
 from deerflow.agents.middlewares.genui_middleware import (
     get_interaction_store,
     process_interaction,
 )
-from deerflow.runtime import DisconnectMode, run_agent
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +36,9 @@ async def submit_ui_interaction(
 ) -> UIInteractionResponse:
     """Submit a user interaction for an interactive UI block.
 
-    Validates the callback, checks expiry and idempotency,
-    then resumes the agent graph with the interaction as a HumanMessage.
+    Validates the callback, checks expiry and idempotency, and registers the
+    submission. The frontend is responsible for sending the interaction payload
+    as a follow-up message through the normal streaming path.
     """
     store = get_interaction_store()
     record = store.get(req.callback_id)
@@ -67,50 +64,10 @@ async def submit_ui_interaction(
         )
 
     logger.info(
-        "UI interaction submitted, resuming graph: callback=%s thread=%s",
+        "UI interaction registered: callback=%s thread=%s",
         req.callback_id,
         thread_id,
     )
-
-    bridge = get_stream_bridge(request)
-    run_mgr = get_run_manager(request)
-    run_ctx = get_run_context(request)
-
-    agent_factory = resolve_agent_factory(None)
-    config = build_run_config(thread_id, None, None)
-    graph_input = {"messages": [human_message]}
-
-    try:
-        run_record = await run_mgr.create_or_reject(
-            thread_id,
-            None,
-            on_disconnect=DisconnectMode.continue_,
-            metadata={"source": "ui_interaction", "callback_id": req.callback_id},
-            kwargs={"input": graph_input, "config": config},
-            multitask_strategy="reject",
-        )
-    except Exception as exc:
-        logger.warning("Failed to create run for interaction resumption: %s", exc)
-        return UIInteractionResponse(
-            success=True,
-            message="Interaction received (graph busy)",
-            callback_id=req.callback_id,
-        )
-
-    task = asyncio.create_task(
-        run_agent(
-            bridge,
-            run_mgr,
-            run_record,
-            ctx=run_ctx,
-            agent_factory=agent_factory,
-            graph_input=graph_input,
-            config=config,
-            stream_modes=["values", "messages", "custom"],
-            stream_subgraphs=False,
-        )
-    )
-    run_record.task = task
 
     return UIInteractionResponse(
         success=True,

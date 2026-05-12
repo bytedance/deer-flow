@@ -23,10 +23,15 @@ async function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export interface SubmitInteractionOptions {
+  onSuccess?: (callbackId: string, payload: Record<string, unknown>) => void;
+}
+
 export async function submitInteraction(
   threadId: string,
   callbackId: string,
   payload: Record<string, unknown>,
+  options?: SubmitInteractionOptions,
 ): Promise<InteractionResponse> {
   const store = useBlockStore.getState();
   store.setInteractionLoading(callbackId);
@@ -56,6 +61,12 @@ export async function submitInteraction(
 
       const data: InteractionResponse = await response.json();
       store.setInteractionSuccess(callbackId);
+      options?.onSuccess?.(callbackId, payload);
+      window.dispatchEvent(
+        new CustomEvent("genui:interaction-submitted", {
+          detail: { threadId, callbackId, payload },
+        }),
+      );
       return data;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
