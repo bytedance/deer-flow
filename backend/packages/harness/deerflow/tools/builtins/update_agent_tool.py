@@ -27,7 +27,7 @@ from langgraph.types import Command
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
@@ -118,9 +118,13 @@ def update_agent(
         return _err("update_agent is only available inside a custom agent's chat. There is no agent_name in the current runtime context, so there is nothing to update. If you are inside the bootstrap flow, use setup_agent instead.")
 
     # Resolve the active user so that updates only affect this user's agent.
-    # ``get_effective_user_id`` returns DEFAULT_USER_ID when no auth context
-    # is set (matching how memory and thread storage behave).
-    user_id = get_effective_user_id()
+    # ``resolve_runtime_user_id`` prefers ``runtime.context["user_id"]`` (set by
+    # the gateway from the auth-validated request) and falls back to the
+    # contextvar, then DEFAULT_USER_ID. This matches setup_agent so a user
+    # creating an agent and later refining it always touches the same files,
+    # even if the contextvar gets lost across an async/thread boundary
+    # (issue #2782 / #2862 class of bugs).
+    user_id = resolve_runtime_user_id(runtime)
 
     # Reject an unknown ``model`` *before* touching the filesystem. Otherwise
     # ``_resolve_model_name`` silently falls back to the default at runtime
