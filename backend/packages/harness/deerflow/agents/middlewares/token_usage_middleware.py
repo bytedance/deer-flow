@@ -278,7 +278,7 @@ class TokenUsageMiddleware(AgentMiddleware):
         # Walk backward through consecutive ToolMessages before the new AIMessage
         # so that multiple concurrent task tool calls all get their subagent tokens
         # written back to the same dispatch message (merging into one update).
-        state_updates: list = []
+        state_updates: dict[int, AIMessage] = {}
         if len(messages) >= 2:
             from deerflow.tools.builtins.task_tool import pop_cached_subagent_usage
 
@@ -296,40 +296,19 @@ class TokenUsageMiddleware(AgentMiddleware):
                     dispatch_idx = idx - 1
                     while dispatch_idx >= 0:
                         candidate = messages[dispatch_idx]
-                        if isinstance(candidate, AIMessage) and _has_tool_call(
-                            candidate, tool_msg.tool_call_id
-                        ):
+                        if isinstance(candidate, AIMessage) and _has_tool_call(candidate, tool_msg.tool_call_id):
                             # Accumulate into an existing update for the same
                             # AIMessage (multiple task calls in one response),
                             # or merge fresh from the original message.
-                            existing_update = next(
-                                (u for u in state_updates if u.id == candidate.id),
-                                None,
-                            )
-                            prev = (
-                                existing_update.usage_metadata
-                                if existing_update
-                                else (getattr(candidate, "usage_metadata", None) or {})
-                            )
+                            existing_update = state_updates.get(dispatch_idx)
+                            prev = existing_update.usage_metadata if existing_update else (getattr(candidate, "usage_metadata", None) or {})
                             merged = {
                                 **prev,
-                                "input_tokens": prev.get("input_tokens", 0)
-                                + subagent_usage["input_tokens"],
-                                "output_tokens": prev.get("output_tokens", 0)
-                                + subagent_usage["output_tokens"],
-                                "total_tokens": prev.get("total_tokens", 0)
-                                + subagent_usage["total_tokens"],
+                                "input_tokens": prev.get("input_tokens", 0) + subagent_usage["input_tokens"],
+                                "output_tokens": prev.get("output_tokens", 0) + subagent_usage["output_tokens"],
+                                "total_tokens": prev.get("total_tokens", 0) + subagent_usage["total_tokens"],
                             }
-                            updated = candidate.model_copy(
-                                update={"usage_metadata": merged}
-                            )
-                            if existing_update:
-                                state_updates = [
-                                    updated if u.id == candidate.id else u
-                                    for u in state_updates
-                                ]
-                            else:
-                                state_updates.append(updated)
+                            state_updates[dispatch_idx] = candidate.model_copy(update={"usage_metadata": merged})
                             break
                         dispatch_idx -= 1
                 idx -= 1
@@ -337,7 +316,7 @@ class TokenUsageMiddleware(AgentMiddleware):
         last = messages[-1]
         if not isinstance(last, AIMessage):
             if state_updates:
-                return {"messages": state_updates}
+                return {"messages": [state_updates[idx] for idx in sorted(state_updates)]}
             return None
 
         usage = getattr(last, "usage_metadata", None)
@@ -363,12 +342,12 @@ class TokenUsageMiddleware(AgentMiddleware):
         additional_kwargs = dict(getattr(last, "additional_kwargs", {}) or {})
 
         if additional_kwargs.get(TOKEN_USAGE_ATTRIBUTION_KEY) == attribution:
-            return {"messages": state_updates} if state_updates else None
+            return {"messages": [state_updates[idx] for idx in sorted(state_updates)]} if state_updates else None
 
         additional_kwargs[TOKEN_USAGE_ATTRIBUTION_KEY] = attribution
         updated_msg = last.model_copy(update={"additional_kwargs": additional_kwargs})
-        state_updates.append(updated_msg)
-        return {"messages": state_updates}
+        state_updates[len(messages) - 1] = updated_msg
+        return {"messages": [state_updates[idx] for idx in sorted(state_updates)]}
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:

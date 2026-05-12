@@ -1212,3 +1212,66 @@ def test_terminal_event_usage_none_when_no_records(monkeypatch):
     completed = [e for e in events if e["type"] == "task_completed"]
     assert len(completed) == 1
     assert completed[0]["usage"] is None
+
+
+def test_subagent_usage_cache_is_skipped_when_token_usage_is_disabled(monkeypatch):
+    config = _make_subagent_config()
+    app_config = SimpleNamespace(token_usage=SimpleNamespace(enabled=False))
+    runtime = _make_runtime(app_config=app_config)
+    records = [{"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}]
+    result = _make_result(FakeSubagentStatus.COMPLETED, result="done", token_usage_records=records)
+
+    task_tool_module._subagent_usage_cache.clear()
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, app_config: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _, *, app_config: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+
+    _run_task_tool(
+        runtime=runtime,
+        description="test",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-disabled-cache",
+    )
+
+    assert task_tool_module.pop_cached_subagent_usage("tc-disabled-cache") is None
+
+
+def test_subagent_usage_cache_is_cleared_when_polling_raises(monkeypatch):
+    config = _make_subagent_config()
+    app_config = SimpleNamespace(token_usage=SimpleNamespace(enabled=True))
+    runtime = _make_runtime(app_config=app_config)
+
+    task_tool_module._subagent_usage_cache["tc-error"] = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, app_config: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _, *, app_config: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", MagicMock(side_effect=RuntimeError("poll failed")))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+
+    with pytest.raises(RuntimeError, match="poll failed"):
+        _run_task_tool(
+            runtime=runtime,
+            description="test",
+            prompt="do work",
+            subagent_type="general-purpose",
+            tool_call_id="tc-error",
+        )
+
+    assert task_tool_module.pop_cached_subagent_usage("tc-error") is None
