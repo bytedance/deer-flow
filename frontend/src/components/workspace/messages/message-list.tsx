@@ -10,6 +10,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { submitInteraction } from "@/core/genui";
+import { useBlockStore } from "@/core/genui/store";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildTokenDebugSteps,
@@ -206,6 +207,27 @@ export function MessageList({
     () => buildTokenDebugSteps(messages, t),
     [messages, t],
   );
+
+  const claimedBlockIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const group of groupedMessages) {
+      if (group.type === "assistant:processing") {
+        ids.push(...extractBlockIdsFromMessages(group.messages));
+      }
+    }
+    return ids;
+  }, [groupedMessages]);
+
+  const preStreamBlockIdsRef = useRef<string[]>([]);
+  const wasLoadingRef = useRef(false);
+  useEffect(() => {
+    if (thread.isLoading && !wasLoadingRef.current) {
+      preStreamBlockIdsRef.current = Array.from(
+        useBlockStore.getState().blocks.keys(),
+      );
+    }
+    wasLoadingRef.current = thread.isLoading;
+  }, [thread.isLoading]);
 
   const renderAssistantCopyButton = useCallback((messages: Message[]) => {
     const clipboardData = [...messages]
@@ -513,7 +535,11 @@ export function MessageList({
         })}
         {thread.isLoading && <StreamingIndicator className="my-4" />}
         {thread.isLoading && (
-          <GenUIBlockList threadId={threadId} onInteraction={handleInteraction} />
+          <GenUIBlockList
+            threadId={threadId}
+            excludeBlockIds={[...claimedBlockIds, ...preStreamBlockIdsRef.current]}
+            onInteraction={handleInteraction}
+          />
         )}
         <div style={{ height: `${paddingBottom}px` }} />
       </ConversationContent>
