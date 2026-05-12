@@ -47,6 +47,9 @@ postgres = [
     "psycopg-pool>=3.3.0",
 ]
 pymupdf = ["pymupdf4llm>=0.0.17"]
+chroma = [
+    "chromadb>=1.5.9",
+]
 
 [build-system]
 requires = ["hatchling"]
