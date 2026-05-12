@@ -75,11 +75,7 @@ export default function FormBlock({ block }: FormBlockProps) {
   };
 
   if (interactionState?.status === "submitted") {
-    return (
-      <div className="rounded-lg border border-green-200 bg-green-50 p-4 dark:border-green-800 dark:bg-green-950" role="status">
-        <p className="text-sm text-green-800 dark:text-green-200">Form submitted successfully.</p>
-      </div>
-    );
+    return null;
   }
 
   if (interactionState?.status === "expired") {
