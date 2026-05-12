@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.utils import sanitize_log_param
+from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -136,6 +137,24 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 runtime_context.setdefault(key, context[key])
 
 
+def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
+    """Stamp the authenticated user into the run context for background tools.
+
+    Tool execution may happen after the request handler has returned, so tools
+    that persist user-scoped files should not rely only on ambient ContextVars.
+    The value comes from server-side auth state, never from client context.
+    """
+
+    user = getattr(request.state, "user", None)
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return
+
+    runtime_context = config.setdefault("context", {})
+    if isinstance(runtime_context, dict):
+        runtime_context["user_id"] = str(user_id)
+
+
 def resolve_agent_factory(assistant_id: str | None):
     """Resolve the agent factory callable from config.
 
@@ -249,6 +268,23 @@ async def start_run(
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
+    body_context = getattr(body, "context", None) or {}
+    model_name = body_context.get("model_name")
+
+    # Coerce non-string model_name values to str before truncation.
+    if model_name is not None and not isinstance(model_name, str):
+        model_name = str(model_name)
+
+    # Validate model against the allowlist when a model_name is provided.
+    if model_name:
+        app_config = get_app_config()
+        resolved = app_config.get_model_config(model_name)
+        if resolved is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name!r} is not in the configured model allowlist",
+            )
+
     try:
         record = await run_mgr.create_or_reject(
             thread_id,
@@ -257,6 +293,7 @@ async def start_run(
             metadata=body.metadata or {},
             kwargs={"input": body.input, "config": body.config},
             multitask_strategy=body.multitask_strategy,
+            model_name=model_name,
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -288,6 +325,7 @@ async def start_run(
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
     merge_run_context_overrides(config, getattr(body, "context", None))
+    inject_authenticated_user_context(config, request)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 

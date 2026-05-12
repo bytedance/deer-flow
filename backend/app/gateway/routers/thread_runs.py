@@ -68,6 +68,27 @@ class RunResponse(BaseModel):
     updated_at: str = ""
 
 
+class ThreadTokenUsageModelBreakdown(BaseModel):
+    tokens: int = 0
+    runs: int = 0
+
+
+class ThreadTokenUsageCallerBreakdown(BaseModel):
+    lead_agent: int = 0
+    subagent: int = 0
+    middleware: int = 0
+
+
+class ThreadTokenUsageResponse(BaseModel):
+    thread_id: str
+    total_tokens: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_runs: int = 0
+    by_model: dict[str, ThreadTokenUsageModelBreakdown] = Field(default_factory=dict)
+    by_caller: ThreadTokenUsageCallerBreakdown = Field(default_factory=ThreadTokenUsageCallerBreakdown)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -368,10 +389,10 @@ async def list_run_events(
     return await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)
 
 
-@router.get("/{thread_id}/token-usage")
+@router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
 @require_permission("threads", "read", owner_check=True)
-async def thread_token_usage(thread_id: str, request: Request) -> dict:
+async def thread_token_usage(thread_id: str, request: Request) -> ThreadTokenUsageResponse:
     """Thread-level token usage aggregation."""
     run_store = get_run_store(request)
     agg = await run_store.aggregate_tokens_by_thread(thread_id)
-    return {"thread_id": thread_id, **agg}
+    return ThreadTokenUsageResponse(thread_id=thread_id, **agg)

@@ -10,6 +10,7 @@ from langgraph.store.memory import InMemoryStore
 
 from app.gateway.routers import threads
 from deerflow.config.paths import Paths
+from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -433,6 +434,59 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
         assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
 
 
+# ── Metadata filter validation at API boundary ────────────────────────────────
+
+
+def test_search_threads_rejects_invalid_key_at_api_boundary() -> None:
+    """Keys that don't match [A-Za-z0-9_-]+ are rejected by the Pydantic
+    validator on ThreadSearchRequest.metadata — 422 from both backends.
+    """
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"metadata": {"bad;key": "x"}})
+
+    assert response.status_code == 422
+
+
+def test_search_threads_rejects_unsupported_value_type_at_api_boundary() -> None:
+    """Value types outside (None, bool, int, float, str) are rejected."""
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"metadata": {"env": ["a", "b"]}})
+
+    assert response.status_code == 422
+
+
+def test_search_threads_returns_400_for_backend_invalid_metadata_filter() -> None:
+    """If the backend still raises InvalidMetadataFilterError (defense in
+    depth), the handler surfaces it as HTTP 400.
+    """
+    app, _store, _checkpointer = _build_thread_app()
+    thread_store = app.state.thread_store
+
+    async def _raise(**kwargs):
+        raise InvalidMetadataFilterError("rejected")
+
+    with TestClient(app) as client:
+        with patch.object(thread_store, "search", side_effect=_raise):
+            response = client.post("/api/threads/search", json={"metadata": {"valid_key": "x"}})
+
+    assert response.status_code == 400
+    assert "rejected" in response.json()["detail"]
+
+
+def test_search_threads_succeeds_with_valid_metadata() -> None:
+    """Sanity check: valid metadata passes through without error."""
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"metadata": {"env": "prod"}})
+
+    assert response.status_code == 200
+
+
 # ── DELETE endpoint: DB record cleanup ───────────────────────────────────────
 
 
@@ -539,3 +593,4 @@ def test_delete_thread_route_succeeds_when_db_stores_absent(tmp_path):
 
     assert response.status_code == 200
     assert response.json()["success"] is True
+

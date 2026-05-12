@@ -65,6 +65,40 @@ export function accumulateUsage(messages: Message[]): TokenUsage | null {
   return hasUsage ? cumulative : null;
 }
 
+function hasNonZeroUsage(
+  usage: TokenUsage | null | undefined,
+): usage is TokenUsage {
+  return (
+    usage !== null &&
+    usage !== undefined &&
+    (usage.inputTokens > 0 || usage.outputTokens > 0 || usage.totalTokens > 0)
+  );
+}
+
+function addUsage(base: TokenUsage, delta: TokenUsage): TokenUsage {
+  return {
+    inputTokens: base.inputTokens + delta.inputTokens,
+    outputTokens: base.outputTokens + delta.outputTokens,
+    totalTokens: base.totalTokens + delta.totalTokens,
+  };
+}
+
+export function selectHeaderTokenUsage({
+  backendUsage,
+  messages,
+  pendingMessages = [],
+}: {
+  backendUsage?: TokenUsage | null;
+  messages: Message[];
+  pendingMessages?: Message[];
+}): TokenUsage | null {
+  if (hasNonZeroUsage(backendUsage)) {
+    const pendingUsage = accumulateUsage(pendingMessages);
+    return pendingUsage ? addUsage(backendUsage, pendingUsage) : backendUsage;
+  }
+  return accumulateUsage(messages);
+}
+
 /**
  * Format a token count for display: 1234 -> "1,234", 12345 -> "12.3K"
  */

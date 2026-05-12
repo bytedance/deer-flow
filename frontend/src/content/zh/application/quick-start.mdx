@@ -1,6 +1,6 @@
 ---
 title: 快速上手
-description: 本指南引导你使用 `make dev` 工作流在本地机器上启动 DeerFlow 应用。所有四个服务（LangGraph、Gateway、前端、nginx）一起启动，通过单个 URL 访问。
+description: 本指南引导你使用 `make dev` 工作流在本地机器上启动 DeerFlow 应用。Gateway、前端和 nginx 会一起启动，通过单个 URL 访问。
 ---
 
 import { Callout, Cards, Steps } from "nextra/components";
@@ -12,7 +12,7 @@ import { Callout, Cards, Steps } from "nextra/components";
   3.12+、Node.js 22+ 的机器，以及至少一个 LLM API Key。
 </Callout>
 
-本指南引导你使用 `make dev` 工作流在本地机器上启动 DeerFlow 应用。所有四个服务（LangGraph、Gateway、前端、nginx）一起启动，通过单个 URL 访问。
+本指南引导你使用 `make dev` 工作流在本地机器上启动 DeerFlow 应用。Gateway、前端和 nginx 会一起启动，通过单个 URL 访问。
 
 ## 前置条件
 
@@ -88,8 +88,7 @@ make dev
 
 这会启动：
 
-- LangGraph 服务，端口 `2024`
-- Gateway API，端口 `8001`
+- Gateway API 和嵌入式 Agent 运行时，端口 `8001`
 - 前端，端口 `3000`
 - nginx 反向代理，端口 `2026`
 
@@ -113,15 +112,13 @@ make stop
 
 | 服务      | 日志文件             |
 | --------- | -------------------- |
-| LangGraph | `logs/langgraph.log` |
 | Gateway   | `logs/gateway.log`   |
 | 前端      | `logs/frontend.log`  |
 | nginx     | `logs/nginx.log`     |
 
 <Callout type="tip">
   如果有问题，先检查日志文件。大多数启动错误（缺失 API
-  Key、配置解析失败）会出现在 <code>logs/langgraph.log</code> 或{" "}
-  <code>logs/gateway.log</code> 中。
+  Key、配置解析失败）会出现在 <code>logs/gateway.log</code> 中。
 </Callout>
 
 <Cards num={2}>

@@ -1499,12 +1499,13 @@ def write_file_tool(
     content: str,
     append: bool = False,
 ) -> str:
-    """Write text content to a file.
+    """Write text content to a file. By default this overwrites the target file; set append to true to add content to the end without replacing existing content.
 
     Args:
         description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
         content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        append: Whether to append content to the end of the file instead of overwriting it. Defaults to false.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)

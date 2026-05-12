@@ -10,11 +10,11 @@ from weakref import WeakValueDictionary
 from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
-from deerflow.mcp.tools import _make_sync_tool_wrapper
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE
+from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
@@ -235,4 +235,4 @@ async def skill_manage_tool(
     )
 
 
-skill_manage_tool.func = _make_sync_tool_wrapper(_skill_manage_impl, "skill_manage")
+skill_manage_tool.func = make_sync_tool_wrapper(_skill_manage_impl, "skill_manage")

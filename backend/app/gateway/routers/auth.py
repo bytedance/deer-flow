@@ -305,7 +305,7 @@ async def login_local(
 async def register(request: Request, response: Response, body: RegisterRequest):
     """Register a new user account (always 'user' role).
 
-    Admin is auto-created on first boot. This endpoint creates regular users.
+    The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
     """
     try:

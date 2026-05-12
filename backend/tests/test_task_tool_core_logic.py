@@ -777,22 +777,27 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
 
 
 def test_cleanup_scheduled_on_cancellation(monkeypatch):
-    """Verify cancellation schedules deferred cleanup for the background task."""
+    """Verify cancellation handler synchronously cleans up after shielded wait."""
     config = _make_subagent_config()
     events = []
     cleanup_calls = []
-    scheduled_cleanup_coros = []
     poll_count = 0
 
     def get_result(_: str):
         nonlocal poll_count
         poll_count += 1
-        if poll_count == 1:
+        # Main loop polls RUNNING twice, then shielded wait gets COMPLETED
+        if poll_count <= 2:
             return _make_result(FakeSubagentStatus.RUNNING, ai_messages=[])
         return _make_result(FakeSubagentStatus.COMPLETED, result="done")
 
-    async def cancel_on_first_sleep(_: float) -> None:
-        raise asyncio.CancelledError
+    sleep_count = 0
+
+    async def cancel_on_second_sleep(_: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 2:
+            raise asyncio.CancelledError
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(
@@ -804,12 +809,7 @@ def test_cleanup_scheduled_on_cancellation(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_first_sleep)
-    monkeypatch.setattr(
-        task_tool_module.asyncio,
-        "create_task",
-        lambda coro: scheduled_cleanup_coros.append(coro) or _DummyScheduledTask(),
-    )
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_second_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
         task_tool_module,
@@ -826,24 +826,47 @@ def test_cleanup_scheduled_on_cancellation(monkeypatch):
             tool_call_id="tc-cancelled-cleanup",
         )
 
-    assert cleanup_calls == []
-    assert len(scheduled_cleanup_coros) == 1
-
-    asyncio.run(scheduled_cleanup_coros.pop())
-
+    # Cleanup happens synchronously within the cancellation handler
     assert cleanup_calls == ["tc-cancelled-cleanup"]
 
 
 def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
-    """Verify deferred cleanup gives up after a bounded number of polls."""
+    """Verify cancellation handler survives a shielded-wait timeout gracefully.
+
+    When the subagent never reaches a terminal state, the shielded wait times
+    out (or is interrupted), the handler reports whatever usage it can, calls
+    cleanup (which is a no-op for non-terminal tasks), and re-raises.
+    """
     config = _make_subagent_config()
-    config.timeout_seconds = 1
     events = []
+    report_calls = []
     cleanup_calls = []
-    scheduled_cleanup_coros = []
+    scheduled_cleanups = []
+
+    # Always return RUNNING — subagent never finishes
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
+    )
 
     async def cancel_on_first_sleep(_: float) -> None:
         raise asyncio.CancelledError
+
+    def fake_report_subagent_usage(runtime, result):
+        report_calls.append((runtime, result))
+
+    class DummyCleanupTask:
+        def __init__(self, coro):
+            self.coro = coro
+
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+    def fake_create_task(coro):
+        scheduled_cleanups.append(coro)
+        coro.close()
+        return DummyCleanupTask(coro)
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(
@@ -852,19 +875,10 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
-
-    monkeypatch.setattr(
-        task_tool_module,
-        "get_background_task_result",
-        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
-    )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_first_sleep)
-    monkeypatch.setattr(
-        task_tool_module.asyncio,
-        "create_task",
-        lambda coro: scheduled_cleanup_coros.append(coro) or _DummyScheduledTask(),
-    )
+    monkeypatch.setattr(task_tool_module.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", fake_report_subagent_usage)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
         task_tool_module,
@@ -881,13 +895,73 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
             tool_call_id="tc-cancelled-timeout",
         )
 
-    async def bounded_sleep(_seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(task_tool_module.asyncio, "sleep", bounded_sleep)
-    asyncio.run(scheduled_cleanup_coros.pop())
-
+    # Non-terminal tasks cannot be cleaned immediately; a deferred cleanup
+    # keeps polling after the parent cancellation path exits.
     assert cleanup_calls == []
+    assert len(scheduled_cleanups) == 1
+    # _report_subagent_usage is called (but skips because result has no records)
+    assert len(report_calls) == 1
+
+
+def test_cancellation_wait_uses_subagent_polling_budget(monkeypatch):
+    """Cancelled parent waits on the existing subagent polling budget, not a fixed timeout."""
+    config = _make_subagent_config()
+    events = []
+    report_calls = []
+    cleanup_calls = []
+    sleep_count = 0
+    result_polls = 0
+    terminal_result = _make_result(FakeSubagentStatus.COMPLETED, result="done")
+
+    def get_result(_: str):
+        nonlocal result_polls
+        result_polls += 1
+        if result_polls < 5:
+            return _make_result(FakeSubagentStatus.RUNNING, ai_messages=[])
+        return terminal_result
+
+    async def cancel_then_continue(_: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 1:
+            raise asyncio.CancelledError
+
+    def fake_report_subagent_usage(runtime, result):
+        report_calls.append((runtime, result))
+
+    async def fail_on_fixed_timeout(awaitable, *, timeout=None):
+        raise AssertionError(f"cancellation wait should not use fixed timeout={timeout}")
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_then_continue)
+    monkeypatch.setattr(task_tool_module.asyncio, "wait_for", fail_on_fixed_timeout)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", fake_report_subagent_usage)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: cleanup_calls.append(task_id),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run_task_tool(
+            runtime=_make_runtime(),
+            description="执行任务",
+            prompt="cancel task",
+            subagent_type="general-purpose",
+            tool_call_id="tc-cancel-budget",
+        )
+
+    assert report_calls == [(_make_runtime(), terminal_result)]
+    assert cleanup_calls == ["tc-cancel-budget"]
 
 
 def test_cancellation_calls_request_cancel(monkeypatch):
@@ -895,7 +969,6 @@ def test_cancellation_calls_request_cancel(monkeypatch):
     config = _make_subagent_config()
     events = []
     cancel_requests = []
-    scheduled_cleanup_coros = []
 
     async def cancel_on_first_sleep(_: float) -> None:
         raise asyncio.CancelledError
@@ -915,11 +988,6 @@ def test_cancellation_calls_request_cancel(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_first_sleep)
-    monkeypatch.setattr(
-        task_tool_module.asyncio,
-        "create_task",
-        lambda coro: (coro.close(), scheduled_cleanup_coros.append(None))[-1] or _DummyScheduledTask(),
-    )
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
         task_tool_module,
@@ -987,3 +1055,80 @@ def test_task_tool_returns_cancelled_message(monkeypatch):
     assert output == "Task cancelled by user."
     assert any(e.get("type") == "task_cancelled" for e in events)
     assert cleanup_calls == ["tc-poll-cancelled"]
+
+
+def test_cancellation_reports_subagent_usage(monkeypatch):
+    """Verify cancellation handler waits (shielded) for subagent terminal state,
+    then reports the final token usage before re-raising CancelledError.
+
+    The report must happen synchronously within the cancellation handler so
+    the parent worker's finally block sees the updated journal totals.
+    """
+    config = _make_subagent_config()
+    events = []
+    report_calls = []
+    cleanup_calls = []
+
+    # Terminal result with token usage collected after cancellation processing
+    cancel_result = _make_result(FakeSubagentStatus.CANCELLED, error="Cancelled by user")
+    cancel_result.token_usage_records = [{"source_run_id": "sub-run-1", "caller": "subagent:gp", "input_tokens": 50, "output_tokens": 25, "total_tokens": 75}]
+    cancel_result.usage_reported = False
+
+    poll_count = 0
+
+    def get_result(_: str):
+        nonlocal poll_count
+        poll_count += 1
+        # Main loop polls 3 times (RUNNING each time to keep looping)
+        if poll_count <= 3:
+            running = _make_result(FakeSubagentStatus.RUNNING, ai_messages=[])
+            running.token_usage_records = []
+            running.usage_reported = False
+            return running
+        # Shielded wait poll gets the terminal result
+        return cancel_result
+
+    sleep_count = 0
+
+    async def cancel_on_third_sleep(_: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 3:
+            raise asyncio.CancelledError
+
+    def fake_report_subagent_usage(runtime, result):
+        report_calls.append((runtime, result))
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_third_sleep)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", fake_report_subagent_usage)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda _: None)
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: cleanup_calls.append(task_id),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run_task_tool(
+            runtime=_make_runtime(),
+            description="执行任务",
+            prompt="cancel me",
+            subagent_type="general-purpose",
+            tool_call_id="tc-cancel-report",
+        )
+
+    # _report_subagent_usage is called synchronously within the cancellation
+    # handler (after the shielded wait), before CancelledError is re-raised.
+    assert len(report_calls) == 1
+    assert report_calls[0][1] is cancel_result
+    assert cleanup_calls == ["tc-cancel-report"]

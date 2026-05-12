@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
+from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent
 from deerflow.config.memory_config import MemoryConfig
 
@@ -18,6 +20,14 @@ def _messages() -> list:
         HumanMessage(content="user-2"),
         AIMessage(content="assistant-2"),
     ]
+
+
+def _dynamic_context_reminder(msg_id: str = "reminder-1") -> HumanMessage:
+    return HumanMessage(
+        content="<system-reminder>\n<current_date>2026-05-08, Friday</current_date>\n</system-reminder>",
+        id=msg_id,
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
 
 
 def _runtime(thread_id: str | None = "thread-1", agent_name: str | None = None) -> SimpleNamespace:
@@ -96,6 +106,38 @@ def test_before_summarization_hook_receives_messages_before_compression() -> Non
     assert captured[0].agent_name is None
     assert isinstance(result["messages"][0], RemoveMessage)
     assert result["messages"][1].content.startswith("Here is a summary")
+
+
+def test_dynamic_context_reminder_is_preserved_across_summarization() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+    reminder = _dynamic_context_reminder()
+
+    result = middleware.before_model(
+        {
+            "messages": [
+                reminder,
+                HumanMessage(content="user-1"),
+                AIMessage(content="assistant-1"),
+                HumanMessage(content="user-2"),
+            ]
+        },
+        _runtime(),
+    )
+
+    assert len(captured) == 1
+    assert [message.content for message in captured[0].messages_to_summarize] == ["user-1"]
+    assert captured[0].preserved_messages[0] is reminder
+
+    emitted = result["messages"]
+    assert isinstance(emitted[0], RemoveMessage)
+    assert emitted[1].name == "summary"
+    assert emitted[2] is reminder
+
+    followup_state = {"messages": [*emitted[1:], HumanMessage(content="Follow-up", id="msg-2")]}
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        assert DynamicContextMiddleware().before_agent(followup_state, _runtime()) is None
 
 
 def test_before_summarization_hook_not_called_when_threshold_not_met() -> None:

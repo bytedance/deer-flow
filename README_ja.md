@@ -181,7 +181,7 @@ make down   # コンテナを停止して削除
 ```
 
 > [!NOTE]
-> LangGraphエージェントサーバーは現在`langgraph dev`（オープンソースCLIサーバー）経由で実行されます。
+> Agentランタイムは現在Gateway内で実行されます。`/api/langgraph/*`はnginxによってGatewayのLangGraph-compatible APIへ書き換えられます。
 
 アクセス: http://localhost:2026
 
@@ -249,8 +249,8 @@ DeerFlowはメッセージングアプリからのタスク受信をサポート
 
 ```yaml
 channels:
-  # LangGraphサーバーURL（デフォルト: http://localhost:2024）
-  langgraph_url: http://localhost:2024
+  # LangGraph-compatible Gateway API base URL（デフォルト: http://localhost:8001/api）
+  langgraph_url: http://localhost:8001/api
   # Gateway API URL（デフォルト: http://localhost:8001）
   gateway_url: http://localhost:8001
 

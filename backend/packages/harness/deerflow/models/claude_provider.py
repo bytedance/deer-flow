@@ -196,6 +196,10 @@ class ClaudeChatModel(ChatAnthropic):
         enforced by both the Anthropic API and AWS Bedrock.  Breakpoints are
         placed on the *last* eligible blocks because later breakpoints cover a
         larger prefix and yield better cache hit rates.
+
+        The system prompt is expected to be fully static (no per-user memory or
+        current date).  Dynamic context is injected per-turn via
+        DynamicContextMiddleware as a <system-reminder> in the first HumanMessage.
         """
         MAX_CACHE_BREAKPOINTS = 4
 
