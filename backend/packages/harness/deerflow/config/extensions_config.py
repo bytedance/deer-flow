@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from deerflow.config.runtime_paths import existing_project_file
+
 
 class McpOAuthConfig(BaseModel):
     """OAuth configuration for an MCP server (HTTP/SSE transports)."""
@@ -73,8 +75,8 @@ class ExtensionsConfig(BaseModel):
         Priority:
         1. If provided `config_path` argument, use it.
         2. If provided `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, check for `extensions_config.json` in the current directory, then in the parent directory.
-        4. For backward compatibility, also check for `mcp_config.json` if `extensions_config.json` is not found.
+        3. Otherwise, search the caller project root for `extensions_config.json`, then `mcp_config.json`.
+        4. For backward compatibility, also search legacy backend/repository-root defaults.
         5. If not found, return None (extensions are optional).
 
         Args:
@@ -83,8 +85,9 @@ class ExtensionsConfig(BaseModel):
         Resolution order:
             1. If provided `config_path` argument, use it.
             2. If provided `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable, use it.
-            3. Otherwise, search backend/repository-root defaults for
+            3. Otherwise, search the caller project root for
                `extensions_config.json`, then legacy `mcp_config.json`.
+            4. Finally, search backend/repository-root defaults for monorepo compatibility.
 
         Returns:
             Path to the extensions config file if found, otherwise None.
@@ -100,6 +103,10 @@ class ExtensionsConfig(BaseModel):
                 raise FileNotFoundError(f"Extensions config file specified by environment variable `DEER_FLOW_EXTENSIONS_CONFIG_PATH` not found at {path}")
             return path
         else:
+            project_config = existing_project_file(("extensions_config.json", "mcp_config.json"))
+            if project_config is not None:
+                return project_config
+
             backend_dir = Path(__file__).resolve().parents[4]
             repo_root = backend_dir.parent
             for path in (

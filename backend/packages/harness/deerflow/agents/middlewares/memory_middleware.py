@@ -1,7 +1,7 @@
 """Middleware for memory mechanism."""
 
 import logging
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -11,6 +11,10 @@ from langgraph.runtime import Runtime
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.config.memory_config import get_memory_config
+from deerflow.runtime.user_context import get_effective_user_id
+
+if TYPE_CHECKING:
+    from deerflow.config.memory_config import MemoryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +37,17 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
     state_schema = MemoryMiddlewareState
 
-    def __init__(self, agent_name: str | None = None):
+    def __init__(self, agent_name: str | None = None, *, memory_config: "MemoryConfig | None" = None):
         """Initialize the MemoryMiddleware.
 
         Args:
             agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            memory_config: Explicit memory config. When omitted, legacy global
+                config fallback is used.
         """
         super().__init__()
         self._agent_name = agent_name
+        self._memory_config = memory_config
 
     @override
     def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
@@ -53,7 +60,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         Returns:
             None (no state changes needed from this middleware).
         """
-        config = get_memory_config()
+        config = self._memory_config or get_memory_config()
         if not config.enabled:
             return None
 
@@ -86,11 +93,16 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         # Queue the filtered conversation for memory update
         correction_detected = detect_correction(filtered_messages)
         reinforcement_detected = not correction_detected and detect_reinforcement(filtered_messages)
+        # Capture user_id at enqueue time while the request context is still alive.
+        # threading.Timer fires on a different thread where ContextVar values are not
+        # propagated, so we must store user_id explicitly in ConversationContext.
+        user_id = get_effective_user_id()
         queue = get_memory_queue()
         queue.add(
             thread_id=thread_id,
             messages=filtered_messages,
             agent_name=self._agent_name,
+            user_id=user_id,
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
         )

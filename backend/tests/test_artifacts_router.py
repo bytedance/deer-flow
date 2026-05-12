@@ -3,7 +3,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.responses import FileResponse
@@ -36,7 +36,7 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
 
     request = _make_request()
-    response = asyncio.run(artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/note.txt", request))
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/note.txt", request))
 
     assert bytes(response.body).decode("utf-8") == text
     assert response.media_type == "text/plain"
@@ -49,7 +49,7 @@ def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
 
-    response = asyncio.run(artifacts_router.get_artifact("thread-1", f"mnt/user-data/outputs/{filename}", _make_request()))
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/{filename}", _make_request()))
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
@@ -63,7 +63,7 @@ def test_get_artifact_forces_download_for_active_content_in_skill_archive(tmp_pa
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: skill_path)
 
-    response = asyncio.run(artifacts_router.get_artifact("thread-1", f"mnt/user-data/outputs/sample.skill/{filename}", _make_request()))
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/sample.skill/{filename}", _make_request()))
 
     assert response.headers.get("content-disposition", "").startswith("attachment;")
     assert bytes(response.body) == content.encode("utf-8")
@@ -75,7 +75,7 @@ def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeyp
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
 
-    app = FastAPI()
+    app = make_authed_test_app()
     app.include_router(artifacts_router.router)
 
     with TestClient(app) as client:
@@ -93,7 +93,7 @@ def test_get_artifact_download_true_forces_attachment_for_skill_archive(tmp_path
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: skill_path)
 
-    app = FastAPI()
+    app = make_authed_test_app()
     app.include_router(artifacts_router.router)
 
     with TestClient(app) as client:

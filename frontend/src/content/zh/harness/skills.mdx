@@ -1,0 +1,159 @@
+---
+title: 技能
+description: 技能不仅仅是提示词。它是一个自包含的能力包，可以包含结构化指令、分步工作流、领域最佳实践、支撑资源和工具配置。技能按需加载——在任务需要时注入内容，否则不影响上下文。
+---
+
+import { Callout, Cards, FileTree, Steps } from "nextra/components";
+
+# 技能
+
+<Callout type="info" emoji="🎯">
+  技能是面向任务的能力包，教会 Agent 如何完成特定类型的工作。基础 Agent
+  保持通用；技能在需要时提供专业化。
+</Callout>
+
+技能不仅仅是提示词。它是一个自包含的能力包，可以包含结构化指令、分步工作流、领域最佳实践、支撑资源和工具配置。技能按需加载——在任务需要时注入内容，否则不影响上下文。
+
+## 技能包含什么
+
+每个技能位于 `skills/public/`（或用户创建技能的 `skills/custom/`）下自己的子目录中。目录包含一个 `SKILL.md` 文件，定义技能的元数据、指令和工作流。
+
+<FileTree>
+  <FileTree.Folder name="skills/" defaultOpen>
+    <FileTree.Folder name="public/" defaultOpen>
+      <FileTree.Folder name="deep-research/" defaultOpen>
+        <FileTree.File name="SKILL.md" />
+      </FileTree.Folder>
+      <FileTree.Folder name="data-analysis/">
+        <FileTree.File name="SKILL.md" />
+      </FileTree.Folder>
+    </FileTree.Folder>
+    <FileTree.Folder name="custom/">
+      <FileTree.File name="（你的自定义技能放在这里）" />
+    </FileTree.Folder>
+  </FileTree.Folder>
+</FileTree>
+
+`SKILL.md` 文件是技能的权威定义，由 `skills/parser.py` 解析以提取技能名称、描述、类别、指令以及任何依赖项或工具需求。
+
+## 内置技能
+
+DeerFlow 内置以下公共技能：
+
+| 技能                           | 描述                                         |
+| ------------------------------ | -------------------------------------------- |
+| `deep-research`                | 带来源收集、交叉验证和结构化输出的多步骤研究 |
+| `data-analysis`                | 数据探索、统计分析和洞察生成                 |
+| `chart-visualization`          | 从数据创建图表和可视化                       |
+| `ppt-generation`               | 演示文稿幻灯片生成                           |
+| `image-generation`             | AI 图像生成工作流                            |
+| `code-documentation`           | 自动化代码文档生成                           |
+| `newsletter-generation`        | 新闻简报内容创作                             |
+| `podcast-generation`           | 播客脚本和大纲生成                           |
+| `academic-paper-review`        | 结构化学术论文分析                           |
+| `consulting-analysis`          | 商业咨询框架和分析                           |
+| `systematic-literature-review` | 文献综述方法论和综合                         |
+| `github-deep-research`         | 仓库和代码深度研究                           |
+| `frontend-design`              | 前端设计和 UI 工作流                         |
+| `web-design-guidelines`        | 网页设计标准和审查                           |
+| `video-generation`             | 视频内容规划和生成                           |
+
+## 技能生命周期
+
+<Steps>
+
+### 发现和加载
+
+`skills/loader.py` 中的 `load_skills()` 扫描配置技能路径下的 `public/` 和 `custom/` 目录。它每次调用都重新读取 `ExtensionsConfig.from_file()`，这意味着通过 Gateway API 启用或禁用技能会立即在运行中的 LangGraph 服务器中生效，无需重启。
+
+### 解析
+
+`parser.py` 读取每个 `SKILL.md` 文件并提取结构化元数据：名称、描述、类别、指令以及任何工具或资源需求。
+
+### 安全扫描
+
+`security_scanner.py` 在技能内容加载到 Agent 上下文之前检查潜在危险模式，防止恶意技能内容被注入。
+
+### 依赖安装
+
+`installer.py` 处理技能声明的任何 Python 或系统依赖项，在技能首次加载时安装到运行时环境中。
+
+### 上下文注入
+
+当 Agent 以特定技能在范围内调用时，技能的指令被注入到系统提示中。Agent 在该对话期间可以访问技能的工作流、最佳实践和领域知识。
+
+</Steps>
+
+## 配置
+
+技能系统在 `config.yaml` 的 `skills:` 下配置：
+
+```yaml
+skills:
+  # 主机上的技能目录路径。
+  # 默认：相对于后端目录的 ../skills
+  # 取消注释以自定义：
+  # path: /absolute/path/to/custom/skills
+
+  # 在沙箱容器中挂载技能的路径
+  container_path: /mnt/skills
+```
+
+`container_path` 很重要：它告诉 Agent 在沙箱内哪里找到技能文件。Harness 自动将主机技能目录挂载到这个容器路径。
+
+## 启用和禁用技能
+
+技能可用性在 `extensions_config.json` 中跟踪（独立于 `config.yaml`）。你可以管理技能状态：
+
+- **通过 DeerFlow 应用界面**：技能面板允许你切换技能的启用/禁用状态。
+- **通过 Gateway API**：`POST /api/extensions/skills/{name}/enable` 和 `/disable`。
+- **直接编辑 `extensions_config.json`**。
+
+由于 `load_skills()` 每次调用都重新读取扩展配置，更改立即生效——无需重启服务器。
+
+## 按自定义 Agent 限制技能
+
+自定义 Agent 可以被限制为特定技能子集。在 Agent 的配置中（存储在 `agents/{name}/config.yaml`），设置 `skills` 列表：
+
+```yaml
+# agents/my-researcher/config.yaml
+name: my-researcher
+skills:
+  - deep-research
+  - academic-paper-review
+```
+
+- **省略或 null**：Agent 加载所有全局启用的技能。
+- **空列表 `[]`**：Agent 没有技能。
+- **命名列表**：Agent 只加载那些特定技能。
+
+## 技能进化
+
+DeerFlow 包含一个可选的**技能进化**功能，允许 Agent 在 `skills/custom/` 目录中自主创建和改进技能：
+
+```yaml
+skill_evolution:
+  enabled: false # 设为 true 允许 Agent 管理技能创建
+  moderation_model_name: null # 安全扫描模型（null = 使用默认模型）
+```
+
+<Callout type="warning">
+  只在你信任 Agent
+  输出的环境中启用技能进化。新创建的技能在加载前会经过安全扫描，但该功能给予
+  Agent 对技能目录的写访问权限。
+</Callout>
+
+## 编写自定义技能
+
+要创建自定义技能：
+
+1. 在 `skills/custom/your-skill-name/` 下创建新目录
+2. 添加定义技能元数据和指令的 `SKILL.md` 文件
+3. 技能将在下次 `load_skills()` 调用时自动被发现
+
+`SKILL.md` 格式遵循与内置技能相同的结构。使用现有公共技能之一作为预期格式的参考。
+
+<Cards num={2}>
+  <Cards.Card title="沙箱" href="/docs/harness/sandbox" />
+  <Cards.Card title="工具" href="/docs/harness/tools" />
+</Cards>
