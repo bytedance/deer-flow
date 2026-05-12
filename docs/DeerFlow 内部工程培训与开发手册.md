@@ -913,117 +913,110 @@ DeerFlow 为每个线程维护独立数据目录。
 
 结论先说：
 
-- **技术上支持多个用户/多个会话并发使用**
-- **但默认并不是开箱即用的企业级多租户平台**
+- **已实现基于 ContextVar 的多租户隔离机制**
+- **Thread、Agent、MCP Server、Memory 均已按 tenant_id 隔离**
+- **认证体系已实现（JWT + API Key），默认关闭**
+- **租户自动检测（登录时根据邮箱自动识别租户）尚在设计阶段**
 
-这两个结论必须同时讲清楚。
+#### 4.11.1 当前已实现的多租户能力
 
-#### 4.11.1 为什么说它“技术上支持”
+从代码实现看，DeerFlow 已具备以下多租户基础设施：
 
-从当前实现看，DeerFlow 具备多人并发使用所需要的几个基础能力：
+1. **租户上下文传递**
+   - 请求进入时，`AuthMiddleware` 从 JWT `tenant_id` claim 或 `X-DeerFlow-Tenant` header 提取租户标识
+   - 通过 `set_current_tenant_id(tenant_id)` 写入 `ContextVar`
+   - 整个请求生命周期内，任何代码可通过 `get_current_tenant_id()` 获取当前租户
+   - 无认证模式下默认为 `”default”`
+   - 租户 ID 格式校验：`^[A-Za-z0-9-]+$`
 
-1. **线程级隔离**
-   - 每个请求会绑定 `thread_id`
-   - 每个线程都有独立的 `workspace / uploads / outputs`
-   - 不同会话的运行文件不会天然混在一起
+2. **Thread 隔离**
+   - 线程存储路径包含 tenant_id：`{base_dir}/tenants/{tenant_id}/threads/{thread_id}`
+   - 搜索线程时按 tenant_id 过滤
+   - 用户只能看到自己租户下、自己创建的线程（tenant_id + user_id 双重隔离）
 
-2. **Sandbox 隔离**
-   - Agent 的工具执行可以绑定到线程级 sandbox
-   - `AioSandboxProvider` 还支持容器化隔离
-   - 不同 session 的文件操作和命令执行可以隔离开
+3. **Agent 隔离**
+   - 租户级 Agent 存储在 `{base_dir}/tenants/{tenant_id}/agents/{name}/`
+   - 完整 CRUD API：`/api/tenants/{tenant_id}/agents`
+   - 三级优先级：User > Tenant > Builtin
 
-3. **服务端并发能力**
-   - LangGraph / Gateway / Nginx 是服务化架构
-   - 支持 SSE 流式返回
-   - 共享环境和长运行服务也是官方建议场景之一
+4. **MCP Server 隔离**
+   - 租户级 MCP Server 配置：`/api/tenants/{tenant_id}/mcp-servers`
+   - Agent 运行时只加载当前租户的 MCP Server
 
-4. **并发资源控制**
-   - subagent 并发数量可控
-   - sandbox `replicas` 可配置
-   - 可以通过增加机器资源和容器副本提升共享环境承载能力
+5. **Memory 隔离**
+   - Memory 缓存 key 包含 tenant_id：`(tenant_id, agent_name)`
+   - 存储路径：`{base_dir}/users/{user_id}/memory.json`
 
-所以从“架构能力”角度说，它并不是只能单人单会话运行。
+6. **认证体系**
+   - 支持 JWT cookie（`access_token`）和 API Key 两种认证方式
+   - JWT payload 包含 `tenant_id` claim
+   - API Key 模式需显式传 `X-DeerFlow-Tenant` header
+   - 默认部署为无认证模式（`user_id` = `”default”`，`tenant_id` = `”default”`）
 
-#### 4.11.2 为什么又说它“默认不是企业级多用户平台”
+#### 4.11.2 租户 ID 传递机制
 
-因为当前仓库的默认设计更偏：
+```text
+┌──────────┐     ┌──────────────────┐     ┌─────────────────┐
+│ Frontend │     │  AuthMiddleware  │     │  Business Code  │
+│          │     │                  │     │                 │
+│ JWT cookie ──→ │ 解析 tenant_id   │     │                 │
+│ 或 Header  ──→ │ 校验格式         │     │                 │
+│          │     │ set_current_     │ ──→ │ get_current_    │
+│          │     │   tenant_id()   │     │   tenant_id()   │
+└──────────┘     └──────────────────┘     └─────────────────┘
+```
 
-- 本地可信环境
-- 内部测试共享
-- 小规模团队使用
+优先级：JWT payload > `X-DeerFlow-Tenant` header > 默认 `”default”`
 
-而不是一套已经完整交付好的 SaaS 多租户平台。
+#### 4.11.3 尚未实现的能力
 
-最关键的原因有 4 个：
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| 租户自动检测 | 设计完成，未实现 | 登录时根据邮箱自动识别所属租户 |
+| Skill 租户隔离 | 未实现 | Skill 目前全局共享（PUBLIC/CUSTOM），无租户级 Skill |
+| RBAC 权限体系 | 未实现 | 无角色/权限模型，仅区分 admin 和普通用户 |
+| 配额治理 | 未实现 | 无 token 用量限制、并发限制等 |
+| 审计日志 | 部分实现 | Agent 使用记录已有，但无完整审计链路 |
+| 多租户计费 | 未实现 | 无按租户的 token 消耗统计和计费 |
 
-1. **默认安全边界偏本地可信环境**
-   - 官方文档明确提醒：如果部署到跨设备、跨网络或公网环境，必须自己加严格安全措施
-   - 也就是说，默认并不建议直接裸暴露给不受控用户访问
-
-2. **认证体系已实现但默认关闭**
-   - 后端已有自定义 `AuthProvider`（支持 `gateway-config` 和 `proxy-policy` 策略）
-   - 默认部署为无认证模式，`user_id` 统一为 `”default”`
-   - 培训时不要把它讲成”已经具备成熟的企业账号体系”，但也不要说”没有认证”
-
-3. **Memory 已支持 per-user 隔离**
-   - Memory 存储路径为 `{base_dir}/users/{user_id}/memory.json`
-   - 启用认证后自动按用户隔离
-   - 无认证模式下所有用户共享 `default` 用户的 memory
-
-4. **缺少开箱即用的多租户治理能力**
-   - 例如统一身份认证、RBAC、租户隔离、配额治理、审计分级等
-   - 这些不是 DeerFlow 当前默认开箱即用全部交付好的部分
-
-#### 4.11.3 培训时最推荐的表达方式
+#### 4.11.4 培训时最推荐的表达方式
 
 建议团队统一这样描述：
 
-> DeerFlow 在运行时层面支持多人并发使用，因为它具备线程隔离、sandbox 隔离和服务化并发能力；  
-> 但如果要作为正式多用户平台上线，仍需要补齐认证、权限、memory 隔离、资源治理等平台能力。
+> DeerFlow 已实现基于 ContextVar 的多租户隔离机制，Thread、Agent、MCP Server、Memory 均按 tenant_id 隔离。认证体系支持 JWT 和 API Key，默认关闭。  
+> 如果要作为正式多租户 SaaS 平台上线，还需补齐：租户自动检测、RBAC、配额治理、Skill 租户隔离、完整审计等能力。
 
-这样表述最稳妥，不会误导业务方，也不会低估现有能力。
-
-#### 4.11.4 哪些场景可以直接用，哪些场景要先补能力
+#### 4.11.5 哪些场景可以直接用，哪些场景要先补能力
 
 | 场景 | 是否适合直接使用 | 说明 |
 | --- | --- | --- |
-| 单开发者本地使用 | 是 | 这是最自然的默认场景 |
-| 小团队内网共享测试 | 基本可以 | 需要控制访问范围，注意资源配置 |
-| 部门内多人共同试用 | 可以，但建议加前置认证 | 至少要补反向代理鉴权和访问控制 |
-| 面向企业正式生产使用 | 不能直接裸上 | 需要补齐认证、隔离、审计、资源治理 |
-| 面向公网开放 | 不建议直接使用默认部署 | 必须经过严格安全加固 |
+| 单开发者本地使用 | 是 | 默认 tenant = “default”，无需配置 |
+| 小团队内网共享测试 | 是 | 启用认证，每人一个账号即可 |
+| 单租户企业内部部署 | 是 | 启用认证，所有用户属于同一 tenant |
+| 多租户 SaaS 部署 | 基本可以，需补充 | 租户隔离已有，需补 RBAC、配额、自动检测 |
+| 面向公网开放 | 需要安全加固 | 必须启用认证 + HTTPS + 速率限制 |
 
-#### 4.11.5 如果要改造成正式多用户平台，最少要补什么
+#### 4.11.6 如果要补齐完整多租户 SaaS 能力，还需要做什么
 
-至少补下面 5 件事：
+1. **租户自动检测**（设计已完成，见 `docs/plans/2026-05-12-tenant-auto-detection-design.md`）
+   - 登录时根据邮箱域名自动识别租户
+   - 多租户冲突时返回 409 让用户选择
 
-1. **统一认证入口**
-   - 例如在 Nginx 或 API Gateway 前加企业认证
-   - 阻止未认证用户直接访问 Gateway API
+2. **RBAC 权限体系**
+   - 定义角色（admin / member / viewer）
+   - 控制 Agent CRUD、MCP Server 管理、知识库访问等操作权限
 
-2. **用户与 thread 的绑定关系**
-   - 明确一个用户能访问哪些 thread
-   - 不能只靠前端传一个 `thread_id` 就默认可信
+3. **Skill 租户隔离**
+   - 支持租户级 Skill 安装和管理
+   - 租户 Skill 优先级高于 PUBLIC Skill
 
-3. **per-user memory 隔离**
-   - 不能继续共用默认全局 `memory.json`
-   - 需要按用户或按租户拆分 memory 存储
+4. **配额与计费**
+   - 按租户统计 token 消耗
+   - 设置租户级并发限制和月度配额
 
-4. **资源与并发治理**
-   - 根据并发量调整机器规格
-   - 配置合适的 sandbox `replicas`
-   - 控制长任务、subagent 并发和模型成本
-
-5. **审计与安全策略**
-   - 对工具调用、文件读写、命令执行建立审计链路
-   - 对高风险工具加 guardrail 或审批策略
-
-#### 4.11.6 一个最容易讲错的点
-
-不要把“支持多线程/多会话并发”直接等同于“已经是成熟的多用户平台”。
-
-前者说的是运行时能力，后者说的是平台治理能力。  
-DeerFlow 当前更强的是前者；如果要落企业级正式场景，还要把后者补上。
+5. **完整审计链路**
+   - 记录所有敏感操作（工具调用、文件读写、Agent 创建/删除）
+   - 支持按租户导出审计日志
 
 ### 4.12 GenUI / A2UI 动态 UI 渲染系统
 
