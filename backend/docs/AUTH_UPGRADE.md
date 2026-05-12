@@ -2,13 +2,16 @@
 
 DeerFlow 内置了认证模块。本文档面向从无认证版本升级的用户。
 
+完整设计见 [AUTH_DESIGN.md](AUTH_DESIGN.md)。
+
 ## 核心概念
 
 认证模块采用**始终强制**策略：
 
-- 首次启动时自动创建 admin 账号，随机密码打印到控制台日志
+- 首次启动时不会自动创建账号；首次访问 `/setup` 时由操作者创建第一个 admin 账号
 - 认证从一开始就是强制的，无竞争窗口
-- 历史对话（升级前创建的 thread）自动迁移到 admin 名下
+- 已有 admin 后，服务启动时会把历史对话（升级前创建且缺少 `user_id` 的 thread）迁移到 admin 名下
+- 新数据按用户隔离：thread、workspace/uploads/outputs、memory、自定义 agent 都归属当前用户
 
 ## 升级步骤
 
@@ -25,39 +28,41 @@ cd backend && make install
 make dev
 ```
 
-控制台会输出：
+如果没有 admin 账号，控制台只会提示：
 
 ```
 ============================================================
-  Admin account created on first boot
-  Email:    admin@deerflow.dev
-  Password: aB3xK9mN_pQ7rT2w
-  Change it after login: Settings → Account
+  First boot detected — no admin account exists.
+  Visit /setup to complete admin account creation.
 ============================================================
 ```
 
-如果未登录就重启了服务，不用担心——只要 setup 未完成，每次启动都会重置密码并重新打印到控制台。
+首次启动不会在日志里打印随机密码，也不会写入默认 admin。这样避免启动日志泄露凭据，也避免在操作者创建账号前出现可被猜测的默认身份。
 
-### 3. 登录
+### 3. 创建 admin
 
-访问 `http://localhost:2026/login`，使用控制台输出的邮箱和密码登录。
+访问 `http://localhost:2026/setup`，填写邮箱和密码创建第一个 admin 账号。创建成功后会自动登录并进入 workspace。
 
-### 4. 修改密码
+如果这是从无认证版本升级，创建 admin 后重启一次服务，让启动迁移把缺少 `user_id` 的历史 thread 归属到 admin。
 
-登录后进入 Settings → Account → Change Password。
+### 4. 登录
+
+后续访问 `http://localhost:2026/login`，使用已创建的邮箱和密码登录。
 
 ### 5. 添加用户（可选）
 
-其他用户通过 `/login` 页面注册，自动获得 **user** 角色。每个用户只能看到自己的对话。
+其他用户通过 `/login` 页面注册，自动获得 **user** 角色。每个用户只能看到自己的对话、上传文件、输出文件、memory 和自定义 agent。
 
 ## 安全机制
 
 | 机制 | 说明 |
 |------|------|
 | JWT HttpOnly Cookie | Token 不暴露给 JavaScript，防止 XSS 窃取 |
-| CSRF Double Submit Cookie | 所有 POST/PUT/DELETE 请求需携带 `X-CSRF-Token` |
+| CSRF Double Submit Cookie | 受保护的 POST/PUT/PATCH/DELETE 请求需携带 `X-CSRF-Token`；登录/注册/初始化/登出走 auth 端点 Origin 校验 |
 | bcrypt 密码哈希 | 密码不以明文存储 |
-| 多租户隔离 | 用户只能访问自己的 thread |
+| Thread owner filter | `threads_meta.user_id` 由服务端认证上下文写入，搜索、读取、更新、删除默认按当前用户过滤 |
+| 文件系统隔离 | 线程数据写入 `{base_dir}/users/{user_id}/threads/{thread_id}/user-data/`，sandbox 内统一映射为 `/mnt/user-data/` |
+| Memory / agent 隔离 | 用户 memory 和自定义 agent 写入 `{base_dir}/users/{user_id}/...`；旧共享 agent 只作为只读兼容回退 |
 | HTTPS 自适应 | 检测 `x-forwarded-proto`，自动设置 `Secure` cookie 标志 |
 
 ## 常见操作
@@ -74,22 +79,26 @@ python -m app.gateway.auth.reset_admin
 python -m app.gateway.auth.reset_admin --email user@example.com
 ```
 
-会输出新的随机密码。
+会把新的随机密码写入 `.deer-flow/admin_initial_credentials.txt`，文件权限为 `0600`。命令行只输出文件路径，不输出明文密码。
 
 ### 完全重置
 
-删除用户数据库，重启后自动创建新 admin：
+删除统一 SQLite 数据库，重启后重新访问 `/setup` 创建新 admin：
 
 ```bash
-rm -f backend/.deer-flow/users.db
-# 重启服务，控制台输出新密码
+rm -f backend/.deer-flow/data/deerflow.db
+# 重启服务后访问 http://localhost:2026/setup
 ```
 
 ## 数据存储
 
 | 文件 | 内容 |
 |------|------|
-| `.deer-flow/users.db` | SQLite 用户数据库（密码哈希、角色） |
+| `.deer-flow/data/deerflow.db` | 统一 SQLite 数据库（users、threads_meta、runs、feedback 等应用数据） |
+| `.deer-flow/users/{user_id}/threads/{thread_id}/user-data/` | 用户线程的 workspace、uploads、outputs |
+| `.deer-flow/users/{user_id}/memory.json` | 用户级 memory |
+| `.deer-flow/users/{user_id}/agents/{agent_name}/` | 用户自定义 agent 配置、SOUL 和 agent memory |
+| `.deer-flow/admin_initial_credentials.txt` | `reset_admin` 生成的新凭据文件（0600，读完应删除） |
 | `.env` 中的 `AUTH_JWT_SECRET` | JWT 签名密钥（未设置时自动生成临时密钥，重启后 session 失效） |
 
 ### 生产环境建议
@@ -111,19 +120,21 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 | `/api/v1/auth/me` | GET | 获取当前用户信息 |
 | `/api/v1/auth/change-password` | POST | 修改密码 |
 | `/api/v1/auth/setup-status` | GET | 检查 admin 是否存在 |
+| `/api/v1/auth/initialize` | POST | 首次初始化第一个 admin（仅无 admin 时可调用） |
 
 ## 兼容性
 
-- **标准模式**（`make dev`）：完全兼容，admin 自动创建
+- **标准模式**（`make dev`）：完全兼容；无 admin 时访问 `/setup` 初始化
 - **Gateway 模式**（`make dev-pro`）：完全兼容
-- **Docker 部署**：完全兼容，`.deer-flow/users.db` 需持久化卷挂载
-- **IM 渠道**（Feishu/Slack/Telegram）：通过 LangGraph SDK 通信，不经过认证层
+- **Docker 部署**：完全兼容，`.deer-flow/data/deerflow.db` 需持久化卷挂载
+- **IM 渠道**（Feishu/Slack/Telegram）：通过 Gateway 内部认证通信，使用 `default` 用户桶
 - **DeerFlowClient**（嵌入式）：不经过 HTTP，不受认证影响
 
 ## 故障排查
 
 | 症状 | 原因 | 解决 |
 |------|------|------|
-| 启动后没看到密码 | admin 已存在（非首次启动） | 用 `reset_admin` 重置，或删 `users.db` |
+| 启动后没看到密码 | 当前实现不在启动日志输出密码 | 首次安装访问 `/setup`；忘记密码用 `reset_admin` |
+| `/login` 自动跳到 `/setup` | 系统还没有 admin | 在 `/setup` 创建第一个 admin |
 | 登录后 POST 返回 403 | CSRF token 缺失 | 确认前端已更新 |
 | 重启后需要重新登录 | `AUTH_JWT_SECRET` 未持久化 | 在 `.env` 中设置固定密钥 |

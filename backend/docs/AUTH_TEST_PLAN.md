@@ -19,7 +19,7 @@
 
 ```bash
 # 清除已有数据
-rm -f backend/.deer-flow/users.db
+rm -f backend/.deer-flow/data/deerflow.db
 
 # 选择模式启动
 make dev          # 标准模式
@@ -28,10 +28,11 @@ make dev-pro      # Gateway 模式
 ```
 
 **验证点：**
-- [ ] 控制台输出 admin 邮箱和随机密码
-- [ ] 密码格式为 `secrets.token_urlsafe(16)` 的 22 字符字符串
-- [ ] 邮箱为 `admin@deerflow.dev`
-- [ ] 提示 `Change it after login: Settings -> Account`
+- [ ] 控制台不输出 admin 邮箱或明文密码
+- [ ] 控制台提示 `First boot detected — no admin account exists.`
+- [ ] 控制台提示访问 `/setup` 完成 admin 创建
+- [ ] `GET /api/v1/auth/setup-status` 返回 `{"needs_setup": true}`
+- [ ] 前端访问 `/login` 会跳转 `/setup`
 
 ### 1.2 非首次启动
 
@@ -42,7 +43,8 @@ make dev
 
 **验证点：**
 - [ ] 控制台不输出密码
-- [ ] 如果 admin 仍 `needs_setup=True`，控制台有 warning 提示
+- [ ] `GET /api/v1/auth/setup-status` 返回 `{"needs_setup": false}`
+- [ ] 已登录用户如果 `needs_setup=True`，访问 workspace 会被引导到 `/setup` 完成改邮箱 / 改密码流程
 
 ### 1.3 环境变量配置
 
@@ -76,19 +78,22 @@ make dev
 curl -s $BASE/api/v1/auth/setup-status | jq .
 ```
 
-**预期：** 返回 `{"needs_setup": false}`（admin 在启动时已自动创建，`count_users() > 0`）。仅在启动完成前的极短窗口内可能返回 `true`。
+**预期：**
+- 干净数据库且尚未初始化 admin：返回 `{"needs_setup": true}`
+- 已存在 admin：返回 `{"needs_setup": false}`
 
-#### TC-API-02: Admin 首次登录
+#### TC-API-02: 首次初始化 Admin
 
 ```bash
-curl -s -X POST $BASE/api/v1/auth/login/local \
-  -d "username=admin@deerflow.dev&password=<控制台密码>" \
+curl -s -X POST $BASE/api/v1/auth/initialize \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"AdminPass1!"}' \
   -c cookies.txt | jq .
 ```
 
 **预期：**
-- 状态码 200
-- Body: `{"expires_in": 604800, "needs_setup": true}`
+- 状态码 201
+- Body: `{"id": "...", "email": "admin@example.com", "system_role": "admin", "needs_setup": false}`
 - `cookies.txt` 包含 `access_token`（HttpOnly）和 `csrf_token`（非 HttpOnly）
 
 #### TC-API-03: 获取当前用户
@@ -97,9 +102,9 @@ curl -s -X POST $BASE/api/v1/auth/login/local \
 curl -s $BASE/api/v1/auth/me -b cookies.txt | jq .
 ```
 
-**预期：** `{"id": "...", "email": "admin@deerflow.dev", "system_role": "admin", "needs_setup": true}`
+**预期：** `{"id": "...", "email": "admin@example.com", "system_role": "admin", "needs_setup": false}`
 
-#### TC-API-04: Setup 流程（改邮箱 + 改密码）
+#### TC-API-04: 改密码流程
 
 ```bash
 CSRF=$(grep csrf_token cookies.txt | awk '{print $NF}')
@@ -107,13 +112,36 @@ curl -s -X POST $BASE/api/v1/auth/change-password \
   -b cookies.txt \
   -H "Content-Type: application/json" \
   -H "X-CSRF-Token: $CSRF" \
-  -d '{"current_password":"<控制台密码>","new_password":"NewPass123!","new_email":"admin@example.com"}' | jq .
+  -d '{"current_password":"AdminPass1!","new_password":"NewPass123!"}' | jq .
 ```
 
 **预期：**
 - 状态码 200
 - `{"message": "Password changed successfully"}`
-- 再调 `/auth/me` 邮箱变为 `admin@example.com`，`needs_setup` 变为 `false`
+- 再调 `/auth/me` 仍为 `admin@example.com`，`needs_setup` 仍为 `false`
+
+#### TC-API-04a: reset_admin 后的 Setup 流程（改邮箱 + 改密码）
+
+```bash
+cd backend
+python -m app.gateway.auth.reset_admin --email admin@example.com
+# 从 .deer-flow/admin_initial_credentials.txt 读取 reset 后密码
+
+curl -s -X POST $BASE/api/v1/auth/login/local \
+  -d "username=admin@example.com&password=<凭据文件密码>" \
+  -c cookies.txt | jq .
+
+CSRF=$(grep csrf_token cookies.txt | awk '{print $NF}')
+curl -s -X POST $BASE/api/v1/auth/change-password \
+  -b cookies.txt \
+  -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" \
+  -d '{"current_password":"<凭据文件密码>","new_password":"AdminPass2!","new_email":"admin2@example.com"}' | jq .
+```
+
+**预期：**
+- 登录返回 `{"expires_in": 604800, "needs_setup": true}`
+- `change-password` 后 `/auth/me` 邮箱变为 `admin2@example.com`，`needs_setup` 变为 `false`
 
 #### TC-API-05: 普通用户注册
 
@@ -493,7 +521,7 @@ curl -s -X POST $BASE/api/v1/auth/register \
 
 ```bash
 # 检查数据库
-sqlite3 backend/.deer-flow/users.db "SELECT email, password_hash FROM users LIMIT 3;"
+sqlite3 backend/.deer-flow/data/deerflow.db "SELECT email, password_hash FROM users LIMIT 3;"
 ```
 
 **预期：** `password_hash` 以 `$2b$` 开头（bcrypt 格式）
@@ -506,23 +534,24 @@ sqlite3 backend/.deer-flow/users.db "SELECT email, password_hash FROM users LIMI
 
 ### 4.1 首次登录流程
 
-#### TC-UI-01: 访问首页跳转登录
+#### TC-UI-01: 无 admin 时访问 workspace 跳转 setup
 
 1. 打开 `http://localhost:2026/workspace`
-2. **预期：** 自动跳转到 `/login`
+2. **预期：** 自动跳转到 `/setup`
 
-#### TC-UI-02: Login 页面
+#### TC-UI-02: Setup 页面创建 admin
 
-1. 输入 admin 邮箱和控制台密码
-2. 点击 Login
-3. **预期：** 跳转到 `/setup`（因为 `needs_setup=true`）
-
-#### TC-UI-03: Setup 页面
-
-1. 输入新邮箱、控制台密码（current）、新密码、确认密码
-2. 点击 Complete Setup
+1. 输入 admin 邮箱、密码、确认密码
+2. 点击 Create Admin Account
 3. **预期：** 跳转到 `/workspace`
 4. 刷新页面不跳回 `/setup`
+
+#### TC-UI-03: 已初始化后 Login 页面
+
+1. 退出登录后访问 `/login`
+2. 输入 admin 邮箱和密码
+3. 点击 Login
+4. **预期：** 跳转到 `/workspace`
 
 #### TC-UI-04: Setup 密码不匹配
 
@@ -602,7 +631,7 @@ sqlite3 backend/.deer-flow/users.db "SELECT email, password_hash FROM users LIMI
 #### TC-UI-15: reset_admin 后重新登录
 
 1. 执行 `cd backend && python -m app.gateway.auth.reset_admin`
-2. 使用新密码登录
+2. 从 `.deer-flow/admin_initial_credentials.txt` 读取新密码并登录
 3. **预期：** 跳转到 `/setup` 页面（`needs_setup` 被重置为 true）
 4. 旧 session 已失效
 
@@ -645,18 +674,28 @@ make install
 make dev
 ```
 
-#### TC-UPG-01: 首次启动创建 admin
+#### TC-UPG-01: 首次启动等待 admin 初始化
 
 **预期：**
-- [ ] 控制台输出 admin 邮箱（`admin@deerflow.dev`）和随机密码
+- [ ] 控制台不输出 admin 邮箱或随机密码
+- [ ] 访问 `/setup` 可创建第一个 admin
 - [ ] 无报错，正常启动
 
 #### TC-UPG-02: 旧 Thread 迁移到 admin
 
 ```bash
+# 创建第一个 admin
+curl -s -X POST http://localhost:2026/api/v1/auth/initialize \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"AdminPass1!"}' \
+  -c cookies.txt
+
+# 重启一次：启动迁移只在已有 admin 的启动路径执行
+make stop && make dev
+
 # 登录 admin
 curl -s -X POST http://localhost:2026/api/v1/auth/login/local \
-  -d "username=admin@deerflow.dev&password=<控制台密码>" \
+  -d "username=admin@example.com&password=AdminPass1!" \
   -c cookies.txt
 
 # 查看 thread 列表
@@ -670,8 +709,8 @@ curl -s -X POST http://localhost:2026/api/threads/search \
 
 **预期：**
 - [ ] 返回的 thread 数量 ≥ 旧版创建的数量
-- [ ] 控制台日志有 `Migrated N orphaned thread(s) to admin`
-- [ ] 每个 thread 的 `metadata.owner_id` 都已被设为 admin 的 ID
+- [ ] 控制台日志有 `Migrated N orphan LangGraph thread(s) to admin`
+- [ ] 旧 thread 只对 admin 可见
 
 #### TC-UPG-03: 旧 Thread 内容完整
 
@@ -683,7 +722,7 @@ curl -s http://localhost:2026/api/threads/<old-thread-id> \
 
 **预期：**
 - [ ] `metadata.title` 保留原值（如 `old-thread-1`）
-- [ ] `metadata.owner_id` 已填充
+- [ ] 响应不回显服务端保留的 `user_id` / `owner_id`
 
 #### TC-UPG-04: 新用户看不到旧 Thread
 
@@ -706,18 +745,19 @@ curl -s -X POST http://localhost:2026/api/threads/search \
 
 ### 5.3 数据库 Schema 兼容
 
-#### TC-UPG-05: 无 users.db 时自动创建
+#### TC-UPG-05: 无 deerflow.db 时创建 schema 但不创建默认用户
 
 ```bash
-ls -la backend/.deer-flow/users.db
+ls -la backend/.deer-flow/data/deerflow.db
+sqlite3 backend/.deer-flow/data/deerflow.db "SELECT COUNT(*) FROM users;"
 ```
 
-**预期：** 文件存在，`sqlite3` 可查到 `users` 表含 `needs_setup`、`token_version` 列
+**预期：** 文件存在，`sqlite3` 可查到 `users` 表含 `needs_setup`、`token_version` 列；未调用 `/initialize` 前用户数为 0
 
-#### TC-UPG-06: users.db WAL 模式
+#### TC-UPG-06: deerflow.db WAL 模式
 
 ```bash
-sqlite3 backend/.deer-flow/users.db "PRAGMA journal_mode;"
+sqlite3 backend/.deer-flow/data/deerflow.db "PRAGMA journal_mode;"
 ```
 
 **预期：** 返回 `wal`
@@ -768,9 +808,9 @@ make dev
 ```
 
 **预期：**
-- [ ] 服务正常启动（忽略 `users.db`，无 auth 相关代码不报错）
+- [ ] 服务正常启动（忽略 `deerflow.db`，无 auth 相关代码不报错）
 - [ ] 旧对话数据仍然可访问
-- [ ] `users.db` 文件残留但不影响运行
+- [ ] `deerflow.db` 文件残留但不影响运行
 
 #### TC-UPG-12: 再次升级到 auth 分支
 
@@ -781,51 +821,47 @@ make dev
 ```
 
 **预期：**
-- [ ] 识别已有 `users.db`，不重新创建 admin
-- [ ] 旧的 admin 账号仍可登录（如果回退期间未删 `users.db`）
+- [ ] 识别已有 `deerflow.db`，不重新创建 admin
+- [ ] 旧的 admin 账号仍可登录（如果回退期间未删 `deerflow.db`）
 
-### 5.7 休眠 Admin（初始密码未使用/未更改）
+### 5.7 Admin 初始化与 reset_admin
 
-> 首次启动生成 admin + 随机密码，但运维未登录、未改密码。
-> 密码只在首次启动的控制台闪过一次，后续启动不再显示。
+> 首次启动不生成默认 admin，也不在日志输出密码。忘记密码时走 `reset_admin`，新密码写入 0600 凭据文件。
 
-#### TC-UPG-13: 重启后自动重置密码并打印
+#### TC-UPG-13: 未初始化 admin 时重启不创建默认账号
 
 ```bash
-# 首次启动，记录密码
-rm -f backend/.deer-flow/users.db
+rm -f backend/.deer-flow/data/deerflow.db
 make dev
-# 控制台输出密码 P0，不登录
 make stop
 
-# 隔了几天，再次启动
 make dev
-# 控制台输出新密码 P1
+curl -s $BASE/api/v1/auth/setup-status | jq .
 ```
 
 **预期：**
-- [ ] 控制台输出 `Admin account setup incomplete — password reset`
-- [ ] 输出新密码 P1（P0 已失效）
-- [ ] 用 P1 可以登录，P0 不可以
-- [ ] 登录后 `needs_setup=true`，跳转 `/setup`
-- [ ] `token_version` 递增（旧 session 如有也失效）
+- [ ] 控制台不输出密码
+- [ ] `setup-status` 仍为 `{"needs_setup": true}`
+- [ ] 访问 `/setup` 仍可创建第一个 admin
 
-#### TC-UPG-14: 密码丢失 — 无需 CLI，重启即可
+#### TC-UPG-14: 密码丢失 — reset_admin 写入凭据文件
 
 ```bash
-# 忘记了控制台密码 → 直接重启服务
-make stop && make dev
-# 控制台自动输出新密码
+python -m app.gateway.auth.reset_admin --email admin@example.com
+ls -la backend/.deer-flow/admin_initial_credentials.txt
+cat backend/.deer-flow/admin_initial_credentials.txt
 ```
 
 **预期：**
-- [ ] 无需 `reset_admin`，重启服务即可拿到新密码
-- [ ] `reset_admin` CLI 仍然可用作手动备选方案
+- [ ] 命令行只输出凭据文件路径，不输出明文密码
+- [ ] 凭据文件权限为 `0600`
+- [ ] 凭据文件包含 email + password 行
+- [ ] 该用户下次登录返回 `needs_setup=true`
 
-#### TC-UPG-15: 休眠 admin 期间普通用户注册
+#### TC-UPG-15: 未初始化 admin 期间普通用户注册策略边界
 
 ```bash
-# admin 存在但从未登录，普通用户先注册
+# admin 尚不存在，普通用户尝试注册
 curl -s -X POST $BASE/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"earlybird@example.com","password":"EarlyPass1!"}' \
@@ -833,11 +869,11 @@ curl -s -X POST $BASE/api/v1/auth/register \
 ```
 
 **预期：**
-- [ ] 注册成功（201），角色为 `user`
-- [ ] 无法提权为 admin
-- [ ] 普通用户的数据与 admin 隔离
+- [ ] 当前代码允许注册普通用户并自动登录（201，角色为 `user`）
+- [ ] 但 `setup-status` 仍为 `{"needs_setup": true}`，因为 admin 仍不存在
+- [ ] 这是一个产品策略边界：若要求“必须先有 admin”，需要在 `/register` 增加 admin-exists gate
 
-#### TC-UPG-16: 休眠 admin 不影响后续操作
+#### TC-UPG-16: 普通用户数据与后续 admin 隔离
 
 ```bash
 # 普通用户正常创建 thread、发消息
@@ -849,14 +885,13 @@ curl -s -X POST $BASE/api/threads \
   -d '{"metadata":{}}' | jq .thread_id
 ```
 
-**预期：** 正常创建，不受休眠 admin 影响
+**预期：** 普通用户正常创建 thread；后续 admin 创建后，搜索不到该普通用户 thread
 
-#### TC-UPG-17: 休眠 admin 最终完成 Setup
+#### TC-UPG-17: reset_admin 后完成 Setup
 
 ```bash
-# 运维终于登录
 curl -s -X POST $BASE/api/v1/auth/login/local \
-  -d "username=admin@deerflow.dev&password=<P0或P1>" \
+  -d "username=admin@example.com&password=<凭据文件密码>" \
   -c admin.txt | jq .needs_setup
 # 预期: true
 
@@ -866,7 +901,7 @@ curl -s -X POST $BASE/api/v1/auth/change-password \
   -b admin.txt \
   -H "Content-Type: application/json" \
   -H "X-CSRF-Token: $CSRF" \
-  -d '{"current_password":"<密码>","new_password":"AdminFinal1!","new_email":"admin@real.com"}' \
+  -d '{"current_password":"<凭据文件密码>","new_password":"AdminFinal1!","new_email":"admin@real.com"}' \
   -c admin.txt
 
 # 验证
@@ -876,7 +911,7 @@ curl -s $BASE/api/v1/auth/me -b admin.txt | jq '{email, needs_setup}'
 **预期：**
 - [ ] `email` 变为 `admin@real.com`
 - [ ] `needs_setup` 变为 `false`
-- [ ] 后续重启控制台不再有 warning
+- [ ] 后续登录使用新密码
 
 #### TC-UPG-18: 长期未用后 JWT 密钥轮换
 
@@ -890,8 +925,8 @@ make stop && make dev
 
 **预期：**
 - [ ] 服务正常启动
-- [ ] 旧密码仍可登录（密码存在 DB，与 JWT 密钥无关）
-- [ ] 旧的 JWT token 失效（密钥变了签名不匹配）— 但因为从未登录过也没有旧 token
+- [ ] 账号密码仍可登录（密码存在 DB，与 JWT 密钥无关）
+- [ ] 旧的 JWT token 失效（密钥变了签名不匹配）
 
 ---
 
@@ -910,7 +945,7 @@ for i in 1 2 3; do
 done
 
 # 检查 admin 数量
-sqlite3 backend/.deer-flow/users.db \
+sqlite3 backend/.deer-flow/data/deerflow.db \
   "SELECT COUNT(*) FROM users WHERE system_role='admin';"
 ```
 
@@ -1055,7 +1090,7 @@ curl -s -X POST $BASE/api/v1/auth/register \
 wait
 
 # 检查用户数
-sqlite3 backend/.deer-flow/users.db \
+sqlite3 backend/.deer-flow/data/deerflow.db \
   "SELECT COUNT(*) FROM users WHERE email='race@example.com';"
 ```
 
@@ -1165,13 +1200,16 @@ curl -s -w "%{http_code}" -X DELETE "$BASE/api/threads/$TID" \
 ```bash
 cd backend
 python -m app.gateway.auth.reset_admin
-# 记录密码 P1
+cp .deer-flow/admin_initial_credentials.txt /tmp/deerflow-reset-p1.txt
+P1=$(awk -F': ' '/^password:/ {print $2}' /tmp/deerflow-reset-p1.txt)
 
 python -m app.gateway.auth.reset_admin
-# 记录密码 P2
+cp .deer-flow/admin_initial_credentials.txt /tmp/deerflow-reset-p2.txt
+P2=$(awk -F': ' '/^password:/ {print $2}' /tmp/deerflow-reset-p2.txt)
 ```
 
 **预期：**
+- [ ] `.deer-flow/admin_initial_credentials.txt` 每次都会被重写，文件权限为 `0600`
 - [ ] P1 ≠ P2（每次生成新随机密码）
 - [ ] P1 不可用，只有 P2 有效
 - [ ] `token_version` 递增了 2
@@ -1324,7 +1362,8 @@ done
 ```bash
 GW=http://localhost:8001
 
-for path in /health /api/v1/auth/setup-status /api/v1/auth/login/local /api/v1/auth/register; do
+for path in /health /api/v1/auth/setup-status /api/v1/auth/login/local \
+            /api/v1/auth/register /api/v1/auth/initialize /api/v1/auth/logout; do
   echo "$path: $(curl -s -w '%{http_code}' -o /dev/null $GW$path)"
 done
 # 预期: 200 或 405/422（方法不对但不是 401）
@@ -1399,9 +1438,9 @@ done
 >
 > 前置条件：
 > - `.env` 中设置 `AUTH_JWT_SECRET`（否则每次容器重启 session 全部失效）
-> - `DEER_FLOW_HOME` 挂载到宿主机目录（持久化 `users.db`）
+> - `DEER_FLOW_HOME` 挂载到宿主机目录（持久化 `deerflow.db`）
 
-#### TC-DOCKER-01: users.db 通过 volume 持久化
+#### TC-DOCKER-01: deerflow.db 通过 volume 持久化
 
 ```bash
 # 启动容器
@@ -1416,13 +1455,13 @@ curl -s -X POST $BASE/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"docker-test@example.com","password":"DockerTest1!"}' -w "\nHTTP %{http_code}"
 
-# 检查宿主机上的 users.db
-ls -la ${DEER_FLOW_HOME:-backend/.deer-flow}/users.db
-sqlite3 ${DEER_FLOW_HOME:-backend/.deer-flow}/users.db \
+# 检查宿主机上的 deerflow.db
+ls -la ${DEER_FLOW_HOME:-backend/.deer-flow}/data/deerflow.db
+sqlite3 ${DEER_FLOW_HOME:-backend/.deer-flow}/data/deerflow.db \
   "SELECT email FROM users WHERE email='docker-test@example.com';"
 ```
 
-**预期：** users.db 在宿主机 `DEER_FLOW_HOME` 目录中，查询可见刚注册的用户。
+**预期：** deerflow.db 在宿主机 `DEER_FLOW_HOME` 目录中，查询可见刚注册的用户。
 
 #### TC-DOCKER-02: 重启容器后 session 保持
 
@@ -1466,22 +1505,24 @@ done
 
 **已知限制：** In-process rate limiter 不跨 worker 共享。生产环境如需精确限速，需要 Redis 等外部存储。
 
-#### TC-DOCKER-04: IM 渠道不经过 auth
+#### TC-DOCKER-04: IM 渠道使用内部认证
 
 ```bash
-# IM 渠道（Feishu/Slack/Telegram）在 gateway 容器内部通过 LangGraph SDK 通信
-# 不走 nginx，不经过 AuthMiddleware
+# IM 渠道（Feishu/Slack/Telegram）在 gateway 容器内部通过 LangGraph SDK 调 Gateway
+# 请求携带 process-local internal auth header，并带匹配的 CSRF cookie/header
 
 # 验证方式：检查 gateway 日志中 channel manager 的请求不包含 auth 错误
 docker logs deer-flow-gateway 2>&1 | grep -E "ChannelManager|channel" | head -10
 ```
 
-**预期：** 无 auth 相关错误。渠道通过 `langgraph-sdk` 直连 LangGraph Server（`http://langgraph:2024`），不走 auth 层。
+**预期：** 无 auth 相关错误。渠道不依赖浏览器 cookie；服务端通过内部认证头把请求归入 `default` 用户桶。
 
-#### TC-DOCKER-05: admin 密码写入 0600 凭证文件（不再走日志）
+#### TC-DOCKER-05: reset_admin 密码写入 0600 凭证文件（不再走日志）
 
 ```bash
-# 凭证文件写在挂载到宿主机的 DEER_FLOW_HOME 下
+# 首次启动不会自动生成 admin 密码。先重置已有 admin，凭据文件写在挂载到宿主机的 DEER_FLOW_HOME 下。
+docker exec deer-flow-gateway python -m app.gateway.auth.reset_admin --email docker-test@example.com
+
 ls -la ${DEER_FLOW_HOME:-backend/.deer-flow}/admin_initial_credentials.txt
 # 预期文件权限: -rw------- (0600)
 
@@ -1512,14 +1553,15 @@ sleep 15
 docker ps --filter name=deer-flow-langgraph --format '{{.Names}}' | wc -l
 # 预期: 0
 
-# auth 流程正常
+# auth 流程正常：未登录受保护接口返回 401
 curl -s -w "%{http_code}" -o /dev/null $BASE/api/models
 # 预期: 401
 
-curl -s -X POST $BASE/api/v1/auth/login/local \
-  -d "username=admin@deerflow.dev&password=<日志密码>" \
+curl -s -X POST $BASE/api/v1/auth/initialize \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"AdminPass1!"}' \
   -c cookies.txt -w "\nHTTP %{http_code}"
-# 预期: 200
+# 预期: 201
 ```
 
 ### 7.4 补充边界用例
@@ -1587,13 +1629,15 @@ curl -s -D - -X POST $BASE/api/v1/auth/login/local \
 #### TC-EDGE-05: HTTP 无 max_age / HTTPS 有 max_age
 
 ```bash
+GW=http://localhost:8001
+
 # HTTP
-curl -s -D - -X POST $BASE/api/v1/auth/login/local \
+curl -s -D - -X POST $GW/api/v1/auth/login/local \
   -d "username=admin@example.com&password=正确密码" 2>/dev/null \
   | grep "access_token=" | grep -oi "max-age=[0-9]*" || echo "NO max-age (HTTP session cookie)"
 
-# HTTPS
-curl -s -D - -X POST $BASE/api/v1/auth/login/local \
+# HTTPS：直连 Gateway 才能用 X-Forwarded-Proto 模拟 HTTPS；nginx 会覆盖该 header
+curl -s -D - -X POST $GW/api/v1/auth/login/local \
   -H "X-Forwarded-Proto: https" \
   -d "username=admin@example.com&password=正确密码" 2>/dev/null \
   | grep "access_token=" | grep -oi "max-age=[0-9]*"
@@ -1712,10 +1756,10 @@ curl -s -X POST $BASE/api/threads \
   -b cookies.txt \
   -H "Content-Type: application/json" \
   -H "X-CSRF-Token: $CSRF" \
-  -d '{"metadata":{"owner_id":"victim-user-id"}}' | jq .metadata.owner_id
+  -d '{"metadata":{"owner_id":"victim-user-id","user_id":"victim-user-id"}}' | jq .metadata
 ```
 
-**预期：** 返回的 `metadata.owner_id` 应为当前登录用户的 ID，不是请求中注入的 `victim-user-id`。服务端应覆盖客户端提供的 `user_id`。
+**预期：** 返回的 `metadata` 不包含 `owner_id` 或 `user_id`。真实所有权写入 `threads_meta.user_id`，不从客户端 metadata 接收，也不通过 metadata 回显。
 
 #### 7.5.6 HTTP Method 探测
 
@@ -1796,6 +1840,6 @@ cd backend && PYTHONPATH=. uv run pytest \
 # 核心接口冒烟
 curl -s $BASE/health                              # 200
 curl -s $BASE/api/models                          # 401 (无 cookie)
-curl -s -X POST $BASE/api/v1/auth/setup-status    # 200
+curl -s $BASE/api/v1/auth/setup-status            # 200
 curl -s $BASE/api/v1/auth/me -b cookies.txt       # 200 (有 cookie)
 ```
