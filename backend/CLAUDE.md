@@ -227,6 +227,8 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 
 Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
 
+Gateway run input normalization uses LangChain message conversion for dict entries in `input.messages`, preserving standard `user`, `system`, `assistant`/`ai`, and `tool` roles before passing state to the agent.
+
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
 **Interface**: Abstract `Sandbox` with `execute_command`, `read_file`, `write_file`, `list_dir`

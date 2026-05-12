@@ -67,11 +67,62 @@ def test_normalize_input_none():
 
 
 def test_normalize_input_with_messages():
+    from langchain_core.messages import HumanMessage
+
     from app.gateway.services import normalize_input
 
     result = normalize_input({"messages": [{"role": "user", "content": "hi"}]})
     assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], HumanMessage)
     assert result["messages"][0].content == "hi"
+
+
+def test_normalize_input_preserves_system_messages():
+    from langchain_core.messages import SystemMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input({"messages": [{"role": "system", "content": "Use concise answers."}]})
+
+    assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], SystemMessage)
+    assert result["messages"][0].content == "Use concise answers."
+
+
+def test_normalize_input_preserves_assistant_tool_calls():
+    from langchain_core.messages import AIMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "call-1", "name": "bash", "args": {"cmd": "ls"}}],
+                }
+            ]
+        }
+    )
+
+    assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], AIMessage)
+    assert result["messages"][0].tool_calls == [{"id": "call-1", "name": "bash", "args": {"cmd": "ls"}, "type": "tool_call"}]
+
+
+def test_normalize_input_preserves_tool_messages():
+    from langchain_core.messages import ToolMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input({"messages": [{"role": "tool", "content": "file.txt", "name": "bash", "tool_call_id": "call-1"}]})
+
+    assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], ToolMessage)
+    assert result["messages"][0].content == "file.txt"
+    assert result["messages"][0].name == "bash"
+    assert result["messages"][0].tool_call_id == "call-1"
 
 
 def test_normalize_input_passthrough():
