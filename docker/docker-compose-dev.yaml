@@ -171,7 +171,6 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
-      - UV_EXTRAS=discord
     env_file:
       - ../.env
     extra_hosts:
