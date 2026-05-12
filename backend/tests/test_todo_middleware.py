@@ -265,11 +265,7 @@ class TestToolCallIntentOrError:
         # reminder guard explicitly decides whether each new field means "not a
         # clean final answer"; the helper has a matching comment pointing back
         # to this sentinel.
-        tool_related_fields = {
-            name
-            for name in AIMessage.model_fields
-            if "tool" in name.lower() or ("function" in name.lower() and "call" in name.lower())
-        }
+        tool_related_fields = {name for name in AIMessage.model_fields if "tool" in name.lower() or ("function" in name.lower() and "call" in name.lower())}
         assert tool_related_fields <= {"tool_calls", "invalid_tool_calls"}
 
 
