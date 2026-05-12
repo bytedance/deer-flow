@@ -194,3 +194,41 @@ class TestRunRepository:
         rows = await repo.list_by_thread("t1", owner_id=None)
         assert len(rows) == 2
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_reuses_shared_model_name_expression(self):
+        captured = []
+
+        class FakeResult:
+            def all(self):
+                return []
+
+        class FakeSession:
+            async def execute(self, stmt):
+                captured.append(stmt)
+                return FakeResult()
+
+        class FakeSessionContext:
+            async def __aenter__(self):
+                return FakeSession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        repo = RunRepository(lambda: FakeSessionContext())
+
+        agg = await repo.aggregate_tokens_by_thread("t1")
+        assert agg == {
+            "total_tokens": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_runs": 0,
+            "by_model": {},
+            "by_caller": {"lead_agent": 0, "subagent": 0, "middleware": 0},
+        }
+        assert len(captured) == 1
+
+        stmt = captured[0]
+        model_expr = stmt._raw_columns[0].element
+        group_by_expr = stmt._group_by_clauses[0]
+        assert model_expr is group_by_expr
