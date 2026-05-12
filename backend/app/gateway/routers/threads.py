@@ -93,11 +93,9 @@ class ThreadSearchRequest(BaseModel):
     @field_validator("metadata")
     @classmethod
     def _validate_metadata_filters(cls, v: dict[str, Any]) -> dict[str, Any]:
-        """Reject metadata filter entries that the SQL backend would skip.
+        """Reject filter entries the SQL backend cannot compile.
 
-        Keeps `/threads/search` behavior consistent across SQL and memory
-        backends — both now return HTTP 422 for the same invalid input
-        instead of one rejecting (400) and the other silently accepting.
+        Enforces consistent behaviour across SQL and memory backends.
         See ``deerflow.persistence.json_compat`` for the shared validators.
         """
         if not v:

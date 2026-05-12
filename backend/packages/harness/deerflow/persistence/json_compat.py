@@ -19,6 +19,11 @@ _KEY_CHARSET_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 # Allowed value types for metadata filter values (same set accepted by JsonMatch).
 ALLOWED_FILTER_VALUE_TYPES: tuple[type, ...] = (type(None), bool, int, float, str)
 
+# SQLite raises an overflow when binding values outside signed 64-bit range;
+# PostgreSQL overflows during BIGINT cast. Reject at validation time instead.
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
 
 def validate_metadata_filter_key(key: object) -> bool:
     """Return True if *key* is safe for use as a JSON metadata filter key.
@@ -27,10 +32,6 @@ def validate_metadata_filter_key(key: object) -> bool:
     charset is restricted because the key is interpolated into the
     compiled SQL path expression (``$."<key>"`` / ``->`` literal), so any
     laxer pattern would open a SQL/JSONPath injection surface.
-
-    Shared by ``JsonMatch.__init__`` (raises) and the Gateway-side
-    Pydantic validator on ``ThreadSearchRequest.metadata`` (returns 422)
-    so both layers use the same admission rule.
     """
     return isinstance(key, str) and bool(_KEY_CHARSET_RE.match(key))
 
@@ -43,8 +44,17 @@ def validate_metadata_filter_value(value: object) -> bool:
     intentionally rejected rather than silently coerced via ``str()`` —
     silent coercion would (a) produce wrong matches and (b) break
     SQLAlchemy's ``inherit_cache`` invariant when ``value`` is unhashable.
+
+    Integer values are additionally restricted to the signed 64-bit range
+    ``[-2**63, 2**63 - 1]``: SQLite overflows when binding larger values
+    and PostgreSQL overflows during the ``BIGINT`` cast.
     """
-    return isinstance(value, ALLOWED_FILTER_VALUE_TYPES)
+    if not isinstance(value, ALLOWED_FILTER_VALUE_TYPES):
+        return False
+    if isinstance(value, int) and not isinstance(value, bool):
+        if not (_INT64_MIN <= value <= _INT64_MAX):
+            return False
+    return True
 
 
 class JsonMatch(ColumnElement):
@@ -55,7 +65,7 @@ class JsonMatch(ColumnElement):
     that distinguishes bool vs int and NULL vs missing key.
 
     *key* must be a single literal key matching ``[A-Za-z0-9_-]+``.
-    *value* must be one of: ``None``, ``bool``, ``int``, ``float``, ``str``.
+    *value* must be one of: ``None``, ``bool``, ``int`` (signed 64-bit), ``float``, ``str``.
     """
 
     inherit_cache = True
@@ -69,14 +79,11 @@ class JsonMatch(ColumnElement):
     ]
 
     def __init__(self, column: ColumnElement, key: str, value: object) -> None:
-        # Reuse the shared validators so this class and the Gateway-side
-        # Pydantic validator on ThreadSearchRequest.metadata cannot drift.
-        # Distinct exception types preserve the (ValueError, TypeError)
-        # split that ``ThreadMetaRepository.search()`` filters on to
-        # log+skip a single bad entry without aborting the whole query.
         if not validate_metadata_filter_key(key):
             raise ValueError(f"JsonMatch key must match {_KEY_CHARSET_RE.pattern!r}; got: {key!r}")
         if not validate_metadata_filter_value(value):
+            if isinstance(value, int) and not isinstance(value, bool):
+                raise TypeError(f"JsonMatch int value out of signed 64-bit range [-2**63, 2**63-1]: {value!r}")
             raise TypeError(f"JsonMatch value must be None, bool, int, float, or str; got: {type(value).__name__!r}")
         self.column = column
         self.key = key
@@ -160,7 +167,8 @@ def _build_clause(compiler: SQLCompiler, typeof: str, extract: str, value: objec
 
 @compiles(JsonMatch, "sqlite")
 def _compile_sqlite(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str:
-    assert validate_metadata_filter_key(element.key), f"Key escaped validation: {element.key!r}"
+    if not validate_metadata_filter_key(element.key):
+        raise ValueError(f"Key escaped validation: {element.key!r}")
     col = compiler.process(element.column, **kw)
     path = f'$."{element.key}"'
     typeof = f"json_type({col}, '{path}')"
@@ -170,7 +178,8 @@ def _compile_sqlite(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str
 
 @compiles(JsonMatch, "postgresql")
 def _compile_pg(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str:
-    assert validate_metadata_filter_key(element.key), f"Key escaped validation: {element.key!r}"
+    if not validate_metadata_filter_key(element.key):
+        raise ValueError(f"Key escaped validation: {element.key!r}")
     col = compiler.process(element.column, **kw)
     typeof = f"json_typeof({col} -> '{element.key}')"
     extract = f"({col} ->> '{element.key}')"

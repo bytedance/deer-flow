@@ -509,3 +509,42 @@ class TestJsonMatchCompilation:
 
         with pytest.raises(NotImplementedError, match="mysql"):
             str(expr.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    def test_json_match_rejects_out_of_range_int(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+
+        # boundary values must be accepted
+        json_match(t.c.data, "k", 2**63 - 1)
+        json_match(t.c.data, "k", -(2**63))
+
+        # one beyond each boundary must be rejected
+        for out_of_range in [2**63, -(2**63) - 1, 10**30]:
+            with pytest.raises(TypeError, match="out of signed 64-bit range"):
+                json_match(t.c.data, "k", out_of_range)
+
+    def test_compiler_raises_on_escaped_key(self):
+        """Compiler raises ValueError even when __init__ validation is bypassed."""
+        from sqlalchemy import Column, MetaData, String, Table, create_engine
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+        engine = create_engine("sqlite://")
+
+        elem = json_match(t.c.data, "k", "v")
+        elem.key = "bad.key"  # bypass __init__ to simulate -O stripping assert
+
+        with pytest.raises(ValueError, match="Key escaped validation"):
+            str(elem.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
+
+        with pytest.raises(ValueError, match="Key escaped validation"):
+            str(elem.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
