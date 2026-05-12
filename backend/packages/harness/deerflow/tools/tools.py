@@ -148,6 +148,23 @@ def get_available_tools(
                         # run starts in a new asyncio task with the
                         # ContextVar at its default of ``None``, so reuse is
                         # only triggered for re-entrant calls inside one run.
+                        #
+                        # Intentionally NOT reconciling against the current
+                        # ``mcp_tools`` snapshot. The MCP cache only refreshes
+                        # on ``extensions_config.json`` mtime changes, which
+                        # in practice happens between graph runs — not inside
+                        # one. And even if a refresh did happen mid-run, the
+                        # already-built lead agent's ``ToolNode`` still holds
+                        # the *previous* tool set (LangGraph binds tools at
+                        # graph construction time), so a brand-new MCP tool
+                        # couldn't actually be invoked anyway. The
+                        # ``DeferredToolRegistry`` doesn't retain the names
+                        # of previously-promoted tools (``promote()`` drops
+                        # the entry entirely), so re-syncing the registry
+                        # against a fresh ``mcp_tools`` list would
+                        # mis-classify those promotions as new tools and
+                        # re-register them as deferred — exactly the bug
+                        # this fix exists to prevent.
                         existing_registry = get_deferred_registry()
                         if existing_registry is None:
                             registry = DeferredToolRegistry()
@@ -156,9 +173,10 @@ def get_available_tools(
                             set_deferred_registry(registry)
                             logger.info(f"Tool search active: {len(mcp_tools)} tools deferred")
                         else:
+                            mcp_tool_names = {t.name for t in mcp_tools}
                             still_deferred = len(existing_registry)
-                            promoted = len(mcp_tools) - still_deferred
-                            logger.info(f"Tool search active (reusing registry): {still_deferred} tools deferred, {promoted} already promoted")
+                            promoted_count = max(0, len(mcp_tool_names) - still_deferred)
+                            logger.info(f"Tool search active (preserved promotions): {still_deferred} tools deferred, {promoted_count} already promoted")
                         builtin_tools.append(tool_search_tool)
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")

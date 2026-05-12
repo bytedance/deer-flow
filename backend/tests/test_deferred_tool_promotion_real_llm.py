@@ -84,11 +84,11 @@ def fake_translator(text: str, target_lang: str) -> str:
 
 @pytest.fixture(autouse=True)
 def _reset_registry_between_tests():
-    from deerflow.tools.builtins import tool_search as ts_mod
+    from deerflow.tools.builtins.tool_search import reset_deferred_registry
 
-    ts_mod._registry_var.set(None)
+    reset_deferred_registry()
     yield
-    ts_mod._registry_var.set(None)
+    reset_deferred_registry()
 
 
 def _patch_mcp_pipeline(monkeypatch: pytest.MonkeyPatch, mcp_tools: list) -> None:

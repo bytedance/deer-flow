@@ -22,8 +22,9 @@ B. **At the graph-execution boundary** — drive a real ``create_agent`` graph
    the registry, the second turn's filter would strip the tool.
 
 Strategy: use the production ``deerflow.tools.tools.get_available_tools``
-unmodified; mock only the LLM and the MCP tool source. Patch the
-``deerflow.tools.tools.get_cached_mcp_tools`` symbol to return our fixture
+unmodified; mock only the LLM and the MCP tool source. Patch
+``deerflow.mcp.cache.get_cached_mcp_tools`` (the symbol that
+``get_available_tools`` resolves via lazy import) to return our fixture
 tools so we don't need a real MCP server.
 """
 
@@ -83,11 +84,11 @@ def _reset_deferred_registry_between_tests():
     in a synchronous test runner, so one test's promotion can leak into the
     next and silently break filter assertions.
     """
-    from deerflow.tools.builtins import tool_search as ts_mod
+    from deerflow.tools.builtins.tool_search import reset_deferred_registry
 
-    ts_mod._registry_var.set(None)
+    reset_deferred_registry()
     yield
-    ts_mod._registry_var.set(None)
+    reset_deferred_registry()
 
 
 def _patch_mcp_pipeline(monkeypatch: pytest.MonkeyPatch, mcp_tools: list) -> None:
@@ -143,17 +144,19 @@ def _force_tool_search_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_get_available_tools_resets_registry_wiping_promotion(monkeypatch: pytest.MonkeyPatch):
-    """Reproduce the bug at the unit boundary.
+def test_get_available_tools_preserves_promotions_across_reentrant_calls(monkeypatch: pytest.MonkeyPatch):
+    """Re-entrant ``get_available_tools()`` must preserve prior promotions.
 
-    Step 1: call get_available_tools() — it registers the MCP tools as deferred.
+    Step 1: call get_available_tools() — registers MCP tools as deferred.
     Step 2: simulate the agent calling tool_search by promoting one tool.
-    Step 3: call get_available_tools() again — currently this resets the
-            registry and re-registers everything as deferred, wiping the
-            promotion.
+    Step 3: call get_available_tools() again (the same code path
+            ``task_tool`` exercises mid-run).
 
     Assertion: after step 3, the promoted tool is STILL promoted (not
-    re-deferred). This test fails on main and is what the fix must make pass.
+    re-deferred). On ``main`` before the fix, step 3's
+    ``reset_deferred_registry()`` wiped the promotion and re-registered
+    every MCP tool as deferred — this assertion fired with
+    ``REGRESSION (#2884)``.
     """
     from deerflow.tools.builtins.tool_search import get_deferred_registry
     from deerflow.tools.tools import get_available_tools
