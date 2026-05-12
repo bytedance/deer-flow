@@ -90,6 +90,28 @@ class ThreadSearchRequest(BaseModel):
     offset: int = Field(default=0, ge=0, description="Pagination offset")
     status: str | None = Field(default=None, description="Filter by thread status")
 
+    @field_validator("metadata")
+    @classmethod
+    def _validate_metadata_filters(cls, v: dict[str, Any]) -> dict[str, Any]:
+        """Reject filter entries the SQL backend cannot compile.
+
+        Enforces consistent behaviour across SQL and memory backends.
+        See ``deerflow.persistence.json_compat`` for the shared validators.
+        """
+        if not v:
+            return v
+        from deerflow.persistence.json_compat import validate_metadata_filter_key, validate_metadata_filter_value
+
+        bad_entries: list[str] = []
+        for key, value in v.items():
+            if not validate_metadata_filter_key(key):
+                bad_entries.append(f"{key!r} (unsafe key)")
+            elif not validate_metadata_filter_value(value):
+                bad_entries.append(f"{key!r} (unsupported value type {type(value).__name__})")
+        if bad_entries:
+            raise ValueError(f"Invalid metadata filter entries: {', '.join(bad_entries)}")
+        return v
+
 
 class ThreadStateResponse(BaseModel):
     """Response model for thread state."""
@@ -294,14 +316,18 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     (SQL-backed for sqlite/postgres, Store-backed for memory mode).
     """
     from app.gateway.deps import get_thread_store
+    from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 
     repo = get_thread_store(request)
-    rows = await repo.search(
-        metadata=body.metadata or None,
-        status=body.status,
-        limit=body.limit,
-        offset=body.offset,
-    )
+    try:
+        rows = await repo.search(
+            metadata=body.metadata or None,
+            status=body.status,
+            limit=body.limit,
+            offset=body.offset,
+        )
+    except InvalidMetadataFilterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return [
         ThreadResponse(
             thread_id=r["thread_id"],

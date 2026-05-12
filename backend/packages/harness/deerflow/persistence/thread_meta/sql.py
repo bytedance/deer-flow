@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.thread_meta.base import ThreadMetaStore
+from deerflow.persistence.json_compat import json_match
+from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+
+logger = logging.getLogger(__name__)
 
 
 class ThreadMetaRepository(ThreadMetaStore):
@@ -20,7 +24,7 @@ class ThreadMetaRepository(ThreadMetaStore):
     @staticmethod
     def _row_to_dict(row: ThreadMetaRow) -> dict[str, Any]:
         d = row.to_dict()
-        d["metadata"] = d.pop("metadata_json", {})
+        d["metadata"] = d.pop("metadata_json", None) or {}
         for key in ("created_at", "updated_at"):
             val = d.get(key)
             if isinstance(val, datetime):
@@ -104,39 +108,43 @@ class ThreadMetaRepository(ThreadMetaStore):
     async def search(
         self,
         *,
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
         status: str | None = None,
         limit: int = 100,
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Search threads with optional metadata and status filters.
 
         Owner filter is enforced by default: caller must be in a user
         context. Pass ``user_id=None`` to bypass (migration/CLI).
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.search")
-        stmt = select(ThreadMetaRow).order_by(ThreadMetaRow.updated_at.desc())
+        stmt = select(ThreadMetaRow).order_by(ThreadMetaRow.updated_at.desc(), ThreadMetaRow.thread_id.desc())
         if resolved_user_id is not None:
             stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
         if status:
             stmt = stmt.where(ThreadMetaRow.status == status)
 
         if metadata:
-            # When metadata filter is active, fetch a larger window and filter
-            # in Python. TODO(Phase 2): use JSON DB operators (Postgres @>,
-            # SQLite json_extract) for server-side filtering.
-            stmt = stmt.limit(limit * 5 + offset)
-            async with self._sf() as session:
-                result = await session.execute(stmt)
-                rows = [self._row_to_dict(r) for r in result.scalars()]
-            rows = [r for r in rows if all(r.get("metadata", {}).get(k) == v for k, v in metadata.items())]
-            return rows[offset : offset + limit]
-        else:
-            stmt = stmt.limit(limit).offset(offset)
-            async with self._sf() as session:
-                result = await session.execute(stmt)
-                return [self._row_to_dict(r) for r in result.scalars()]
+            applied = 0
+            for key, value in metadata.items():
+                try:
+                    stmt = stmt.where(json_match(ThreadMetaRow.metadata_json, key, value))
+                    applied += 1
+                except (ValueError, TypeError) as exc:
+                    logger.warning("Skipping metadata filter key %s: %s", ascii(key), exc)
+            if applied == 0:
+                # Comma-separated plain string (no list repr / nested
+                # quoting) so the 400 detail surfaced by the Gateway is
+                # easy for clients to read. Sorted for determinism.
+                rejected_keys = ", ".join(sorted(str(k) for k in metadata))
+                raise InvalidMetadataFilterError(f"All metadata filter keys were rejected as unsafe: {rejected_keys}")
+
+        stmt = stmt.limit(limit).offset(offset)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
 
     async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None) -> bool:
         """Return True if the row exists and is owned (or filter bypassed)."""
