@@ -280,8 +280,20 @@ def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:
 
 
 def _get_builtin_agents_dir() -> Path:
-    """Return the path to the builtin agents directory at project root."""
-    return project_root() / "agents" / "builtin"
+    """Return the path to the builtin agents directory at project root.
+
+    Falls back to the repo root (parent of backend/) for monorepo layouts
+    where project_root() resolves to the backend/ directory.
+    """
+    candidate = project_root() / "agents" / "builtin"
+    if candidate.is_dir():
+        return candidate
+    # Monorepo fallback: backend/ is project_root, agents/ is one level up
+    repo_root = Path(__file__).resolve().parents[4].parent
+    fallback = repo_root / "agents" / "builtin"
+    if fallback.is_dir():
+        return fallback
+    return candidate
 
 
 def scan_builtin_agents() -> list[AgentConfig]:

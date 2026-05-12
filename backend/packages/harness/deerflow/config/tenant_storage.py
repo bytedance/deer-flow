@@ -48,7 +48,11 @@ class TenantConfig:
 
 
 class TenantStorage:
-    """JSON-file storage for tenant configurations. Cross-tenant (admin-scoped)."""
+    """Deprecated: JSON-file storage for tenant configurations.
+
+    Use ``deerflow.persistence.tenant.repository.TenantRepository`` instead.
+    This class is retained only for backward compatibility with tests.
+    """
 
     def __init__(self, base_dir: Path | None = None) -> None:
         if base_dir is not None:

@@ -22,7 +22,6 @@ from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.summarization_config import get_summarization_config
-from deerflow.config.tenant_storage import TenantStorage
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -430,12 +429,34 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     tenant_id = cfg.get("tenant_id", "default")
 
     # Enforce tenant exists and is_active — LangGraph Server requests bypass Gateway auth middleware
-    ts = TenantStorage()
-    tc = ts.get(tenant_id)
-    if tc is None:
-        raise PermissionError(f"Tenant {tenant_id!r} does not exist")
-    if not tc.is_active:
-        raise PermissionError(f"Tenant {tenant_id!r} is disabled")
+    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.tenant.repository import TenantRepository
+
+    sf = get_session_factory()
+    if sf is not None:
+        _tenant_repo = TenantRepository(sf)
+
+        async def _check_tenant():
+            return await _tenant_repo.get(tenant_id)
+
+        import asyncio
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    tc = executor.submit(asyncio.run, _check_tenant()).result()
+            else:
+                tc = loop.run_until_complete(_check_tenant())
+        except RuntimeError:
+            tc = asyncio.run(_check_tenant())
+
+        if tc is None:
+            raise PermissionError(f"Tenant {tenant_id!r} does not exist")
+        if not tc.is_active:
+            raise PermissionError(f"Tenant {tenant_id!r} is disabled")
 
     agent_config = load_agent_config(agent_name, tenant_id=tenant_id) if not is_bootstrap else None
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default

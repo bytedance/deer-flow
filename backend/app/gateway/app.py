@@ -190,6 +190,24 @@ async def _ensure_admin_user(app: FastAPI) -> None:
                     except Exception as e:
                         logger.warning("Failed to import tenants.json: %s", e)
 
+            # Auto-create tenants referenced by users but missing from tenants table
+            from datetime import UTC, datetime
+
+            now = datetime.now(UTC).isoformat()
+            user_tenants = await conn.execute(text("SELECT DISTINCT tenant_id FROM users"))
+            for (tid,) in user_tenants.fetchall():
+                if tid:
+                    existing = await conn.execute(text("SELECT 1 FROM tenants WHERE tenant_id = :tid"), {"tid": tid})
+                    if existing.scalar() is None:
+                        await conn.execute(
+                            text("""
+                                INSERT INTO tenants (tenant_id, name, is_active, daily_quota_usd, monthly_quota_usd, created_at, updated_at)
+                                VALUES (:tid, :name, 1, 50.0, 1000.0, :now, :now)
+                            """),
+                            {"tid": tid, "name": tid, "now": now},
+                        )
+                        logger.info("Auto-created missing tenant %r (referenced by users table)", tid)
+
     # Check session factory BEFORE trying get_local_provider(), which raises
     # a cryptic RuntimeError when the persistence engine isn't ready yet.
     sf = get_session_factory()
