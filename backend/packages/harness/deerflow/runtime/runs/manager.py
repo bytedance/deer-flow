@@ -36,6 +36,7 @@ class RunRecord:
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     abort_action: str = "interrupt"
     error: str | None = None
+    model_name: str | None = None
 
 
 class RunManager:
@@ -65,6 +66,7 @@ class RunManager:
                 metadata=record.metadata or {},
                 kwargs=record.kwargs or {},
                 created_at=record.created_at,
+                model_name=record.model_name,
             )
         except Exception:
             logger.warning("Failed to persist run %s to store", record.run_id, exc_info=True)
@@ -137,6 +139,18 @@ class RunManager:
                 logger.warning("Failed to persist status update for run %s", run_id, exc_info=True)
         logger.info("Run %s -> %s", run_id, status.value)
 
+    async def update_model_name(self, run_id: str, model_name: str | None) -> None:
+        """Update the model name for a run."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                logger.warning("update_model_name called for unknown run %s", run_id)
+                return
+            record.model_name = model_name
+            record.updated_at = _now_iso()
+        await self._persist_to_store(record)
+        logger.info("Run %s model_name=%s", run_id, model_name)
+
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> bool:
         """Request cancellation of a run.
 
@@ -171,6 +185,7 @@ class RunManager:
         metadata: dict | None = None,
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
+        model_name: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -221,6 +236,7 @@ class RunManager:
                 kwargs=kwargs or {},
                 created_at=now,
                 updated_at=now,
+                model_name=model_name,
             )
             self._runs[run_id] = record
 
