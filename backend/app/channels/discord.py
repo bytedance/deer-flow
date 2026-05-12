@@ -124,6 +124,13 @@ class DiscordChannel(Channel):
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
 
+        # Cancel all active typing indicator tasks
+        for target_id, task in list(self._typing_tasks.items()):
+            if not task.done():
+                task.cancel()
+            logger.debug("[Discord] cancelled typing task for target %s", target_id)
+        self._typing_tasks.clear()
+
         if self._client and self._discord_loop and self._discord_loop.is_running():
             close_future = asyncio.run_coroutine_threadsafe(self._client.close(), self._discord_loop)
             try:
