@@ -28,7 +28,6 @@ import {
   ReasoningTrigger,
 } from "@/components/ai-elements/reasoning";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
-import { GenUIBlockList } from "@/components/genui/GenUIBlockList";
 import { Badge } from "@/components/ui/badge";
 import {
   deleteFeedback,
@@ -36,7 +35,6 @@ import {
   type FeedbackData,
 } from "@/core/api/feedback";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
-import { submitInteraction } from "@/core/genui/interaction";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -330,14 +328,6 @@ function MessageContent_({
         className="my-3"
         components={components}
       />
-      {!isHuman && !isLoading && (
-        <GenUIBlockList
-          threadId={threadId}
-          onInteraction={(callbackId, payload) => {
-            void submitInteraction(threadId, callbackId, payload);
-          }}
-        />
-      )}
     </AIElementMessageContent>
   );
 }

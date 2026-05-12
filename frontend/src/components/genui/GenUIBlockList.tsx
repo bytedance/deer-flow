@@ -6,23 +6,28 @@ import { GenUIRenderer } from "./GenUIRenderer";
 
 interface GenUIBlockListProps {
   threadId: string;
+  blockIds?: string[];
+  excludeBlockIds?: string[];
   onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
 }
 
-export function GenUIBlockList({ threadId: _threadId, onInteraction }: GenUIBlockListProps) {
+export function GenUIBlockList({ threadId: _threadId, blockIds, excludeBlockIds, onInteraction }: GenUIBlockListProps) {
   const blocks = useBlockStore((state) => state.blocks);
 
-  const topLevelBlocks = Array.from(blocks.values()).filter(
-    (block) => !block.parent_id,
-  );
+  const filteredBlocks = Array.from(blocks.values()).filter((block) => {
+    if (block.parent_id) return false;
+    if (blockIds) return blockIds.includes(block.block_id);
+    if (excludeBlockIds) return !excludeBlockIds.includes(block.block_id);
+    return true;
+  });
 
-  if (topLevelBlocks.length === 0) {
+  if (filteredBlocks.length === 0) {
     return null;
   }
 
   return (
     <div className="flex w-full flex-col gap-3">
-      {topLevelBlocks.map((block) => (
+      {filteredBlocks.map((block) => (
         <GenUIRenderer
           key={block.block_id}
           block={block}

@@ -40,9 +40,13 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   applyBlock: (block: UIBlock) =>
     set((state) => {
       const blocks = new Map(state.blocks);
+      const interactions = new Map(state.interactions);
       switch (block.action) {
         case "create":
           blocks.set(block.block_id, block);
+          if (block.callback_id) {
+            interactions.delete(block.callback_id);
+          }
           break;
         case "update": {
           const existing = blocks.get(block.block_id);
@@ -60,7 +64,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
           blocks.delete(block.block_id);
           break;
       }
-      return { blocks };
+      return { blocks, interactions };
     }),
 
   getChildBlocks: (parentId: string) => {

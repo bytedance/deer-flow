@@ -136,14 +136,23 @@ export function useThreadStream({
     listeners.current = { onSend, onStart, onFinish, onToolEnd };
   }, [onSend, onStart, onFinish, onToolEnd]);
 
+  const prevThreadIdRef = useRef<string | null>(threadId ?? null);
+
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
+    const prevThreadId = prevThreadIdRef.current;
+    prevThreadIdRef.current = normalizedThreadId;
+
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
       setOnStreamThreadId(normalizedThreadId);
+      useBlockStore.getState().reset();
     } else {
       setOnStreamThreadId(normalizedThreadId);
+      if (prevThreadId && prevThreadId !== normalizedThreadId) {
+        useBlockStore.getState().reset();
+      }
     }
     threadIdRef.current = normalizedThreadId;
 
@@ -674,11 +683,8 @@ export function useThreadRuns(threadId?: string) {
 
 export function useDeleteThread() {
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient();
   return useMutation({
     mutationFn: async ({ threadId }: { threadId: string }) => {
-      await apiClient.threads.delete(threadId);
-
       const response = await fetchGateway(
         `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
         {
@@ -689,8 +695,8 @@ export function useDeleteThread() {
       if (!response.ok) {
         const error = await response
           .json()
-          .catch(() => ({ detail: "Failed to delete local thread data." }));
-        throw new Error(error.detail ?? "Failed to delete local thread data.");
+          .catch(() => ({ detail: "Failed to delete thread." }));
+        throw new Error(error.detail ?? "Failed to delete thread.");
       }
     },
     onSuccess(_, { threadId }) {

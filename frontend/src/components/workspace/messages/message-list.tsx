@@ -32,6 +32,8 @@ import { useUpdateSubtask } from "@/core/tasks/context";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
+import { GenUIBlockList } from "@/components/genui";
+
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
@@ -51,6 +53,23 @@ export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 160;
 export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
+
+const BLOCK_ID_REGEX = /block_id=([a-f0-9-]+)/g;
+
+function extractBlockIdsFromMessages(messages: Message[]): string[] {
+  const blockIds: string[] = [];
+  for (const msg of messages) {
+    if (msg.type === "tool") {
+      const text = extractTextFromMessage(msg);
+      let match: RegExpExecArray | null;
+      BLOCK_ID_REGEX.lastIndex = 0;
+      while ((match = BLOCK_ID_REGEX.exec(text)) !== null) {
+        blockIds.push(match[1]!);
+      }
+    }
+  }
+  return blockIds;
+}
 
 function LoadMoreHistoryIndicator({
   isLoading,
@@ -463,6 +482,7 @@ export function MessageList({
               </div>
             );
           } else if (group.type === "assistant:processing") {
+            const blockIds = extractBlockIdsFromMessages(group.messages);
             return (
               <div key={`processing-${group.id}`} className="w-full">
                 <MessageGroup
@@ -475,6 +495,13 @@ export function MessageList({
                   )}
                   showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
                 />
+                {blockIds.length > 0 && (
+                  <GenUIBlockList
+                    threadId={threadId}
+                    blockIds={blockIds}
+                    onInteraction={handleInteraction}
+                  />
+                )}
                 {renderTokenUsage({
                   messages: group.messages,
                   turnUsageMessages,
@@ -485,6 +512,9 @@ export function MessageList({
           }
         })}
         {thread.isLoading && <StreamingIndicator className="my-4" />}
+        {thread.isLoading && (
+          <GenUIBlockList threadId={threadId} onInteraction={handleInteraction} />
+        )}
         <div style={{ height: `${paddingBottom}px` }} />
       </ConversationContent>
     </Conversation>
