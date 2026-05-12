@@ -190,7 +190,7 @@ class DiscordChannel(Channel):
             try:
                 while True:
                     try:
-                        await channel.typing()
+                        await channel.trigger_typing()
                     except Exception:
                         pass
                     await asyncio.sleep(10)
