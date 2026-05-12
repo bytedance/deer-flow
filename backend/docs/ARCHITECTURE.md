@@ -63,7 +63,8 @@ The agent runtime is embedded in the FastAPI Gateway and built on LangGraph for 
 - Tool execution orchestration
 - SSE streaming for real-time responses
 
-**Graph registry**: `langgraph.json` remains available for tooling and Studio compatibility.
+**Graph registry**: `langgraph.json` remains available for tooling, Studio, or direct LangGraph Server compatibility.
+It is not the default service entrypoint; scripts and Docker deployments run the Gateway embedded runtime.
 
 ```json
 {
