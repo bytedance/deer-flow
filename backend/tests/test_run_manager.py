@@ -5,6 +5,7 @@ import re
 import pytest
 
 from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -75,27 +76,27 @@ async def test_cancel_not_inflight(manager: RunManager):
 
 @pytest.mark.anyio
 async def test_list_by_thread(manager: RunManager):
-    """Same thread should return multiple runs, newest first."""
+    """Same thread should return multiple runs."""
     r1 = await manager.create("thread-1")
     r2 = await manager.create("thread-1")
     await manager.create("thread-2")
 
     runs = await manager.list_by_thread("thread-1")
     assert len(runs) == 2
-    assert runs[0].run_id == r2.run_id
-    assert runs[1].run_id == r1.run_id
+    assert runs[0].run_id == r1.run_id
+    assert runs[1].run_id == r2.run_id
 
 
 @pytest.mark.anyio
 async def test_list_by_thread_is_stable_when_timestamps_tie(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
-    """Newest-first ordering should not depend on timestamp precision."""
+    """Ordering should be stable (insertion order) even when timestamps tie."""
     monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: "2026-01-01T00:00:00+00:00")
 
     r1 = await manager.create("thread-1")
     r2 = await manager.create("thread-1")
 
     runs = await manager.list_by_thread("thread-1")
-    assert [run.run_id for run in runs] == [r2.run_id, r1.run_id]
+    assert [run.run_id for run in runs] == [r1.run_id, r2.run_id]
 
 
 @pytest.mark.anyio
@@ -141,3 +142,53 @@ async def test_create_defaults(manager: RunManager):
     assert record.kwargs == {}
     assert record.multitask_strategy == "reject"
     assert record.assistant_id is None
+
+
+@pytest.mark.anyio
+async def test_model_name_create_or_reject():
+    """create_or_reject should accept and persist model_name."""
+    from deerflow.runtime.runs.schemas import DisconnectMode
+
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+
+    record = await mgr.create_or_reject(
+        "thread-1",
+        assistant_id="lead_agent",
+        on_disconnect=DisconnectMode.cancel,
+        metadata={"key": "val"},
+        kwargs={"input": {}},
+        multitask_strategy="reject",
+        model_name="anthropic.claude-sonnet-4-20250514-v1:0",
+    )
+    assert record.model_name == "anthropic.claude-sonnet-4-20250514-v1:0"
+    assert record.status == RunStatus.pending
+
+    # Verify model_name was persisted to store
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["model_name"] == "anthropic.claude-sonnet-4-20250514-v1:0"
+
+    # Verify retrieval returns the model_name via in-memory record
+    fetched = mgr.get(record.run_id)
+    assert fetched is not None
+    assert fetched.model_name == "anthropic.claude-sonnet-4-20250514-v1:0"
+
+
+@pytest.mark.anyio
+async def test_model_name_default_is_none():
+    """create_or_reject without model_name should default to None."""
+    from deerflow.runtime.runs.schemas import DisconnectMode
+
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+
+    record = await mgr.create_or_reject(
+        "thread-1",
+        on_disconnect=DisconnectMode.cancel,
+        model_name=None,
+    )
+    assert record.model_name is None
+
+    stored = await store.get(record.run_id)
+    assert stored["model_name"] is None

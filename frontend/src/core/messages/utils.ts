@@ -21,55 +21,13 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
-type MessageGroup =
+export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
-
-type ToolCallArgs = ToolCall["args"];
-type NormalizedToolCall = Pick<ToolCall, "id" | "name" | "args">;
-
-function parseToolCallsString(toolCalls: string) {
-  const parsed = tryParseJSON(toolCalls);
-  if (Array.isArray(parsed)) {
-    return parsed;
-  }
-  const repairedArgsObjects = toolCalls.replace(
-    /"args":"(\{[\s\S]*?\}|\[[\s\S]*?\])"/g,
-    '"args":$1',
-  );
-  const repaired = tryParseJSON(repairedArgsObjects);
-  if (Array.isArray(repaired)) {
-    return repaired;
-  }
-
-  const salvagedToolCalls = Array.from(
-    toolCalls.matchAll(
-      /(?:"id":"([^"]*)",)?\s*"name":"([^"]+)"\s*,\s*"args":"(\{[\s\S]*?\}|\[[\s\S]*?\])"/g,
-    ),
-  ).map((match) => ({
-    id: match[1] ?? undefined,
-    name: match[2]!,
-    args: match[3]!,
-  }));
-  return salvagedToolCalls;
-}
-
-function normalizeToolCallArgs(args: unknown): ToolCallArgs {
-  if (args && typeof args === "object" && !Array.isArray(args)) {
-    return args as ToolCallArgs;
-  }
-  if (typeof args === "string") {
-    const parsed = tryParseJSON(args);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as ToolCallArgs;
-    }
-  }
-  return {};
-}
 
 export function getToolCalls(message: Message): NormalizedToolCall[] {
   if (message.type !== "ai") {
@@ -101,10 +59,7 @@ export function getToolCalls(message: Message): NormalizedToolCall[] {
   });
 }
 
-export function groupMessages<T>(
-  messages: Message[],
-  mapper: (group: MessageGroup) => T,
-): T[] {
+export function getMessageGroups(messages: Message[]): MessageGroup[] {
   if (messages.length === 0) {
     return [];
   }
@@ -199,9 +154,50 @@ export function groupMessages<T>(
     }
   }
 
-  return groups
+  return groups;
+}
+
+export function groupMessages<T>(
+  messages: Message[],
+  mapper: (group: MessageGroup) => T,
+): T[] {
+  return getMessageGroups(messages)
     .map(mapper)
     .filter((result) => result !== undefined && result !== null) as T[];
+}
+
+export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
+  const usageMessagesByGroupIndex: Array<Message[] | null> = Array.from(
+    { length: groups.length },
+    () => null,
+  );
+
+  let turnStartIndex: number | null = null;
+
+  for (const [index, group] of groups.entries()) {
+    if (group.type === "human") {
+      turnStartIndex = null;
+      continue;
+    }
+
+    turnStartIndex ??= index;
+
+    const nextGroup = groups[index + 1];
+    const isTurnEnd = !nextGroup || nextGroup.type === "human";
+
+    if (!isTurnEnd) {
+      continue;
+    }
+
+    usageMessagesByGroupIndex[index] = groups
+      .slice(turnStartIndex, index + 1)
+      .flatMap((currentGroup) => currentGroup.messages)
+      .filter((message) => message.type === "ai");
+
+    turnStartIndex = null;
+  }
+
+  return usageMessagesByGroupIndex;
 }
 
 export function extractTextFromMessage(message: Message) {
@@ -401,7 +397,11 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 export function isHiddenFromUIMessage(message: Message) {
-  return message.additional_kwargs?.hide_from_ui === true;
+  return (
+    message.additional_kwargs?.hide_from_ui === true ||
+    message.name === "summary" ||
+    message.name === "loop_warning"
+  );
 }
 
 /**

@@ -1,3 +1,65 @@
+---
+title: Use Tools and Skills
+description: This tutorial shows you how to configure and use tools and skills in DeerFlow to give the agent access to web search, file operations, and domain-specific capabilities.
+---
+
+import { Callout } from "nextra/components";
+
 # Use Tools and Skills
 
-TBD
+This tutorial shows you how to configure and use tools and skills in DeerFlow to give the agent access to web search, file operations, and domain-specific capabilities.
+
+## Configuring tools
+
+Add tools to `config.yaml`:
+
+```yaml
+tools:
+  # Web search
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+
+  # Web content fetching
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+
+  # Sandbox file operations
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+## Enabling skills
+
+Enable skills through the DeerFlow app's extensions panel, or edit `extensions_config.json` directly.
+
+**Via the app UI:**
+
+1. Open the DeerFlow app
+2. Click the Extensions/Skills icon in the sidebar
+3. Find `deep-research` and toggle it on
+
+## Using a skill for research
+
+With the `deep-research` skill enabled, select it in the conversation input, then send a research request:
+
+```
+Do a deep research on the latest advances in quantum computing, focusing on practical applications.
+```
+
+The agent will run a multi-step research workflow including web search, information synthesis, and report generation.
+
+## Using the data analysis skill
+
+Enable `data-analysis`, then upload a CSV or data file and ask the agent to analyze it:
+
+```
+Analyze this CSV file and identify the top trends.
+```
+
+The agent will use the sandbox tools to read the file, run analysis, and produce charts.
+
+## Next steps
+
+- [Work with Memory](/docs/tutorials/work-with-memory)
+- [Tools Reference](/docs/harness/tools)
+- [Skills Reference](/docs/harness/skills)
