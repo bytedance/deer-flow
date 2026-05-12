@@ -62,6 +62,18 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_users_by_email(self, email: str) -> list[User]:
+        """Get all users matching an email across all tenants.
+
+        Args:
+            email: User email address
+
+        Returns:
+            List of matching Users (empty list if none found)
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def update_user(self, user: User) -> User:
         """Update an existing user.
 

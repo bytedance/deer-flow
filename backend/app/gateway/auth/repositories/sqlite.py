@@ -84,22 +84,22 @@ class SQLiteUserRepository(UserRepository):
             return self._row_to_user(row) if row is not None else None
 
     async def get_user_by_email(self, email: str) -> User | None:
+        stmt = select(UserRow).where(UserRow.email == email).limit(1)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            row = result.scalars().first()
+            return self._row_to_user(row) if row is not None else None
+
+    async def get_users_by_email(self, email: str) -> list[User]:
         stmt = select(UserRow).where(UserRow.email == email)
         async with self._sf() as session:
             result = await session.execute(stmt)
-            row = result.scalar_one_or_none()
-            return self._row_to_user(row) if row is not None else None
+            return [self._row_to_user(row) for row in result.scalars().all()]
 
     async def update_user(self, user: User) -> User:
         async with self._sf() as session:
             row = await session.get(UserRow, str(user.id))
             if row is None:
-                # Hard fail on concurrent delete: callers (reset_admin,
-                # password change handlers, _ensure_admin_user) all
-                # fetched the user just before this call, so a missing
-                # row here means the row vanished underneath us. Silent
-                # success would let the caller log "password reset" for
-                # a row that no longer exists.
                 raise UserNotFoundError(f"User {user.id} no longer exists")
             row.email = user.email
             row.password_hash = user.password_hash
@@ -112,8 +112,10 @@ class SQLiteUserRepository(UserRepository):
             await session.commit()
         return user
 
-    async def count_users(self) -> int:
+    async def count_users(self, tenant_id: str | None = None) -> int:
         stmt = select(func.count()).select_from(UserRow)
+        if tenant_id is not None:
+            stmt = stmt.where(UserRow.tenant_id == tenant_id)
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 

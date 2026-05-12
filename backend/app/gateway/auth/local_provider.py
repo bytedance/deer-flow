@@ -4,31 +4,25 @@ import logging
 
 from app.gateway.auth.models import User
 from app.gateway.auth.password import hash_password_async, needs_rehash, verify_password_async
-from app.gateway.auth.providers import AuthProvider
+from app.gateway.auth.providers import AuthProvider, TenantSelectionRequired
 from app.gateway.auth.repositories.base import UserRepository
 
 logger = logging.getLogger(__name__)
+
+_MAX_TENANT_VERIFY = 10
 
 
 class LocalAuthProvider(AuthProvider):
     """Email/password authentication provider using local database."""
 
     def __init__(self, repository: UserRepository):
-        """Initialize with a UserRepository.
-
-        Args:
-            repository: UserRepository implementation (SQLite)
-        """
         self._repo = repository
 
-    async def authenticate(self, credentials: dict) -> User | None:
+    async def authenticate(self, credentials: dict) -> User | TenantSelectionRequired | None:
         """Authenticate with email and password.
 
-        Args:
-            credentials: dict with 'email', 'password', and optionally 'tenant_id' keys
-
-        Returns:
-            User if authentication succeeds, None otherwise
+        When tenant_id is "default" or missing, auto-detects the user's tenant
+        by querying all users with the given email across all tenants.
         """
         email = credentials.get("email")
         password = credentials.get("password")
@@ -37,27 +31,57 @@ class LocalAuthProvider(AuthProvider):
         if not email or not password:
             return None
 
+        if tenant_id != "default":
+            return await self._authenticate_explicit(email, password, tenant_id)
+
+        return await self._authenticate_auto_detect(email, password)
+
+    async def _authenticate_explicit(self, email: str, password: str, tenant_id: str) -> User | None:
         user = await self._repo.get_user_by_email_and_tenant(email, tenant_id)
-        if user is None:
+        if user is None or user.password_hash is None:
             return None
-
-        if user.password_hash is None:
-            # OAuth user without local password
-            return None
-
         if not await verify_password_async(password, user.password_hash):
             return None
+        await self._maybe_rehash(user, password)
+        return user
 
+    async def _authenticate_auto_detect(self, email: str, password: str) -> User | TenantSelectionRequired | None:
+        users = await self._repo.get_users_by_email(email)
+        if not users:
+            return None
+
+        # Cap verification to prevent bcrypt DoS; verify a subset then return full list
+        candidates = users[:_MAX_TENANT_VERIFY] if len(users) > _MAX_TENANT_VERIFY else users
+
+        if len(candidates) == 1:
+            user = candidates[0]
+            if user.password_hash and await verify_password_async(password, user.password_hash):
+                await self._maybe_rehash(user, password)
+                return user
+            return None
+
+        matched = []
+        for u in candidates:
+            if u.password_hash and await verify_password_async(password, u.password_hash):
+                matched.append(u)
+
+        if len(matched) == 0:
+            return None
+        if len(matched) == 1:
+            await self._maybe_rehash(matched[0], password)
+            return matched[0]
+
+        # Multiple password matches — return full tenant list for selection
+        tenant_list = tuple({"tenant_id": u.tenant_id, "email": u.email} for u in matched)
+        return TenantSelectionRequired(tenant_list)
+
+    async def _maybe_rehash(self, user: User, password: str) -> None:
         if needs_rehash(user.password_hash):
             try:
                 user.password_hash = await hash_password_async(password)
                 await self._repo.update_user(user)
             except Exception:
-                # Rehash is an opportunistic upgrade; a transient DB error must not
-                # prevent an otherwise-valid login from succeeding.
                 logger.warning("Failed to rehash password for user %s; login will still succeed", user.email, exc_info=True)
-
-        return user
 
     async def get_user(self, user_id: str) -> User | None:
         """Get user by ID."""

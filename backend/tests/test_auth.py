@@ -744,6 +744,7 @@ def test_authenticate_auto_rehashes_legacy_hash():
 
     mock_repo = MagicMock()
     mock_repo.get_user_by_email_and_tenant = AsyncMock(return_value=user)
+    mock_repo.get_users_by_email = AsyncMock(return_value=[user])
     mock_repo.update_user = AsyncMock(return_value=user)
 
     provider = LocalAuthProvider(mock_repo)
@@ -770,6 +771,7 @@ def test_authenticate_skips_rehash_for_v2_hash():
 
     mock_repo = MagicMock()
     mock_repo.get_user_by_email_and_tenant = AsyncMock(return_value=user)
+    mock_repo.get_users_by_email = AsyncMock(return_value=[user])
     mock_repo.update_user = AsyncMock(return_value=user)
 
     provider = LocalAuthProvider(mock_repo)

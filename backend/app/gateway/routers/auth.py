@@ -15,6 +15,7 @@ from app.gateway.auth import (
 )
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+from app.gateway.auth.providers import TenantSelectionRequired
 from app.gateway.csrf_middleware import is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
 
@@ -31,6 +32,7 @@ class LoginResponse(BaseModel):
 
     expires_in: int  # seconds
     needs_setup: bool = False
+    tenant_id: str | None = None
 
 
 # Top common-password blocklist. Drawn from the public SecLists "10k worst
@@ -283,15 +285,23 @@ async def login_local(
     client_ip = _get_client_ip(request)
     _check_rate_limit(client_ip)
 
-    user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password, "tenant_id": request.headers.get("X-DeerFlow-Tenant", "default")})
+    result = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password, "tenant_id": request.headers.get("X-DeerFlow-Tenant", "default")})
 
-    if user is None:
+    if isinstance(result, TenantSelectionRequired):
+        logger.info("Tenant selection required for email=%s, tenants=%d", form_data.username, len(result.tenants))
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=AuthErrorResponse(code=AuthErrorCode.TENANT_SELECTION_REQUIRED, message="Multiple tenants found for this account. Please select one.", tenants=result.tenants).model_dump(),
+        )
+
+    if result is None:
         _record_login_failure(client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email or password").model_dump(),
         )
 
+    user = result
     _record_login_success(client_ip)
     token = create_access_token(str(user.id), token_version=user.token_version, tenant_id=user.tenant_id)
     _set_session_cookie(response, token, request)
@@ -299,6 +309,7 @@ async def login_local(
     return LoginResponse(
         expires_in=get_auth_config().token_expiry_days * 24 * 3600,
         needs_setup=user.needs_setup,
+        tenant_id=user.tenant_id,
     )
 
 

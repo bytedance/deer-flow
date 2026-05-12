@@ -21,6 +21,7 @@ class AuthErrorCode(StrEnum):
     PROVIDER_NOT_FOUND = "provider_not_found"
     NOT_AUTHENTICATED = "not_authenticated"
     SYSTEM_ALREADY_INITIALIZED = "system_already_initialized"
+    TENANT_SELECTION_REQUIRED = "tenant_selection_required"
 
 
 class TokenError(StrEnum):
@@ -36,6 +37,7 @@ class AuthErrorResponse(BaseModel):
 
     code: AuthErrorCode
     message: str
+    tenants: list[dict] | None = None
 
 
 def token_error_to_code(err: TokenError) -> AuthErrorCode:

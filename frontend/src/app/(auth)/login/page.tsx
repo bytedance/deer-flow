@@ -56,6 +56,9 @@ export default function LoginPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [tenantChoices, setTenantChoices] = useState<
+    { tenant_id: string; email: string }[]
+  >([]);
 
   // Get next parameter for validated redirect
   const nextParam = searchParams.get("next");
@@ -114,6 +117,14 @@ export default function LoginPage() {
 
       if (!res.ok) {
         const data = await res.json();
+        if (
+          res.status === 409 &&
+          data.detail?.code === "tenant_selection_required"
+        ) {
+          setTenantChoices(data.detail.tenants);
+          setError("");
+          return;
+        }
         const authError = parseAuthError(data);
         setError(authError.message);
         return;
@@ -137,6 +148,37 @@ export default function LoginPage() {
     }
   };
 
+  const handleTenantSelect = async (tenantId: string) => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const res = await fetch("/api/v1/auth/login/local", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-DeerFlow-Tenant": tenantId,
+        },
+        body: `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`,
+        credentials: "include",
+      });
+
+      if (res.ok) {
+        setTenantChoices([]);
+        setCurrentTenantId(tenantId);
+        router.push(redirectPath);
+      } else {
+        const data = await res.json();
+        const authError = parseAuthError(data);
+        setError(authError.message);
+      }
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const actualTheme = theme === "system" ? resolvedTheme : theme;
 
   return (
@@ -153,10 +195,44 @@ export default function LoginPage() {
         <div className="text-center">
           <h1 className="text-foreground font-serif text-3xl">DeerFlow</h1>
           <p className="text-muted-foreground mt-2">
-            {isLogin ? "Sign in to your account" : "Create a new account"}
+            {tenantChoices.length > 0
+              ? "Select your organization"
+              : isLogin
+                ? "Sign in to your account"
+                : "Create a new account"}
           </p>
         </div>
 
+        {tenantChoices.length > 0 ? (
+          <div className="space-y-3">
+            <p className="text-muted-foreground text-center text-sm">
+              Your account exists in multiple organizations. Please select one:
+            </p>
+            <div className="space-y-2">
+              {tenantChoices.map((t) => (
+                <Button
+                  key={t.tenant_id}
+                  variant="outline"
+                  className="w-full justify-start"
+                  disabled={loading}
+                  onClick={() => handleTenantSelect(t.tenant_id)}
+                >
+                  {t.tenant_id}
+                </Button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setTenantChoices([]);
+                setError("");
+              }}
+              className="text-muted-foreground block w-full text-center text-sm hover:underline"
+            >
+              ← Back to login
+            </button>
+          </div>
+        ) : (
         <form onSubmit={handleSubmit} className="space-y-2">
           <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
@@ -196,7 +272,9 @@ export default function LoginPage() {
                 : "Create Account"}
           </Button>
         </form>
+        )}
 
+        {tenantChoices.length === 0 && (
         <div className="text-center text-sm">
           <button
             type="button"
@@ -211,6 +289,7 @@ export default function LoginPage() {
               : "Already have an account? Sign in"}
           </button>
         </div>
+        )}
 
         <div className="text-muted-foreground text-center text-xs">
           <Link href="/" className="hover:underline">
