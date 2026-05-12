@@ -329,7 +329,6 @@ models:
   #       chat_template_kwargs:
   #         enable_thinking: true
 
-
   # Example: Qwen3-Coder deployed on MindIE Engine
   # - name: Qwen3_Coder_480B_MindIE
   #   display_name: Qwen3-Coder-480B (MindIE)
@@ -540,8 +539,8 @@ uploads:
   # Application-level upload limits enforced by the gateway and exposed to the
   # frontend before file selection.
   max_files: 10
-  max_file_size: 52428800    # 50 MiB
-  max_total_size: 104857600  # 100 MiB
+  max_file_size: 52428800 # 50 MiB
+  max_total_size: 104857600 # 100 MiB
   # Automatic Office/PDF conversion runs on the backend host before sandbox
   # isolation applies. Keep this disabled unless uploads come from a fully
   # trusted source and you intentionally accept host-side parser risk.
@@ -1081,3 +1080,24 @@ run_events:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# Vector Database Configuration
+# ============================================================================
+# Configure storage for RAG (Retrieval-Augmented Generation) and knowledge base.
+#
+# backend: none    -- Vector storage disabled
+# backend: chroma  -- Local vector storage using ChromaDB (requires [chroma] extra)
+
+vector_store:
+  # Choose your backend
+  backend: chroma
+
+  # Global embedding model (optional, backend-specific)
+  # embedding_model: text-embedding-3-small
+
+  # Chroma-specific configuration
+  chroma:
+    # Path relative to the DeerFlow home directory (~/.deer-flow/)
+    path: vector_db/chroma
+    collection_name: deerflow_knowledge
