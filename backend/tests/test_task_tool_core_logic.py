@@ -1214,6 +1214,16 @@ def test_terminal_event_usage_none_when_no_records(monkeypatch):
     assert completed[0]["usage"] is None
 
 
+def test_subagent_usage_cache_is_skipped_when_config_file_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_app_config",
+        MagicMock(side_effect=FileNotFoundError("missing config")),
+    )
+
+    assert task_tool_module._token_usage_cache_enabled(None) is False
+
+
 def test_subagent_usage_cache_is_skipped_when_token_usage_is_disabled(monkeypatch):
     config = _make_subagent_config()
     app_config = SimpleNamespace(token_usage=SimpleNamespace(enabled=False))
