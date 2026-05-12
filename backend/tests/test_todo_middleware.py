@@ -471,6 +471,31 @@ class TestWrapModelCall:
         handler.assert_called_once_with(request)
 
 
+class TestRunScopedReminderCleanup:
+    def test_before_agent_clears_stale_count_without_pending_reminder(self):
+        mw = TodoMiddleware()
+        stale_runtime = _make_runtime()
+        stale_runtime.context = {"thread_id": "test-thread", "run_id": "stale-run"}
+        current_runtime = _make_runtime()
+        current_runtime.context = {"thread_id": "test-thread", "run_id": "current-run"}
+        other_thread_runtime = _make_runtime()
+        other_thread_runtime.context = {"thread_id": "other-thread", "run_id": "stale-run"}
+
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+        assert mw.after_model(state, stale_runtime) is not None
+        assert mw.after_model(state, other_thread_runtime) is not None
+
+        # Simulate a model call that drained the pending message, followed by an
+        # abnormal run end where after_agent did not clear the reminder count.
+        assert mw._drain_completion_reminders(stale_runtime)
+        assert mw._completion_reminder_count_for_runtime(stale_runtime) == 1
+
+        mw.before_agent({}, current_runtime)
+
+        assert mw._completion_reminder_count_for_runtime(stale_runtime) == 0
+        assert mw._completion_reminder_count_for_runtime(other_thread_runtime) == 1
+
+
 class TestAwrapModelCall:
     def test_async_pending_reminder_is_injected(self):
         mw = TodoMiddleware()

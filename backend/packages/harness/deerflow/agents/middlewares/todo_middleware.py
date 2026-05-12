@@ -204,7 +204,8 @@ class TodoMiddleware(TodoListMiddleware):
     def _clear_other_run_completion_reminders(self, runtime: Runtime) -> None:
         thread_id, current_run_id = self._pending_key(runtime)
         with self._lock:
-            for key in list(self._pending_completion_reminders):
+            keys = set(self._pending_completion_reminders) | set(self._completion_reminder_counts)
+            for key in keys:
                 if key[0] == thread_id and key[1] != current_run_id:
                     self._pending_completion_reminders.pop(key, None)
                     self._completion_reminder_counts.pop(key, None)
