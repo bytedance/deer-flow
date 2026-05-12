@@ -11,34 +11,26 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
                         │          Nginx (Port 2026)           │
                         │      Unified reverse proxy           │
                         └───────┬──────────────────┬───────────┘
-                                │                  │
-              /api/langgraph/*  │                  │  /api/* (other)
-                                ▼                  ▼
-               ┌──────────────────────────────────────────────┐
-               │             Gateway API (8001)               │
-               │  FastAPI REST + LangGraph-compatible runtime │
-               │                                              │
-               │ Models, MCP, Skills, Memory, Uploads,       │
-               │ Artifacts, Threads, Runs, Streaming          │
-               │                                              │
-               │ ┌────────────────┐                           │
-               │ │  Lead Agent    │                           │
-               │ │  ┌──────────┐  │                           │
-               │ │  │Middleware│  │                           │
-               │ │  │  Chain   │  │                           │
-               │ │  └──────────┘  │                           │
-               │ │  ┌──────────┐  │                           │
-               │ │  │  Tools   │  │                           │
-               │ │  └──────────┘  │                           │
-               │ │  ┌──────────┐  │                           │
-               │ │  │Subagents │  │                           │
-               │ │  └──────────┘  │                           │
-               │ └────────────────┘                           │
-               └──────────────────────────────────────────────┘
+                                │
+            /api/langgraph/*    │    /api/* (other)
+            rewritten to /api/* │
+                                ▼
+               ┌────────────────────────────────────────┐
+               │        Gateway API (8001)              │
+               │        FastAPI REST + agent runtime    │
+               │                                        │
+               │ Models, MCP, Skills, Memory, Uploads,  │
+               │ Artifacts, Threads, Runs, Streaming    │
+               │                                        │
+               │ ┌────────────────────────────────────┐ │
+               │ │ Lead Agent                         │ │
+               │ │ Middleware Chain, Tools, Subagents │ │
+               │ └────────────────────────────────────┘ │
+               └────────────────────────────────────────┘
 ```
 
 **Request Routing** (via Nginx):
-- `/api/langgraph/*` → Gateway API - LangGraph-compatible agent interactions, threads, runs, and streaming translated to native `/api/*` routers
+- `/api/langgraph/*` → Gateway LangGraph-compatible API - agent interactions, threads, streaming
 - `/api/*` (other) → Gateway API - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
 - `/` (non-API) → Frontend - Next.js web interface
 
@@ -196,7 +188,7 @@ export OPENAI_API_KEY="your-api-key-here"
 **Full Application** (from project root):
 
 ```bash
-make dev  # Starts LangGraph + Gateway + Frontend + Nginx
+make dev  # Starts Gateway + Frontend + Nginx
 ```
 
 Access at: http://localhost:2026
@@ -204,14 +196,11 @@ Access at: http://localhost:2026
 **Backend Only** (from backend directory):
 
 ```bash
-# Terminal 1: LangGraph server
+# Gateway API + embedded agent runtime
 make dev
-
-# Terminal 2: Gateway API
-make gateway
 ```
 
-Direct access: LangGraph at http://localhost:2024, Gateway at http://localhost:8001
+Direct access: Gateway at http://localhost:8001
 
 ---
 
@@ -247,7 +236,7 @@ backend/
 │   └── utils/                  # Utilities
 ├── docs/                       # Documentation
 ├── tests/                      # Test suite
-├── langgraph.json              # LangGraph server configuration
+├── langgraph.json              # LangGraph graph registry for tooling/Studio compatibility
 ├── pyproject.toml              # Python dependencies
 ├── Makefile                    # Development commands
 └── Dockerfile                  # Container build
@@ -365,8 +354,8 @@ If a provider is explicitly enabled but required credentials are missing, or the
 
 ```bash
 make install    # Install dependencies
-make dev        # Run LangGraph server (port 2024)
-make gateway    # Run Gateway API (port 8001)
+make dev        # Run Gateway API + embedded agent runtime (port 8001)
+make gateway    # Run Gateway API without reload (port 8001)
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
 ```

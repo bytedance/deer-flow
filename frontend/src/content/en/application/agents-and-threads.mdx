@@ -111,10 +111,9 @@ checkpointer:
 ```
 
 <Callout type="info">
-  The LangGraph Server manages its own state separately. The
-  <code>checkpointer</code> setting in <code>config.yaml</code> applies to the
-  embedded <code>DeerFlowClient</code> (used in direct Python integrations), not
-  to the LangGraph Server deployment used by DeerFlow App.
+  The Gateway embedded runtime uses the <code>checkpointer</code> setting in
+  <code>config.yaml</code>. The same setting is also used by
+  <code>DeerFlowClient</code> in direct Python integrations.
 </Callout>
 
 ### Thread data storage

@@ -185,9 +185,9 @@ If you need to start services individually:
 
 1. **Start backend service**:
    ```bash
-   # Terminal 1: Start Gateway API and embedded LangGraph-compatible runtime (port 8001)
+   # Terminal 1: Start Gateway API + embedded agent runtime (port 8001)
    cd backend
-   make gateway
+   make dev
 
    # Terminal 2: Start Frontend (port 3000)
    cd frontend
@@ -207,7 +207,7 @@ If you need to start services individually:
 
 The nginx configuration provides:
 - Unified entry point on port 2026
-- Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx
+- Rewrites `/api/langgraph/*` to Gateway's LangGraph-compatible API (8001)
 - Routes other `/api/*` endpoints to Gateway API (8001)
 - Routes non-API requests to Frontend (3000)
 - Same-origin API routing; split-origin or port-forwarded browser clients should use the Gateway `GATEWAY_CORS_ORIGINS` allowlist
@@ -231,7 +231,7 @@ deer-flow/
 ├── backend/                 # Backend application
 │   ├── src/
 │   │   ├── gateway/        # Gateway API and LangGraph-compatible runtime (port 8001)
-│   │   ├── agents/         # LangGraph agent definitions
+│   │   ├── agents/         # LangGraph agent runtime used by Gateway
 │   │   ├── mcp/            # Model Context Protocol integration
 │   │   ├── skills/         # Skills system
 │   │   └── sandbox/        # Sandbox execution

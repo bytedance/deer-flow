@@ -561,12 +561,13 @@ location /api/ {
 
 ---
 
-## WebSocket Support
+## Streaming Support
 
-The LangGraph server supports WebSocket connections for real-time streaming. Connect to:
+Gateway's LangGraph-compatible API streams run events with Server-Sent Events (SSE):
 
-```
-ws://localhost:2026/api/langgraph/threads/{thread_id}/runs/stream
+```http
+POST /api/langgraph/threads/{thread_id}/runs/stream
+Accept: text/event-stream
 ```
 
 ---
@@ -602,13 +603,21 @@ const response = await fetch('/api/models');
 const data = await response.json();
 console.log(data.models);
 
-// Using EventSource for streaming
-const eventSource = new EventSource(
-  `/api/langgraph/threads/${threadId}/runs/stream`
-);
-eventSource.onmessage = (event) => {
-  console.log(JSON.parse(event.data));
-};
+// Create a run and stream SSE events
+const streamResponse = await fetch(`/api/langgraph/threads/${threadId}/runs/stream`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  },
+  body: JSON.stringify({
+    input: { messages: [{ role: "user", content: "Hello" }] },
+    stream_mode: ["values", "messages-tuple", "custom"],
+  }),
+});
+
+const reader = streamResponse.body?.getReader();
+// Decode and parse SSE frames from reader in your client code.
 ```
 
 ### cURL Examples
