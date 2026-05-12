@@ -1,3 +1,5 @@
+import { fetch as fetchWithCsrf } from "@/core/api/fetcher";
+
 import { useBlockStore } from "./store";
 
 const MAX_RETRIES = 2;
@@ -36,7 +38,7 @@ export async function submitInteraction(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const response = await fetch(url, {
+      const response = await fetchWithCsrf(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ callback_id: callbackId, payload }),

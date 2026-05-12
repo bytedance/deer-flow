@@ -523,23 +523,30 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Load tenant MCP server configs for merging with global MCP tools
     tenant_mcp_configs = _load_tenant_mcp_configs(tenant_id) if tenant_id and tenant_id != "default" else None
 
+    tools = get_available_tools(
+        model_name=model_name,
+        groups=agent_config.tool_groups if agent_config else None,
+        mcp_servers=agent_config.mcp_servers if agent_config else None,
+        subagent_enabled=subagent_enabled,
+        app_config=resolved_app_config,
+        tenant_mcp_configs=tenant_mcp_configs,
+    ) + extra_tools
+
+    # Filter out excluded tools specified in agent config
+    if agent_config and agent_config.exclude_tools:
+        exclude_set = set(agent_config.exclude_tools)
+        tools = [t for t in tools if t.name not in exclude_set]
+
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config),
-        tools=get_available_tools(
-            model_name=model_name,
-            groups=agent_config.tool_groups if agent_config else None,
-            mcp_servers=agent_config.mcp_servers if agent_config else None,
-            subagent_enabled=subagent_enabled,
-            app_config=resolved_app_config,
-            tenant_mcp_configs=tenant_mcp_configs,
-        )
-        + extra_tools,
+        tools=tools,
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
             available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
+            exclude_tools=agent_config.exclude_tools if agent_config else None,
             app_config=resolved_app_config,
         ),
         state_schema=ThreadState,

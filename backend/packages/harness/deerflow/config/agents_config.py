@@ -46,6 +46,7 @@ class AgentConfig(BaseModel):
     model: str | None = None
     visibility: str = "public"
     tool_groups: list[str] | None = None
+    exclude_tools: list[str] | None = None
     # skills controls which skills are loaded into the agent's prompt:
     # - None (or omitted): load all enabled skills (default fallback behavior)
     # - [] (explicit empty list): disable all skills
@@ -221,11 +222,19 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
     """
     if agent_name:
         agent_dir = resolve_agent_dir(agent_name, user_id=user_id)
+        soul_path = agent_dir / SOUL_FILENAME
+        if not soul_path.exists():
+            # Fall through to builtin agents
+            builtin_soul = _get_builtin_agents_dir() / agent_name / SOUL_FILENAME
+            if builtin_soul.exists():
+                soul_path = builtin_soul
+            else:
+                return None
     else:
         agent_dir = get_paths().base_dir
-    soul_path = agent_dir / SOUL_FILENAME
-    if not soul_path.exists():
-        return None
+        soul_path = agent_dir / SOUL_FILENAME
+        if not soul_path.exists():
+            return None
     content = soul_path.read_text(encoding="utf-8").strip()
     return content or None
 

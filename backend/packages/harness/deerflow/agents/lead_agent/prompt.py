@@ -337,26 +337,7 @@ task(description="Oracle Cloud analysis", prompt="...", subagent_type="general-p
 - For >{n} sub-tasks, use sequential batches of {n} across multiple turns
 </subagent_system>"""
 
-
-SYSTEM_PROMPT_TEMPLATE = """
-<role>
-You are {agent_name}, an open-source super agent.
-</role>
-
-{soul}
-{self_update_section}
-{memory_context}
-
-<thinking_style>
-- Think concisely and strategically about the user's request BEFORE taking action
-- Break down the task: What is clear? What is ambiguous? What is missing?
-- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, you MUST ask for clarification FIRST - do NOT proceed with work**
-{subagent_thinking}- Never write down your full final answer or report in thinking process, but only outline
-- CRITICAL: After thinking, you MUST provide your actual response to the user. Thinking is for planning, the response is for delivery.
-- Your response must contain the actual answer, not just a reference to what you thought about
-</thinking_style>
-
-<clarification_system>
+CLARIFICATION_SECTION = """<clarification_system>
 **WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**
 1. **FIRST**: Analyze the request in your thinking - identify what's unclear, missing, or ambiguous
 2. **SECOND**: If clarification is needed, call `ask_clarification` tool IMMEDIATELY - do NOT start working
@@ -391,14 +372,10 @@ You are {agent_name}, an open-source super agent.
    - **REQUIRED ACTION**: Call ask_clarification to get approval
 
 **STRICT ENFORCEMENT:**
-- ❌ DO NOT start working and then ask for clarification mid-execution - clarify FIRST
-- ❌ DO NOT skip clarification for "efficiency" - accuracy matters more than speed
-- ❌ DO NOT make assumptions when information is missing - ALWAYS ask
-- ❌ DO NOT proceed with guesses - STOP and call ask_clarification first
-- ✅ Analyze the request in thinking → Identify unclear aspects → Ask BEFORE any action
-- ✅ If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
-- ✅ After calling ask_clarification, execution will be interrupted automatically
-- ✅ Wait for user response - do NOT continue with assumptions
+- DO NOT start working and then ask for clarification mid-execution - clarify FIRST
+- DO NOT skip clarification for "efficiency" - accuracy matters more than speed
+- DO NOT make assumptions when information is missing - ALWAYS ask
+- DO NOT proceed with guesses - STOP and call ask_clarification first
 
 **How to Use:**
 ```python
@@ -423,7 +400,27 @@ You (action): ask_clarification(
 
 User: "staging"
 You: "Deploying to staging..." [proceed]
-</clarification_system>
+</clarification_system>"""
+
+
+SYSTEM_PROMPT_TEMPLATE = """
+<role>
+You are {agent_name}, an open-source super agent.
+</role>
+
+{soul}
+{self_update_section}
+{memory_context}
+
+<thinking_style>
+- Think concisely and strategically about the user's request BEFORE taking action
+- Break down the task: What is clear? What is ambiguous? What is missing?
+{clarification_thinking}{subagent_thinking}- Never write down your full final answer or report in thinking process, but only outline
+- CRITICAL: After thinking, you MUST provide your actual response to the user. Thinking is for planning, the response is for delivery.
+- Your response must contain the actual answer, not just a reference to what you thought about
+</thinking_style>
+
+{clarification_section}
 
 {skills_section}
 
@@ -753,6 +750,7 @@ def apply_prompt_template(
     *,
     agent_name: str | None = None,
     available_skills: set[str] | None = None,
+    exclude_tools: list[str] | None = None,
     app_config: AppConfig | None = None,
 ) -> str:
     # Get memory context
@@ -791,6 +789,15 @@ def apply_prompt_template(
 
     genui_section = GENUI_GUIDANCE
 
+    # Include clarification system only if ask_clarification is not excluded
+    exclude_set = set(exclude_tools) if exclude_tools else set()
+    if "ask_clarification" in exclude_set:
+        clarification_section = ""
+        clarification_thinking = ""
+    else:
+        clarification_section = CLARIFICATION_SECTION
+        clarification_thinking = "- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, you MUST ask for clarification FIRST - do NOT proceed with work**\n"
+
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section(app_config=app_config)
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
@@ -804,6 +811,8 @@ def apply_prompt_template(
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
         genui_section=genui_section,
+        clarification_section=clarification_section,
+        clarification_thinking=clarification_thinking,
         memory_context=memory_context,
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
