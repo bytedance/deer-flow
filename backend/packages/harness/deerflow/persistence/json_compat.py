@@ -160,6 +160,7 @@ def _build_clause(compiler: SQLCompiler, typeof: str, extract: str, value: objec
 
 @compiles(JsonMatch, "sqlite")
 def _compile_sqlite(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str:
+    assert validate_metadata_filter_key(element.key), f"Key escaped validation: {element.key!r}"
     col = compiler.process(element.column, **kw)
     path = f'$."{element.key}"'
     typeof = f"json_type({col}, '{path}')"
@@ -169,10 +170,10 @@ def _compile_sqlite(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str
 
 @compiles(JsonMatch, "postgresql")
 def _compile_pg(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str:
+    assert validate_metadata_filter_key(element.key), f"Key escaped validation: {element.key!r}"
     col = compiler.process(element.column, **kw)
-    key = element.key.replace("'", "''")
-    typeof = f"json_typeof({col} -> '{key}')"
-    extract = f"({col} ->> '{key}')"
+    typeof = f"json_typeof({col} -> '{element.key}')"
+    extract = f"({col} ->> '{element.key}')"
     return _build_clause(compiler, typeof, extract, element.value, _PG, **kw)
 
 
