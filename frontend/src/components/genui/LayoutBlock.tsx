@@ -1,5 +1,7 @@
 "use client";
 
+import { useMemo } from "react";
+
 import { useBlockStore } from "@/core/genui/store";
 
 import { GenUIRenderer } from "./GenUIRenderer";
@@ -21,7 +23,11 @@ export default function LayoutBlock({ block }: LayoutBlockProps) {
   const { props, block_id, onInteraction } = block;
   const { layout_type, columns = 2, gap = 16, align = "stretch" } = props;
 
-  const children = useBlockStore((state) => state.getChildBlocks(block_id));
+  const blocks = useBlockStore((state) => state.blocks);
+  const children = useMemo(
+    () => Array.from(blocks.values()).filter((b) => b.parent_id === block_id),
+    [blocks, block_id],
+  );
 
   const style: React.CSSProperties =
     layout_type === "grid"
