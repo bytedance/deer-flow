@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
+from pathlib import Path
 from typing import Any
 
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
-from app.channels.store import ChannelStore
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +46,15 @@ class DiscordChannel(Channel):
         for channel_id in config.get("allowed_channels", []):
             self._allowed_channels.add(str(channel_id))
 
-        # Session tracking: channel_id -> thread_id (in-memory, persisted to store)
+        # Session tracking: channel_id -> Discord thread_id (in-memory, persisted to JSON).
+        # Uses a dedicated JSON file separate from ChannelStore, which maps IM
+        # conversations to DeerFlow thread IDs — a different concern.
         self._active_threads: dict[str, str] = {}
-        self._channel_store: ChannelStore | None = config.get("channel_store")
+        store = config.get("channel_store")
+        if store is not None:
+            self._thread_store_path = store._path.parent / "discord_threads.json"
+        else:
+            self._thread_store_path = Path.home() / ".deer-flow" / "channels" / "discord_threads.json"
 
         # Typing indicator management
         self._typing_tasks: dict[str, asyncio.Task] = {}
@@ -98,25 +105,28 @@ class DiscordChannel(Channel):
         logger.info("Discord channel started")
 
     def _load_active_threads(self) -> None:
-        """Restore active threads from persisted store on startup."""
-        if self._channel_store is None:
-            return
-        for entry in self._channel_store.list_entries("discord"):
-            if "chat_id" in entry and "thread_id" in entry:
-                channel_id = entry["chat_id"]
-                thread_id = entry["thread_id"]
+        """Restore Discord thread mappings from the dedicated JSON file on startup."""
+        try:
+            if not self._thread_store_path.exists():
+                logger.debug("[Discord] no thread mappings file at %s", self._thread_store_path)
+                return
+            data = json.loads(self._thread_store_path.read_text())
+            for channel_id, thread_id in data.items():
                 self._active_threads[channel_id] = thread_id
-        if self._active_threads:
-            logger.info("[Discord] restored %d thread mappings from store", len(self._active_threads))
-        else:
-            logger.debug("[Discord] no thread mappings found in store")
+            if self._active_threads:
+                logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
+        except Exception:
+            logger.exception("[Discord] failed to load thread mappings")
 
     def _save_thread(self, channel_id: str, thread_id: str) -> None:
-        """Persist a thread mapping to the store."""
-        if self._channel_store is None:
-            return
+        """Persist a Discord thread mapping to the dedicated JSON file."""
         try:
-            self._channel_store.set_thread_id("discord", channel_id, thread_id, topic_id=thread_id)
+            data: dict[str, str] = {}
+            if self._thread_store_path.exists():
+                data = json.loads(self._thread_store_path.read_text())
+            data[channel_id] = thread_id
+            self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
+            self._thread_store_path.write_text(json.dumps(data, indent=2))
         except Exception:
             logger.exception("[Discord] failed to save thread mapping for channel %s", channel_id)
 
