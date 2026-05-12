@@ -521,6 +521,7 @@ export function MessageList({
                   <GenUIBlockList
                     threadId={threadId}
                     blockIds={blockIds}
+                    disableExpiration={!thread.isLoading}
                     onInteraction={handleInteraction}
                   />
                 )}

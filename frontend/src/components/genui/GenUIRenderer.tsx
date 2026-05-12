@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useRef } from "react";
+import { Suspense, useEffect, useMemo, useRef } from "react";
 
 import { getBlockComponent } from "@/core/genui/registry";
 import { sanitizeProps } from "@/core/genui/sanitizer";
@@ -11,6 +11,7 @@ import { BlockErrorBoundary } from "./BlockErrorBoundary";
 
 interface GenUIRendererProps {
   block: UIBlock;
+  disableExpiration?: boolean;
   onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
 }
 
@@ -33,15 +34,28 @@ function UnsupportedBlock({ component }: { component: string }) {
   );
 }
 
-export function GenUIRenderer({ block, onInteraction }: GenUIRendererProps) {
+export function GenUIRenderer({ block, disableExpiration, onInteraction }: GenUIRendererProps) {
   const interactionState = useBlockStore(
     (state) => block.callback_id ? state.interactions.get(block.callback_id) : undefined,
   );
+
+  const effectiveInteractionState = useMemo(() => {
+    if (
+      disableExpiration &&
+      block.interactive &&
+      block.callback_id &&
+      (!interactionState || interactionState.status === "idle")
+    ) {
+      return { status: "expired" as const };
+    }
+    return interactionState;
+  }, [disableExpiration, block.interactive, block.callback_id, interactionState]);
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (
+      disableExpiration ||
       !block.interactive ||
       !block.callback_id ||
       !block.callback_timeout_ms ||
@@ -62,7 +76,7 @@ export function GenUIRenderer({ block, onInteraction }: GenUIRendererProps) {
         clearTimeout(timeoutRef.current);
       }
     };
-  }, [block.interactive, block.callback_id, block.callback_timeout_ms, interactionState?.status]);
+  }, [disableExpiration, block.interactive, block.callback_id, block.callback_timeout_ms, interactionState?.status]);
 
   const Component = getBlockComponent(block.component, block.schema_version);
 
@@ -89,7 +103,7 @@ export function GenUIRenderer({ block, onInteraction }: GenUIRendererProps) {
   const blockWithSanitizedProps = {
     ...block,
     props: sanitizedProps,
-    interactionState,
+    interactionState: effectiveInteractionState,
     onInteraction,
   };
 
