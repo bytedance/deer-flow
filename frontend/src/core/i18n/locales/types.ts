@@ -384,6 +384,7 @@ export interface Translations {
       memory: string;
       tools: string;
       skills: string;
+      agents: string;
       notification: string;
       about: string;
     };

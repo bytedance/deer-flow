@@ -14,8 +14,9 @@ export function AgentWelcome({
   agent: Agent | null | undefined;
   agentName: string;
 }) {
-  const displayName = agent?.name ?? agentName;
+  const displayName = agent?.display_name ?? agent?.name ?? agentName;
   const description = agent?.description;
+  const icon = agent?.icon;
 
   return (
     <div
@@ -25,7 +26,11 @@ export function AgentWelcome({
       )}
     >
       <div className="bg-primary/10 flex h-12 w-12 items-center justify-center rounded-full">
-        <BotIcon className="text-primary h-6 w-6" />
+        {icon ? (
+          <span className="text-2xl">{icon}</span>
+        ) : (
+          <BotIcon className="text-primary h-6 w-6" />
+        )}
       </div>
       <div className="text-2xl font-bold">{displayName}</div>
       {description && (

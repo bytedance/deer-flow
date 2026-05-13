@@ -442,6 +442,7 @@ export const zhCN: Translations = {
       memory: "记忆",
       tools: "工具",
       skills: "技能",
+      agents: "智能体",
       notification: "通知",
       about: "关于",
     },

@@ -468,6 +468,7 @@ export const enUS: Translations = {
       memory: "Memory",
       tools: "Tools",
       skills: "Skills",
+      agents: "Agents",
       notification: "Notification",
       about: "About",
     },
