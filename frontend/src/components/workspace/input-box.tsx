@@ -110,6 +110,7 @@ export function InputBox({
   threadId,
   initialValue,
   onContextChange,
+  onFollowupsVisibilityChange,
   onSubmit,
   onStop,
   ...props
@@ -252,7 +253,7 @@ export function InputBox({
   );
 
   const handleSubmit = useCallback(
-    async (message: PromptInputMessage) => {
+    (message: PromptInputMessage) => {
       if (status === "streaming") {
         onStop?.();
         return;
@@ -351,6 +352,14 @@ export function InputBox({
     !isWelcomeMode &&
     !followupsHidden &&
     (followupsLoading || followups.length > 0);
+
+  useEffect(() => {
+    onFollowupsVisibilityChange?.(showFollowups);
+  }, [onFollowupsVisibilityChange, showFollowups]);
+
+  useEffect(() => {
+    return () => onFollowupsVisibilityChange?.(false);
+  }, [onFollowupsVisibilityChange]);
 
   useEffect(() => {
     messagesRef.current = thread.messages;
