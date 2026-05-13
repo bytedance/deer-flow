@@ -1,6 +1,6 @@
 ---
 title: Quick Start
-description: This guide walks you through starting DeerFlow App on your local machine using the `make dev` workflow. All four services (LangGraph, Gateway, Frontend, nginx) start together and are accessible through a single URL.
+description: This guide walks you through starting DeerFlow App on your local machine using the `make dev` workflow. Gateway, Frontend, and nginx start together and are accessible through a single URL.
 ---
 
 import { Callout, Cards, Steps } from "nextra/components";
@@ -12,7 +12,7 @@ import { Callout, Cards, Steps } from "nextra/components";
   Python 3.12+, Node.js 22+, and at least one LLM API key.
 </Callout>
 
-This guide walks you through starting DeerFlow App on your local machine using the `make dev` workflow. All four services (LangGraph, Gateway, Frontend, nginx) start together and are accessible through a single URL.
+This guide walks you through starting DeerFlow App on your local machine using the `make dev` workflow. Gateway, Frontend, and nginx start together and are accessible through a single URL.
 
 ## Prerequisites
 
@@ -88,8 +88,7 @@ make dev
 
 This starts:
 
-- LangGraph server on port `2024`
-- Gateway API on port `8001`
+- Gateway API and embedded agent runtime on port `8001`
 - Frontend on port `3000`
 - nginx reverse proxy on port `2026`
 
@@ -113,15 +112,13 @@ Log files:
 
 | Service   | Log file             |
 | --------- | -------------------- |
-| LangGraph | `logs/langgraph.log` |
 | Gateway   | `logs/gateway.log`   |
 | Frontend  | `logs/frontend.log`  |
 | nginx     | `logs/nginx.log`     |
 
 <Callout type="tip">
   If something is not working, check the log files first. Most startup errors
-  (missing API keys, config parsing failures) appear in `logs/langgraph.log` or
-  `logs/gateway.log`.
+  (missing API keys, config parsing failures) appear in `logs/gateway.log`.
 </Callout>
 
 <Cards num={2}>

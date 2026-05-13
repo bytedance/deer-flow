@@ -23,8 +23,7 @@ Services started:
 
 | Service     | Port | Description              |
 | ----------- | ---- | ------------------------ |
-| LangGraph   | 2024 | DeerFlow Harness runtime |
-| Gateway API | 8001 | FastAPI backend          |
+| Gateway API | 8001 | FastAPI backend + embedded agent runtime |
 | Frontend    | 3000 | Next.js UI               |
 | nginx       | 2026 | Unified reverse proxy    |
 
@@ -36,13 +35,12 @@ Access the app at **http://localhost:2026**.
 make stop
 ```
 
-Stops all four services. Safe to run even if a service is not running.
+Stops all services. Safe to run even if a service is not running.
 
   </Tabs.Tab>
   <Tabs.Tab>
 ```
-logs/langgraph.log   # Agent runtime logs
-logs/gateway.log     # API gateway logs
+logs/gateway.log     # API gateway and agent runtime logs
 logs/frontend.log    # Next.js dev server logs
 logs/nginx.log       # nginx access/error logs
 ```
@@ -50,7 +48,7 @@ logs/nginx.log       # nginx access/error logs
 Tail a log in real time:
 
 ```bash
-tail -f logs/langgraph.log
+tail -f logs/gateway.log
 ```
 
   </Tabs.Tab>
@@ -74,7 +72,7 @@ export DEER_FLOW_ROOT=/path/to/deer-flow
 docker compose -f docker/docker-compose-dev.yaml up --build
 ```
 
-Services: nginx, frontend, gateway, langgraph, and optionally provisioner (for K8s-managed sandboxes).
+Services: nginx, frontend, gateway, and optionally provisioner (for K8s-managed sandboxes).
 
 Access the app at **http://localhost:2026**.
 
@@ -99,7 +97,7 @@ The `docker-compose*.yaml` files include an `env_file: ../.env` directive that l
 
 ### Data persistence
 
-Thread data is stored in `backend/.deer-flow/threads/`. In Docker deployments, this directory is bind-mounted into the langgraph container.
+Thread data is stored in `backend/.deer-flow/threads/`. In Docker deployments, this directory is bind-mounted into the gateway container.
 
 To avoid data loss when containers are recreated:
 
@@ -161,14 +159,7 @@ When `USERDATA_PVC_NAME` is set, the provisioner automatically uses subPath (`th
 
 ### nginx configuration
 
-nginx routes all traffic. Key environment variables that control routing:
-
-| Variable             | Default          | Description                             |
-| -------------------- | ---------------- | --------------------------------------- |
-| `LANGGRAPH_UPSTREAM` | `langgraph:2024` | LangGraph service address               |
-| `LANGGRAPH_REWRITE`  | `/`              | URL rewrite prefix for LangGraph routes |
-
-These are set in the Docker Compose environment and processed by `envsubst` at container startup.
+nginx routes all traffic to the frontend or Gateway. `/api/langgraph/*` is rewritten to Gateway's LangGraph-compatible `/api/*` routes, so no separate LangGraph upstream is required.
 
 ### Authentication
 
@@ -186,8 +177,7 @@ openssl rand -base64 32
 
 | Service                         | Minimum          | Recommended      |
 | ------------------------------- | ---------------- | ---------------- |
-| LangGraph (agent runtime)       | 2 vCPU, 4 GB RAM | 4 vCPU, 8 GB RAM |
-| Gateway                         | 0.5 vCPU, 512 MB | 1 vCPU, 1 GB     |
+| Gateway + agent runtime         | 2 vCPU, 4 GB RAM | 4 vCPU, 8 GB RAM |
 | Frontend                        | 0.5 vCPU, 512 MB | 1 vCPU, 1 GB     |
 | Sandbox container (per session) | 1 vCPU, 1 GB     | 2 vCPU, 2 GB     |
 
@@ -198,9 +188,6 @@ After starting, verify the deployment:
 ```bash
 # Check Gateway health
 curl http://localhost:8001/health
-
-# Check LangGraph health
-curl http://localhost:2024/ok
 
 # List configured models (through nginx)
 curl http://localhost:2026/api/models
