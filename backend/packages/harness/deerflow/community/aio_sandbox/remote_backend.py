@@ -133,12 +133,12 @@ class RemoteSandboxBackend(SandboxBackend):
     def _provisioner_create(self, thread_id: str, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
         try:
+            payload: dict = {"sandbox_id": sandbox_id, "thread_id": thread_id}
+            if extra_mounts:
+                payload["extra_mounts"] = [{"host_path": h, "container_path": c, "read_only": r} for h, c, r in extra_mounts]
             resp = requests.post(
                 f"{self._provisioner_url}/api/sandboxes",
-                json={
-                    "sandbox_id": sandbox_id,
-                    "thread_id": thread_id,
-                },
+                json=payload,
                 timeout=30,
             )
             resp.raise_for_status()
