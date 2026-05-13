@@ -19,6 +19,7 @@ interface Shortcut {
 export function useGlobalShortcuts(shortcuts: Shortcut[]) {
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (!event.key) return;
       const meta = event.metaKey || event.ctrlKey;
 
       for (const shortcut of shortcuts) {

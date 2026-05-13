@@ -93,3 +93,75 @@ def test_escapes_markdown_table_pipes(export_report, kpi_payload):
     markdown = export_report.render_markdown(payload)
     assert "E\\|001" in markdown
     assert "温度\\|异常" in markdown
+
+
+# --- Aggregation mode export tests ---
+
+
+@pytest.fixture()
+def aggregated_payload():
+    return {
+        "report_date": "2026-05-13",
+        "equipment_ids": [f"SE-{i+1:03d}" for i in range(50)],
+        "equipment_type": "static_equipment",
+        "equipment_count": 50,
+        "compare_type": "previous_day",
+        "compare_date": "2026-05-12",
+        "aggregation_mode": "grouped",
+        "overall_status": {"level": "warning", "summary": "50台静设备整体运行稳定，3台设备腐蚀速率偏高"},
+        "kpi_summary": [
+            {"key": "runtime_rate", "name": "运行率", "current": 0.943, "current_note": "均值", "min": 0.78, "max": 0.99, "previous": 0.951, "delta": -0.008, "unit": "%", "direction": "down", "better_when_higher": True},
+            {"key": "corrosion_rate", "name": "腐蚀速率", "current": 0.12, "current_note": "均值", "min": 0.01, "max": 0.48, "previous": 0.11, "delta": 0.01, "unit": "mm/a", "direction": "up", "better_when_higher": False},
+        ],
+        "top_anomalies": [
+            {"rank": 1, "equipment_id": "SE-042", "name": "E-142 换热器", "area": "A区", "issue": "腐蚀速率 0.48 mm/a（阈值 0.3）", "severity": "high"},
+            {"rank": 2, "equipment_id": "SE-108", "name": "E-208 冷却器", "area": "A区", "issue": "壁厚减薄 1.8 mm", "severity": "warning"},
+        ],
+        "alarm_table": [
+            {"time": "2026-05-13 10:00", "equipment": "SE-042", "level": "high", "message": "腐蚀速率超标"},
+        ],
+        "trend_chart": {"title": {"text": "24h趋势"}, "series": []},
+        "recommendations": ["关注腐蚀速率超标设备。"],
+    }
+
+
+def test_aggregated_markdown_has_device_count(export_report, aggregated_payload):
+    markdown = export_report.render_markdown(aggregated_payload)
+    assert "共 50 台" in markdown
+
+
+def test_aggregated_markdown_has_type_title(export_report, aggregated_payload):
+    markdown = export_report.render_markdown(aggregated_payload)
+    assert "# 静设备运行日报" in markdown
+
+
+def test_aggregated_markdown_has_anomaly_table(export_report, aggregated_payload):
+    markdown = export_report.render_markdown(aggregated_payload)
+    assert "## 异常设备排行" in markdown
+    assert "SE-042" in markdown
+    assert "腐蚀速率 0.48" in markdown
+    assert "E-142 换热器" in markdown
+
+
+def test_aggregated_markdown_has_min_max_columns(export_report, aggregated_payload):
+    markdown = export_report.render_markdown(aggregated_payload)
+    assert "当前（均值）" in markdown
+    assert "最小" in markdown
+    assert "最大" in markdown
+
+
+def test_detail_mode_no_anomaly_table(export_report, kpi_payload):
+    markdown = export_report.render_markdown(kpi_payload)
+    assert "## 异常设备排行" not in markdown
+
+
+def test_detail_mode_no_device_count(export_report, kpi_payload):
+    markdown = export_report.render_markdown(kpi_payload)
+    assert "共" not in markdown
+    assert "E001" in markdown
+
+
+def test_aggregated_no_anomalies_skips_section(export_report, aggregated_payload):
+    payload = {**aggregated_payload, "top_anomalies": []}
+    markdown = export_report.render_markdown(payload)
+    assert "## 异常设备排行" not in markdown

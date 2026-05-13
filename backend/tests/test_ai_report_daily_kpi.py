@@ -99,3 +99,125 @@ def test_write_output(daily_kpi, tmp_path):
     assert out_path.name == "daily_kpi.json"
     loaded = json.loads(out_path.read_text(encoding="utf-8"))
     assert loaded["report_date"] == "2026-05-13"
+
+
+# --- Aggregation mode tests ---
+
+
+def _aggregated_input(num_devices=50, kpi_keys=None):
+    """Build a payload with per_equipment data for aggregation testing."""
+    if kpi_keys is None:
+        kpi_keys = ["runtime_rate", "corrosion_rate"]
+    areas = ["A区", "B区", "C区", "D区"]
+    sub_types = ["换热器", "冷却器", "塔器", "容器", "反应器"]
+    per_equipment = {}
+    for i in range(num_devices):
+        eq_id = f"SE-{i+1:03d}"
+        kpis = {}
+        for key in kpi_keys:
+            if key == "runtime_rate":
+                kpis[key] = 0.85 + (i % 15) * 0.01
+            elif key == "corrosion_rate":
+                kpis[key] = 0.05 + (i % 10) * 0.05
+            else:
+                kpis[key] = 50.0 + i
+        sub_type = sub_types[i % len(sub_types)]
+        per_equipment[eq_id] = {
+            "kpis": kpis,
+            "hourly_runtime_rate": [0.9] * 24,
+            "name": f"{sub_type}-{i+1:03d}",
+            "area": areas[i % len(areas)],
+        }
+    avg_kpis = {}
+    for key in kpi_keys:
+        vals = [per_equipment[eid]["kpis"][key] for eid in per_equipment]
+        avg_kpis[key] = round(sum(vals) / len(vals), 4)
+    current = {
+        "kpis": avg_kpis,
+        "kpi_units": {k: "%" if k == "runtime_rate" else "mm/a" for k in kpi_keys},
+        "hourly_runtime_rate": [0.9] * 24,
+        "alarms": [],
+        "per_equipment": per_equipment,
+    }
+    return {
+        "report_date": "2026-05-13",
+        "equipment_ids": list(per_equipment.keys()),
+        "equipment_type": "static_equipment",
+        "equipment_count": num_devices,
+        "kpi_keys": kpi_keys,
+        "compare_type": "none",
+        "compare_date": None,
+        "current": current,
+        "compare": None,
+    }
+
+
+def test_aggregation_mode_grouped(daily_kpi):
+    payload = _aggregated_input(num_devices=50)
+    result = daily_kpi.compute(payload)
+    assert result["aggregation_mode"] == "grouped"
+    assert result["equipment_type"] == "static_equipment"
+    assert result["equipment_count"] == 50
+
+
+def test_aggregation_mode_detail_for_small(daily_kpi):
+    payload = _sample_input(compare_block=None)
+    result = daily_kpi.compute(payload)
+    assert result["aggregation_mode"] == "detail"
+    assert "top_anomalies" not in result
+
+
+def test_aggregated_kpi_summary_has_min_max(daily_kpi):
+    payload = _aggregated_input(num_devices=50)
+    result = daily_kpi.compute(payload)
+    for item in result["kpi_summary"]:
+        assert "min" in item
+        assert "max" in item
+        assert "current_note" in item
+        assert item["current_note"] == "均值"
+        assert item["min"] <= item["current"] <= item["max"]
+
+
+def test_top_anomalies_sorted_by_severity(daily_kpi):
+    payload = _aggregated_input(num_devices=50, kpi_keys=["runtime_rate", "corrosion_rate"])
+    result = daily_kpi.compute(payload)
+    anomalies = result.get("top_anomalies", [])
+    assert isinstance(anomalies, list)
+    assert len(anomalies) <= 10
+    for a in anomalies:
+        assert "rank" in a
+        assert "equipment_id" in a
+        assert "issue" in a
+        assert "severity" in a
+        assert a["name"] != a["equipment_id"]
+        assert a["area"] != ""
+    if len(anomalies) > 1:
+        assert anomalies[0]["rank"] == 1
+        assert anomalies[-1]["rank"] == len(anomalies)
+        high_indices = [i for i, a in enumerate(anomalies) if a["severity"] == "high"]
+        warning_indices = [i for i, a in enumerate(anomalies) if a["severity"] == "warning"]
+        if high_indices and warning_indices:
+            assert max(high_indices) < min(warning_indices)
+
+
+def test_aggregated_trend_chart_title(daily_kpi):
+    payload = _aggregated_input(num_devices=50)
+    result = daily_kpi.compute(payload)
+    title = result["trend_chart"]["title"]["text"]
+    assert "均值" in title
+    assert "50" in title
+
+
+def test_new_kpi_display_names(daily_kpi):
+    expected_keys = [
+        "corrosion_rate", "thickness_loss", "vibration_level",
+        "bearing_temp", "flow_rate", "outlet_pressure", "valve_temp",
+    ]
+    for key in expected_keys:
+        assert key in daily_kpi.KPI_DISPLAY_NAMES
+
+
+def test_new_kpi_better_when_higher(daily_kpi):
+    assert "flow_rate" in daily_kpi.KPI_BETTER_WHEN_HIGHER
+    assert "outlet_pressure" in daily_kpi.KPI_BETTER_WHEN_HIGHER
+    assert "corrosion_rate" not in daily_kpi.KPI_BETTER_WHEN_HIGHER

@@ -188,3 +188,101 @@ def test_main_deduplicates_equipment_and_kpis(query_daily, monkeypatch, capsys, 
     loaded = json.loads((tmp_path / "daily_data.json").read_text(encoding="utf-8"))
     assert loaded["equipment_ids"] == ["E001", "E002"]
     assert loaded["kpi_keys"] == ["runtime_rate", "downtime_count"]
+
+
+# --- New KPI and --type/--scope/--scope-filter tests ---
+
+
+def test_new_kpi_units_registered(query_daily):
+    """All 12 KPI keys must be in KPI_UNITS."""
+    expected = {
+        "runtime_rate", "downtime_count", "alarm_count", "output", "energy_consumption",
+        "corrosion_rate", "thickness_loss", "vibration_level", "bearing_temp",
+        "flow_rate", "outlet_pressure", "valve_temp",
+    }
+    assert expected.issubset(set(query_daily.KPI_UNITS.keys()))
+
+
+def test_new_kpi_demo_values(query_daily):
+    """New KPIs should produce valid demo data."""
+    new_kpis = ["corrosion_rate", "thickness_loss", "vibration_level", "bearing_temp", "flow_rate", "outlet_pressure", "valve_temp"]
+    payload = query_daily.fetch_day("2026-05-13", ["E001"], new_kpis)
+    for key in new_kpis:
+        assert key in payload["kpis"]
+        assert key in payload["kpi_units"]
+        assert isinstance(payload["kpis"][key], (int, float))
+
+
+def test_scope_mode_returns_per_equipment(query_daily, monkeypatch, capsys, tmp_path):
+    """--scope area mode should produce per_equipment for >20 devices."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--type", "static_equipment",
+            "--scope", "area",
+            "--scope-filter", "A区",
+            "--kpis", "runtime_rate,corrosion_rate",
+            "--compare", "previous_day",
+        ],
+    )
+    assert query_daily.main() == 0
+    capsys.readouterr()
+    loaded = json.loads((tmp_path / "daily_data.json").read_text(encoding="utf-8"))
+    assert loaded["equipment_type"] == "static_equipment"
+    assert loaded["equipment_count"] == 250
+    assert "per_equipment" in loaded["current"]
+    assert len(loaded["current"]["per_equipment"]) == 250
+
+
+def test_scope_all_returns_all_devices(query_daily, monkeypatch, capsys, tmp_path):
+    """--scope all --type pump should return 1000 pump devices."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--type", "pump",
+            "--scope", "all",
+            "--kpis", "runtime_rate,flow_rate",
+            "--compare", "none",
+        ],
+    )
+    assert query_daily.main() == 0
+    capsys.readouterr()
+    loaded = json.loads((tmp_path / "daily_data.json").read_text(encoding="utf-8"))
+    assert len(loaded["equipment_ids"]) == 1000
+    assert loaded["equipment_count"] == 1000
+
+
+def test_backward_compat_no_type_no_scope(query_daily, monkeypatch, capsys, tmp_path):
+    """Without --type/--scope, behavior must match original."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--equipment", "E001,E002",
+            "--kpis", "runtime_rate,alarm_count",
+            "--compare", "previous_day",
+        ],
+    )
+    assert query_daily.main() == 0
+    capsys.readouterr()
+    loaded = json.loads((tmp_path / "daily_data.json").read_text(encoding="utf-8"))
+    assert loaded["equipment_ids"] == ["E001", "E002"]
+    assert "per_equipment" not in loaded["current"]
+    assert "equipment_count" not in loaded
+
+
+def test_type_specific_alarms(query_daily):
+    """Alarm messages should differ by equipment type."""
+    payload_static = query_daily.fetch_day("2026-05-13", ["SE-001"], ["runtime_rate"], eq_type="static_equipment")
+    payload_pump = query_daily.fetch_day("2026-05-13", ["PP-001"], ["runtime_rate"], eq_type="pump")
+    static_messages = set(query_daily.TYPE_ALARM_MESSAGES["static_equipment"])
+    pump_messages = set(query_daily.TYPE_ALARM_MESSAGES["pump"])
+    assert static_messages != pump_messages

@@ -5,12 +5,12 @@
 ## 核心原则
 
 - 数据优先：所有结论必须来自脚本输出或用户提交参数，不凭空编造。
-- 先收参后生成：首次进入或缺少参数时必须先渲染参数表单，然后停止等待用户提交。
+- 先收参后生成：首次进入或缺少参数时必须先渲染 Round 1 表单，然后停止等待用户提交。
 - 严格读取 `ui_interaction.payload`：表单字段位于 `payload` 顶层，不在 `values` 中。
 - 输出路径固定：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
 - 无后端路由、无前端组件变更：只使用已注册 GenUI 组件 `form`、`card`、`echart`、`table`、`markdown`。
 
-## 首次进入：渲染参数表单并停止
+## 首次进入：渲染 Round 1 表单并停止
 
 当用户要求生成日报但当前消息不是 `ui_interaction`，或缺少日报参数时，必须调用 `render_ui` 创建交互表单：
 
@@ -19,11 +19,11 @@
   "component": "form",
   "action": "create",
   "interactive": true,
-  "callback_id": "daily-report-params",
+  "callback_id": "daily-report-scope",
   "callback_timeout_ms": 600000,
   "props": {
     "title": "生成设备运行日报",
-    "description": "请选择日报日期、设备范围、KPI 和对比基准。",
+    "description": "请选择日报参数。下一步将确认设备匹配结果和 KPI 指标。",
     "fields": [
       {
         "name": "report_date",
@@ -32,18 +32,35 @@
         "required": true
       },
       {
-        "name": "equipment_scope_csv",
-        "label": "设备范围",
-        "type": "text",
+        "name": "equipment_type",
+        "label": "设备类型",
+        "type": "select",
         "required": true,
-        "placeholder": "例如：E001,E002"
+        "options": [
+          {"label": "全部", "value": "all"},
+          {"label": "静设备", "value": "static_equipment"},
+          {"label": "旋转机组", "value": "rotating_machinery"},
+          {"label": "机泵", "value": "pump"},
+          {"label": "往复机组", "value": "reciprocating_machinery"}
+        ]
       },
       {
-        "name": "kpis_csv",
-        "label": "KPI 指标",
-        "type": "text",
+        "name": "equipment_scope",
+        "label": "设备范围",
+        "type": "select",
         "required": true,
-        "placeholder": "runtime_rate,downtime_count,alarm_count"
+        "options": [
+          {"label": "全部", "value": "all"},
+          {"label": "按区域", "value": "area"},
+          {"label": "指定设备", "value": "specific"}
+        ]
+      },
+      {
+        "name": "scope_filter",
+        "label": "区域名称或设备ID（逗号分隔）",
+        "type": "text",
+        "required": false,
+        "placeholder": "选'全部'时留空；按区域填'A区,B区'；指定设备填'SE-001,SE-002'"
       },
       {
         "name": "compare_with",
@@ -58,38 +75,104 @@
       }
     ],
     "default_values": {
-      "kpis_csv": "runtime_rate,downtime_count,alarm_count",
+      "equipment_type": "all",
+      "equipment_scope": "all",
       "compare_with": "previous_day"
+    },
+    "submit_label": "下一步"
+  }
+}
+```
+
+调用后只回复一句"请填写日报参数后提交。"并立即停止，不要继续调用脚本或生成报告。
+
+## Round 1 回调：查询设备并渲染 Round 2 表单
+
+当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-scope` 时：
+
+1. 从 `payload` 读取参数：`report_date`、`equipment_type`、`equipment_scope`、`scope_filter`、`compare_with`。
+2. 校验输入（payload 来自用户、可被污染）：
+   - `report_date`：必须匹配 `^\d{4}-\d{2}-\d{2}$`。
+   - `equipment_type`：必须是 `all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery` 之一。
+   - `equipment_scope`：必须是 `all` / `area` / `specific` 之一。
+   - `scope_filter`：当 `equipment_scope=area` 时拆分逗号后每个元素只允许中文字母数字下划线连字符；当 `equipment_scope=specific` 时每个元素只允许 `[A-Za-z0-9_-]+`。
+   - `compare_with`：必须是 `previous_day` / `previous_week` / `none` 之一。
+   任一校验失败时渲染 `markdown` 提示用户重新提交，并停止后续步骤。
+3. 调用设备目录查询脚本；将校验后的值用双引号包裹，禁止直接拼接原始 `payload`：
+
+```bash
+python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
+  --type "{validated.equipment_type}" \
+  --scope "{validated.equipment_scope}" \
+  --filter "{validated.scope_filter}"
+```
+
+4. 读取脚本输出的 `available_kpis` 和 `total_matched`。
+5. 根据脚本返回动态生成 Round 2 表单。每个 KPI 生成一个 checkbox 字段，字段 `name` 为 `kpi_{key}`，`label` 为 `{name} ({unit})`。`available_kpis` 中 `default=true` 的 KPI 在 `default_values` 中设为 `true`，其余为 `false`。`description` 显示匹配设备数量。
+
+示例（静设备 A 区匹配 238 台时）：
+
+```json
+{
+  "component": "form",
+  "action": "create",
+  "interactive": true,
+  "callback_id": "daily-report-confirm",
+  "callback_timeout_ms": 600000,
+  "props": {
+    "title": "确认日报参数",
+    "description": "已匹配: 静设备 · A区 · 238 台。请选择关注的 KPI 指标。",
+    "fields": [
+      {"name": "kpi_runtime_rate", "label": "运行率 (%)", "type": "checkbox", "required": false},
+      {"name": "kpi_alarm_count", "label": "告警数量 (条)", "type": "checkbox", "required": false},
+      {"name": "kpi_corrosion_rate", "label": "腐蚀速率 (mm/a)", "type": "checkbox", "required": false}
+    ],
+    "default_values": {
+      "kpi_runtime_rate": true,
+      "kpi_alarm_count": true,
+      "kpi_corrosion_rate": true
     },
     "submit_label": "生成日报"
   }
 }
 ```
 
-调用后只回复一句“请填写日报参数后提交。”并立即停止，不要继续调用脚本或生成报告。
+渲染表单后停止，等待用户提交。
 
-## 参数表单回调：生成日报
+## Round 2 回调：生成日报
 
-当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-params` 时：
+当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-confirm` 时：
 
-- 从 `payload.report_date`、`payload.equipment_scope_csv`、`payload.kpis_csv`、`payload.compare_with` 读取参数。
-- 在拼接 shell 命令前必须先校验输入（payload 来自用户、可被污染）：
-  - `report_date`：必须匹配 `^\d{4}-\d{2}-\d{2}$`。
-  - `equipment_scope_csv`：拆分逗号后每个元素只允许 `[A-Za-z0-9_\-]+`，去重后保留原顺序。
-  - `kpis_csv`：拆分逗号后每个元素只允许 `[a-z_]+`，过滤未在 `runtime_rate,downtime_count,alarm_count,output,energy_consumption` 白名单中的项。
-  - `compare_with`：必须是 `previous_day` / `previous_week` / `none` 之一。
-  任一校验失败时不要执行脚本，改为渲染 `markdown` 提示用户重新提交，并停止后续步骤。
-- 调用数据查询脚本；将校验后的值用双引号包裹再拼接，禁止直接拼接原始 `payload`：
+1. 从 `payload` 中收集所有以 `kpi_` 开头且值为 `true` 的字段，去掉 `kpi_` 前缀组装 KPI 列表。
+2. **如果没有任何 KPI 被选中**，渲染 `markdown` 提示"请至少选择一个 KPI 指标"并停止，不调用任何脚本。
+3. **从对话历史中回溯找到 `daily-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_date`、`equipment_type`、`equipment_scope`、`scope_filter`、`compare_with`。必须显式从对话历史获取，不依赖 LLM 自动记忆。
+4. 根据设备范围选择调用方式：
+   - **指定设备（`equipment_scope=specific`）**：使用 `--equipment` 直接传递设备 ID。
+   - **按区域或全部（`equipment_scope=all` 或 `equipment_scope=area`）**：使用 `--type`/`--scope`/`--scope-filter` 参数，由脚本内部解析设备列表，**不拼接设备 ID CSV**。
+
+按区域或全部场景：
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
   --date "{validated.report_date}" \
-  --equipment "{validated.equipment_scope_csv}" \
-  --kpis "{validated.kpis_csv}" \
+  --type "{validated.equipment_type}" \
+  --scope "{validated.equipment_scope}" \
+  --scope-filter "{validated.scope_filter}" \
+  --kpis "{validated.kpis}" \
   --compare "{validated.compare_with}"
 ```
 
-- 调用 KPI 计算脚本：
+指定设备场景：
+
+```bash
+python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
+  --date "{validated.report_date}" \
+  --equipment "{validated.equipment_ids}" \
+  --kpis "{validated.kpis}" \
+  --compare "{validated.compare_with}"
+```
+
+5. 调用 KPI 计算脚本：
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/daily_kpi.py \
@@ -97,15 +180,34 @@ python /mnt/skills/custom/data-analyst/scripts/daily_kpi.py \
   --output /mnt/user-data/outputs/daily_kpi.json
 ```
 
-- 读取 `/mnt/user-data/outputs/daily_kpi.json`，按以下顺序渲染 GenUI：
-  - `card`：每个 card 必须使用 `props.title` 与 `props.value`；可选 `props.subtitle` 与 `props.trend = {"direction": "up"|"down"|"flat", "value": "..."}`。不要使用 `items`、`summary` 或其它未注册字段。
-  - `card`：先渲染一个概览卡片，`title` 为“整体状态”，`value` 使用 `overall_status.level`，`subtitle` 使用 `overall_status.summary`。
-  - `card`：对 `kpi_summary` 中每个 KPI 分别渲染一个独立卡片，`title` 使用 KPI 名称，`value` 使用当前值与单位，`subtitle` 展示上一周期值，`trend.direction` 使用 `direction`，`trend.value` 展示变化量。
-  - `echart`：以 `props.option = trend_chart`、`props.height = 400` 渲染 24 小时运行率趋势；`trend_chart` 已是标准 ECharts option。
-  - `table`：用 `props.columns` 和 `props.data = alarm_table` 展示异常事件；为空时用 `markdown` 说明“今日无异常事件”。
-  - `markdown`：展示总结与建议。
+6. 读取 `/mnt/user-data/outputs/daily_kpi.json`，按以下规则渲染 GenUI。
 
-- 最后渲染导出表单：
+### 逐台模式（aggregation_mode=detail）
+
+按以下顺序渲染：
+
+- `card`：概览卡片，`title` 为"整体状态"，`value` 使用 `overall_status.level`，`subtitle` 使用 `overall_status.summary`。
+- `card`：对 `kpi_summary` 中每个 KPI 分别渲染一个独立卡片，`title` 使用 KPI 名称，`value` 使用当前值与单位，`subtitle` 展示上一周期值，`trend.direction` 使用 `direction`，`trend.value` 展示变化量。
+- `echart`：以 `props.option = trend_chart`、`props.height = 400` 渲染 24 小时运行率趋势。
+- `table`：用 `props.columns` 和 `props.data = alarm_table` 展示异常事件；为空时用 `markdown` 说明"今日无异常事件"。
+- `markdown`：展示总结与建议。
+
+### 聚合模式（aggregation_mode=grouped）
+
+按以下顺序渲染：
+
+- `card`：概览卡片，`title` 包含设备类型和数量（如"静设备 · 238 台"），`value` 使用 `overall_status.level`，`subtitle` 使用 `overall_status.summary`。
+- `card`：对 `kpi_summary` 中每个 KPI 分别渲染一个独立卡片，`title` 使用 KPI 名称，`value` 显示"均值: {current}"，`subtitle` 显示"范围: {min} ~ {max}"。
+- `echart`：以 `props.option = trend_chart`、`props.height = 400` 渲染 24 小时运行率趋势（标题含"均值"）。
+- `table`：用 `props.columns` 和 `props.data = top_anomalies` 展示异常设备排行。`columns` 为：`[{key: "rank", label: "排名"}, {key: "equipment_id", label: "设备ID"}, {key: "name", label: "名称"}, {key: "area", label: "区域"}, {key: "issue", label: "异常描述"}, {key: "severity", label: "严重性"}]`。无异常时不渲染此表格。
+- `table`：用 `alarm_table` 展示告警事件；为空时用 `markdown` 说明"今日无异常事件"。
+- `markdown`：展示总结与建议。
+
+### 通用：card 字段规则
+
+每个 card 必须使用 `props.title` 与 `props.value`；可选 `props.subtitle` 与 `props.trend = {"direction": "up"|"down"|"flat", "value": "..."}`。不要使用 `items`、`summary` 或其它未注册字段。
+
+### 最后渲染导出表单
 
 ```json
 {
@@ -140,7 +242,7 @@ python /mnt/skills/custom/data-analyst/scripts/daily_kpi.py \
 
 当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-export` 时：
 
-- 从 `payload.format` 读取导出格式；当前只支持 `md`。如果不是 `md`，渲染 `markdown` 提示“当前 MVP 仅支持 Markdown 导出”，并停止。
+- 从 `payload.format` 读取导出格式；当前只支持 `md`。如果不是 `md`，渲染 `markdown` 提示"当前 MVP 仅支持 Markdown 导出"，并停止。
 - 调用导出脚本；使用校验后的固定格式值，不要拼接原始 `payload`：
 
 ```bash
@@ -161,9 +263,9 @@ python /mnt/skills/custom/data-analyst/scripts/export_report.py \
 ## 数据源优先级
 
 1. MCP `data_catalog.*`：如未来可用，优先使用。
-2. Skill 脚本：当前 MVP 主路径，使用 `/mnt/skills/custom/data-analyst/scripts/query_daily.py`。
+2. Skill 脚本：当前 MVP 主路径，使用 `/mnt/skills/custom/data-analyst/scripts/` 下的脚本。
 3. `http_connector`：如配置了真实数据接口，可作为后续接入路径。
-4. 演示数据回退：无真实数据源时由 `query_daily.py` 返回稳定演示数据。
+4. 演示数据回退：无真实数据源时由脚本返回稳定演示数据。
 
 当 MCP 或真实数据接口返回错误、超时或未配置时，必须明确说明已使用演示数据回退；不要把演示数据描述成真实生产数据。
 

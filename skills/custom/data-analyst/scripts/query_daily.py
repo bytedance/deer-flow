@@ -1,0 +1,376 @@
+#!/usr/bin/env python
+"""Query daily report data for ai-report--daily agent.
+
+Output contract (design doc §6.1): writes JSON to
+``$DAILY_REPORT_OUTPUT_DIR/daily_data.json`` (default
+``/mnt/user-data/outputs/daily_data.json``) with shape::
+
+    {
+      "report_date": "2026-05-13",
+      "equipment_ids": ["E001"],
+      "kpi_keys": ["runtime_rate", ...],
+      "compare_type": "previous_day" | "previous_week" | "none",
+      "compare_date": "2026-05-12" | null,
+      "current": {
+        "kpis": {<key>: <value>},
+        "kpi_units": {<key>: <unit>},
+        "hourly_runtime_rate": [24 floats],
+        "alarms": [{time, equipment, level, message}],
+        "per_equipment": {<id>: {kpis, hourly_runtime_rate}} (only when >20 devices)
+      },
+      "compare": <same as current> | null,
+    }
+
+If no real data API is configured the script returns deterministic
+demo data so the agent pipeline can be exercised end-to-end.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
+OUTPUT_FILENAME = "daily_data.json"
+EQUIPMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+KPI_KEY_PATTERN = re.compile(r"^[a-z_]+$")
+
+VALID_TYPES = {"all", "static_equipment", "rotating_machinery", "pump", "reciprocating_machinery"}
+VALID_SCOPES = {"all", "area", "specific"}
+
+KPI_UNITS = {
+    "runtime_rate": "%",
+    "downtime_count": "次",
+    "alarm_count": "条",
+    "output": "件",
+    "energy_consumption": "kWh",
+    "corrosion_rate": "mm/a",
+    "thickness_loss": "mm",
+    "vibration_level": "mm/s",
+    "bearing_temp": "℃",
+    "flow_rate": "m³/h",
+    "outlet_pressure": "MPa",
+    "valve_temp": "℃",
+}
+
+KPI_DEMO_RANGES: dict[str, tuple[float, float]] = {
+    "runtime_rate": (0.75, 0.98),
+    "downtime_count": (0, 6),
+    "alarm_count": (0, 10),
+    "output": (800, 1500),
+    "energy_consumption": (200.0, 600.0),
+    "corrosion_rate": (0.01, 0.5),
+    "thickness_loss": (0.0, 2.0),
+    "vibration_level": (0.5, 15.0),
+    "bearing_temp": (35.0, 90.0),
+    "flow_rate": (50.0, 500.0),
+    "outlet_pressure": (0.3, 2.5),
+    "valve_temp": (40.0, 120.0),
+}
+
+KPI_INTEGER_KEYS = {"downtime_count", "alarm_count", "output"}
+
+TYPE_ALARM_MESSAGES: dict[str, list[str]] = {
+    "all": ["温度异常", "压力波动", "传感器离线", "通信中断"],
+    "static_equipment": ["腐蚀速率超标", "壁厚不足", "泄漏检测", "法兰密封异常"],
+    "rotating_machinery": ["振动超标", "轴承温度过高", "不平衡", "转速异常"],
+    "pump": ["气蚀检测", "密封泄漏", "效率下降", "出口压力异常"],
+    "reciprocating_machinery": ["阀片磨损", "气缸温度异常", "振动异常", "活塞杆磨损"],
+}
+
+
+def _output_dir() -> Path:
+    return Path(os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
+
+
+def _deterministic_float(seed: str, low: float, high: float) -> float:
+    digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
+    ratio = int(digest[:8], 16) / 0xFFFFFFFF
+    return round(low + ratio * (high - low), 4)
+
+
+def _deterministic_int(seed: str, low: int, high: int) -> int:
+    digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
+    ratio = int(digest[:8], 16) / 0xFFFFFFFF
+    return int(low + ratio * (high - low + 1))
+
+
+def _demo_kpis(date_str: str, equipment_ids: list[str], kpi_keys: list[str]) -> dict:
+    seed_prefix = f"{date_str}|{','.join(sorted(equipment_ids))}"
+    kpis: dict = {}
+    for key in kpi_keys:
+        seed = f"{seed_prefix}|{key}"
+        low, high = KPI_DEMO_RANGES.get(key, (0.0, 100.0))
+        if key in KPI_INTEGER_KEYS:
+            kpis[key] = _deterministic_int(seed, int(low), int(high))
+        else:
+            kpis[key] = _deterministic_float(seed, low, high)
+    return kpis
+
+
+def _demo_kpis_single(date_str: str, equipment_id: str, kpi_keys: list[str]) -> dict:
+    """Generate demo KPIs for a single device (unique per device)."""
+    kpis: dict = {}
+    for key in kpi_keys:
+        seed = f"{date_str}|{equipment_id}|{key}"
+        low, high = KPI_DEMO_RANGES.get(key, (0.0, 100.0))
+        if key in KPI_INTEGER_KEYS:
+            kpis[key] = _deterministic_int(seed, int(low), int(high))
+        else:
+            kpis[key] = _deterministic_float(seed, low, high)
+    return kpis
+
+
+def _demo_hourly(date_str: str, equipment_ids: list[str]) -> list[float]:
+    seed_prefix = f"hourly|{date_str}|{','.join(sorted(equipment_ids))}"
+    return [_deterministic_float(f"{seed_prefix}|{h}", 0.6, 1.0) for h in range(24)]
+
+
+def _demo_hourly_single(date_str: str, equipment_id: str) -> list[float]:
+    """Generate demo hourly runtime for a single device."""
+    return [_deterministic_float(f"hourly|{date_str}|{equipment_id}|{h}", 0.6, 1.0) for h in range(24)]
+
+
+def _demo_alarms(date_str: str, equipment_ids: list[str], eq_type: str = "all") -> list[dict]:
+    alarm_count = _deterministic_int(f"alarms|{date_str}|{','.join(sorted(equipment_ids))}", 0, 3)
+    levels = ["info", "warning", "high"]
+    messages = TYPE_ALARM_MESSAGES.get(eq_type, TYPE_ALARM_MESSAGES["all"])
+    alarms = []
+    for i in range(alarm_count):
+        seed = f"alarm|{date_str}|{i}"
+        hour = _deterministic_int(seed + "|h", 0, 23)
+        level_idx = _deterministic_int(seed + "|l", 0, len(levels) - 1)
+        msg_idx = _deterministic_int(seed + "|m", 0, len(messages) - 1)
+        eq_idx = _deterministic_int(seed + "|e", 0, len(equipment_ids) - 1) if equipment_ids else 0
+        equipment = equipment_ids[eq_idx] if equipment_ids else "unknown"
+        alarms.append(
+            {
+                "time": f"{date_str} {hour:02d}:00",
+                "equipment": equipment,
+                "level": levels[level_idx],
+                "message": messages[msg_idx],
+            }
+        )
+    return alarms
+
+
+def fetch_day(
+    date_str: str,
+    equipment_ids: list[str],
+    kpi_keys: list[str],
+    eq_type: str = "all",
+    include_per_equipment: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
+) -> dict:
+    """Return one-day payload. Falls back to deterministic demo data."""
+    return _demo_day(date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta)
+
+
+def _demo_day(
+    date_str: str,
+    equipment_ids: list[str],
+    kpi_keys: list[str],
+    eq_type: str = "all",
+    include_per_equipment: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
+) -> dict:
+    kpis = _demo_kpis(date_str, equipment_ids, kpi_keys)
+    result: dict = {
+        "kpis": kpis,
+        "kpi_units": {k: KPI_UNITS.get(k, "") for k in kpi_keys},
+        "hourly_runtime_rate": _demo_hourly(date_str, equipment_ids),
+        "alarms": _demo_alarms(date_str, equipment_ids, eq_type),
+    }
+    if include_per_equipment:
+        meta = equipment_meta or {}
+        per_eq: dict = {}
+        for eid in equipment_ids:
+            entry: dict = {
+                "kpis": _demo_kpis_single(date_str, eid, kpi_keys),
+                "hourly_runtime_rate": _demo_hourly_single(date_str, eid),
+            }
+            if eid in meta:
+                entry["name"] = meta[eid].get("name", eid)
+                entry["area"] = meta[eid].get("area", "")
+            per_eq[eid] = entry
+        result["per_equipment"] = per_eq
+    return result
+
+
+def _compare_date(date_str: str, compare: str) -> str | None:
+    if compare == "previous_day":
+        return (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    if compare == "previous_week":
+        return (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+    return None
+
+
+def _resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:
+    """Resolve equipment from type+scope+filter using list_equipment logic.
+
+    Returns full equipment dicts (id, name, area, sub_type) so callers
+    can propagate metadata into per_equipment entries.
+    """
+    script_dir = Path(__file__).parent
+    list_eq_path = script_dir / "list_equipment.py"
+    if list_eq_path.exists():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("list_equipment", list_eq_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        result = mod.query_equipment(eq_type, scope, scope_filter, limit=10000)
+        return result.get("equipment", [])
+    return []
+
+
+def build_result(
+    date_str: str,
+    equipment_ids: list[str],
+    kpi_keys: list[str],
+    compare: str,
+    eq_type: str = "all",
+    include_per_equipment: bool = False,
+    is_scope_mode: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
+) -> dict:
+    compare = compare or "none"
+    current = fetch_day(date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta)
+    compare_date_str = _compare_date(date_str, compare)
+    compare_block = fetch_day(compare_date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta) if compare_date_str else None
+    result: dict = {
+        "report_date": date_str,
+        "equipment_ids": equipment_ids,
+        "kpi_keys": kpi_keys,
+        "compare_type": compare,
+        "compare_date": compare_date_str,
+        "current": current,
+        "compare": compare_block,
+    }
+    if is_scope_mode:
+        result["equipment_type"] = eq_type
+        result["equipment_count"] = len(equipment_ids)
+    return result
+
+
+def write_payload(result: dict) -> Path:
+    out_dir = _output_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / OUTPUT_FILENAME
+    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out_path
+
+
+def _parse_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _validate_equipment_ids(equipment_ids: list[str]) -> str | None:
+    if not equipment_ids:
+        return "--equipment must be a non-empty CSV"
+    invalid = [item for item in equipment_ids if not EQUIPMENT_ID_PATTERN.fullmatch(item)]
+    if invalid:
+        return "--equipment contains invalid equipment id(s): " + ",".join(invalid)
+    return None
+
+
+def _validate_kpi_keys(kpi_keys: list[str]) -> str | None:
+    if not kpi_keys:
+        return "--kpis must include at least one KPI key"
+    invalid_format = [item for item in kpi_keys if not KPI_KEY_PATTERN.fullmatch(item)]
+    if invalid_format:
+        return "--kpis contains invalid KPI key(s): " + ",".join(invalid_format)
+    unsupported = [item for item in kpi_keys if item not in KPI_UNITS]
+    if unsupported:
+        return "--kpis contains unsupported KPI key(s): " + ",".join(unsupported)
+    return None
+
+
+def _error(message: str) -> int:
+    print(json.dumps({"error": message}, ensure_ascii=False))
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Query daily report data")
+    parser.add_argument("--date", required=True, help="Report date YYYY-MM-DD")
+    parser.add_argument("--equipment", default="", help="Comma-separated equipment ids")
+    parser.add_argument(
+        "--kpis",
+        default="runtime_rate,downtime_count,alarm_count",
+        help="Comma-separated KPI keys",
+    )
+    parser.add_argument(
+        "--compare",
+        default="previous_day",
+        choices=["previous_day", "previous_week", "none"],
+    )
+    parser.add_argument("--type", default="all", help="Equipment type filter")
+    parser.add_argument("--scope", default=None, help="Scope: all/area/specific")
+    parser.add_argument("--scope-filter", default="", help="Area names or equipment IDs for scope")
+    args = parser.parse_args()
+
+    try:
+        try:
+            datetime.strptime(args.date, "%Y-%m-%d")
+        except ValueError as exc:
+            return _error(f"invalid --date: {exc}")
+
+        eq_type = getattr(args, "type")
+        if eq_type not in VALID_TYPES:
+            return _error(f"--type must be one of {sorted(VALID_TYPES)}, got: {eq_type}")
+
+        scope = args.scope
+
+        if scope is not None:
+            if scope not in VALID_SCOPES:
+                return _error(f"--scope must be one of {sorted(VALID_SCOPES)}, got: {scope}")
+            equipment_records = _resolve_equipment_by_scope(eq_type, scope, getattr(args, "scope_filter", ""))
+            if not equipment_records:
+                return _error("no equipment matched for the given --type/--scope/--scope-filter")
+            equipment_ids = [e["id"] for e in equipment_records]
+            equipment_meta = {e["id"]: e for e in equipment_records}
+            include_per_equipment = len(equipment_ids) > 20
+            is_scope_mode = True
+        else:
+            equipment_ids = _dedupe_preserve_order(_parse_csv(args.equipment))
+            equipment_error = _validate_equipment_ids(equipment_ids)
+            if equipment_error:
+                return _error(equipment_error)
+            equipment_meta = None
+            include_per_equipment = False
+            is_scope_mode = False
+
+        kpi_keys = _dedupe_preserve_order(_parse_csv(args.kpis) or ["runtime_rate", "downtime_count", "alarm_count"])
+        kpi_error = _validate_kpi_keys(kpi_keys)
+        if kpi_error:
+            return _error(kpi_error)
+
+        result = build_result(args.date, equipment_ids, kpi_keys, args.compare, eq_type, include_per_equipment, is_scope_mode, equipment_meta)
+        out_path = write_payload(result)
+        print(json.dumps({"output": str(out_path), "report_date": result["report_date"]}, ensure_ascii=False))
+        return 0
+    except Exception as exc:  # noqa: BLE001 - report to stdout per Skill convention
+        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

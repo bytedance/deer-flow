@@ -92,3 +92,126 @@ def test_query_kpi_export_pipeline(monkeypatch, tmp_path, capsys):
     assert "## KPI 指标" in markdown
     assert "## 异常事件" in markdown
     assert "## 建议" in markdown
+
+
+def test_scope_aggregation_pipeline(monkeypatch, tmp_path, capsys):
+    """End-to-end pipeline: list_equipment → query_daily(scope) → daily_kpi → export."""
+    monkeypatch.setenv("DAILY_REPORT_OUTPUT_DIR", str(tmp_path))
+
+    list_equipment = _load_module("list_equipment")
+    query_daily = _load_module("query_daily")
+    daily_kpi = _load_module("daily_kpi")
+    export_report = _load_module("export_report")
+
+    eq_result = list_equipment.query_equipment("static_equipment", "area", "A区", limit=10000)
+    assert eq_result["total_matched"] == 250
+    assert eq_result["equipment_type"] == "static_equipment"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--type", "static_equipment",
+            "--scope", "area",
+            "--scope-filter", "A区",
+            "--kpis", "runtime_rate,corrosion_rate",
+            "--compare", "previous_day",
+        ],
+    )
+    assert query_daily.main() == 0
+    query_result = json.loads(capsys.readouterr().out)
+    assert "output" in query_result
+
+    data = json.loads((tmp_path / "daily_data.json").read_text(encoding="utf-8"))
+    assert data["equipment_type"] == "static_equipment"
+    assert data["equipment_count"] == 250
+    assert "per_equipment" in data["current"]
+    assert len(data["current"]["per_equipment"]) == 250
+    sample_eq = next(iter(data["current"]["per_equipment"].values()))
+    assert "name" in sample_eq
+    assert "area" in sample_eq
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "daily_kpi.py",
+            "--input", str(tmp_path / "daily_data.json"),
+            "--output", str(tmp_path / "daily_kpi.json"),
+        ],
+    )
+    assert daily_kpi.main() == 0
+    capsys.readouterr()
+
+    kpi_payload = json.loads((tmp_path / "daily_kpi.json").read_text(encoding="utf-8"))
+    assert kpi_payload["aggregation_mode"] == "grouped"
+    assert kpi_payload["equipment_count"] == 250
+    assert isinstance(kpi_payload["top_anomalies"], list)
+    for item in kpi_payload["kpi_summary"]:
+        assert "min" in item
+        assert "max" in item
+        assert item["current_note"] == "均值"
+    if kpi_payload["top_anomalies"]:
+        anomaly = kpi_payload["top_anomalies"][0]
+        assert anomaly["name"] != anomaly["equipment_id"]
+        assert anomaly["area"] != ""
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_report.py",
+            "--input", str(tmp_path / "daily_kpi.json"),
+            "--format", "md",
+            "--output", str(tmp_path / "daily_report.md"),
+        ],
+    )
+    assert export_report.main() == 0
+    capsys.readouterr()
+
+    markdown = (tmp_path / "daily_report.md").read_text(encoding="utf-8")
+    assert "# 静设备运行日报" in markdown
+    assert "共 250 台" in markdown
+    assert "当前（均值）" in markdown
+
+
+def test_new_kpi_pipeline(monkeypatch, tmp_path, capsys):
+    """Pipeline with new KPI keys (vibration_level, bearing_temp)."""
+    monkeypatch.setenv("DAILY_REPORT_OUTPUT_DIR", str(tmp_path))
+
+    query_daily = _load_module("query_daily")
+    daily_kpi = _load_module("daily_kpi")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--equipment", "RM-001,RM-002",
+            "--kpis", "runtime_rate,vibration_level,bearing_temp",
+            "--compare", "none",
+        ],
+    )
+    assert query_daily.main() == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "daily_kpi.py",
+            "--input", str(tmp_path / "daily_data.json"),
+            "--output", str(tmp_path / "daily_kpi.json"),
+        ],
+    )
+    assert daily_kpi.main() == 0
+    capsys.readouterr()
+
+    kpi_payload = json.loads((tmp_path / "daily_kpi.json").read_text(encoding="utf-8"))
+    kpi_keys = {item["key"] for item in kpi_payload["kpi_summary"]}
+    assert "vibration_level" in kpi_keys
+    assert "bearing_temp" in kpi_keys
+    assert kpi_payload["aggregation_mode"] == "detail"
