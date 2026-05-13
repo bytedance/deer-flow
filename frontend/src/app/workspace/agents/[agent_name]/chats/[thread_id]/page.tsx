@@ -6,7 +6,6 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
-import { AgentChildSelector } from "@/components/workspace/agent-child-selector";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
@@ -22,7 +21,7 @@ import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
-import { useAgent, useAgentChildren } from "@/core/agents";
+import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
@@ -42,8 +41,6 @@ export default function AgentChatPage() {
   }>();
 
   const { agent } = useAgent(agent_name);
-  const childAgents = useAgentChildren(agent_name);
-  const isGroupAgent = agent?.type === "group";
 
   const { threadId, setThreadId, isNewThread, setIsNewThread } =
     useThreadChat();
@@ -221,27 +218,11 @@ export default function AgentChatPage() {
                   }
                   context={settings.context}
                   extraHeader={
-                    isNewThread &&
-                    (isGroupAgent ? (
-                      <>
-                        <AgentWelcome agent={agent} agentName={agent_name} />
-                        <AgentChildSelector
-                          agents={childAgents}
-                          onSelect={(child) => {
-                            router.push(
-                              `/workspace/agents/${child.name}/chats/new`,
-                            );
-                          }}
-                        />
-                      </>
-                    ) : (
+                    isNewThread && (
                       <AgentWelcome agent={agent} agentName={agent_name} />
-                    ))
+                    )
                   }
-                  disabled={
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                    (isNewThread && isGroupAgent)
-                  }
+                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
                   onContextChange={(context) => setSettings("context", context)}
                   onFollowupsVisibilityChange={setShowFollowups}
                   onSubmit={handleSubmit}

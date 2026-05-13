@@ -16,9 +16,11 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { useAgents } from "@/core/agents";
+import { type Agent, useAgentChildren, useAgents } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
+
+import { AgentChildSelector } from "./agent-child-selector";
 
 const STORAGE_KEY = "sidebar-agents-collapsed";
 
@@ -32,6 +34,9 @@ export function WorkspaceNavChatList() {
     if (typeof window === "undefined") return true;
     return localStorage.getItem(STORAGE_KEY) !== "true";
   });
+
+  const [activeGroup, setActiveGroup] = useState<Agent | null>(null);
+  const childAgents = useAgentChildren(activeGroup?.name);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, agentsOpen ? "false" : "true");
@@ -66,10 +71,28 @@ export function WorkspaceNavChatList() {
             <CollapsibleContent>
               <SidebarMenu className="ml-3 border-l pl-2">
                 {enabledAgents.map((agent) => {
-                  const href = `/workspace/agents/${agent.name}/chats/new`;
+                  const isGroup = agent.type === "group";
                   const isActive = pathname.startsWith(
                     `/workspace/agents/${agent.name}`,
                   );
+
+                  if (isGroup) {
+                    return (
+                      <SidebarMenuItem key={agent.name}>
+                        <SidebarMenuButton
+                          isActive={isActive}
+                          onClick={() => setActiveGroup(agent)}
+                        >
+                          <span className="text-sm">
+                            {agent.icon ?? <BotIcon className="size-4" />}
+                          </span>
+                          <span>{agent.display_name ?? agent.name}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  }
+
+                  const href = `/workspace/agents/${agent.name}/chats/new`;
                   return (
                     <SidebarMenuItem key={agent.name}>
                       <SidebarMenuButton isActive={isActive} asChild>
@@ -103,6 +126,14 @@ export function WorkspaceNavChatList() {
           </SidebarMenuButton>
         </SidebarMenuItem>
       </SidebarMenu>
+
+      <AgentChildSelector
+        open={activeGroup !== null}
+        agents={childAgents}
+        title={activeGroup?.display_name ?? activeGroup?.name}
+        description={activeGroup?.description ?? undefined}
+        onClose={() => setActiveGroup(null)}
+      />
     </SidebarGroup>
   );
 }
