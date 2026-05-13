@@ -15,16 +15,14 @@ DeerFlow 应用在 `logs/` 目录中写入每个服务的日志：
 
 | 文件                 | 内容                                   |
 | -------------------- | -------------------------------------- |
-| `logs/langgraph.log` | Agent 运行时、工具调用、LangGraph 错误 |
-| `logs/gateway.log`   | API 请求/响应、Gateway 错误            |
+| `logs/gateway.log`   | API 请求/响应、Agent 运行时和 Gateway 错误 |
 | `logs/frontend.log`  | Next.js 服务器日志                     |
 | `logs/nginx.log`     | 代理访问和错误日志                     |
 
 **实时追踪日志**：
 
 ```bash
-tail -f logs/langgraph.log   # 查看 Agent 活动
-tail -f logs/gateway.log     # 查看 API 请求
+tail -f logs/gateway.log     # 查看 API 请求和 Agent 活动
 ```
 
 **调整日志级别**：
@@ -41,9 +39,6 @@ DeerFlow 暴露健康检查端点：
 ```bash
 # Gateway 健康状态
 curl http://localhost:8001/health
-
-# LangGraph 健康状态
-curl http://localhost:2024/ok
 
 # 通过 nginx 完整代理链验证
 curl http://localhost:2026/api/models
@@ -68,8 +63,8 @@ make config-upgrade
 **诊断**：
 
 ```bash
-# 检查 LangGraph 日志中的模型错误
-grep -i "error\|apikey\|unauthorized" logs/langgraph.log | tail -20
+# 检查 Gateway 日志中的模型错误
+grep -i "error\|apikey\|unauthorized" logs/gateway.log | tail -20
 ```
 
 **解决**：
@@ -118,13 +113,13 @@ SKIP_ENV_VALIDATION=1 pnpm build
 
 ### MCP 服务器连接失败
 
-**症状**：MCP 工具未出现，`logs/langgraph.log` 中有超时错误。
+**症状**：MCP 工具未出现，`logs/gateway.log` 中有超时错误。
 
 **诊断**：
 
 ```bash
 # 检查 MCP 相关错误
-grep -i "mcp\|timeout" logs/langgraph.log | tail -20
+grep -i "mcp\|timeout" logs/gateway.log | tail -20
 ```
 
 **解决**：

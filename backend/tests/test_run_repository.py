@@ -3,7 +3,10 @@
 Uses a temp SQLite DB to test ORM-backed CRUD operations.
 """
 
+import re
+
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from deerflow.persistence.run import RunRepository
 
@@ -249,3 +252,77 @@ class TestRunRepository:
         rows = await repo.list_by_thread("t1", user_id=None)
         assert len(rows) == 2
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_model_name_persistence(self, tmp_path):
+        """RunRepository should persist, normalize, and truncate model_name correctly via SQL."""
+        from deerflow.persistence.engine import get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        repo = RunRepository(get_session_factory())
+
+        await repo.put("run-1", thread_id="thread-1", model_name="gpt-4o")
+        row = await repo.get("run-1")
+        assert row is not None
+        assert row["model_name"] == "gpt-4o"
+
+        long_name = "a" * 200
+        await repo.put("run-2", thread_id="thread-1", model_name=long_name)
+        row2 = await repo.get("run-2")
+        assert row2["model_name"] == "a" * 128
+
+        await repo.put("run-3", thread_id="thread-1", model_name=123)
+        row3 = await repo.get("run-3")
+        assert row3["model_name"] == "123"
+
+        await repo.put("run-4", thread_id="thread-1", model_name=None)
+        row4 = await repo.get("run-4")
+        assert row4["model_name"] is None
+
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_reuses_shared_model_name_expression(self):
+        captured = []
+
+        class FakeResult:
+            def all(self):
+                return []
+
+        class FakeSession:
+            async def execute(self, stmt):
+                captured.append(stmt)
+                return FakeResult()
+
+        class FakeSessionContext:
+            async def __aenter__(self):
+                return FakeSession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        repo = RunRepository(lambda: FakeSessionContext())
+
+        agg = await repo.aggregate_tokens_by_thread("t1")
+        assert agg == {
+            "total_tokens": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_runs": 0,
+            "by_model": {},
+            "by_caller": {"lead_agent": 0, "subagent": 0, "middleware": 0},
+        }
+        assert len(captured) == 1
+
+        stmt = captured[0]
+        compiled_sql = str(stmt.compile(dialect=postgresql.dialect()))
+        select_sql, group_by_sql = compiled_sql.split(" GROUP BY ", maxsplit=1)
+        model_expr_pattern = r"coalesce\(runs\.model_name, %\(([^)]+)\)s\)"
+
+        select_match = re.search(model_expr_pattern + r" AS model", select_sql)
+        group_by_match = re.fullmatch(model_expr_pattern, group_by_sql.strip())
+
+        assert select_match is not None
+        assert group_by_match is not None
+        assert select_match.group(1) == group_by_match.group(1)

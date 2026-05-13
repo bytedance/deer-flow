@@ -109,6 +109,34 @@ def get_effective_user_id() -> str:
     return str(user.id)
 
 
+def resolve_runtime_user_id(runtime: object | None) -> str:
+    """Single source of truth for a tool/middleware's effective user_id.
+
+    Resolution order (most authoritative first):
+      1. ``runtime.context["user_id"]`` — set by ``inject_authenticated_user_context``
+         in the gateway from the auth-validated ``request.state.user``. This is
+         the only source that survives boundaries where the contextvar may have
+         been lost (background tasks scheduled outside the request task,
+         worker pools that don't copy_context, future cross-process drivers).
+      2. The ``_current_user`` ContextVar — set by the auth middleware at
+         request entry. Reliable for in-task work; copied by ``asyncio``
+         child tasks and by ``ContextThreadPoolExecutor``.
+      3. ``DEFAULT_USER_ID`` — last-resort fallback so unauthenticated
+         CLI / migration / test paths keep working without raising.
+
+    Tools that persist user-scoped state (custom agents, memory, uploads)
+    MUST call this instead of ``get_effective_user_id()`` directly so they
+    benefit from the runtime.context channel that ``setup_agent`` already
+    relies on.
+    """
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict):
+        ctx_user_id = context.get("user_id")
+        if ctx_user_id:
+            return str(ctx_user_id)
+    return get_effective_user_id()
+
+
 # ---------------------------------------------------------------------------
 # Sentinel-based user_id resolution
 # ---------------------------------------------------------------------------
