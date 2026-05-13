@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares import title_middleware as title_middleware_module
+from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
 
@@ -37,6 +38,22 @@ class TestTitleMiddlewareCoreLogic:
         middleware = TitleMiddleware()
         state = {
             "messages": [
+                HumanMessage(content="帮我总结这段代码"),
+                AIMessage(content="好的，我先看结构"),
+            ]
+        }
+
+        assert middleware._should_generate_title(state) is True
+
+    def test_should_generate_title_with_dynamic_context_reminder(self):
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="<system-reminder>\n<memory>User prefers Python.</memory>\n</system-reminder>",
+                    additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                ),
                 HumanMessage(content="帮我总结这段代码"),
                 AIMessage(content="好的，我先看结构"),
             ]
@@ -242,6 +259,25 @@ class TestTitleMiddlewareCoreLogic:
         }
         prompt, _ = middleware._build_title_prompt(state)
         assert "<think>" not in prompt
+
+    def test_build_title_prompt_uses_real_user_message_with_dynamic_context_reminder(self):
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="<system-reminder>\n<memory>User prefers Python.</memory>\n</system-reminder>",
+                    additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                ),
+                HumanMessage(content="请帮我写测试"),
+                AIMessage(content="好的"),
+            ]
+        }
+
+        prompt, user_msg = middleware._build_title_prompt(state)
+        assert user_msg == "请帮我写测试"
+        assert "<system-reminder>" not in prompt
+        assert "User prefers Python" not in prompt
 
     def test_generate_title_async_strips_think_tags_in_response(self, monkeypatch):
         """Async title generation strips <think> blocks from the model response."""

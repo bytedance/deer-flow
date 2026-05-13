@@ -157,9 +157,41 @@ fi
 
 # ── Install dependencies ────────────────────────────────────────────────────
 
+# Pick a Python for the extras detector. Falls back to plain `python` for
+# Windows/Git Bash where only `python` is on PATH.
+if command -v python3 >/dev/null 2>&1; then
+    DETECT_PYTHON="python3"
+elif command -v python >/dev/null 2>&1; then
+    DETECT_PYTHON="python"
+else
+    DETECT_PYTHON=""
+fi
+
+# Resolve uv extras (postgres, etc.) from UV_EXTRAS or config.yaml so that
+# `uv sync` does not wipe out optional dependencies on every restart. See
+# scripts/detect_uv_extras.py and Issue #2754 for context. The detector
+# whitelists extra names against `^[A-Za-z][A-Za-z0-9_-]*$`, so the unquoted
+# splat below only sees valid uv argument tokens.
+#
+# Stderr is intentionally NOT redirected so the user sees:
+#   - whitelist warnings (e.g. "ignoring invalid UV_EXTRAS entry ';'");
+#   - detector crashes (e.g. unexpected Python error).
+# `|| true` keeps `set -e` from killing dev startup on a detector failure;
+# the result is just an empty UV_EXTRAS_FLAGS, which means "no extras".
+UV_EXTRAS_FLAGS=""
+if [ -n "$DETECT_PYTHON" ]; then
+    UV_EXTRAS_FLAGS=$("$DETECT_PYTHON" "$REPO_ROOT/scripts/detect_uv_extras.py" || { echo "[serve.sh] detect_uv_extras.py failed (exit $?) — proceeding without extras" >&2; echo ""; })
+fi
+
 if ! $SKIP_INSTALL; then
     echo "Syncing dependencies..."
-    (cd backend && uv sync --quiet) || { echo "✗ Backend dependency install failed"; exit 1; }
+    if [ -n "$UV_EXTRAS_FLAGS" ]; then
+        echo "  • uv extras: $UV_EXTRAS_FLAGS"
+    fi
+    # `--all-packages` propagates extras into workspace members (deerflow-harness
+    # in particular). Required for postgres extras — see PR #2584.
+    # Intentionally unquoted to splat multiple `--extra X` pairs.
+    (cd backend && uv sync --quiet --all-packages $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
     (cd frontend && pnpm install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
     echo "✓ Dependencies synced"
 else

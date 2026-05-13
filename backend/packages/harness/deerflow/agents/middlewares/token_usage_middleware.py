@@ -267,11 +267,20 @@ class TokenUsageMiddleware(AgentMiddleware):
 
         usage = getattr(last, "usage_metadata", None)
         if usage:
+            input_token_details = usage.get("input_token_details") or {}
+            output_token_details = usage.get("output_token_details") or {}
+            detail_parts = []
+            if input_token_details:
+                detail_parts.append(f"input_token_details={input_token_details}")
+            if output_token_details:
+                detail_parts.append(f"output_token_details={output_token_details}")
+            detail_suffix = f" {' '.join(detail_parts)}" if detail_parts else ""
             logger.info(
-                "LLM token usage: input=%s output=%s total=%s",
+                "LLM token usage: input=%s output=%s total=%s%s",
                 usage.get("input_tokens", "?"),
                 usage.get("output_tokens", "?"),
                 usage.get("total_tokens", "?"),
+                detail_suffix,
             )
 
         todos = state.get("todos") or []

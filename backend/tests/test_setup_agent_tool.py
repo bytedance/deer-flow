@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deerflow.tools.builtins.setup_agent_tool import setup_agent
 
 # --- Helpers ---
@@ -126,3 +128,23 @@ class TestSetupAgentNoDataLoss:
         assert agent_dir.exists()
         assert (agent_dir / "SOUL.md").read_text() == "# My Agent"
         assert (agent_dir / "config.yaml").exists()
+
+    @pytest.mark.no_auto_user
+    def test_runtime_user_id_used_when_contextvar_missing(self, tmp_path: Path):
+        """setup_agent should not fall back to default when runtime carries user_id."""
+        runtime = _DummyRuntime(
+            context={"agent_name": "test-agent", "user_id": "auth-user-42"},
+            tool_call_id="tool-3",
+        )
+
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
+            setup_agent.func(
+                soul="# My Agent",
+                description="A test agent",
+                runtime=runtime,
+            )
+
+        expected_dir = tmp_path / "users" / "auth-user-42" / "agents" / "test-agent"
+        default_dir = tmp_path / "users" / "default" / "agents" / "test-agent"
+        assert (expected_dir / "SOUL.md").read_text() == "# My Agent"
+        assert not default_dir.exists()
