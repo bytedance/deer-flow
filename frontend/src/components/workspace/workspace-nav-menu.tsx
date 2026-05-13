@@ -25,6 +25,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { GithubIcon } from "./github-icon";
@@ -32,15 +33,15 @@ import { SettingsDialog } from "./settings";
 
 function NavMenuButtonContent({
   isSidebarOpen,
-  t,
+  userName,
 }: {
   isSidebarOpen: boolean;
-  t: ReturnType<typeof useI18n>["t"];
+  userName: string | null;
 }) {
   return isSidebarOpen ? (
     <div className="text-muted-foreground flex w-full items-center gap-2 text-left text-sm">
       <SettingsIcon className="size-4" />
-      <span>{t.workspace.settingsAndMore}</span>
+      <span className="truncate">{userName ?? "..."}</span>
       <ChevronsUpDown className="text-muted-foreground ml-auto size-4" />
     </div>
   ) : (
@@ -58,6 +59,7 @@ export function WorkspaceNavMenu() {
   const [mounted, setMounted] = useState(false);
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
+  const { user } = useAuth();
 
   useEffect(() => {
     setMounted(true);
@@ -79,7 +81,7 @@ export function WorkspaceNavMenu() {
                   size="lg"
                   className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
                 >
-                  <NavMenuButtonContent isSidebarOpen={isSidebarOpen} t={t} />
+                  <NavMenuButtonContent isSidebarOpen={isSidebarOpen} userName={user?.email ?? null} />
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent
@@ -150,7 +152,7 @@ export function WorkspaceNavMenu() {
             </DropdownMenu>
           ) : (
             <SidebarMenuButton size="lg" className="pointer-events-none">
-              <NavMenuButtonContent isSidebarOpen={isSidebarOpen} t={t} />
+              <NavMenuButtonContent isSidebarOpen={isSidebarOpen} userName={user?.email ?? null} />
             </SidebarMenuButton>
           )}
         </SidebarMenuItem>

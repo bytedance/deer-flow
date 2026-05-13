@@ -41,23 +41,11 @@ export function WorkspaceHeader({ className }: { className?: string }) {
             <div className="ml-2 min-w-0 flex-1">
               {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ? (
                 <Link href="/" className="text-primary font-serif">
-                  DeerFlow
+                  EHM
                 </Link>
               ) : (
                 <div className="text-primary cursor-default font-serif">
-                  DeerFlow
-                </div>
-              )}
-              {user && (
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate text-[11px] text-muted-foreground">
-                    {user.email}
-                  </span>
-                  {(user.system_role === "superadmin" || user.system_role === "tenant_admin") && (
-                    <span className="shrink-0 rounded bg-blue-100 px-1 py-px text-[9px] font-medium text-blue-700 dark:bg-blue-900 dark:text-blue-200">
-                      {user.system_role}
-                    </span>
-                  )}
+                  EHM
                 </div>
               )}
             </div>
