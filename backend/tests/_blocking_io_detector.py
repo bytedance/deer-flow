@@ -13,10 +13,12 @@ import asyncio
 import importlib
 import sys
 import traceback
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from functools import wraps
+from pathlib import Path
 from types import TracebackType
 from typing import Any
 
@@ -185,6 +187,69 @@ class BlockingIODetector(AbstractContextManager["BlockingIODetector"]):
     def assert_no_blocking_calls(self) -> None:
         if self.violations:
             raise AssertionError(format_blocking_calls(self.violations))
+
+
+class BlockingIOProbe:
+    """Collect detector output across tests and format a compact summary."""
+
+    def __init__(self, project_root: Path) -> None:
+        self._project_root = project_root.resolve()
+        self._observed: list[tuple[str, BlockingCall]] = []
+
+    @property
+    def violation_count(self) -> int:
+        return len(self._observed)
+
+    @property
+    def test_count(self) -> int:
+        return len({nodeid for nodeid, _violation in self._observed})
+
+    def clear(self) -> None:
+        self._observed.clear()
+
+    def record(self, nodeid: str, violations: Iterable[BlockingCall]) -> None:
+        for violation in violations:
+            self._observed.append((nodeid, violation))
+
+    def format_summary(self, *, limit: int = 30) -> str:
+        if not self._observed:
+            return "blocking io probe: no violations"
+
+        call_sites: Counter[tuple[str, str, int, str, str]] = Counter()
+        for _nodeid, violation in self._observed:
+            frame = self._local_call_site(violation.stack)
+            if frame is None:
+                call_sites[(violation.name, "<unknown>", 0, "<unknown>", "")] += 1
+                continue
+
+            call_sites[
+                (
+                    violation.name,
+                    self._relative(frame.filename),
+                    frame.lineno,
+                    frame.name,
+                    (frame.line or "").strip(),
+                )
+            ] += 1
+
+        lines = [f"blocking io probe: {self.violation_count} violations across {self.test_count} tests", "Top call sites:"]
+        for (name, filename, lineno, function, line), count in call_sites.most_common(limit):
+            lines.append(f"{count:4d} {name} {filename}:{lineno} {function} | {line}")
+        return "\n".join(lines)
+
+    def _relative(self, filename: str) -> str:
+        try:
+            return str(Path(filename).resolve().relative_to(self._project_root))
+        except ValueError:
+            return filename
+
+    def _local_call_site(self, stack: tuple[traceback.FrameSummary, ...]) -> traceback.FrameSummary | None:
+        local_frames = [frame for frame in stack if str(self._project_root) in frame.filename and "/.venv/" not in frame.filename and not self._relative(frame.filename).startswith("tests/")]
+        if local_frames:
+            return local_frames[-1]
+
+        test_frames = [frame for frame in stack if str(self._project_root) in frame.filename and "/.venv/" not in frame.filename]
+        return test_frames[-1] if test_frames else None
 
 
 def detect_blocking_io(

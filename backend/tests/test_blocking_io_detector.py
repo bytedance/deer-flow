@@ -12,6 +12,7 @@ import pytest
 import requests
 from _blocking_io_detector import (
     BlockingCallSpec,
+    BlockingIOProbe,
     detect_blocking_io,
 )
 
@@ -153,3 +154,37 @@ async def test_records_path_read_text_on_event_loop(tmp_path: Path) -> None:
         assert path.read_text(encoding="utf-8") == "content"
 
     assert [violation.name for violation in detector.violations] == ["pathlib.Path.read_text"]
+
+
+async def test_probe_formats_summary_for_recorded_violations(tmp_path: Path) -> None:
+    probe = BlockingIOProbe(Path(__file__).resolve().parents[1])
+    path = tmp_path / "data.txt"
+    path.write_text("content", encoding="utf-8")
+
+    with detect_blocking_io(PATH_READ_TEXT_ONLY, stack_limit=18) as detector:
+        assert path.read_text(encoding="utf-8") == "content"
+
+    probe.record("tests/test_example.py::test_example", detector.violations)
+    summary = probe.format_summary()
+
+    assert "blocking io probe: 1 violations across 1 tests" in summary
+    assert "pathlib.Path.read_text" in summary
+
+
+async def test_probe_formats_empty_summary_and_can_be_cleared(tmp_path: Path) -> None:
+    probe = BlockingIOProbe(Path(__file__).resolve().parents[1])
+
+    assert probe.format_summary() == "blocking io probe: no violations"
+
+    path = tmp_path / "data.txt"
+    path.write_text("content", encoding="utf-8")
+    with detect_blocking_io(PATH_READ_TEXT_ONLY, stack_limit=18) as detector:
+        assert path.read_text(encoding="utf-8") == "content"
+
+    probe.record("tests/test_example.py::test_example", detector.violations)
+    assert probe.violation_count == 1
+
+    probe.clear()
+
+    assert probe.violation_count == 0
+    assert probe.format_summary() == "blocking io probe: no violations"
