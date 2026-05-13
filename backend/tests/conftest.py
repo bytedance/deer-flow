@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from _blocking_io_detector import BlockingIOProbe, detect_blocking_io
+from support.detectors.blocking_io import BlockingIOProbe, detect_blocking_io
 
 # Make 'app' and 'deerflow' importable from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent))

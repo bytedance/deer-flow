@@ -10,7 +10,7 @@ from time import sleep as imported_sleep
 import httpx
 import pytest
 import requests
-from _blocking_io_detector import (
+from support.detectors.blocking_io import (
     BlockingCallSpec,
     BlockingIOProbe,
     detect_blocking_io,
