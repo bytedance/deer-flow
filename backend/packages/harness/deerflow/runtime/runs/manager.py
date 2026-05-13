@@ -6,7 +6,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from deerflow.utils.time import now_iso as _now_iso
 
@@ -71,6 +71,33 @@ class RunManager:
         except Exception:
             logger.warning("Failed to persist run %s to store", record.run_id, exc_info=True)
 
+    async def _persist_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
+        """Best-effort persist a status transition to the backing store."""
+        if self._store is None:
+            return
+        try:
+            await self._store.update_status(run_id, status.value, error=error)
+        except Exception:
+            logger.warning("Failed to persist status update for run %s", run_id, exc_info=True)
+
+    @staticmethod
+    def _record_from_store(row: dict[str, Any]) -> RunRecord:
+        """Build a read-only runtime record from a serialized store row."""
+        return RunRecord(
+            run_id=row["run_id"],
+            thread_id=row["thread_id"],
+            assistant_id=row.get("assistant_id"),
+            status=RunStatus(row.get("status", RunStatus.pending.value)),
+            on_disconnect=DisconnectMode(row.get("on_disconnect") or DisconnectMode.cancel.value),
+            multitask_strategy=row.get("multitask_strategy") or "reject",
+            metadata=row.get("metadata") or {},
+            kwargs=row.get("kwargs") or {},
+            created_at=row.get("created_at") or "",
+            updated_at=row.get("updated_at") or "",
+            error=row.get("error"),
+            model_name=row.get("model_name"),
+        )
+
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
         if self._store is not None:
@@ -110,16 +137,41 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    def get(self, run_id: str) -> RunRecord | None:
+    async def get(self, run_id: str) -> RunRecord | None:
         """Return a run record by ID, or ``None``."""
-        return self._runs.get(run_id)
+        async with self._lock:
+            record = self._runs.get(run_id)
+        if record is not None:
+            return record
+        if self._store is None:
+            return None
+        try:
+            row = await self._store.get(run_id)
+        except Exception:
+            logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
+            return None
+        if row is None:
+            return None
+        return self._record_from_store(row)
 
     async def list_by_thread(self, thread_id: str) -> list[RunRecord]:
         """Return all runs for a given thread, newest first."""
         async with self._lock:
-            # Dict insertion order matches creation order, so reversing it gives
-            # us deterministic newest-first results even when timestamps tie.
-            return [r for r in self._runs.values() if r.thread_id == thread_id]
+            # Dict insertion order gives deterministic results when timestamps tie.
+            memory_records = [r for r in self._runs.values() if r.thread_id == thread_id]
+        if self._store is None:
+            return memory_records
+        records_by_id = {record.run_id: record for record in memory_records}
+        try:
+            rows = await self._store.list_by_thread(thread_id)
+        except Exception:
+            logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
+            return memory_records
+        for row in rows:
+            run_id = row["run_id"]
+            if run_id not in records_by_id:
+                records_by_id[run_id] = self._record_from_store(row)
+        return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
@@ -132,11 +184,7 @@ class RunManager:
             record.updated_at = _now_iso()
             if error is not None:
                 record.error = error
-        if self._store is not None:
-            try:
-                await self._store.update_status(run_id, status.value, error=error)
-            except Exception:
-                logger.warning("Failed to persist status update for run %s", run_id, exc_info=True)
+        await self._persist_status(run_id, status, error=error)
         logger.info("Run %s -> %s", run_id, status.value)
 
     async def update_model_name(self, run_id: str, model_name: str | None) -> None:
@@ -173,6 +221,7 @@ class RunManager:
                 record.task.cancel()
             record.status = RunStatus.interrupted
             record.updated_at = _now_iso()
+        await self._persist_status(run_id, RunStatus.interrupted)
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True
 
@@ -200,6 +249,7 @@ class RunManager:
         now = _now_iso()
 
         _supported_strategies = ("reject", "interrupt", "rollback")
+        interrupted_run_ids: list[str] = []
 
         async with self._lock:
             if multitask_strategy not in _supported_strategies:
@@ -218,6 +268,7 @@ class RunManager:
                         r.task.cancel()
                     r.status = RunStatus.interrupted
                     r.updated_at = now
+                    interrupted_run_ids.append(r.run_id)
                 logger.info(
                     "Cancelled %d inflight run(s) on thread %s (strategy=%s)",
                     len(inflight),
@@ -240,6 +291,8 @@ class RunManager:
             )
             self._runs[run_id] = record
 
+        for interrupted_run_id in interrupted_run_ids:
+            await self._persist_status(interrupted_run_id, RunStatus.interrupted)
         await self._persist_to_store(record)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
