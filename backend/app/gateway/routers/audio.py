@@ -82,7 +82,7 @@ def _validate_audio_upload(
     config: AppConfig,
     file: UploadFile,
 ) -> None:
-    content_type = (file.content_type or "").strip().lower()
+    content_type = (file.content_type or "").strip().lower().split(";")[0].strip()
     accepted_types = {mime.lower() for mime in config.audio_input.accepted_mime_types}
     if content_type not in accepted_types:
         raise HTTPException(

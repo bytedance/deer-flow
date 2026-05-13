@@ -1163,6 +1163,8 @@ export type PromptInputSpeechButtonProps = ComponentProps<
   typeof PromptInputButton
 > & {
   language?: string;
+  autoStart?: boolean;
+  threadId: string;
   textareaRef?: RefObject<HTMLTextAreaElement | null>;
   onTranscriptionChange?: (text: string) => void;
 };
@@ -1185,17 +1187,19 @@ export function appendTranscriptionToInput(
 export const PromptInputSpeechButton = ({
   className,
   language,
+  autoStart,
+  threadId,
   textareaRef,
   onTranscriptionChange,
   disabled: externalDisabled,
   ...props
 }: PromptInputSpeechButtonProps) => {
   const controller = useOptionalPromptInputController();
-  const [isListening, setIsListening] = useState(false);
-  const [recognition, setRecognition] = useState<SpeechRecognition | null>(
-    null,
-  );
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  type RecordingState = "idle" | "recording" | "transcribing";
+  const [state, setState] = useState<RecordingState>("idle");
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
   const callbacksRef = useRef({
     controller,
     textareaRef,
@@ -1207,116 +1211,150 @@ export const PromptInputSpeechButton = ({
     onTranscriptionChange,
   };
 
-  useEffect(() => {
-    if (
-      typeof window !== "undefined" &&
-      ("SpeechRecognition" in window || "webkitSpeechRecognition" in window)
-    ) {
-      const SpeechRecognition =
-        window.SpeechRecognition || window.webkitSpeechRecognition;
-      const speechRecognition = new SpeechRecognition();
+  const stopRecordingAndTranscribe = useCallback(async () => {
+    const mediaRecorder = mediaRecorderRef.current;
+    if (!mediaRecorder || mediaRecorder.state !== "recording") return;
 
-      speechRecognition.continuous = true;
-      speechRecognition.interimResults = true;
-      speechRecognition.lang =
-        language ??
-        (typeof navigator !== "undefined" ? navigator.language : "en-US");
+    return new Promise<void>((resolve) => {
+      mediaRecorder.onstop = async () => {
+        setState("transcribing");
+        const mimeType = mediaRecorder.mimeType || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type: mimeType });
+        chunksRef.current = [];
 
-      speechRecognition.onstart = () => {
-        setIsListening(true);
-      };
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((t) => t.stop());
+          streamRef.current = null;
+        }
 
-      speechRecognition.onend = () => {
-        setIsListening(false);
-      };
+        const ext = mimeType.includes("mp4")
+          ? "m4a"
+          : mimeType.includes("mpeg")
+            ? "mp3"
+            : mimeType.includes("ogg")
+              ? "ogg"
+              : "webm";
+        const file = new File([blob], `recording.${ext}`, { type: mimeType.split(";")[0] });
 
-      speechRecognition.onresult = (event) => {
-        let finalTranscript = "";
+        try {
+          const { transcribeAudio } = await import("@/core/audio/api");
+          const result = await transcribeAudio(threadId, file, {
+            locale: language,
+          });
 
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const result = event.results[i];
-          if (result?.isFinal) {
-            finalTranscript += result[0]?.transcript ?? "";
+          if (result.transcript) {
+            const currentController = callbacksRef.current.controller;
+            const currentTextareaRef = callbacksRef.current.textareaRef;
+            const currentOnTranscriptionChange =
+              callbacksRef.current.onTranscriptionChange;
+            const currentValue =
+              currentController?.textInput.value ??
+              currentTextareaRef?.current?.value ??
+              "";
+            const nextValue = appendTranscriptionToInput(
+              currentValue,
+              result.transcript,
+            );
+
+            if (currentController) {
+              currentController.textInput.setInput(nextValue);
+              currentOnTranscriptionChange?.(nextValue);
+            } else if (currentTextareaRef?.current) {
+              const textarea = currentTextareaRef.current;
+              textarea.value = nextValue;
+              textarea.dispatchEvent(new Event("input", { bubbles: true }));
+              currentOnTranscriptionChange?.(nextValue);
+            }
           }
+        } catch (err) {
+          console.error("[SpeechButton] transcription failed:", err);
         }
 
-        const currentTextareaRef = callbacksRef.current.textareaRef;
-        const currentOnTranscriptionChange =
-          callbacksRef.current.onTranscriptionChange;
-        const currentController = callbacksRef.current.controller;
-        const currentValue =
-          currentController?.textInput.value ??
-          currentTextareaRef?.current?.value ??
-          "";
-        const nextValue = appendTranscriptionToInput(
-          currentValue,
-          finalTranscript,
-        );
+        setState("idle");
+        resolve();
+      };
+      mediaRecorder.stop();
+    });
+  }, [threadId, language]);
 
-        if (nextValue === currentValue) {
-          return;
-        }
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
 
-        if (currentController) {
-          currentController.textInput.setInput(nextValue);
-          currentOnTranscriptionChange?.(nextValue);
-          return;
-        }
+      const mimeType = MediaRecorder.isTypeSupported("audio/mp4")
+        ? "audio/mp4"
+        : MediaRecorder.isTypeSupported("audio/mpeg")
+          ? "audio/mpeg"
+          : MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")
+            ? "audio/ogg;codecs=opus"
+            : MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+              ? "audio/webm;codecs=opus"
+              : "";
 
-        if (currentTextareaRef?.current) {
-          const textarea = currentTextareaRef.current;
-          textarea.value = nextValue;
-          textarea.dispatchEvent(new Event("input", { bubbles: true }));
-          currentOnTranscriptionChange?.(nextValue);
+      const recorder = new MediaRecorder(stream, {
+        mimeType: mimeType || undefined,
+        audioBitsPerSecond: 64000,
+      });
+
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          chunksRef.current.push(e.data);
         }
       };
 
-      speechRecognition.onerror = (event) => {
-        console.error("Speech recognition error:", event.error);
-        setIsListening(false);
-      };
-
-      recognitionRef.current = speechRecognition;
-      setRecognition(speechRecognition);
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setState("recording");
+    } catch (err) {
+      console.error("[SpeechButton] getUserMedia failed:", err);
+      setState("idle");
     }
+  }, []);
 
+  useEffect(() => {
+    if (autoStart && state === "idle" && !externalDisabled) {
+      void startRecording();
+    }
+  }, [autoStart, externalDisabled]);
+
+  useEffect(() => {
     return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [language]);
+  }, []);
 
-  const toggleListening = useCallback(() => {
-    if (!recognition) {
-      console.warn("[SpeechButton] recognition not initialized");
-      return;
+  const handleClick = useCallback(() => {
+    if (state === "idle") {
+      void startRecording();
+    } else if (state === "recording") {
+      void stopRecordingAndTranscribe();
     }
+  }, [state, startRecording, stopRecordingAndTranscribe]);
 
-    if (isListening) {
-      recognition.stop();
-    } else {
-      try {
-        recognition.start();
-      } catch (err) {
-        console.error("[SpeechButton] recognition.start() failed:", err);
-        setIsListening(false);
-      }
-    }
-  }, [recognition, isListening]);
+  const isRecording = state === "recording";
+  const isTranscribing = state === "transcribing";
 
   return (
     <PromptInputButton
       {...props}
       className={cn(
         "relative transition-all duration-200",
-        isListening && "bg-accent text-accent-foreground animate-pulse",
+        isRecording && "bg-red-100 text-red-600 animate-pulse",
+        isTranscribing && "opacity-60",
         className,
       )}
-      disabled={externalDisabled || !recognition}
-      onClick={toggleListening}
+      disabled={externalDisabled || isTranscribing}
+      onClick={handleClick}
     >
-      <MicIcon className="size-4" />
+      {isTranscribing ? (
+        <Loader2Icon className="size-4 animate-spin" />
+      ) : (
+        <MicIcon className="size-4" />
+      )}
     </PromptInputButton>
   );
 };

@@ -574,8 +574,7 @@ export function InputBox({
   const microphoneButtonDisabled =
     disabled ||
     status === "streaming" ||
-    !microphoneInputEnabled ||
-    !speechRecognitionSupported
+    !microphoneInputEnabled
       ? true
       : undefined;
 
@@ -1004,6 +1003,8 @@ export function InputBox({
                 <PromptInputSpeechButton
                   aria-label={t.inputBox.microphoneInput}
                   className="px-2!"
+                  autoStart
+                  threadId={threadId}
                   disabled={microphoneButtonDisabled}
                   language={audioLocale}
                 />

@@ -82,9 +82,9 @@ class OpenAITranscriptionProvider:
         endpoint = f"{self._base_url}/audio/transcriptions"
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
 
-        data: dict[str, str] = {"model": self._model}
+        data: dict[str, str] = {"model": self._model, "response_format": "verbose_json"}
         if locale:
-            data["language"] = locale
+            data["language"] = locale.split("-")[0]
 
         try:
             with file_path.open("rb") as file_handle:
