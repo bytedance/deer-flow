@@ -103,7 +103,13 @@ export default function ChatPage() {
   });
 
   const handleSubmit = useCallback(
-    (message: PromptInputMessage) => sendMessage(threadId, message),
+    (message: PromptInputMessage) => {
+      const sendPromise = sendMessage(threadId, message);
+      if (message.files.length > 0) {
+        return sendPromise;
+      }
+      void sendPromise;
+    },
     [sendMessage, threadId],
   );
   const handleStop = useCallback(async () => {

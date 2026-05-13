@@ -258,7 +258,7 @@ export function InputBox({
         onStop?.();
         return;
       }
-      if (!message.text) {
+      if (!message.text.trim() && message.files.length === 0) {
         return;
       }
       setFollowups([]);

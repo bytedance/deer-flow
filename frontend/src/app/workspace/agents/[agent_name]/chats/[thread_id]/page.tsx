@@ -52,6 +52,7 @@ export default function AgentChatPage() {
   const {
     thread,
     sendMessage,
+    isUploading,
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
@@ -87,8 +88,13 @@ export default function AgentChatPage() {
   });
 
   const handleSubmit = useCallback(
-    (message: PromptInputMessage) =>
-      sendMessage(threadId, message, { agent_name }),
+    (message: PromptInputMessage) => {
+      const sendPromise = sendMessage(threadId, message, { agent_name });
+      if (message.files.length > 0) {
+        return sendPromise;
+      }
+      void sendPromise;
+    },
     [sendMessage, threadId, agent_name],
   );
 
@@ -206,7 +212,10 @@ export default function AgentChatPage() {
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }
-                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  disabled={
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                    isUploading
+                  }
                   onContextChange={(context) => setSettings("context", context)}
                   onFollowupsVisibilityChange={setShowFollowups}
                   onSubmit={handleSubmit}
