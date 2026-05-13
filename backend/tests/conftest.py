@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 _blocking_io_probe = BlockingIOProbe(_BACKEND_ROOT)
+_BLOCKING_IO_DETECTOR_ATTR = "_blocking_io_detector"
 
 # Break the circular import chain that exists in production code:
 #   deerflow.subagents.__init__
@@ -100,14 +101,29 @@ def pytest_runtest_call(item: pytest.Item):
         yield
         return
 
-    with detect_blocking_io(fail_on_exit=False, stack_limit=18) as detector:
-        yield
+    detector = detect_blocking_io(fail_on_exit=False, stack_limit=18)
+    detector.__enter__()
+    setattr(item, _BLOCKING_IO_DETECTOR_ATTR, detector)
+    yield
 
-    _blocking_io_probe.record(item.nodeid, detector.violations)
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item: pytest.Item):
+    yield
+
+    detector = getattr(item, _BLOCKING_IO_DETECTOR_ATTR, None)
+    if detector is None:
+        return
+
+    try:
+        detector.__exit__(None, None, None)
+        _blocking_io_probe.record(item.nodeid, detector.violations)
+    finally:
+        delattr(item, _BLOCKING_IO_DETECTOR_ATTR)
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    if _blocking_io_fail_enabled(session.config) and _blocking_io_probe.violation_count:
+    if _blocking_io_fail_enabled(session.config) and _blocking_io_probe.violation_count and session.exitstatus == pytest.ExitCode.OK:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 

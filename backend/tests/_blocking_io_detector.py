@@ -106,12 +106,15 @@ class BlockingIODetector(AbstractContextManager["BlockingIODetector"]):
     def __enter__(self) -> BlockingIODetector:
         try:
             self._active = True
+            alias_replacements: dict[int, BlockingCallable] = {}
             for spec in self._specs:
                 owner, attr_name, original = _resolve_target(spec.target)
                 wrapper = self._wrap(spec, original)
                 self._patch_attribute(owner, attr_name, original, wrapper)
-                if self._patch_loaded_aliases_enabled:
-                    self._patch_loaded_module_aliases(original, wrapper)
+                alias_replacements[id(original)] = wrapper
+
+            if self._patch_loaded_aliases_enabled:
+                self._patch_loaded_module_aliases(alias_replacements)
         except Exception:
             self._restore()
             self._active = False
@@ -144,15 +147,16 @@ class BlockingIODetector(AbstractContextManager["BlockingIODetector"]):
         self._patches.append((owner, attr_name, original))
         self._patch_keys.add(key)
 
-    def _patch_loaded_module_aliases(self, original: BlockingCallable, replacement: BlockingCallable) -> None:
+    def _patch_loaded_module_aliases(self, replacements_by_id: dict[int, BlockingCallable]) -> None:
         for module in tuple(sys.modules.values()):
             namespace = getattr(module, "__dict__", None)
             if not isinstance(namespace, dict):
                 continue
 
             for attr_name, value in tuple(namespace.items()):
-                if value is original:
-                    self._patch_attribute(module, attr_name, original, replacement)
+                replacement = replacements_by_id.get(id(value))
+                if replacement is not None:
+                    self._patch_attribute(module, attr_name, value, replacement)
 
     def _wrap(self, spec: BlockingCallSpec, original: BlockingCallable) -> BlockingCallable:
         @wraps(original)
