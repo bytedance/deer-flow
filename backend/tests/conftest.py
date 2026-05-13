@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from _blocking_io_detector import detect_blocking_io
 
 # Make 'app' and 'deerflow' importable from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -54,6 +55,13 @@ def provisioner_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture()
+def blocking_io_detector():
+    """Fail a focused test if blocking calls run on the event loop thread."""
+    with detect_blocking_io(fail_on_exit=True) as detector:
+        yield detector
 
 
 # ---------------------------------------------------------------------------
