@@ -12,7 +12,7 @@ function TokenUsageSummary({
   inputTokens,
   outputTokens,
   totalTokens,
-  cacheReadTokens,
+ cacheReadTokens,
   cacheCreationTokens,
   unavailable = false,
 }: {
@@ -20,7 +20,7 @@ function TokenUsageSummary({
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
-  cacheReadTokens?: number;
+ cacheReadTokens?: number;
   cacheCreationTokens?: number;
   unavailable?: boolean;
 }) {
@@ -37,7 +37,7 @@ function TokenUsageSummary({
         <CoinsIcon className="size-3" />
         {t.tokenUsage.label}
       </span>
-      {!unavailable ? (
+     {!unavailable ? (
         <>
           <span>
             {t.tokenUsage.input}: {formatTokenCount(inputTokens ?? 0)}
@@ -67,7 +67,7 @@ function TokenUsageSummary({
 export function MessageTokenUsageList({
   className,
   enabled = false,
-  isLoading = false,
+  isLoading: _isLoading = false,
   messages,
 }: {
   className?: string;
@@ -75,7 +75,7 @@ export function MessageTokenUsageList({
   isLoading?: boolean;
   messages: Message[];
 }) {
-  if (!enabled || isLoading) {
+  if (!enabled) {
     return null;
   }
 
@@ -87,14 +87,18 @@ export function MessageTokenUsageList({
 
   const usage = accumulateUsage(aiMessages);
 
+  if (!usage) {
+    return null;
+  }
+
   return (
     <TokenUsageSummary
       className={className}
-      inputTokens={usage?.inputTokens}
-      outputTokens={usage?.outputTokens}
-      totalTokens={usage?.totalTokens}
-      cacheReadTokens={usage?.cacheReadTokens}
-      cacheCreationTokens={usage?.cacheCreationTokens}
+     inputTokens={usage.inputTokens}
+      outputTokens={usage.outputTokens}
+      totalTokens={usage.totalTokens}
+      cacheReadTokens={usage.cacheReadTokens}
+      cacheCreationTokens={usage.cacheCreationTokens}
       unavailable={!usage}
     />
   );

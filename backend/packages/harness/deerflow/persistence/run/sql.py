@@ -227,10 +227,11 @@ class RunRepository(RunStore):
         """Aggregate token usage via a single SQL GROUP BY query."""
         _completed = RunRow.status.in_(("success", "error"))
         _thread = RunRow.thread_id == thread_id
+        model_name = func.coalesce(RunRow.model_name, "unknown")
 
         stmt = (
             select(
-                func.coalesce(RunRow.model_name, "unknown").label("model"),
+                model_name.label("model"),
                 func.count().label("runs"),
                 func.coalesce(func.sum(RunRow.total_tokens), 0).label("total_tokens"),
                 func.coalesce(func.sum(RunRow.total_input_tokens), 0).label("total_input_tokens"),
@@ -242,7 +243,7 @@ class RunRepository(RunStore):
                 func.coalesce(func.sum(RunRow.cache_creation_tokens), 0).label("cache_creation"),
             )
             .where(_thread, _completed)
-            .group_by(func.coalesce(RunRow.model_name, "unknown"))
+            .group_by(model_name)
         )
 
         async with self._sf() as session:

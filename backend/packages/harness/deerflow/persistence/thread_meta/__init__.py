@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from deerflow.persistence.thread_meta.base import ThreadMetaStore
+from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
+    "InvalidMetadataFilterError",
     "MemoryThreadMetaStore",
     "ThreadMetaRepository",
     "ThreadMetaRow",
