@@ -296,7 +296,11 @@ export function useThreadStream({
     onError(error) {
       setOptimisticMessages([]);
       toast.error(getStreamErrorMessage(error));
-      pendingUsageBaselineMessageIdsRef.current = new Set();
+      pendingUsageBaselineMessageIdsRef.current = new Set(
+        messagesRef.current
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
+      );
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
@@ -305,7 +309,11 @@ export function useThreadStream({
     },
     onFinish(state) {
       listeners.current.onFinish?.(state.values);
-      pendingUsageBaselineMessageIdsRef.current = new Set();
+      pendingUsageBaselineMessageIdsRef.current = new Set(
+        messagesRef.current
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
+      );
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
@@ -339,7 +347,11 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
-    pendingUsageBaselineMessageIdsRef.current = new Set();
+    pendingUsageBaselineMessageIdsRef.current = new Set(
+      messagesRef.current
+        .map(messageIdentity)
+        .filter((id): id is string => Boolean(id)),
+    );
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);

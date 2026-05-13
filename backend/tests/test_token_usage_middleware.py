@@ -1,9 +1,10 @@
 """Tests for TokenUsageMiddleware attribution annotations."""
 
+import importlib
 import logging
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.middlewares.token_usage_middleware import (
     TOKEN_USAGE_ATTRIBUTION_KEY,
@@ -232,3 +233,49 @@ class TestTokenUsageMiddleware:
                 "tool_call_id": "write_todos:remove",
             }
         ]
+
+    def test_merges_subagent_usage_by_message_position_when_ai_message_ids_are_missing(self, monkeypatch):
+        middleware = TokenUsageMiddleware()
+        first_dispatch = AIMessage(
+            content="",
+            tool_calls=[{"id": "task:first", "name": "task", "args": {}}],
+        )
+        second_dispatch = AIMessage(
+            content="",
+            tool_calls=[
+                {"id": "task:second-a", "name": "task", "args": {}},
+                {"id": "task:second-b", "name": "task", "args": {}},
+            ],
+        )
+        messages = [
+            first_dispatch,
+            ToolMessage(content="first", tool_call_id="task:first"),
+            second_dispatch,
+            ToolMessage(content="second-a", tool_call_id="task:second-a"),
+            ToolMessage(content="second-b", tool_call_id="task:second-b"),
+            AIMessage(content="done"),
+        ]
+        cached_usage = {
+            "task:second-a": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            "task:second-b": {"input_tokens": 20, "output_tokens": 7, "total_tokens": 27},
+        }
+
+        task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
+        monkeypatch.setattr(
+            task_tool_module,
+            "pop_cached_subagent_usage",
+            lambda tool_call_id: cached_usage.pop(tool_call_id, None),
+        )
+
+        result = middleware.after_model({"messages": messages}, _make_runtime())
+
+        assert result is not None
+        usage_updates = [message for message in result["messages"] if getattr(message, "usage_metadata", None)]
+        assert len(usage_updates) == 1
+        updated = usage_updates[0]
+        assert updated.tool_calls == second_dispatch.tool_calls
+        assert updated.usage_metadata == {
+            "input_tokens": 30,
+            "output_tokens": 12,
+            "total_tokens": 42,
+        }

@@ -65,7 +65,7 @@ export function accumulateUsage(messages: Message[]): TokenUsage | null {
   return hasUsage ? cumulative : null;
 }
 
-function hasNonZeroUsage(
+export function hasNonZeroUsage(
   usage: TokenUsage | null | undefined,
 ): usage is TokenUsage {
   return (
@@ -75,7 +75,7 @@ function hasNonZeroUsage(
   );
 }
 
-function addUsage(base: TokenUsage, delta: TokenUsage): TokenUsage {
+export function addUsage(base: TokenUsage, delta: TokenUsage): TokenUsage {
   return {
     inputTokens: base.inputTokens + delta.inputTokens,
     outputTokens: base.outputTokens + delta.outputTokens,

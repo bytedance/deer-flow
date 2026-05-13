@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from deerflow.agents.memory.queue import ConversationContext, MemoryUpdateQueue
+from deerflow.config.memory_config import MemoryConfig
 
 
 def test_conversation_context_has_user_id():
@@ -17,7 +18,7 @@ def test_conversation_context_user_id_default_none():
 
 def test_queue_add_stores_user_id():
     q = MemoryUpdateQueue()
-    with patch.object(q, "_reset_timer"):
+    with patch("deerflow.agents.memory.queue.get_memory_config", return_value=MemoryConfig(enabled=True)), patch.object(q, "_reset_timer"):
         q.add(thread_id="t1", messages=["msg"], user_id="alice")
     assert len(q._queue) == 1
     assert q._queue[0].user_id == "alice"
@@ -26,7 +27,7 @@ def test_queue_add_stores_user_id():
 
 def test_queue_process_passes_user_id_to_updater():
     q = MemoryUpdateQueue()
-    with patch.object(q, "_reset_timer"):
+    with patch("deerflow.agents.memory.queue.get_memory_config", return_value=MemoryConfig(enabled=True)), patch.object(q, "_reset_timer"):
         q.add(thread_id="t1", messages=["msg"], user_id="alice")
 
     mock_updater = MagicMock()
