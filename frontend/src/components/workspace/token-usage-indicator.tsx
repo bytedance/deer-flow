@@ -111,7 +111,7 @@ export function TokenUsageIndicator({
                   <span>{t.tokenUsage.cache ?? "Cache"}</span>
                   <span className="font-mono text-muted-foreground">
                     {usage.cacheReadTokens > 0 && usage.cacheCreationTokens > 0
-                      ? `${formatTokenCount(usage.cacheReadTokens)}${formatTokenCount(usage.cacheCreationTokens) !== "0" ? ` / ${formatTokenCount(usage.cacheCreationTokens)}` : ""}`
+                      ? `${formatTokenCount(usage.cacheReadTokens)} / ${formatTokenCount(usage.cacheCreationTokens)}`
                       : formatTokenCount(usage.cacheReadTokens + usage.cacheCreationTokens)}
                   </span>
                 </div>

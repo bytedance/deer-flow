@@ -60,3 +60,6 @@ config.yaml.bak
 /frontend/playwright-report/
 .gstack/
 .worktrees
+
+# Hermes Agent plans
+.agents/plans/
