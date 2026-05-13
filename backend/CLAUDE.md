@@ -232,14 +232,14 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 **Interface**: Abstract `Sandbox` with `execute_command`, `read_file`, `write_file`, `list_dir`
 **Provider Pattern**: `SandboxProvider` with `acquire`, `get`, `release` lifecycle
 **Implementations**:
-- `LocalSandboxProvider` - Singleton local filesystem execution with path mappings
+- `LocalSandboxProvider` - Local filesystem execution. `acquire(thread_id)` returns a per-thread `LocalSandbox` (id `local:{thread_id}`) whose `path_mappings` resolve `/mnt/user-data/{workspace,uploads,outputs}` and `/mnt/acp-workspace` to that thread's host directories, so the public `Sandbox` API honours the `/mnt/user-data` contract uniformly with AIO. `acquire()` / `acquire(None)` keeps the legacy generic singleton (id `local`) for callers without a thread context. Per-thread sandboxes are held in an LRU cache (default 256 entries) guarded by a `threading.Lock`.
 - `AioSandboxProvider` (`packages/harness/deerflow/community/`) - Docker-based isolation
 
 **Virtual Path System**:
 - Agent sees: `/mnt/user-data/{workspace,uploads,outputs}`, `/mnt/skills`
 - Physical: `backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/...`, `deer-flow/skills/`
-- Translation: `replace_virtual_path()` / `replace_virtual_paths_in_command()`
-- Detection: `is_local_sandbox()` checks `sandbox_id == "local"`
+- Translation: `LocalSandboxProvider` builds per-thread `PathMapping`s for the user-data prefixes at acquire time; `tools.py` keeps `replace_virtual_path()` / `replace_virtual_paths_in_command()` as a defense-in-depth layer (and for path validation). AIO has the directories volume-mounted at the same virtual paths inside its container, so both implementations accept `/mnt/user-data/...` natively.
+- Detection: `is_local_sandbox()` accepts both `sandbox_id == "local"` (legacy / no-thread) and `sandbox_id.startswith("local:")` (per-thread)
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
 - `bash` - Execute commands with path translation and error handling

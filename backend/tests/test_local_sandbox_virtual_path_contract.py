@@ -244,3 +244,123 @@ def test_is_local_sandbox_accepts_both_id_formats():
     assert is_local_sandbox(per_thread) is True
     assert is_local_sandbox(foreign) is False
     assert is_local_sandbox(unset) is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 5. Concurrency safety (Copilot review feedback)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_concurrent_acquire_same_thread_yields_single_instance(provider):
+    """Two threads racing on ``acquire("alpha")`` must share one LocalSandbox.
+
+    Without the provider lock the check-then-act in ``acquire`` is non-atomic:
+    both racers would see an empty cache, both would build their own
+    LocalSandbox, and one would overwrite the other — losing the loser's
+    ``_agent_written_paths`` and any in-flight state on it.
+    """
+    import threading
+    import time
+
+    from deerflow.sandbox.local import local_sandbox as local_sandbox_module
+
+    # Force a wide race window by slowing the LocalSandbox constructor down.
+    original_init = local_sandbox_module.LocalSandbox.__init__
+
+    def slow_init(self, *args, **kwargs):
+        time.sleep(0.05)
+        original_init(self, *args, **kwargs)
+
+    barrier = threading.Barrier(8)
+    results: list[str] = []
+    results_lock = threading.Lock()
+
+    def racer():
+        barrier.wait()
+        sid = provider.acquire("alpha")
+        with results_lock:
+            results.append(sid)
+
+    with patch.object(local_sandbox_module.LocalSandbox, "__init__", slow_init):
+        threads = [threading.Thread(target=racer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    # Every racer must observe the same ``sandbox_id``…
+    assert len(set(results)) == 1, f"Racers saw different ids: {results}"
+    # …and the cache must hold exactly one instance for ``alpha``.
+    assert len(provider._thread_sandboxes) == 1
+    assert "alpha" in provider._thread_sandboxes
+
+
+def test_concurrent_acquire_distinct_threads_yields_distinct_instances(provider):
+    """Different thread_ids race-acquired in parallel each get their own sandbox."""
+    import threading
+
+    barrier = threading.Barrier(6)
+    sids: dict[str, str] = {}
+    lock = threading.Lock()
+
+    def racer(name: str):
+        barrier.wait()
+        sid = provider.acquire(name)
+        with lock:
+            sids[name] = sid
+
+    threads = [threading.Thread(target=racer, args=(f"t{i}",)) for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert set(sids.values()) == {f"local:t{i}" for i in range(6)}
+    assert set(provider._thread_sandboxes.keys()) == {f"t{i}" for i in range(6)}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 6. Bounded memory growth (Copilot review feedback)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_thread_sandbox_cache_is_bounded(isolated_paths, tmp_path):
+    """The LRU cap must evict the least-recently-used thread sandboxes once
+    exceeded — otherwise long-running gateways would accumulate cache entries
+    for every distinct ``thread_id`` ever served."""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    cfg = _build_config(skills_dir)
+
+    with patch("deerflow.config.get_app_config", return_value=cfg):
+        provider = LocalSandboxProvider(max_cached_threads=3)
+
+    for i in range(5):
+        provider.acquire(f"t{i}")
+
+    # Only the 3 most-recent thread_ids should be retained.
+    assert set(provider._thread_sandboxes.keys()) == {"t2", "t3", "t4"}
+    assert provider.get("local:t0") is None
+    assert provider.get("local:t4") is not None
+
+
+def test_lru_promotes_recently_used_thread(isolated_paths, tmp_path):
+    """``get`` on a cached thread should mark it as most-recently used so a
+    later acquire-storm doesn't evict an active thread that is being polled."""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    cfg = _build_config(skills_dir)
+
+    with patch("deerflow.config.get_app_config", return_value=cfg):
+        provider = LocalSandboxProvider(max_cached_threads=3)
+
+    for name in ["a", "b", "c"]:
+        provider.acquire(name)
+    # Touch "a" via ``get`` so it becomes most-recently used.
+    provider.get("local:a")
+    # Adding a fourth thread should evict "b" (the new LRU), not "a".
+    provider.acquire("d")
+
+    assert "a" in provider._thread_sandboxes
+    assert "b" not in provider._thread_sandboxes
+    assert {"a", "c", "d"} == set(provider._thread_sandboxes.keys())
