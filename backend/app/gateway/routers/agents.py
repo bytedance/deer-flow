@@ -39,6 +39,7 @@ class AgentResponse(BaseModel):
     enabled: bool = Field(default=True, description="Whether the agent is enabled")
     type: str | None = Field(default=None, description="Agent type: null/agent (normal) or group (parent agent)")
     parent: str | None = Field(default=None, description="Parent agent name for child agents")
+    order: int | None = Field(default=None, description="Display order for child agents within a group")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -124,6 +125,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         editable=editable,
         type=agent_cfg.type,
         parent=agent_cfg.parent,
+        order=agent_cfg.order,
         soul=soul,
     )
 

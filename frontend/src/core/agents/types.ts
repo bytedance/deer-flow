@@ -16,6 +16,7 @@ export interface Agent {
   soul?: string | null;
   type?: "agent" | "group" | null;
   parent?: string | null;
+  order?: number | null;
 }
 
 export interface CreateAgentRequest {

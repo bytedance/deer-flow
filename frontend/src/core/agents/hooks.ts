@@ -119,7 +119,10 @@ export function useForkAgent() {
 export function useAgentChildren(parentName: string | null | undefined) {
   const { agents } = useAgents();
   return useMemo(
-    () => agents.filter((a) => a.parent === parentName && a.enabled),
+    () =>
+      agents
+        .filter((a) => a.parent === parentName && a.enabled)
+        .sort((a, b) => (a.order ?? 999) - (b.order ?? 999)),
     [agents, parentName],
   );
 }
