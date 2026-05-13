@@ -50,6 +50,11 @@ class DiscordChannel(Channel):
         # Uses a dedicated JSON file separate from ChannelStore, which maps IM
         # conversations to DeerFlow thread IDs — a different concern.
         self._active_threads: dict[str, str] = {}
+        # Reverse-lookup set for O(1) thread ID checks (avoids O(n) scan of _active_threads.values()).
+        self._active_thread_ids: set[str] = set()
+        # Lock protecting _active_threads and the JSON file from concurrent access.
+        # _run_client (Discord loop thread) and the main thread both read/write.
+        self._thread_store_lock = threading.Lock()
         store = config.get("channel_store")
         if store is not None:
             self._thread_store_path = store._path.parent / "discord_threads.json"
@@ -106,29 +111,39 @@ class DiscordChannel(Channel):
 
     def _load_active_threads(self) -> None:
         """Restore Discord thread mappings from the dedicated JSON file on startup."""
-        try:
-            if not self._thread_store_path.exists():
-                logger.debug("[Discord] no thread mappings file at %s", self._thread_store_path)
-                return
-            data = json.loads(self._thread_store_path.read_text())
-            for channel_id, thread_id in data.items():
-                self._active_threads[channel_id] = thread_id
-            if self._active_threads:
-                logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
-        except Exception:
-            logger.exception("[Discord] failed to load thread mappings")
+        with self._thread_store_lock:
+            try:
+                if not self._thread_store_path.exists():
+                    logger.debug("[Discord] no thread mappings file at %s", self._thread_store_path)
+                    return
+                data = json.loads(self._thread_store_path.read_text())
+                self._active_threads.clear()
+                self._active_thread_ids.clear()
+                for channel_id, thread_id in data.items():
+                    self._active_threads[channel_id] = thread_id
+                    self._active_thread_ids.add(thread_id)
+                if self._active_threads:
+                    logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
+            except Exception:
+                logger.exception("[Discord] failed to load thread mappings")
 
     def _save_thread(self, channel_id: str, thread_id: str) -> None:
         """Persist a Discord thread mapping to the dedicated JSON file."""
-        try:
-            data: dict[str, str] = {}
-            if self._thread_store_path.exists():
-                data = json.loads(self._thread_store_path.read_text())
-            data[channel_id] = thread_id
-            self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
-            self._thread_store_path.write_text(json.dumps(data, indent=2))
-        except Exception:
-            logger.exception("[Discord] failed to save thread mapping for channel %s", channel_id)
+        with self._thread_store_lock:
+            try:
+                data: dict[str, str] = {}
+                if self._thread_store_path.exists():
+                    data = json.loads(self._thread_store_path.read_text())
+                old_id = data.get(channel_id)
+                data[channel_id] = thread_id
+                # Update reverse-lookup set
+                if old_id:
+                    self._active_thread_ids.discard(old_id)
+                self._active_thread_ids.add(thread_id)
+                self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
+                self._thread_store_path.write_text(json.dumps(data, indent=2))
+            except Exception:
+                logger.exception("[Discord] failed to save thread mapping for channel %s", channel_id)
 
     async def stop(self) -> None:
         self._running = False
@@ -284,7 +299,7 @@ class DiscordChannel(Channel):
             typing_target = thread_obj
 
             # If this is a known active thread, process normally
-            if thread_id in self._active_threads.values():
+            if thread_id in self._active_thread_ids:
                 msg_type = InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT
                 inbound = self._make_inbound(
                     chat_id=chat_id,
@@ -311,16 +326,19 @@ class DiscordChannel(Channel):
             thread_id = None
             typing_target = None
 
-        # Track whether the original message was posted in a thread
-        message_in_thread = message.thread is not None
+        # At this point we're guaranteed to be in a channel, not a thread
+        # (the Thread case is handled above). Apply mention_only for all
+        # non-thread messages — no special case needed.
         channel_id = str(message.channel.id)
 
         # Check if there's an active thread for this channel
         if channel_id in self._active_threads:
             # respect mention_only: if enabled, only process messages that mention the bot
             # (unless the channel is in allowed_channels)
-            # Thread messages are always allowed through (continuation within a thread)
-            if not message_in_thread and self._mention_only and not has_mention and channel_id not in self._allowed_channels:
+            # Messages within a thread are always allowed through (continuation).
+            # At this code point we know the message is in a channel, not a thread
+            # (Thread case handled above), so always apply the check.
+            if self._mention_only and not has_mention and channel_id not in self._allowed_channels:
                 logger.debug("[Discord] skipping no-@ message in channel %s (not in thread)", channel_id)
                 return
             # mention_only + fresh @ → create new thread instead of routing to existing one
