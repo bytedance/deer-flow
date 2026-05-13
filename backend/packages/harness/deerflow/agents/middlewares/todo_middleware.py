@@ -163,12 +163,16 @@ class TodoMiddleware(TodoListMiddleware):
     # Maximum number of completion reminders before allowing the agent to exit.
     # This prevents infinite loops when the agent cannot make further progress.
     _MAX_COMPLETION_REMINDERS = 2
+    # Hard cap for per-run reminder bookkeeping in long-lived middleware instances.
+    _MAX_COMPLETION_REMINDER_KEYS = 4096
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._lock = threading.Lock()
         self._pending_completion_reminders: dict[tuple[str, str], list[str]] = {}
         self._completion_reminder_counts: dict[tuple[str, str], int] = {}
+        self._completion_reminder_touch_order: dict[tuple[str, str], int] = {}
+        self._completion_reminder_next_order = 0
 
     @staticmethod
     def _get_thread_id(runtime: Runtime) -> str:
@@ -185,11 +189,39 @@ class TodoMiddleware(TodoListMiddleware):
     def _pending_key(self, runtime: Runtime) -> tuple[str, str]:
         return self._get_thread_id(runtime), self._get_run_id(runtime)
 
+    def _touch_completion_reminder_key_locked(self, key: tuple[str, str]) -> None:
+        self._completion_reminder_next_order += 1
+        self._completion_reminder_touch_order[key] = self._completion_reminder_next_order
+
+    def _completion_reminder_keys_locked(self) -> set[tuple[str, str]]:
+        keys = set(self._pending_completion_reminders)
+        keys.update(self._completion_reminder_counts)
+        keys.update(self._completion_reminder_touch_order)
+        return keys
+
+    def _drop_completion_reminder_key_locked(self, key: tuple[str, str]) -> None:
+        self._pending_completion_reminders.pop(key, None)
+        self._completion_reminder_counts.pop(key, None)
+        self._completion_reminder_touch_order.pop(key, None)
+
+    def _prune_completion_reminder_state_locked(self, protected_key: tuple[str, str]) -> None:
+        keys = self._completion_reminder_keys_locked()
+        overflow = len(keys) - self._MAX_COMPLETION_REMINDER_KEYS
+        if overflow <= 0:
+            return
+
+        candidates = [key for key in keys if key != protected_key]
+        candidates.sort(key=lambda key: self._completion_reminder_touch_order.get(key, 0))
+        for key in candidates[:overflow]:
+            self._drop_completion_reminder_key_locked(key)
+
     def _queue_completion_reminder(self, runtime: Runtime, reminder: str) -> None:
         key = self._pending_key(runtime)
         with self._lock:
             self._pending_completion_reminders.setdefault(key, []).append(reminder)
             self._completion_reminder_counts[key] = self._completion_reminder_counts.get(key, 0) + 1
+            self._touch_completion_reminder_key_locked(key)
+            self._prune_completion_reminder_state_locked(protected_key=key)
 
     def _completion_reminder_count_for_runtime(self, runtime: Runtime) -> int:
         key = self._pending_key(runtime)
@@ -199,22 +231,22 @@ class TodoMiddleware(TodoListMiddleware):
     def _drain_completion_reminders(self, runtime: Runtime) -> list[str]:
         key = self._pending_key(runtime)
         with self._lock:
-            return self._pending_completion_reminders.pop(key, [])
+            reminders = self._pending_completion_reminders.pop(key, [])
+            if reminders or key in self._completion_reminder_counts:
+                self._touch_completion_reminder_key_locked(key)
+            return reminders
 
     def _clear_other_run_completion_reminders(self, runtime: Runtime) -> None:
         thread_id, current_run_id = self._pending_key(runtime)
         with self._lock:
-            keys = set(self._pending_completion_reminders) | set(self._completion_reminder_counts)
-            for key in keys:
+            for key in self._completion_reminder_keys_locked():
                 if key[0] == thread_id and key[1] != current_run_id:
-                    self._pending_completion_reminders.pop(key, None)
-                    self._completion_reminder_counts.pop(key, None)
+                    self._drop_completion_reminder_key_locked(key)
 
     def _clear_current_run_completion_reminders(self, runtime: Runtime) -> None:
         key = self._pending_key(runtime)
         with self._lock:
-            self._pending_completion_reminders.pop(key, None)
-            self._completion_reminder_counts.pop(key, None)
+            self._drop_completion_reminder_key_locked(key)
 
     @override
     def before_agent(self, state: PlanningState, runtime: Runtime) -> dict[str, Any] | None:

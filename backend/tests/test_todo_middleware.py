@@ -1,9 +1,13 @@
 """Tests for TodoMiddleware context-loss detection."""
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
+from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.todo_middleware import (
     TodoMiddleware,
@@ -23,9 +27,35 @@ def _reminder_msg():
     return HumanMessage(name="todo_reminder", content="reminder")
 
 
+class _CapturingFakeMessagesListChatModel(FakeMessagesListChatModel):
+    _seen_messages: list[list[Any]] = PrivateAttr(default_factory=list)
+
+    @property
+    def seen_messages(self) -> list[list[Any]]:
+        return self._seen_messages
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self._seen_messages.append(list(messages))
+        return super()._generate(
+            messages,
+            stop=stop,
+            run_manager=run_manager,
+            **kwargs,
+        )
+
+
 def _make_runtime():
     runtime = MagicMock()
     runtime.context = {"thread_id": "test-thread", "run_id": "test-run"}
+    return runtime
+
+
+def _make_runtime_for(thread_id: str, run_id: str):
+    runtime = _make_runtime()
+    runtime.context = {"thread_id": thread_id, "run_id": run_id}
     return runtime
 
 
@@ -160,6 +190,14 @@ class TestAbeforeModel:
 
 def _completion_reminder_msg():
     return HumanMessage(name="todo_completion_reminder", content="finish your todos")
+
+
+def _todo_completion_reminders(messages):
+    reminders = []
+    for message in messages:
+        if isinstance(message, HumanMessage) and message.name == "todo_completion_reminder":
+            reminders.append(message)
+    return reminders
 
 
 def _ai_no_tool_calls():
@@ -471,6 +509,58 @@ class TestWrapModelCall:
         handler.assert_called_once_with(request)
 
 
+class TestTodoMiddlewareAgentGraphIntegration:
+    def test_completion_reminder_is_transient_in_real_agent_graph(self):
+        mw = TodoMiddleware()
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_todos",
+                            "id": "todos-1",
+                            "args": {
+                                "todos": [
+                                    {"content": "Step 1", "status": "completed"},
+                                    {"content": "Step 2", "status": "pending"},
+                                ]
+                            },
+                        }
+                    ],
+                ),
+                AIMessage(content="premature final 1"),
+                AIMessage(content="premature final 2"),
+                AIMessage(content="premature final 3"),
+            ],
+        )
+        graph = create_agent(model=model, tools=[], middleware=[mw])
+
+        result = graph.invoke(
+            {"messages": [("user", "finish all todos")]},
+            context={"thread_id": "integration-thread", "run_id": "integration-run"},
+        )
+
+        assert len(model.seen_messages) == 4
+        reminders_by_call = [_todo_completion_reminders(messages) for messages in model.seen_messages]
+        assert reminders_by_call[0] == []
+        assert reminders_by_call[1] == []
+        assert len(reminders_by_call[2]) == 1
+        assert len(reminders_by_call[3]) == 1
+        assert "Step 1" not in reminders_by_call[2][0].content
+        assert "Step 2" in reminders_by_call[2][0].content
+
+        persisted_reminders = _todo_completion_reminders(result["messages"])
+        assert persisted_reminders == []
+        assert result["messages"][-1].content == "premature final 3"
+        assert result["todos"] == [
+            {"content": "Step 1", "status": "completed"},
+            {"content": "Step 2", "status": "pending"},
+        ]
+        assert mw._pending_completion_reminders == {}
+        assert mw._completion_reminder_counts == {}
+
+
 class TestRunScopedReminderCleanup:
     def test_before_agent_clears_stale_count_without_pending_reminder(self):
         mw = TodoMiddleware()
@@ -494,6 +584,43 @@ class TestRunScopedReminderCleanup:
 
         assert mw._completion_reminder_count_for_runtime(stale_runtime) == 0
         assert mw._completion_reminder_count_for_runtime(other_thread_runtime) == 1
+
+    def test_size_guard_prunes_oldest_count_only_reminder_state(self):
+        mw = TodoMiddleware()
+        mw._MAX_COMPLETION_REMINDER_KEYS = 2
+        first_runtime = _make_runtime_for("thread-a", "run-a")
+        second_runtime = _make_runtime_for("thread-b", "run-b")
+        third_runtime = _make_runtime_for("thread-c", "run-c")
+
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+        assert mw.after_model(state, first_runtime) is not None
+
+        # Simulate the normal model request path: pending reminder is consumed,
+        # but the run count remains until after_agent() or stale cleanup.
+        assert mw._drain_completion_reminders(first_runtime)
+        assert mw._completion_reminder_count_for_runtime(first_runtime) == 1
+
+        assert mw.after_model(state, second_runtime) is not None
+        assert mw.after_model(state, third_runtime) is not None
+
+        assert mw._completion_reminder_count_for_runtime(first_runtime) == 0
+        assert mw._completion_reminder_count_for_runtime(second_runtime) == 1
+        assert mw._completion_reminder_count_for_runtime(third_runtime) == 1
+        assert ("thread-a", "run-a") not in mw._completion_reminder_touch_order
+
+    def test_size_guard_prunes_pending_and_count_state_together(self):
+        mw = TodoMiddleware()
+        mw._MAX_COMPLETION_REMINDER_KEYS = 1
+        stale_runtime = _make_runtime_for("thread-a", "run-a")
+        current_runtime = _make_runtime_for("thread-b", "run-b")
+
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+        assert mw.after_model(state, stale_runtime) is not None
+        assert mw.after_model(state, current_runtime) is not None
+
+        assert mw._drain_completion_reminders(stale_runtime) == []
+        assert mw._completion_reminder_count_for_runtime(stale_runtime) == 0
+        assert mw._completion_reminder_count_for_runtime(current_runtime) == 1
 
 
 class TestAwrapModelCall:
