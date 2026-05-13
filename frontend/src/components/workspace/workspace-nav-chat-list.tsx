@@ -28,7 +28,9 @@ export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
   const { agents } = useAgents();
-  const enabledAgents = agents.filter((a) => a.enabled && !a.parent);
+  const enabledAgents = agents
+    .filter((a) => a.enabled && !a.parent)
+    .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
 
   const [agentsOpen, setAgentsOpen] = useState(() => {
     if (typeof window === "undefined") return true;
