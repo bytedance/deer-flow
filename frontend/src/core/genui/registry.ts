@@ -15,6 +15,7 @@ const COMPONENT_REGISTRY: Record<string, () => Promise<{ default: LazyComponent 
   timeline: () => import("@/components/genui/TimelineBlock") as any,
   layout: () => import("@/components/genui/LayoutBlock") as any,
   markdown: () => import("@/components/genui/MarkdownBlock") as any,
+  image: () => import("@/components/genui/ImageBlock") as any,
 };
 /* eslint-enable @typescript-eslint/no-explicit-any */
 

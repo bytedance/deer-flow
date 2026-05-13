@@ -329,6 +329,7 @@ Three-tier agent discovery with priority-based override: **user > tenant > built
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`)
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware → interrupts)
    - `view_image` - Read image as base64 (added only if model supports vision)
+   - `http_connector` - Call pre-configured HTTP endpoints by name (async, with retry/truncation/structured logging). Config-driven via `config.yaml` `http_connectors` section, keyed by tenant_id
    - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
@@ -475,6 +476,7 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `summarization` - Context summarization (enabled, trigger conditions, keep policy)
 - `subagents.enabled` - Master switch for subagent delegation
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens)
+- `http_connectors` - Pre-configured HTTP endpoints keyed by tenant_id. Each connector: name, url, method, auth_type, auth_token_env, timeout_seconds, max_response_bytes, max_retries, retry_on_status, cache_ttl_seconds. See [docs/HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md)
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description)
@@ -640,3 +642,5 @@ See `docs/` directory for detailed documentation:
 - [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
 - [summarization.md](docs/summarization.md) - Context summarization
 - [plan_mode_usage.md](docs/plan_mode_usage.md) - Plan mode with TodoList
+- [HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md) - HTTP connector tool for external data sources
+- [data_catalog_mcp_protocol.md](docs/data_catalog_mcp_protocol.md) - MCP protocol for data catalog integration

@@ -521,7 +521,7 @@ export function MessageList({
                   <GenUIBlockList
                     threadId={threadId}
                     blockIds={blockIds}
-                    disableExpiration={!thread.isLoading}
+                    disableExpiration={!thread.isLoading && blockIds.every((id) => preStreamBlockIdsRef.current.includes(id))}
                     onInteraction={handleInteraction}
                   />
                 )}

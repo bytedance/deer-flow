@@ -6,10 +6,10 @@ import logging
 import threading
 from collections import defaultdict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
-from deerflow.agents.genui_persistence import get_persisted_blocks
+from deerflow.agents.genui_persistence import extract_blocks_from_messages, get_persisted_blocks
 from deerflow.tools.render_ui_metrics import get_render_ui_metrics
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,24 @@ async def get_backend_metrics() -> dict:
 
 
 @router.get("/threads/{thread_id}/ui-blocks")
-async def get_thread_blocks(thread_id: str) -> list[dict]:
-    """Retrieve persisted UI blocks for SSE recovery."""
-    return get_persisted_blocks(thread_id)
+async def get_thread_blocks(thread_id: str, request: Request) -> list[dict]:
+    """Retrieve persisted UI blocks for SSE recovery.
+
+    First checks in-memory store. If empty, falls back to extracting blocks
+    from checkpoint messages (durable persistence via tool return values).
+    """
+    blocks = get_persisted_blocks(thread_id)
+    if blocks:
+        return blocks
+
+    try:
+        from app.gateway.deps import get_event_store
+
+        event_store = get_event_store(request)
+        stored_messages = await event_store.list_messages(thread_id, limit=500)
+        raw_messages = [m.get("content", m) if isinstance(m, dict) else m for m in stored_messages]
+        blocks = extract_blocks_from_messages(raw_messages)
+    except Exception:
+        logger.debug("Checkpoint-based block recovery failed for thread %s", thread_id, exc_info=True)
+
+    return blocks

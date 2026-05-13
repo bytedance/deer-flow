@@ -35,6 +35,7 @@ from app.gateway.routers import (
     skills,
     suggestions,
     tenant_agents,
+    tenant_connectors,
     tenant_mcp_servers,
     tenant_status,
     thread_runs,
@@ -598,6 +599,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Tenant MCP Servers CRUD API
     app.include_router(tenant_mcp_servers.router)
+
+    # Tenant HTTP Connectors CRUD API
+    app.include_router(tenant_connectors.router)
 
     # GenUI interaction API
     app.include_router(genui.router)

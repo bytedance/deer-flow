@@ -33,6 +33,7 @@ const tableColumnSchema = z.object({
   label: z.string(),
   sortable: z.boolean().optional(),
   width: z.number().optional(),
+  type: z.enum(["text", "image"]).optional(),
 });
 
 export const tablePropsSchema = z.object({
@@ -130,6 +131,15 @@ export const echartPropsSchema = z.object({
   loading: z.boolean().optional(),
 });
 
+const imagePropsSchema = z.object({
+  src: z.string().max(2048),
+  alt: z.string().max(500).optional(),
+  width: z.number().min(1).max(4096).optional(),
+  height: z.number().min(1).max(4096).optional(),
+  caption: z.string().max(500).optional(),
+  fallback: z.string().max(200).optional(),
+});
+
 const propsSchemas: Record<string, z.ZodType> = {
   chart: chartPropsSchema,
   echart: echartPropsSchema,
@@ -141,6 +151,7 @@ const propsSchemas: Record<string, z.ZodType> = {
   timeline: timelinePropsSchema,
   layout: layoutPropsSchema,
   markdown: markdownPropsSchema,
+  image: imagePropsSchema,
 };
 
 export function validateProps(

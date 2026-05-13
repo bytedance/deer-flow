@@ -19,6 +19,7 @@ from deerflow.config.content_safety_config import ContentSafetyConfig, load_cont
 from deerflow.config.cost_config import CostConfig, load_cost_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
+from deerflow.config.http_connector_config import HttpConnectorConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.rag_config import RagConfig, load_rag_config_from_dict
@@ -115,6 +116,7 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
+    http_connectors: dict[str, list[HttpConnectorConfig]] = Field(default_factory=dict, description="HTTP connectors keyed by tenant_id for external API integration")
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
@@ -333,6 +335,15 @@ class AppConfig(BaseModel):
             The tool group config if found, otherwise None.
         """
         return next((group for group in self.tool_groups if group.name == name), None)
+
+    def get_http_connector(self, tenant_id: str, name: str) -> HttpConnectorConfig | None:
+        """Get an HTTP connector config by tenant and name."""
+        connectors = self.http_connectors.get(tenant_id, [])
+        return next((c for c in connectors if c.name == name), None)
+
+    def list_connector_names(self, tenant_id: str) -> list[str]:
+        """List available HTTP connector names for a tenant."""
+        return [c.name for c in self.http_connectors.get(tenant_id, [])]
 
 
 # Compatibility singleton layer for code paths that have not yet been

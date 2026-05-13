@@ -7,6 +7,7 @@ interface TableColumn {
   label: string;
   sortable?: boolean;
   width?: number;
+  type?: "text" | "image";
 }
 
 interface TableBlockProps {
@@ -118,7 +119,16 @@ export default function TableBlock({ block }: TableBlockProps) {
                 >
                   {columns.map((col) => (
                     <td key={col.key} className="px-4 py-2">
-                      {String((row[col.key] ?? "") as unknown)}
+                      {col.type === "image" && typeof row[col.key] === "string" && row[col.key] ? (
+                        <img
+                          src={row[col.key] as string}
+                          alt={col.label}
+                          loading="lazy"
+                          className="max-h-16 max-w-24 rounded object-cover"
+                        />
+                      ) : (
+                        String((row[col.key] ?? "") as unknown)
+                      )}
                     </td>
                   ))}
                 </tr>

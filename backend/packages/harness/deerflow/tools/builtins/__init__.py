@@ -1,4 +1,5 @@
 from .clarification_tool import ask_clarification_tool
+from .http_connector_tool import http_connector_tool
 from .present_file_tool import present_file_tool
 from .render_ui_tool import render_ui_tool
 from .setup_agent_tool import setup_agent
@@ -11,6 +12,7 @@ __all__ = [
     "update_agent",
     "present_file_tool",
     "ask_clarification_tool",
+    "http_connector_tool",
     "view_image_tool",
     "task_tool",
     "render_ui_tool",

@@ -125,6 +125,14 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         else:
             app.state.tenant_mcp_repo = None
 
+        # Tenant HTTP Connector repository
+        if sf is not None:
+            from deerflow.persistence.http_connector import TenantHttpConnectorRepository
+
+            app.state.http_connector_repo = TenantHttpConnectorRepository(sf)
+        else:
+            app.state.http_connector_repo = None
+
         # Knowledge base service
         if sf is not None:
             from deerflow.knowledge_base.service import KnowledgeBaseService

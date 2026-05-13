@@ -1,5 +1,6 @@
 """Tool for rendering dynamic UI components in the user interface."""
 
+import json
 import uuid
 
 from langchain.tools import tool
@@ -8,7 +9,7 @@ from langgraph.config import get_config, get_stream_writer
 from deerflow.tools.render_ui_metrics import get_render_ui_metrics
 
 ALLOWED_COMPONENTS = frozenset(
-    {"chart", "echart", "table", "card", "form", "confirm", "code", "timeline", "markdown", "layout"}
+    {"chart", "echart", "table", "card", "form", "confirm", "code", "timeline", "markdown", "layout", "image"}
 )
 
 ALLOWED_ACTIONS = frozenset({"create", "update", "delete"})
@@ -103,4 +104,5 @@ def render_ui_tool(
                 timeout=timeout_seconds,
             )
 
-    return f"UI component '{component}' ({action}) rendered successfully. block_id={resolved_block_id}"
+    block_json = json.dumps(block, ensure_ascii=False, separators=(",", ":"))
+    return f"UI component '{component}' ({action}) rendered successfully. block_id={resolved_block_id}\n<!--ui_block:{block_json}-->"
