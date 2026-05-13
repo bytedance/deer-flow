@@ -45,6 +45,8 @@ class AgentConfig(BaseModel):
     icon: str | None = None
     model: str | None = None
     visibility: str = "public"
+    type: str | None = None
+    parent: str | None = None
     tool_groups: list[str] | None = None
     exclude_tools: list[str] | None = None
     # skills controls which skills are loaded into the agent's prompt:
@@ -68,6 +70,8 @@ class AgentInfo(BaseModel):
     tenant_id: str | None = None
     editable: bool = True
     enabled: bool = True
+    type: str | None = None
+    parent: str | None = None
     tags: list[str] | None = None
     tool_groups: list[str] | None = None
     skills: list[str] | None = None
@@ -85,6 +89,8 @@ def to_agent_info(config: AgentConfig, *, source: str = "user", editable: bool =
         tenant_id=tenant_id,
         editable=editable,
         enabled=enabled,
+        type=config.type,
+        parent=config.parent,
         tags=config.tags,
         tool_groups=config.tool_groups,
         skills=config.skills,

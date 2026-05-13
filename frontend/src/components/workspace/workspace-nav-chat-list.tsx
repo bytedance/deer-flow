@@ -26,7 +26,7 @@ export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
   const { agents } = useAgents();
-  const enabledAgents = agents.filter((a) => a.enabled);
+  const enabledAgents = agents.filter((a) => a.enabled && !a.parent);
 
   const [agentsOpen, setAgentsOpen] = useState(() => {
     if (typeof window === "undefined") return true;
@@ -75,7 +75,7 @@ export function WorkspaceNavChatList() {
                       <SidebarMenuButton isActive={isActive} asChild>
                         <Link className="text-muted-foreground" href={href}>
                           <span className="text-sm">
-                            {agent.icon || <BotIcon className="size-4" />}
+                            {agent.icon ?? <BotIcon className="size-4" />}
                           </span>
                           <span>{agent.display_name ?? agent.name}</span>
                         </Link>

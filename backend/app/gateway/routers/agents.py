@@ -37,6 +37,8 @@ class AgentResponse(BaseModel):
     source: str = Field(default="user", description="Agent source: builtin | tenant | user")
     editable: bool = Field(default=True, description="Whether the current user can edit this agent")
     enabled: bool = Field(default=True, description="Whether the agent is enabled")
+    type: str | None = Field(default=None, description="Agent type: null/agent (normal) or group (parent agent)")
+    parent: str | None = Field(default=None, description="Parent agent name for child agents")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -120,6 +122,8 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         tags=agent_cfg.tags,
         source=source,
         editable=editable,
+        type=agent_cfg.type,
+        parent=agent_cfg.parent,
         soul=soul,
     )
 

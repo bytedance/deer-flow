@@ -1,6 +1,5 @@
-import { useMemo } from "react";
-
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
 
 import {
   createAgent,
@@ -115,4 +114,21 @@ export function useForkAgent() {
       void queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
   });
+}
+
+export function useAgentChildren(parentName: string | null | undefined) {
+  const { agents } = useAgents();
+  return useMemo(
+    () => agents.filter((a) => a.parent === parentName && a.enabled),
+    [agents, parentName],
+  );
+}
+
+export function isAgentAvailable(agent: Agent, allAgents: Agent[]): boolean {
+  if (!agent.enabled) return false;
+  if (agent.parent) {
+    const parent = allAgents.find((a) => a.name === agent.parent);
+    if (parent && !parent.enabled) return false;
+  }
+  return true;
 }

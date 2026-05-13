@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import {
+  isAgentAvailable,
   useDeleteAgent,
   useGroupedAgents,
   useSetAgentEnabled,
@@ -61,6 +62,7 @@ function AgentSettingsList({
 }) {
   const { t } = useI18n();
   const router = useRouter();
+  const allAgents = groups.flatMap((g) => g.agents);
 
   const handleCreateAgent = () => {
     onClose?.();
@@ -80,25 +82,59 @@ function AgentSettingsList({
           {t.agents.emptyTitle}
         </div>
       )}
-      {groups.map((group) => (
-        <div key={group.source} className="flex flex-col gap-2">
-          <h3 className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
-            {group.label}
-          </h3>
-          {group.agents.map((agent) => (
-            <AgentSettingsItem key={agent.name} agent={agent} />
-          ))}
-        </div>
-      ))}
+      {groups.map((group) => {
+        const sorted = sortWithChildren(group.agents);
+        return (
+          <div key={group.source} className="flex flex-col gap-2">
+            <h3 className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+              {group.label}
+            </h3>
+            {sorted.map((agent) => (
+              <AgentSettingsItem
+                key={agent.name}
+                agent={agent}
+                allAgents={allAgents}
+              />
+            ))}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function AgentSettingsItem({ agent }: { agent: Agent }) {
+function sortWithChildren(agents: Agent[]): Agent[] {
+  const parents = agents.filter((a) => !a.parent);
+  const childMap = new Map<string, Agent[]>();
+  for (const agent of agents) {
+    if (agent.parent) {
+      const list = childMap.get(agent.parent) ?? [];
+      list.push(agent);
+      childMap.set(agent.parent, list);
+    }
+  }
+  const result: Agent[] = [];
+  for (const parent of parents) {
+    result.push(parent);
+    const children = childMap.get(parent.name);
+    if (children) result.push(...children);
+  }
+  return result;
+}
+
+function AgentSettingsItem({
+  agent,
+  allAgents,
+}: {
+  agent: Agent;
+  allAgents: Agent[];
+}) {
   const { t } = useI18n();
   const { mutate: setEnabled } = useSetAgentEnabled();
   const deleteAgent = useDeleteAgent();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const available = isAgentAvailable(agent, allAgents);
+  const isChild = !!agent.parent;
 
   async function handleDelete() {
     try {
@@ -112,12 +148,12 @@ function AgentSettingsItem({ agent }: { agent: Agent }) {
 
   return (
     <>
-      <Item className="w-full" variant="outline">
+      <Item className={`w-full ${isChild ? "ml-6" : ""}`} variant="outline">
         <ItemContent>
           <ItemTitle>
             <div className="flex items-center gap-2">
               <span className="text-lg">
-                {agent.icon || <BotIcon className="h-4 w-4" />}
+                {agent.icon ?? <BotIcon className="h-4 w-4" />}
               </span>
               <span>{agent.display_name ?? agent.name}</span>
             </div>
@@ -131,7 +167,10 @@ function AgentSettingsItem({ agent }: { agent: Agent }) {
         <ItemActions>
           <Switch
             checked={agent.enabled}
-            disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+            disabled={
+              env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+              (isChild && !available && agent.enabled)
+            }
             onCheckedChange={(checked) =>
               setEnabled({ name: agent.name, enabled: checked })
             }

@@ -14,6 +14,8 @@ export interface Agent {
   editable: boolean;
   enabled: boolean;
   soul?: string | null;
+  type?: "agent" | "group" | null;
+  parent?: string | null;
 }
 
 export interface CreateAgentRequest {
