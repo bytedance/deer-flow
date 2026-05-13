@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from _router_auth_helpers import make_authed_test_app
@@ -42,22 +43,18 @@ def _make_message(seq: int) -> dict:
 
 def _make_store_only_run_manager() -> RunManager:
     store = MemoryRunStore()
-    # Seed like MemoryRunStore.put() without asyncio.run() (sync TestClient tests).
-    created = "2026-01-01T00:00:00+00:00"
-    store._runs["store-only-run"] = {
-        "run_id": "store-only-run",
-        "thread_id": "thread-store",
-        "assistant_id": "lead_agent",
-        "user_id": None,
-        "model_name": None,
-        "status": "running",
-        "multitask_strategy": "reject",
-        "metadata": {},
-        "kwargs": {},
-        "error": None,
-        "created_at": created,
-        "updated_at": created,
-    }
+    asyncio.run(
+        store.put(
+            "store-only-run",
+            thread_id="thread-store",
+            assistant_id="lead_agent",
+            status="running",
+            multitask_strategy="reject",
+            metadata={},
+            kwargs={},
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+    )
     return RunManager(store=store)
 
 

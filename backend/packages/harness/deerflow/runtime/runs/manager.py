@@ -152,7 +152,11 @@ class RunManager:
             return None
         if row is None:
             return None
-        return self._record_from_store(row)
+        try:
+            return self._record_from_store(row)
+        except Exception:
+            logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+            return None
 
     async def list_by_thread(self, thread_id: str) -> list[RunRecord]:
         """Return all runs for a given thread, newest first."""
@@ -160,17 +164,20 @@ class RunManager:
             # Dict insertion order gives deterministic results when timestamps tie.
             memory_records = [r for r in self._runs.values() if r.thread_id == thread_id]
         if self._store is None:
-            return memory_records
+            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)
         records_by_id = {record.run_id: record for record in memory_records}
         try:
             rows = await self._store.list_by_thread(thread_id)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
-            return memory_records
+            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)
         for row in rows:
-            run_id = row["run_id"]
-            if run_id not in records_by_id:
-                records_by_id[run_id] = self._record_from_store(row)
+            run_id = row.get("run_id")
+            if run_id and run_id not in records_by_id:
+                try:
+                    records_by_id[run_id] = self._record_from_store(row)
+                except Exception:
+                    logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:

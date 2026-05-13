@@ -99,8 +99,9 @@ async def test_list_by_thread(manager: RunManager):
 
     runs = await manager.list_by_thread("thread-1")
     assert len(runs) == 2
-    assert runs[0].run_id == r1.run_id
-    assert runs[1].run_id == r2.run_id
+    # Newest first: r2 was created after r1.
+    assert runs[0].run_id == r2.run_id
+    assert runs[1].run_id == r1.run_id
 
 
 @pytest.mark.anyio
