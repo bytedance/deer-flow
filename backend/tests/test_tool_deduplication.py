@@ -65,8 +65,7 @@ def _make_minimal_config(tools):
 
 @patch("deerflow.tools.tools.get_app_config")
 @patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
-@patch("deerflow.tools.tools.reset_deferred_registry")
-def test_config_loaded_async_only_tool_gets_sync_wrapper(mock_reset, mock_bash, mock_cfg):
+def test_config_loaded_async_only_tool_gets_sync_wrapper(mock_bash, mock_cfg):
     """Config-loaded async-only tools can still be invoked by sync clients."""
 
     async def async_tool_impl(x: int) -> str:
@@ -98,8 +97,7 @@ def test_config_loaded_async_only_tool_gets_sync_wrapper(mock_reset, mock_bash, 
 
 @patch("deerflow.tools.tools.get_app_config")
 @patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
-@patch("deerflow.tools.tools.reset_deferred_registry")
-def test_no_duplicates_returned(mock_reset, mock_bash, mock_cfg):
+def test_no_duplicates_returned(mock_bash, mock_cfg):
     """get_available_tools() never returns two tools with the same name."""
     mock_cfg.return_value = _make_minimal_config([])
 
@@ -113,8 +111,7 @@ def test_no_duplicates_returned(mock_reset, mock_bash, mock_cfg):
 
 @patch("deerflow.tools.tools.get_app_config")
 @patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
-@patch("deerflow.tools.tools.reset_deferred_registry")
-def test_first_occurrence_wins(mock_reset, mock_bash, mock_cfg):
+def test_first_occurrence_wins(mock_bash, mock_cfg):
     """When duplicates exist, the first occurrence is kept."""
     mock_cfg.return_value = _make_minimal_config([])
 
@@ -132,8 +129,7 @@ def test_first_occurrence_wins(mock_reset, mock_bash, mock_cfg):
 
 @patch("deerflow.tools.tools.get_app_config")
 @patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
-@patch("deerflow.tools.tools.reset_deferred_registry")
-def test_duplicate_triggers_warning(mock_reset, mock_bash, mock_cfg, caplog):
+def test_duplicate_triggers_warning(mock_bash, mock_cfg, caplog):
     """A warning is logged for every skipped duplicate."""
     import logging
 
