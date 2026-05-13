@@ -93,13 +93,17 @@ class TestBuildPatchedMessagesPatching:
         ]
         patched = mw._build_patched_messages(msgs)
         assert patched is not None
-        # HumanMessage, AIMessage, synthetic ToolMessage, HumanMessage
-        assert len(patched) == 4
+        # Phase 1 injects ToolMessage after the dangling AIMessage.
+        # Phase 2 then injects an AIMessage after that ToolMessage (since it's followed by HumanMessage).
+        # Result: HumanMessage, AIMessage, synthetic ToolMessage, synthetic AIMessage, HumanMessage
+        assert len(patched) == 5
         assert isinstance(patched[0], HumanMessage)
         assert isinstance(patched[1], AIMessage)
         assert isinstance(patched[2], ToolMessage)
         assert patched[2].tool_call_id == "call_1"
-        assert isinstance(patched[3], HumanMessage)
+        assert isinstance(patched[3], AIMessage)
+        assert "interrupted" in patched[3].content.lower()
+        assert isinstance(patched[4], HumanMessage)
 
     def test_mixed_responded_and_dangling(self):
         mw = DanglingToolCallMiddleware()
@@ -227,6 +231,80 @@ class TestWrapModelCall:
 
         handler.assert_called_once_with(patched_request)
         assert result == "response"
+
+
+class TestOrphanedToolResults:
+    """Tests for Phase 2: orphaned tool results (ToolMessage followed by HumanMessage)."""
+
+    def test_completed_cycle_followed_by_human_injects_ai(self):
+        """AI calls tool, tool responds, but user interrupts before AI replies."""
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            HumanMessage(content="search for x"),
+            _ai_with_tool_calls([_tc("web_search", "call_1")]),
+            _tool_msg("call_1", "web_search"),
+            HumanMessage(content="any results?"),
+        ]
+        patched = mw._build_patched_messages(msgs)
+        assert patched is not None
+        # ToolMessage should be followed by a synthetic AIMessage before the HumanMessage
+        tool_idx = next(i for i, m in enumerate(patched) if isinstance(m, ToolMessage))
+        assert isinstance(patched[tool_idx + 1], AIMessage)
+        assert "interrupted" in patched[tool_idx + 1].content.lower()
+        assert isinstance(patched[tool_idx + 2], HumanMessage)
+
+    def test_multiple_tool_messages_in_group_only_one_ai_injected(self):
+        """When AI calls two tools and both respond, only one AIMessage is injected."""
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1"), _tc("read", "call_2")]),
+            _tool_msg("call_1", "bash"),
+            _tool_msg("call_2", "read"),
+            HumanMessage(content="what happened?"),
+        ]
+        patched = mw._build_patched_messages(msgs)
+        assert patched is not None
+        synthetic_ais = [m for m in patched if isinstance(m, AIMessage) and "interrupted" in m.content.lower()]
+        assert len(synthetic_ais) == 1
+
+    def test_completed_cycle_at_end_no_patch(self):
+        """Tool results at end of history (no following HumanMessage) need no patch."""
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1")]),
+            _tool_msg("call_1", "bash"),
+        ]
+        assert mw._build_patched_messages(msgs) is None
+
+    def test_completed_cycle_followed_by_ai_no_patch(self):
+        """Tool results properly followed by AIMessage need no Phase 2 patch."""
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1")]),
+            _tool_msg("call_1", "bash"),
+            AIMessage(content="done"),
+            HumanMessage(content="thanks"),
+        ]
+        assert mw._build_patched_messages(msgs) is None
+
+    def test_issue_1936_scenario(self):
+        """Reproduces the exact scenario from issue #1936:
+        tool result → AI calls tool → tool result → multiple human messages.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _tool_msg("prev_call", "some_tool"),  # [26] previous tool result
+            _ai_with_tool_calls([_tc("web_search", "call_o6ml")]),  # [27] AI requests tool
+            _tool_msg("call_o6ml", "web_search"),  # [28] tool result
+            HumanMessage(content="follow up 1"),  # [29] user interrupted
+            HumanMessage(content="follow up 2"),  # [30]
+        ]
+        patched = mw._build_patched_messages(msgs)
+        assert patched is not None
+        # Synthetic AIMessage should appear after [28] tool result, before [29] human
+        tool_28_idx = next(i for i, m in enumerate(patched) if isinstance(m, ToolMessage) and m.tool_call_id == "call_o6ml")
+        assert isinstance(patched[tool_28_idx + 1], AIMessage)
+        assert "interrupted" in patched[tool_28_idx + 1].content.lower()
 
 
 class TestAwrapModelCall:
