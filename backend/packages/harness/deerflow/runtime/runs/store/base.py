@@ -98,9 +98,7 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def aggregate_tokens_by_thread_daily(
-        self, thread_id: str, *, limit: int = 365
-    ) -> list[dict[str, Any]]:
+    async def aggregate_tokens_by_thread_daily(self, thread_id: str, *, limit: int = 365) -> list[dict[str, Any]]:
         """Daily token usage breakdown for completed runs in a thread.
 
         Returns a list of dicts (one per (date, model) combination), sorted

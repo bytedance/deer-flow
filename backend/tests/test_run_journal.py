@@ -896,17 +896,19 @@ class TestCacheTokenTracking:
     def test_external_records_cache_tokens(self, journal_setup):
         """record_external_llm_usage_records should accumulate cache tokens."""
         j, _ = journal_setup
-        j.record_external_llm_usage_records([
-            {
-                "source_run_id": "ext-1",
-                "caller": "subagent:research",
-                "input_tokens": 100,
-                "output_tokens": 50,
-                "total_tokens": 150,
-                "cache_read_tokens": 40,
-                "cache_creation_tokens": 60,
-            }
-        ])
+        j.record_external_llm_usage_records(
+            [
+                {
+                    "source_run_id": "ext-1",
+                    "caller": "subagent:research",
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "total_tokens": 150,
+                    "cache_read_tokens": 40,
+                    "cache_creation_tokens": 60,
+                }
+            ]
+        )
         assert j._cache_read_tokens == 40
         assert j._cache_creation_tokens == 60
         assert j._subagent_tokens == 150
@@ -915,15 +917,17 @@ class TestCacheTokenTracking:
     def test_external_records_no_cache_tokens_field(self, journal_setup):
         """External records without cache tokens fields should not crash."""
         j, _ = journal_setup
-        j.record_external_llm_usage_records([
-            {
-                "source_run_id": "ext-2",
-                "caller": "subagent:research",
-                "input_tokens": 100,
-                "output_tokens": 50,
-                "total_tokens": 150,
-            }
-        ])
+        j.record_external_llm_usage_records(
+            [
+                {
+                    "source_run_id": "ext-2",
+                    "caller": "subagent:research",
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "total_tokens": 150,
+                }
+            ]
+        )
         assert j._cache_read_tokens == 0
         assert j._cache_creation_tokens == 0
 

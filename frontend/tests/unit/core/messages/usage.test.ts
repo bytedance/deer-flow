@@ -116,7 +116,7 @@ test("prefers backend thread usage for header totals", () => {
         total_tokens: 15,
         cache_read_tokens: 2,
         cache_creation_tokens: 1,
-      },
+      } as unknown,
     },
   ] as Message[];
 
@@ -152,7 +152,7 @@ test("adds current in-flight message usage to backend header totals", () => {
         total_tokens: 15,
         cache_read_tokens: 2,
         cache_creation_tokens: 1,
-      },
+      } as unknown,
     },
     {
       id: "ai-pending",
@@ -164,7 +164,7 @@ test("adds current in-flight message usage to backend header totals", () => {
         total_tokens: 10,
         cache_read_tokens: 1,
         cache_creation_tokens: 0,
-      },
+      } as unknown,
     },
   ] as Message[];
 
@@ -201,7 +201,7 @@ test("falls back to visible messages when backend usage is unavailable or zero",
         total_tokens: 15,
         cache_read_tokens: 2,
         cache_creation_tokens: 1,
-      },
+      } as unknown,
     },
   ] as Message[];
 

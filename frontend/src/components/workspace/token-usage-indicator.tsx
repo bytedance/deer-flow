@@ -109,10 +109,12 @@ export function TokenUsageIndicator({
               {usage.cacheReadTokens > 0 || usage.cacheCreationTokens > 0 ? (
                 <div className="flex justify-between gap-4">
                   <span>{t.tokenUsage.cache ?? "Cache"}</span>
-                  <span className="font-mono text-muted-foreground">
+                  <span className="text-muted-foreground font-mono">
                     {usage.cacheReadTokens > 0 && usage.cacheCreationTokens > 0
                       ? `${formatTokenCount(usage.cacheReadTokens)} / ${formatTokenCount(usage.cacheCreationTokens)}`
-                      : formatTokenCount(usage.cacheReadTokens + usage.cacheCreationTokens)}
+                      : formatTokenCount(
+                          usage.cacheReadTokens + usage.cacheCreationTokens,
+                        )}
                   </span>
                 </div>
               ) : null}
