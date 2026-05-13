@@ -29,12 +29,12 @@ describe("input box audio helpers", () => {
         microphonePlaceholder: "Start speaking...",
         audioFilePlaceholder: "Choose an audio file...",
         microphoneUnsupportedPlaceholder: "Browser unsupported",
-        speechRecognitionSupported: true,
+        microphoneSupported: true,
       }),
     ).toBe("How can I assist you today?");
   });
 
-  test("uses the microphone placeholder when speech recognition is supported", () => {
+  test("uses the microphone placeholder when microphone recording is supported", () => {
     expect(
       getInputSourcePlaceholder({
         inputSource: "microphone",
@@ -42,12 +42,12 @@ describe("input box audio helpers", () => {
         microphonePlaceholder: "Start speaking...",
         audioFilePlaceholder: "Choose an audio file...",
         microphoneUnsupportedPlaceholder: "Browser unsupported",
-        speechRecognitionSupported: true,
+        microphoneSupported: true,
       }),
     ).toBe("Start speaking...");
   });
 
-  test("falls back to the unsupported placeholder when speech recognition is unavailable", () => {
+  test("falls back to the unsupported placeholder when microphone recording is unavailable", () => {
     expect(
       getInputSourcePlaceholder({
         inputSource: "microphone",
@@ -55,7 +55,7 @@ describe("input box audio helpers", () => {
         microphonePlaceholder: "Start speaking...",
         audioFilePlaceholder: "Choose an audio file...",
         microphoneUnsupportedPlaceholder: "Browser unsupported",
-        speechRecognitionSupported: false,
+        microphoneSupported: false,
       }),
     ).toBe("Browser unsupported");
   });
@@ -68,7 +68,7 @@ describe("input box audio helpers", () => {
         microphonePlaceholder: "Start speaking...",
         audioFilePlaceholder: "Choose an audio file...",
         microphoneUnsupportedPlaceholder: "Browser unsupported",
-        speechRecognitionSupported: true,
+        microphoneSupported: true,
       }),
     ).toBe("Choose an audio file...");
   });

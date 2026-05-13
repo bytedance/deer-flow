@@ -206,14 +206,14 @@ export function getInputSourcePlaceholder({
   microphonePlaceholder,
   audioFilePlaceholder,
   microphoneUnsupportedPlaceholder,
-  speechRecognitionSupported,
+  microphoneSupported,
 }: {
   inputSource: InputSource;
   defaultPlaceholder: string;
   microphonePlaceholder: string;
   audioFilePlaceholder: string;
   microphoneUnsupportedPlaceholder: string;
-  speechRecognitionSupported: boolean;
+  microphoneSupported: boolean;
 }): string {
   if (inputSource === "text") {
     return defaultPlaceholder;
@@ -222,7 +222,7 @@ export function getInputSourcePlaceholder({
     return audioFilePlaceholder;
   }
 
-  return speechRecognitionSupported
+  return microphoneSupported
     ? microphonePlaceholder
     : microphoneUnsupportedPlaceholder;
 }
@@ -308,8 +308,7 @@ export function InputBox({
     null,
   );
   const [inputSource, setInputSource] = useState<InputSource>("text");
-  const [speechRecognitionSupported, setSpeechRecognitionSupported] =
-    useState(false);
+  const [microphoneSupported, setMicrophoneSupported] = useState(false);
   const [audioTranscriptionError, setAudioTranscriptionError] = useState<
     string | null
   >(null);
@@ -321,12 +320,13 @@ export function InputBox({
   >(null);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (typeof window === "undefined" || typeof navigator === "undefined") {
       return;
     }
 
-    setSpeechRecognitionSupported(
-      "SpeechRecognition" in window || "webkitSpeechRecognition" in window,
+    setMicrophoneSupported(
+      typeof window.MediaRecorder !== "undefined" &&
+        typeof navigator.mediaDevices?.getUserMedia === "function",
     );
   }, []);
 
@@ -565,7 +565,7 @@ export function InputBox({
     audioFilePlaceholder: t.inputBox.audioFilePlaceholder,
     microphoneUnsupportedPlaceholder:
       t.inputBox.microphoneUnsupportedPlaceholder,
-    speechRecognitionSupported,
+    microphoneSupported,
   });
 
   const promptInputAccept =
@@ -574,7 +574,8 @@ export function InputBox({
   const microphoneButtonDisabled =
     disabled ||
     status === "streaming" ||
-    !microphoneInputEnabled
+    !microphoneInputEnabled ||
+    !microphoneSupported
       ? true
       : undefined;
 
@@ -966,7 +967,7 @@ export function InputBox({
                             {t.inputBox.microphoneInput}
                           </div>
                           <div className="pl-7 text-xs">
-                            {speechRecognitionSupported
+                            {microphoneSupported
                               ? t.inputBox.microphoneInputDescription
                               : t.inputBox.microphoneUnsupported}
                           </div>
@@ -995,7 +996,7 @@ export function InputBox({
             {activeInputSource === "microphone" && microphoneInputEnabled && (
               <Tooltip
                 content={
-                  speechRecognitionSupported
+                  microphoneSupported
                     ? t.inputBox.microphoneInputDescription
                     : t.inputBox.microphoneUnsupported
                 }
@@ -1374,7 +1375,7 @@ export function InputBox({
         )}
         {activeInputSource === "microphone" &&
           microphoneInputEnabled &&
-          !speechRecognitionSupported && (
+          !microphoneSupported && (
           <div className="text-muted-foreground px-4 pb-2 text-[11px]">
             {t.inputBox.microphoneUnsupported}
           </div>

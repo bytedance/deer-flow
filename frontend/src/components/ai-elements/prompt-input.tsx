@@ -1105,66 +1105,14 @@ export const PromptInputSubmit = ({
   );
 };
 
-interface SpeechRecognition extends EventTarget {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  start(): void;
-  stop(): void;
-  onstart: ((this: SpeechRecognition, ev: Event) => any) | null;
-  onend: ((this: SpeechRecognition, ev: Event) => any) | null;
-  onresult:
-    | ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => any)
-    | null;
-  onerror:
-    | ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => any)
-    | null;
-}
-
-interface SpeechRecognitionEvent extends Event {
-  results: SpeechRecognitionResultList;
-  resultIndex: number;
-}
-
-type SpeechRecognitionResultList = {
-  readonly length: number;
-  item(index: number): SpeechRecognitionResult;
-  [index: number]: SpeechRecognitionResult;
-};
-
-type SpeechRecognitionResult = {
-  readonly length: number;
-  item(index: number): SpeechRecognitionAlternative;
-  [index: number]: SpeechRecognitionAlternative;
-  isFinal: boolean;
-};
-
-type SpeechRecognitionAlternative = {
-  transcript: string;
-  confidence: number;
-};
-
-interface SpeechRecognitionErrorEvent extends Event {
-  error: string;
-}
-
-declare global {
-  interface Window {
-    SpeechRecognition: {
-      new (): SpeechRecognition;
-    };
-    webkitSpeechRecognition: {
-      new (): SpeechRecognition;
-    };
-  }
-}
+type RecordingState = "idle" | "recording" | "transcribing";
 
 export type PromptInputSpeechButtonProps = ComponentProps<
   typeof PromptInputButton
 > & {
+  threadId: string;
   language?: string;
   autoStart?: boolean;
-  threadId: string;
   textareaRef?: RefObject<HTMLTextAreaElement | null>;
   onTranscriptionChange?: (text: string) => void;
 };
@@ -1195,7 +1143,6 @@ export const PromptInputSpeechButton = ({
   ...props
 }: PromptInputSpeechButtonProps) => {
   const controller = useOptionalPromptInputController();
-  type RecordingState = "idle" | "recording" | "transcribing";
   const [state, setState] = useState<RecordingState>("idle");
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -1268,6 +1215,11 @@ export const PromptInputSpeechButton = ({
           }
         } catch (err) {
           console.error("[SpeechButton] transcription failed:", err);
+          toast.error(
+            err instanceof Error && err.message.trim().length > 0
+              ? err.message
+              : "Transcription failed. Please try again.",
+          );
         }
 
         setState("idle");
@@ -1303,12 +1255,34 @@ export const PromptInputSpeechButton = ({
           chunksRef.current.push(e.data);
         }
       };
+      recorder.onerror = (event) => {
+        console.error("[SpeechButton] MediaRecorder error:", event);
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+        mediaRecorderRef.current = null;
+        chunksRef.current = [];
+        toast.error("Microphone recording failed. Please try again.");
+        setState("idle");
+      };
 
       mediaRecorderRef.current = recorder;
       recorder.start();
       setState("recording");
     } catch (err) {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+      mediaRecorderRef.current = null;
+      chunksRef.current = [];
       console.error("[SpeechButton] getUserMedia failed:", err);
+      toast.error(
+        err instanceof Error && err.message.trim().length > 0
+          ? err.message
+          : "Microphone recording failed. Please check browser permissions.",
+      );
       setState("idle");
     }
   }, []);
@@ -1317,12 +1291,22 @@ export const PromptInputSpeechButton = ({
     if (autoStart && state === "idle" && !externalDisabled) {
       void startRecording();
     }
-  }, [autoStart, externalDisabled]);
+  }, [autoStart, externalDisabled, state, startRecording]);
 
   useEffect(() => {
     return () => {
+      const mediaRecorder = mediaRecorderRef.current;
+      mediaRecorderRef.current = null;
+      if (mediaRecorder) {
+        mediaRecorder.onstop = null;
+        mediaRecorder.ondataavailable = null;
+        if (mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+        }
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
       }
     };
   }, []);
