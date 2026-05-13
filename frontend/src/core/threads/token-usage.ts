@@ -16,5 +16,7 @@ export function threadTokenUsageToTokenUsage(
     inputTokens: usage.total_input_tokens ?? 0,
     outputTokens: usage.total_output_tokens ?? 0,
     totalTokens: usage.total_tokens ?? 0,
+    cacheReadTokens: usage.cache_read_tokens ?? 0,
+    cacheCreationTokens: usage.cache_creation_tokens ?? 0,
   };
 }

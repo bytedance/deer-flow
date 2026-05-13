@@ -69,6 +69,10 @@ class RunJournal(BaseCallbackHandler):
         self._subagent_tokens = 0
         self._middleware_tokens = 0
 
+        # Cache token accumulators
+        self._cache_read_tokens = 0
+        self._cache_creation_tokens = 0
+
         # Dedup: LangChain may fire on_llm_end multiple times for the same run_id
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
@@ -287,6 +291,14 @@ class RunJournal(BaseCallbackHandler):
                     self._total_tokens += total_tk
                     self._llm_call_count += 1
 
+                    # Cache tokens (OpenAI: input_token_details.cache_read_*/cache_creation_*, Anthropic: cache_* metrics)
+                    cache_details = usage_dict.get("input_token_details", {}) or {}
+                    cache_read = cache_details.get("cache_read_input_tokens", 0) or 0
+                    cache_creation = cache_details.get("cache_creation_input_tokens", 0) or 0
+                    if cache_read > 0 or cache_creation > 0:
+                        self._cache_read_tokens += cache_read
+                        self._cache_creation_tokens += cache_creation
+
                     if caller.startswith("subagent:"):
                         self._subagent_tokens += total_tk
                     elif caller.startswith("middleware:"):
@@ -436,6 +448,9 @@ class RunJournal(BaseCallbackHandler):
             self._total_input_tokens += record.get("input_tokens", 0) or 0
             self._total_output_tokens += record.get("output_tokens", 0) or 0
             self._total_tokens += total_tk
+            # Cache tokens (pass-through from external source)
+            self._cache_read_tokens += record.get("cache_read_tokens", 0) or 0
+            self._cache_creation_tokens += record.get("cache_creation_tokens", 0) or 0
 
             caller = str(record.get("caller", ""))
             if caller.startswith("subagent:"):
@@ -494,6 +509,8 @@ class RunJournal(BaseCallbackHandler):
             "lead_agent_tokens": self._lead_agent_tokens,
             "subagent_tokens": self._subagent_tokens,
             "middleware_tokens": self._middleware_tokens,
+            "cache_read_tokens": self._cache_read_tokens,
+            "cache_creation_tokens": self._cache_creation_tokens,
             "message_count": self._msg_count,
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,

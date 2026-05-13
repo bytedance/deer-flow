@@ -771,3 +771,171 @@ class TestChatModelStartHumanMessage:
         j.on_chat_model_start({}, [], run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
         assert j._first_human_msg is None
+
+
+class TestCacheTokenTracking:
+    """Tests for cache token accumulation in RunJournal.
+
+    Note: RunJournal expects OpenAI-style field names:
+    - input_token_details.cache_read_input_tokens
+    - input_token_details.cache_creation_input_tokens
+    """
+
+    def test_cache_read_tokens_accumulate(self, journal_setup):
+        j, _ = journal_setup
+        usage = {
+            "input_tokens": 350,
+            "output_tokens": 240,
+            "total_tokens": 590,
+            "input_token_details": {
+                "audio": 10,
+                "cache_creation_input_tokens": 200,
+                "cache_read_input_tokens": 100,
+            },
+            "output_token_details": {
+                "audio": 10,
+                "reasoning": 200,
+            },
+        }
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j._cache_read_tokens == 100
+        assert j._cache_creation_tokens == 200
+        assert j._total_tokens == 590
+
+    def test_cache_creation_tokens_accumulate(self, journal_setup):
+        j, _ = journal_setup
+        usage = {
+            "input_tokens": 500,
+            "output_tokens": 100,
+            "total_tokens": 600,
+            "input_token_details": {
+                "cache_creation_input_tokens": 300,
+                "cache_read_input_tokens": 50,
+            },
+        }
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(
+            _make_llm_response("B", usage={"input_tokens": 200, "output_tokens": 50, "total_tokens": 250, "input_token_details": {"cache_creation_input_tokens": 100}}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        assert j._cache_read_tokens == 50
+        assert j._cache_creation_tokens == 400
+
+    def test_cache_tokens_dedup_same_run_id(self, journal_setup):
+        """Cache tokens must not be double-counted for the same run_id."""
+        j, _ = journal_setup
+        run_id = uuid4()
+        usage = {
+            "input_tokens": 350,
+            "output_tokens": 240,
+            "total_tokens": 590,
+            "input_token_details": {"cache_read_input_tokens": 100, "cache_creation_input_tokens": 200},
+        }
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        assert j._cache_read_tokens == 100
+        assert j._cache_creation_tokens == 200
+        assert j._total_tokens == 590
+
+    def test_cache_tokens_in_get_completion_data(self, journal_setup):
+        j, _ = journal_setup
+        usage = {
+            "input_tokens": 350,
+            "output_tokens": 240,
+            "total_tokens": 590,
+            "input_token_details": {"cache_read_input_tokens": 100, "cache_creation_input_tokens": 200},
+        }
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        data = j.get_completion_data()
+        assert data["cache_read_tokens"] == 100
+        assert data["cache_creation_tokens"] == 200
+
+    def test_no_cache_tokens_without_details(self, journal_setup):
+        """When no input_token_details, cache tokens should stay 0."""
+        j, _ = journal_setup
+        usage = {"input_tokens": 350, "output_tokens": 240, "total_tokens": 590}
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j._cache_read_tokens == 0
+        assert j._cache_creation_tokens == 0
+
+    def test_no_cache_tokens_when_usage_is_none(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(_make_llm_response("A", usage=None), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j._cache_read_tokens == 0
+        assert j._cache_creation_tokens == 0
+
+    def test_track_token_usage_false_skips_cache(self, journal_setup):
+        """When token tracking is disabled, cache tokens stay 0."""
+        store = MemoryRunEventStore()
+        j = RunJournal("r1", "t1", store, track_token_usage=False, flush_threshold=100)
+        usage = {
+            "input_tokens": 350,
+            "output_tokens": 240,
+            "total_tokens": 590,
+            "input_token_details": {"cache_read_input_tokens": 100, "cache_creation_input_tokens": 200},
+        }
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j._cache_read_tokens == 0
+        assert j._cache_creation_tokens == 0
+
+    def test_cache_tokens_zero_values_no_crash(self, journal_setup):
+        """input_token_details with zero cache values should not crash."""
+        j, _ = journal_setup
+        usage = {
+            "input_tokens": 350,
+            "output_tokens": 240,
+            "total_tokens": 590,
+            "input_token_details": {"cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+        }
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j._cache_read_tokens == 0
+        assert j._cache_creation_tokens == 0
+
+    def test_external_records_cache_tokens(self, journal_setup):
+        """record_external_llm_usage_records should accumulate cache tokens."""
+        j, _ = journal_setup
+        j.record_external_llm_usage_records([
+            {
+                "source_run_id": "ext-1",
+                "caller": "subagent:research",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "total_tokens": 150,
+                "cache_read_tokens": 40,
+                "cache_creation_tokens": 60,
+            }
+        ])
+        assert j._cache_read_tokens == 40
+        assert j._cache_creation_tokens == 60
+        assert j._subagent_tokens == 150
+        assert j._total_tokens == 150
+
+    def test_external_records_no_cache_tokens_field(self, journal_setup):
+        """External records without cache tokens fields should not crash."""
+        j, _ = journal_setup
+        j.record_external_llm_usage_records([
+            {
+                "source_run_id": "ext-2",
+                "caller": "subagent:research",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "total_tokens": 150,
+            }
+        ])
+        assert j._cache_read_tokens == 0
+        assert j._cache_creation_tokens == 0
+
+    def test_cache_tokens_with_none_details(self, journal_setup):
+        """input_token_details is None should not crash."""
+        j, _ = journal_setup
+        usage = {
+            "input_tokens": 350,
+            "output_tokens": 240,
+            "total_tokens": 590,
+            "input_token_details": None,
+        }
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j._cache_read_tokens == 0
+        assert j._cache_creation_tokens == 0

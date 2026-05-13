@@ -97,4 +97,6 @@ class MemoryRunStore(RunStore):
                 "subagent": sum(r.get("subagent_tokens", 0) for r in completed),
                 "middleware": sum(r.get("middleware_tokens", 0) for r in completed),
             },
+            "cache_read_tokens": sum(r.get("cache_read_tokens", 0) for r in completed),
+            "cache_creation_tokens": sum(r.get("cache_creation_tokens", 0) for r in completed),
         }

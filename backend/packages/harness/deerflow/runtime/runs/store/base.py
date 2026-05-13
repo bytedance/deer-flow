@@ -74,6 +74,8 @@ class RunStore(abc.ABC):
         lead_agent_tokens: int = 0,
         subagent_tokens: int = 0,
         middleware_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
         message_count: int = 0,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
@@ -92,5 +94,20 @@ class RunStore(abc.ABC):
         Returns a dict with keys: total_tokens, total_input_tokens,
         total_output_tokens, total_runs, by_model (model_name → {tokens, runs}),
         by_caller ({lead_agent, subagent, middleware}).
+        """
+        pass
+
+    @abc.abstractmethod
+    async def aggregate_tokens_by_thread_daily(
+        self, thread_id: str, *, limit: int = 365
+    ) -> list[dict[str, Any]]:
+        """Daily token usage breakdown for completed runs in a thread.
+
+        Returns a list of dicts (one per (date, model) combination), sorted
+        by date descending. Each dict has keys:
+        date (str), model_name (str), total_tokens (int),
+        total_input_tokens (int), total_output_tokens (int),
+        total_runs (int), lead_agent_tokens (int), subagent_tokens (int),
+        middleware_tokens (int).
         """
         pass

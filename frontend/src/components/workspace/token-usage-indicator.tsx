@@ -106,6 +106,16 @@ export function TokenUsageIndicator({
                   {formatTokenCount(usage.outputTokens)}
                 </span>
               </div>
+              {usage.cacheReadTokens > 0 || usage.cacheCreationTokens > 0 ? (
+                <div className="flex justify-between gap-4">
+                  <span>{t.tokenUsage.cache ?? "Cache"}</span>
+                  <span className="font-mono text-muted-foreground">
+                    {usage.cacheReadTokens > 0 && usage.cacheCreationTokens > 0
+                      ? `${formatTokenCount(usage.cacheReadTokens)}${formatTokenCount(usage.cacheCreationTokens) !== "0" ? ` / ${formatTokenCount(usage.cacheCreationTokens)}` : ""}`
+                      : formatTokenCount(usage.cacheReadTokens + usage.cacheCreationTokens)}
+                  </span>
+                </div>
+              ) : null}
               <div className="border-t pt-1">
                 <div className="flex justify-between gap-4">
                   <span>{t.tokenUsage.total}</span>

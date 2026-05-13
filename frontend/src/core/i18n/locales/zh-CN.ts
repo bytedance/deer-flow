@@ -292,6 +292,9 @@ export const zhCN: Translations = {
     input: "输入",
     output: "输出",
     total: "总计",
+    cache: "缓存",
+    cacheRead: "读取",
+    cacheCreation: "创建",
     view: "显示方式",
     unavailable:
       "暂无 Token 用量。只有模型成功返回且供应商提供 usage_metadata 时才会显示。",

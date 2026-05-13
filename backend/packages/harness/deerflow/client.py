@@ -272,11 +272,19 @@ class DeerFlowClient:
         return None
 
     @staticmethod
-    def _ai_text_event(msg_id: str | None, text: str, usage: dict | None, additional_kwargs: dict[str, Any] | None = None) -> "StreamEvent":
+    def _ai_text_event(
+        msg_id: str | None,
+        text: str,
+        usage: dict | None,
+        additional_kwargs: dict[str, Any] | None = None,
+        usage_cache: dict[str, int] | None = None,
+    ) -> "StreamEvent":
         """Build a ``messages-tuple`` AI text event."""
         data: dict[str, Any] = {"type": "ai", "content": text, "id": msg_id}
         if usage:
             data["usage_metadata"] = usage
+        if usage_cache:
+            data["usage_metadata"] = {**data["usage_metadata"], **usage_cache}
         if additional_kwargs:
             data["additional_kwargs"] = additional_kwargs
         return StreamEvent(type="messages-tuple", data=data)
@@ -588,6 +596,7 @@ class DeerFlowClient:
         counted_usage_ids: set[str] = set()
         sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        cumulative_cache: dict[str, int] = {"cache_read_tokens": 0, "cache_creation_tokens": 0}
 
         def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
             """Add *usage* to cumulative totals if this id has not been counted.
@@ -615,6 +624,30 @@ class DeerFlowClient:
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
             }
+
+        def _account_usage_cache(msg_id: str | None, usage: Any) -> dict | None:
+            """Capture cache token counts if this id has not been counted.
+
+            Returns the normalized cache dict when accepted, otherwise ``None``.
+            """
+            if not usage:
+                return None
+            if msg_id and msg_id in counted_usage_ids:
+                return None
+            input_details = usage.get("input_token_details") or {}
+            cache_read = input_details.get("cache_read_input_tokens", 0) or 0
+            cache_creation = input_details.get("cache_creation_input_tokens", 0) or 0
+            if msg_id:
+                counted_usage_ids.add(msg_id)
+            if cache_read or cache_creation:
+                cumulative_cache["cache_read_tokens"] += cache_read
+                cumulative_cache["cache_creation_tokens"] += cache_creation
+                return {
+                    "cache_read_tokens": cache_read,
+                    "cache_creation_tokens": cache_creation,
+                }
+            counted_usage_ids.discard(msg_id)  # undo the add above if nothing to report
+            return None
 
         def _unsent_additional_kwargs(msg_id: str | None, additional_kwargs: dict[str, Any] | None) -> dict[str, Any] | None:
             if not additional_kwargs:
@@ -659,6 +692,8 @@ class DeerFlowClient:
                     text = self._extract_text(msg_chunk.content)
                     additional_kwargs = self._serialize_additional_kwargs(msg_chunk)
                     counted_usage = _account_usage(msg_id, msg_chunk.usage_metadata)
+                    # Also capture cache tokens from usage_metadata
+                    counted_cache = _account_usage_cache(msg_id, msg_chunk.usage_metadata)
                     sent_additional_kwargs = False
 
                     if text:
@@ -670,6 +705,7 @@ class DeerFlowClient:
                             text,
                             counted_usage,
                             additional_kwargs_delta,
+                            counted_cache,
                         )
                         sent_additional_kwargs = bool(additional_kwargs_delta)
 
@@ -704,6 +740,7 @@ class DeerFlowClient:
                 if msg_id and msg_id in streamed_ids:
                     if isinstance(msg, AIMessage):
                         _account_usage(msg_id, getattr(msg, "usage_metadata", None))
+                        _account_usage_cache(msg_id, getattr(msg, "usage_metadata", None))
                         additional_kwargs = self._serialize_additional_kwargs(msg)
                         additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
                         if additional_kwargs_delta:
@@ -716,6 +753,7 @@ class DeerFlowClient:
 
                 if isinstance(msg, AIMessage):
                     counted_usage = _account_usage(msg_id, msg.usage_metadata)
+                    counted_cache = _account_usage_cache(msg_id, msg.usage_metadata)
                     additional_kwargs = self._serialize_additional_kwargs(msg)
                     sent_additional_kwargs = False
 
@@ -736,6 +774,7 @@ class DeerFlowClient:
                             text,
                             counted_usage,
                             additional_kwargs_delta,
+                            counted_cache,
                         )
                     elif msg_id:
                         additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
@@ -757,7 +796,7 @@ class DeerFlowClient:
                 },
             )
 
-        yield StreamEvent(type="end", data={"usage": cumulative_usage})
+        yield StreamEvent(type="end", data={"usage": {**cumulative_usage, **cumulative_cache}})
 
     def chat(self, message: str, *, thread_id: str | None = None, **kwargs) -> str:
         """Send a message and return the final text response.

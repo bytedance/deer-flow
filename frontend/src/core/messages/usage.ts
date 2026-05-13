@@ -4,6 +4,8 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
 }
 
 /**
@@ -15,7 +17,13 @@ export function getUsageMetadata(message: Message): TokenUsage | null {
     return null;
   }
   const usage = (message as Record<string, unknown>).usage_metadata as
-    | { input_tokens?: number; output_tokens?: number; total_tokens?: number }
+    | {
+        input_tokens?: number;
+        output_tokens?: number;
+        total_tokens?: number;
+        cache_read_tokens?: number;
+        cache_creation_tokens?: number;
+      }
     | undefined;
   if (!usage) {
     return null;
@@ -24,6 +32,8 @@ export function getUsageMetadata(message: Message): TokenUsage | null {
     inputTokens: usage.input_tokens ?? 0,
     outputTokens: usage.output_tokens ?? 0,
     totalTokens: usage.total_tokens ?? 0,
+    cacheReadTokens: usage.cache_read_tokens ?? 0,
+    cacheCreationTokens: usage.cache_creation_tokens ?? 0,
   };
 }
 
@@ -40,6 +50,8 @@ export function accumulateUsage(messages: Message[]): TokenUsage | null {
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
   };
   let hasUsage = false;
   const countedMessageIds = new Set<string>();
@@ -61,6 +73,8 @@ export function accumulateUsage(messages: Message[]): TokenUsage | null {
     cumulative.inputTokens += usage.inputTokens;
     cumulative.outputTokens += usage.outputTokens;
     cumulative.totalTokens += usage.totalTokens;
+    cumulative.cacheReadTokens += usage.cacheReadTokens;
+    cumulative.cacheCreationTokens += usage.cacheCreationTokens;
   }
   return hasUsage ? cumulative : null;
 }
@@ -71,7 +85,11 @@ function hasNonZeroUsage(
   return (
     usage !== null &&
     usage !== undefined &&
-    (usage.inputTokens > 0 || usage.outputTokens > 0 || usage.totalTokens > 0)
+    (usage.inputTokens > 0 ||
+      usage.outputTokens > 0 ||
+      usage.totalTokens > 0 ||
+      usage.cacheReadTokens > 0 ||
+      usage.cacheCreationTokens > 0)
   );
 }
 
@@ -80,6 +98,8 @@ function addUsage(base: TokenUsage, delta: TokenUsage): TokenUsage {
     inputTokens: base.inputTokens + delta.inputTokens,
     outputTokens: base.outputTokens + delta.outputTokens,
     totalTokens: base.totalTokens + delta.totalTokens,
+    cacheReadTokens: base.cacheReadTokens + delta.cacheReadTokens,
+    cacheCreationTokens: base.cacheCreationTokens + delta.cacheCreationTokens,
   };
 }
 

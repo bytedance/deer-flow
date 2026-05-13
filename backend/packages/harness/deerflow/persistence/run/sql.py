@@ -191,6 +191,8 @@ class RunRepository(RunStore):
         lead_agent_tokens: int = 0,
         subagent_tokens: int = 0,
         middleware_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
         message_count: int = 0,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
@@ -206,6 +208,8 @@ class RunRepository(RunStore):
             "lead_agent_tokens": lead_agent_tokens,
             "subagent_tokens": subagent_tokens,
             "middleware_tokens": middleware_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
             "message_count": message_count,
             "updated_at": datetime.now(UTC),
         }
@@ -234,6 +238,8 @@ class RunRepository(RunStore):
                 func.coalesce(func.sum(RunRow.lead_agent_tokens), 0).label("lead_agent"),
                 func.coalesce(func.sum(RunRow.subagent_tokens), 0).label("subagent"),
                 func.coalesce(func.sum(RunRow.middleware_tokens), 0).label("middleware"),
+                func.coalesce(func.sum(RunRow.cache_read_tokens), 0).label("cache_read"),
+                func.coalesce(func.sum(RunRow.cache_creation_tokens), 0).label("cache_creation"),
             )
             .where(_thread, _completed)
             .group_by(func.coalesce(RunRow.model_name, "unknown"))
@@ -244,6 +250,7 @@ class RunRepository(RunStore):
 
         total_tokens = total_input = total_output = total_runs = 0
         lead_agent = subagent = middleware = 0
+        cache_read = cache_creation = 0
         by_model: dict[str, dict] = {}
         for r in rows:
             by_model[r.model] = {"tokens": r.total_tokens, "runs": r.runs}
@@ -254,6 +261,8 @@ class RunRepository(RunStore):
             lead_agent += r.lead_agent
             subagent += r.subagent
             middleware += r.middleware
+            cache_read += r.cache_read
+            cache_creation += r.cache_creation
 
         return {
             "total_tokens": total_tokens,
@@ -266,4 +275,6 @@ class RunRepository(RunStore):
                 "subagent": subagent,
                 "middleware": middleware,
             },
+            "cache_read_tokens": cache_read,
+            "cache_creation_tokens": cache_creation,
         }
