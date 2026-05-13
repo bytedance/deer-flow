@@ -636,13 +636,26 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, {_ACP_WORKSPACE_VIRTUAL_PATH}/, or configured mount paths are allowed")
 
 
-def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
+def _validate_resolved_user_data_path(
+    resolved: Path,
+    thread_data: ThreadDataState,
+    *,
+    normalized: Path | None = None,
+) -> None:
     """Verify that a resolved host path stays inside allowed per-thread roots.
 
     Raises PermissionError if the path escapes workspace/uploads/outputs.
+
+    When a workspace contains symlinks that point outside the workspace root,
+    ``Path.resolve()`` follows them and the resolved path may fall outside the
+    allowed roots even though the logical (unresolved) path is still within
+    bounds.  To handle this, callers can pass *normalized* — the same path
+    with ``.``/``..`` resolved but symlinks **not** followed.  If the resolved
+    check fails but the normalized path is still inside an unresolved root,
+    access is allowed because the symlink is part of the workspace structure.
     """
-    allowed_roots = [
-        Path(p).resolve()
+    root_paths = [
+        p
         for p in (
             thread_data.get("workspace_path"),
             thread_data.get("uploads_path"),
@@ -651,15 +664,26 @@ def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataSta
         if p is not None
     ]
 
-    if not allowed_roots:
+    allowed_roots_resolved = [Path(p).resolve() for p in root_paths]
+
+    if not allowed_roots_resolved:
         raise SandboxRuntimeError("No allowed local sandbox directories configured")
 
-    for root in allowed_roots:
+    for root in allowed_roots_resolved:
         try:
             resolved.relative_to(root)
             return
         except ValueError:
             continue
+
+    if normalized is not None:
+        allowed_roots_unresolved = [Path(posixpath.normpath(p)) for p in root_paths]
+        for root in allowed_roots_unresolved:
+            try:
+                normalized.relative_to(root)
+                return
+            except ValueError:
+                continue
 
     raise PermissionError("Access denied: path traversal detected")
 
@@ -669,9 +693,10 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
 
     Returns the resolved host path string.
     """
-    resolved_str = replace_virtual_path(path, thread_data)
-    resolved = Path(resolved_str).resolve()
-    _validate_resolved_user_data_path(resolved, thread_data)
+    actual_str = replace_virtual_path(path, thread_data)
+    resolved = Path(actual_str).resolve()
+    normalized = Path(posixpath.normpath(actual_str))
+    _validate_resolved_user_data_path(resolved, thread_data, normalized=normalized)
     return str(resolved)
 
 

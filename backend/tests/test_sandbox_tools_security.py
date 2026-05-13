@@ -267,6 +267,73 @@ def test_resolve_and_validate_user_data_path_blocks_traversal(tmp_path: Path) ->
         _resolve_and_validate_user_data_path("/mnt/user-data/workspace/../../../etc/passwd", thread_data)
 
 
+def test_resolve_and_validate_user_data_path_allows_symlink_inside_workspace(tmp_path: Path) -> None:
+    """Paths through symlinks within the workspace should be accessible.
+
+    When a symlink inside the workspace points to a directory outside the
+    workspace root, dedicated tools should still allow access because the
+    logical path is within the workspace boundary.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external_repo = tmp_path / "external-repos" / "django"
+    external_repo.mkdir(parents=True)
+    (external_repo / "settings.py").write_text("DEBUG = True")
+
+    repo_symlink = workspace / "repo"
+    repo_symlink.symlink_to(external_repo)
+
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+    resolved = _resolve_and_validate_user_data_path(
+        "/mnt/user-data/workspace/repo/settings.py",
+        thread_data,
+    )
+    assert resolved == str(external_repo / "settings.py")
+
+
+def test_resolve_and_validate_user_data_path_allows_symlink_to_file(tmp_path: Path) -> None:
+    """A symlink to a file outside the workspace should still be accessible."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external_file = tmp_path / "secret_configs" / "app.yaml"
+    external_file.parent.mkdir(parents=True)
+    external_file.write_text("key: value")
+
+    link = workspace / "config.yaml"
+    link.symlink_to(external_file)
+
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+    resolved = _resolve_and_validate_user_data_path(
+        "/mnt/user-data/workspace/config.yaml",
+        thread_data,
+    )
+    assert resolved == str(external_file)
+
+
+def test_resolve_and_validate_user_data_path_symlink_does_not_bypass_traversal_check(tmp_path: Path) -> None:
+    """Even with symlink fallback, .. traversal must still be blocked."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+    with pytest.raises(PermissionError):
+        _resolve_and_validate_user_data_path(
+            "/mnt/user-data/workspace/../../../etc/passwd",
+            thread_data,
+        )
+
+
 # ---------- replace_virtual_paths_in_command ----------
 
 
