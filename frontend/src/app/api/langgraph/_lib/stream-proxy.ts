@@ -1,8 +1,5 @@
 import { type NextRequest } from "next/server";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 const DEFAULT_GATEWAY_BASE_URL = "http://127.0.0.1:8001";
 
 const HOP_BY_HOP_HEADERS = [
@@ -42,41 +39,35 @@ function deleteHopByHopHeaders(
   }
 }
 
-function buildGatewayUrl(path: string[] | undefined, search: string) {
-  const pathname = ["api", ...(path ?? []).map(encodeURIComponent)].join("/");
+function buildGatewayUrl(path: string[], search: string) {
+  const pathname = ["api", ...path.map(encodeURIComponent)].join("/");
   return `${getGatewayBaseUrl()}/${pathname}${search}`;
 }
 
-function buildHeaders(request: NextRequest, isStreamRequest: boolean) {
+function buildHeaders(request: NextRequest) {
   const headers = new Headers(request.headers);
   deleteHopByHopHeaders(headers, getConnectionHeaderNames(headers));
   for (const name of ["host", "content-length"]) {
     headers.delete(name);
   }
-  if (isStreamRequest) {
-    headers.set("accept-encoding", "identity");
-  }
+  headers.set("accept-encoding", "identity");
   return headers;
 }
 
-async function proxyRequest(
+export async function proxyLangGraphStream(
   request: NextRequest,
-  context: { params: Promise<{ path?: string[] }> },
+  path: string[],
 ) {
   if (process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
     return new Response(null, { status: 404 });
   }
 
-  // Keep LangGraph SSE out of Next rewrites because the dev proxy can buffer
-  // events on Windows. Returning the upstream body directly preserves streaming.
-  const { path } = await context.params;
   const target = buildGatewayUrl(path, request.nextUrl.search);
   const method = request.method.toUpperCase();
   const hasBody = !["GET", "HEAD", "OPTIONS"].includes(method);
-  const isStreamRequest = path?.at(-1) === "stream";
   const init: RequestInit & { duplex?: "half" } = {
     method,
-    headers: buildHeaders(request, isStreamRequest),
+    headers: buildHeaders(request),
     redirect: "manual",
     cache: "no-store",
     signal: request.signal,
@@ -99,11 +90,3 @@ async function proxyRequest(
     headers,
   });
 }
-
-export const GET = proxyRequest;
-export const HEAD = proxyRequest;
-export const POST = proxyRequest;
-export const PUT = proxyRequest;
-export const PATCH = proxyRequest;
-export const DELETE = proxyRequest;
-export const OPTIONS = proxyRequest;

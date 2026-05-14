@@ -29,6 +29,17 @@ const config = {
       "http://127.0.0.1:8001",
     );
 
+    if (!process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
+      fallback.push({
+        source: "/api/langgraph",
+        destination: `${gatewayURL}/api`,
+      });
+      fallback.push({
+        source: "/api/langgraph/:path*",
+        destination: `${gatewayURL}/api/:path*`,
+      });
+    }
+
     if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
       rewrites.push({
         source: "/api/agents",

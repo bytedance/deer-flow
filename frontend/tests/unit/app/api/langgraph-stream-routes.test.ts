@@ -1,22 +1,29 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-type RouteContext = {
-  params: Promise<{ path?: string[] }>;
-};
-
-async function loadRoute() {
+async function loadRunStreamRoute() {
   vi.resetModules();
-  return await import("@/app/api/langgraph/[[...path]]/route");
+  return await import("@/app/api/langgraph/threads/[threadId]/runs/stream/route");
 }
 
-function makeContext(path?: string[]): RouteContext {
+async function loadJoinStreamRoute() {
+  vi.resetModules();
+  return await import("@/app/api/langgraph/threads/[threadId]/runs/[runId]/stream/route");
+}
+
+function makeRunContext(threadId: string) {
   return {
-    params: Promise.resolve({ path }),
+    params: Promise.resolve({ threadId }),
   };
 }
 
-describe("/api/langgraph route proxy", () => {
+function makeJoinContext(threadId: string, runId: string) {
+  return {
+    params: Promise.resolve({ threadId, runId }),
+  };
+}
+
+describe("LangGraph stream route proxies", () => {
   const originalGatewayBaseUrl =
     process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL;
 
@@ -28,6 +35,7 @@ describe("/api/langgraph route proxy", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    delete process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL;
     if (originalGatewayBaseUrl === undefined) {
       delete process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL;
     } else {
@@ -35,18 +43,38 @@ describe("/api/langgraph route proxy", () => {
     }
   });
 
-  test("re-encodes path segments and preserves query strings", async () => {
+  test("proxies new run streams to the gateway stream endpoint", async () => {
     const fetchMock = vi.fn(async () => new Response("ok"));
     vi.stubGlobal("fetch", fetchMock);
 
-    const { GET } = await loadRoute();
+    const { POST } = await loadRunStreamRoute();
     const request = new NextRequest(
-      "http://localhost:3000/api/langgraph/ignored?after=a%2Fb",
+      "http://localhost:3000/api/langgraph/threads/ignored/runs/stream?after=a%2Fb",
+      {
+        method: "POST",
+        body: JSON.stringify({ ok: true }),
+      },
     );
-    await GET(request, makeContext(["threads", "a/b", "x?y", "#z"]));
+    await POST(request, makeRunContext("thread/a?b"));
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://gateway.example/base/api/threads/a%2Fb/x%3Fy/%23z?after=a%2Fb",
+      "http://gateway.example/base/api/threads/thread%2Fa%3Fb/runs/stream?after=a%2Fb",
+      expect.objectContaining({ method: "POST", signal: request.signal }),
+    );
+  });
+
+  test("proxies resumable join streams to the gateway stream endpoint", async () => {
+    const fetchMock = vi.fn(async () => new Response("ok"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { GET } = await loadJoinStreamRoute();
+    const request = new NextRequest(
+      "http://localhost:3000/api/langgraph/threads/ignored/runs/ignored/stream",
+    );
+    await GET(request, makeJoinContext("thread-id", "run/id"));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://gateway.example/base/api/threads/thread-id/runs/run%2Fid/stream",
       expect.objectContaining({ method: "GET", signal: request.signal }),
     );
   });
@@ -55,9 +83,9 @@ describe("/api/langgraph route proxy", () => {
     const fetchMock = vi.fn(async () => new Response("ok"));
     vi.stubGlobal("fetch", fetchMock);
 
-    const { POST } = await loadRoute();
+    const { POST } = await loadRunStreamRoute();
     const request = new NextRequest(
-      "http://localhost:3000/api/langgraph/threads",
+      "http://localhost:3000/api/langgraph/threads/thread-id/runs/stream",
       {
         method: "POST",
         headers: {
@@ -75,7 +103,7 @@ describe("/api/langgraph route proxy", () => {
     );
     const body = request.body;
 
-    await POST(request, makeContext(["threads"]));
+    await POST(request, makeRunContext("thread-id"));
 
     const fetchCalls = fetchMock.mock.calls as unknown as [
       string,
@@ -94,33 +122,6 @@ describe("/api/langgraph route proxy", () => {
     expect(headers.get("x-remove")).toBeNull();
     expect(headers.get("cookie")).toBe("access_token=abc");
     expect(headers.get("x-csrf-token")).toBe("csrf");
-    expect(headers.get("accept-encoding")).toBe("gzip, br");
-  });
-
-  test("requests identity encoding for streaming endpoints", async () => {
-    const fetchMock = vi.fn(async () => new Response("ok"));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { POST } = await loadRoute();
-    await POST(
-      new NextRequest(
-        "http://localhost:3000/api/langgraph/threads/thread-id/runs/stream",
-        {
-          method: "POST",
-          headers: {
-            "accept-encoding": "gzip, br",
-          },
-          body: JSON.stringify({ ok: true }),
-        },
-      ),
-      makeContext(["threads", "thread-id", "runs", "stream"]),
-    );
-
-    const fetchCalls = fetchMock.mock.calls as unknown as [
-      string,
-      RequestInit,
-    ][];
-    const headers = fetchCalls[0]?.[1].headers as Headers;
     expect(headers.get("accept-encoding")).toBe("identity");
   });
 
@@ -147,10 +148,16 @@ describe("/api/langgraph route proxy", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const { GET } = await loadRoute();
-    const response = await GET(
-      new NextRequest("http://localhost:3000/api/langgraph/threads"),
-      makeContext(["threads"]),
+    const { POST } = await loadRunStreamRoute();
+    const response = await POST(
+      new NextRequest(
+        "http://localhost:3000/api/langgraph/threads/thread-id/runs/stream",
+        {
+          method: "POST",
+          body: JSON.stringify({ ok: true }),
+        },
+      ),
+      makeRunContext("thread-id"),
     );
 
     expect(response.status).toBe(201);
@@ -168,22 +175,28 @@ describe("/api/langgraph route proxy", () => {
     const fetchMock = vi.fn(async () => new Response("ok"));
     vi.stubGlobal("fetch", fetchMock);
 
-    const { GET } = await loadRoute();
-    const response = await GET(
-      new NextRequest("http://localhost:3000/api/langgraph/threads"),
-      makeContext(["threads"]),
+    const { POST } = await loadRunStreamRoute();
+    const response = await POST(
+      new NextRequest(
+        "http://localhost:3000/api/langgraph/threads/thread-id/runs/stream",
+        {
+          method: "POST",
+          body: JSON.stringify({ ok: true }),
+        },
+      ),
+      makeRunContext("thread-id"),
     );
 
     expect(response.headers.get("cache-control")).toBeNull();
   });
 
-  test("forwards OPTIONS requests", async () => {
+  test("forwards OPTIONS requests without a body", async () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const { OPTIONS } = await loadRoute();
+    const { OPTIONS } = await loadRunStreamRoute();
     const request = new NextRequest(
-      "http://localhost:3000/api/langgraph/threads",
+      "http://localhost:3000/api/langgraph/threads/thread-id/runs/stream",
       {
         method: "OPTIONS",
         headers: {
@@ -192,7 +205,7 @@ describe("/api/langgraph route proxy", () => {
         },
       },
     );
-    const response = await OPTIONS(request, makeContext(["threads"]));
+    const response = await OPTIONS(request, makeRunContext("thread-id"));
 
     const fetchCalls = fetchMock.mock.calls as unknown as [
       string,
@@ -208,7 +221,7 @@ describe("/api/langgraph route proxy", () => {
     expect(headers.get("origin")).toBe("http://localhost:3000");
     expect(headers.get("access-control-request-method")).toBe("POST");
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://gateway.example/base/api/threads",
+      "http://gateway.example/base/api/threads/thread-id/runs/stream",
       expect.objectContaining({ method: "OPTIONS" }),
     );
   });
@@ -217,12 +230,15 @@ describe("/api/langgraph route proxy", () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const { HEAD } = await loadRoute();
+    const { HEAD } = await loadRunStreamRoute();
     const response = await HEAD(
-      new NextRequest("http://localhost:3000/api/langgraph/threads", {
-        method: "HEAD",
-      }),
-      makeContext(["threads"]),
+      new NextRequest(
+        "http://localhost:3000/api/langgraph/threads/thread-id/runs/stream",
+        {
+          method: "HEAD",
+        },
+      ),
+      makeRunContext("thread-id"),
     );
 
     const fetchCalls = fetchMock.mock.calls as unknown as [
@@ -235,7 +251,7 @@ describe("/api/langgraph route proxy", () => {
     expect(init?.body).toBeUndefined();
     expect(init?.duplex).toBeUndefined();
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://gateway.example/base/api/threads",
+      "http://gateway.example/base/api/threads/thread-id/runs/stream",
       expect.objectContaining({ method: "HEAD" }),
     );
   });
@@ -245,27 +261,39 @@ describe("/api/langgraph route proxy", () => {
     const fetchMock = vi.fn(async () => new Response("ok"));
     vi.stubGlobal("fetch", fetchMock);
 
-    const { GET } = await loadRoute();
-    await GET(
-      new NextRequest("http://localhost:3000/api/langgraph/threads"),
-      makeContext(["threads"]),
+    const { POST } = await loadRunStreamRoute();
+    await POST(
+      new NextRequest(
+        "http://localhost:3000/api/langgraph/threads/thread-id/runs/stream",
+        {
+          method: "POST",
+          body: JSON.stringify({ ok: true }),
+        },
+      ),
+      makeRunContext("thread-id"),
     );
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8001/api/threads",
-      expect.objectContaining({ method: "GET" }),
+      "http://127.0.0.1:8001/api/threads/thread-id/runs/stream",
+      expect.objectContaining({ method: "POST" }),
     );
   });
 
-  test("does not expose the same-origin proxy when external LangGraph URL is configured", async () => {
+  test("does not expose same-origin stream routes when external LangGraph URL is configured", async () => {
     process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL = "https://langgraph.example";
     const fetchMock = vi.fn(async () => new Response("ok"));
     vi.stubGlobal("fetch", fetchMock);
 
-    const { GET } = await loadRoute();
-    const response = await GET(
-      new NextRequest("http://localhost:3000/api/langgraph/threads"),
-      makeContext(["threads"]),
+    const { POST } = await loadRunStreamRoute();
+    const response = await POST(
+      new NextRequest(
+        "http://localhost:3000/api/langgraph/threads/thread-id/runs/stream",
+        {
+          method: "POST",
+          body: JSON.stringify({ ok: true }),
+        },
+      ),
+      makeRunContext("thread-id"),
     );
 
     expect(response.status).toBe(404);

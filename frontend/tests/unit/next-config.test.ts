@@ -27,6 +27,7 @@ describe("next config rewrites", () => {
   const originalBackendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_BASE_URL;
   const originalGatewayBaseUrl =
     process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL;
+  const originalLangGraphBaseUrl = process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL;
 
   afterEach(() => {
     if (originalBackendBaseUrl === undefined) {
@@ -39,10 +40,16 @@ describe("next config rewrites", () => {
     } else {
       process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL = originalGatewayBaseUrl;
     }
+    if (originalLangGraphBaseUrl === undefined) {
+      delete process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL;
+    } else {
+      process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL = originalLangGraphBaseUrl;
+    }
   });
 
   test("keeps gateway catch-all as fallback so app routes can win first", async () => {
     delete process.env.NEXT_PUBLIC_BACKEND_BASE_URL;
+    delete process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL;
     process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL =
       "http://gateway.example/base/";
 
@@ -57,6 +64,18 @@ describe("next config rewrites", () => {
         expect.objectContaining({ source: "/api/langgraph/:path*" }),
       ]),
     );
+    expect(rewrites.fallback).toEqual(
+      expect.arrayContaining([
+        {
+          source: "/api/langgraph",
+          destination: "http://gateway.example/base/api",
+        },
+        {
+          source: "/api/langgraph/:path*",
+          destination: "http://gateway.example/base/api/:path*",
+        },
+      ]),
+    );
     expect(rewrites.fallback).toContainEqual({
       source: "/api/:path*",
       destination: "http://gateway.example/base/api/:path*",
@@ -65,6 +84,7 @@ describe("next config rewrites", () => {
 
   test("preserves fallback coverage for gateway routes not explicitly listed", async () => {
     delete process.env.NEXT_PUBLIC_BACKEND_BASE_URL;
+    delete process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL;
 
     const rewrites = await loadRewrites();
 
@@ -73,6 +93,18 @@ describe("next config rewrites", () => {
         source: "/api/:path*",
         destination: "http://127.0.0.1:8001/api/:path*",
       }),
+    );
+  });
+
+  test("does not add LangGraph fallback rewrites when external LangGraph URL is configured", async () => {
+    process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL = "https://langgraph.example";
+
+    const rewrites = await loadRewrites();
+
+    expect(rewrites.fallback).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "/api/langgraph/:path*" }),
+      ]),
     );
   });
 });
