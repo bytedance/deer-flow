@@ -370,6 +370,18 @@ export interface Translations {
       darkDescription: string;
       languageTitle: string;
       languageDescription: string;
+      preferencesTitle: string;
+      preferencesDescription: string;
+      collapsedThinkingStepTitle: string;
+      collapsedThinkingStepDescription: string;
+      collapsedThinkingStepHelp: string;
+      collapsedThinkingStepPreview: {
+        off: string;
+        on: string;
+        offState: string;
+        onState: string;
+        sampleStep: string;
+      };
     };
     tools: {
       title: string;

@@ -431,6 +431,20 @@ export const zhCN: Translations = {
       darkDescription: "更暗的配色，减少眩光方便专注。",
       languageTitle: "语言",
       languageDescription: "在不同语言之间切换。",
+      preferencesTitle: "个性化",
+      preferencesDescription: "调整可选的对话展示行为。",
+      collapsedThinkingStepTitle: "折叠时预览思考步骤",
+      collapsedThinkingStepDescription:
+        "思考过程折叠后，仍显示一行当前思考步骤。",
+      collapsedThinkingStepHelp:
+        "下方对比了关闭和开启该设置时，折叠思考块的展示差异。",
+      collapsedThinkingStepPreview: {
+        off: "关闭",
+        on: "开启",
+        offState: "思考",
+        onState: "思考",
+        sampleStep: "正在梳理资料并判断下一步",
+      },
     },
     tools: {
       title: "工具",
