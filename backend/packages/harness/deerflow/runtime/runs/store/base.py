@@ -97,7 +97,6 @@ class RunStore(abc.ABC):
         """
         pass
 
-    @abc.abstractmethod
     async def aggregate_tokens_by_thread_daily(self, thread_id: str, *, limit: int = 365) -> list[dict[str, Any]]:
         """Daily token usage breakdown for completed runs in a thread.
 
@@ -108,4 +107,6 @@ class RunStore(abc.ABC):
         total_runs (int), lead_agent_tokens (int), subagent_tokens (int),
         middleware_tokens (int).
         """
-        pass
+        # Default implementation returns empty list — stores that support
+        # daily aggregation should override this.
+        return []

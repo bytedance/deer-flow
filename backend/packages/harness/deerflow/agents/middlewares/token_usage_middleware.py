@@ -332,8 +332,8 @@ class TokenUsageMiddleware(AgentMiddleware):
 
             # Extract cache token metrics (OpenAI: cache_read_*/cache_creation_*)
             cache_details = input_token_details or {}
-            cache_read = cache_details.get("cache_read_input_tokens", 0) or 0
-            cache_creation = cache_details.get("cache_creation_input_tokens", 0) or 0
+            cache_read = cache_details.get("cache_read", 0) or 0
+            cache_creation = cache_details.get("cache_creation", 0) or 0
             if cache_read or cache_creation:
                 logger.info(
                     "LLM cache tokens: read=%s creation=%s",

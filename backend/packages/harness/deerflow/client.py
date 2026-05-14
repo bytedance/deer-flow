@@ -594,6 +594,7 @@ class DeerFlowClient:
         # in both the final ``messages`` chunk and the values snapshot —
         # count it only on whichever arrives first.
         counted_usage_ids: set[str] = set()
+        counted_cache_usage_ids: set[str] = set()
         sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         cumulative_cache: dict[str, int] = {"cache_read_tokens": 0, "cache_creation_tokens": 0}
@@ -632,13 +633,13 @@ class DeerFlowClient:
             """
             if not usage:
                 return None
-            if msg_id and msg_id in counted_usage_ids:
+            if msg_id and msg_id in counted_cache_usage_ids:
                 return None
             input_details = usage.get("input_token_details") or {}
-            cache_read = input_details.get("cache_read_input_tokens", 0) or 0
-            cache_creation = input_details.get("cache_creation_input_tokens", 0) or 0
+            cache_read = input_details.get("cache_read", 0) or 0
+            cache_creation = input_details.get("cache_creation", 0) or 0
             if msg_id:
-                counted_usage_ids.add(msg_id)
+                counted_cache_usage_ids.add(msg_id)
             if cache_read or cache_creation:
                 cumulative_cache["cache_read_tokens"] += cache_read
                 cumulative_cache["cache_creation_tokens"] += cache_creation
@@ -646,7 +647,7 @@ class DeerFlowClient:
                     "cache_read_tokens": cache_read,
                     "cache_creation_tokens": cache_creation,
                 }
-            counted_usage_ids.discard(msg_id)  # undo the add above if nothing to report
+            counted_cache_usage_ids.discard(msg_id)  # undo the add above if nothing to report
             return None
 
         def _unsent_additional_kwargs(msg_id: str | None, additional_kwargs: dict[str, Any] | None) -> dict[str, Any] | None:

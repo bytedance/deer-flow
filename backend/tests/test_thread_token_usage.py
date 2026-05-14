@@ -105,6 +105,7 @@ def test_thread_token_usage_handles_missing_cache_fields():
 
     assert response.status_code == 200
     body = response.json()
-    # When cache fields are missing, the route should handle gracefully
-    # (either 0 or absent, depending on implementation)
-    assert "cache_read_tokens" in body or response.status_code == 200
+    # When cache fields are missing from aggregation, the route should
+    # default them to 0 rather than crashing (backwards compatibility).
+    assert isinstance(body.get("cache_read_tokens", 0), (int, float))
+    assert isinstance(body.get("cache_creation_tokens", 0), (int, float))

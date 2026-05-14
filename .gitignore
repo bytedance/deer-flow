@@ -63,3 +63,6 @@ config.yaml.bak
 
 # Hermes Agent plans
 .agents/plans/
+
+# OpenCode agent artifacts (plans, conversations, config, cache)
+.opencode/

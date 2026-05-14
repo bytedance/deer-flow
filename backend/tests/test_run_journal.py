@@ -777,8 +777,8 @@ class TestCacheTokenTracking:
     """Tests for cache token accumulation in RunJournal.
 
     Note: RunJournal expects OpenAI-style field names:
-    - input_token_details.cache_read_input_tokens
-    - input_token_details.cache_creation_input_tokens
+    - input_token_details.cache_read
+    - input_token_details.cache_creation
     """
 
     def test_cache_read_tokens_accumulate(self, journal_setup):
@@ -789,8 +789,8 @@ class TestCacheTokenTracking:
             "total_tokens": 590,
             "input_token_details": {
                 "audio": 10,
-                "cache_creation_input_tokens": 200,
-                "cache_read_input_tokens": 100,
+                "cache_creation": 200,
+                "cache_read": 100,
             },
             "output_token_details": {
                 "audio": 10,
@@ -809,13 +809,13 @@ class TestCacheTokenTracking:
             "output_tokens": 100,
             "total_tokens": 600,
             "input_token_details": {
-                "cache_creation_input_tokens": 300,
-                "cache_read_input_tokens": 50,
+                "cache_creation": 300,
+                "cache_read": 50,
             },
         }
         j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
         j.on_llm_end(
-            _make_llm_response("B", usage={"input_tokens": 200, "output_tokens": 50, "total_tokens": 250, "input_token_details": {"cache_creation_input_tokens": 100}}),
+            _make_llm_response("B", usage={"input_tokens": 200, "output_tokens": 50, "total_tokens": 250, "input_token_details": {"cache_creation": 100}}),
             run_id=uuid4(),
             parent_run_id=None,
             tags=["lead_agent"],
@@ -831,7 +831,7 @@ class TestCacheTokenTracking:
             "input_tokens": 350,
             "output_tokens": 240,
             "total_tokens": 590,
-            "input_token_details": {"cache_read_input_tokens": 100, "cache_creation_input_tokens": 200},
+            "input_token_details": {"cache_read": 100, "cache_creation": 200},
         }
         j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
         j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
@@ -845,7 +845,7 @@ class TestCacheTokenTracking:
             "input_tokens": 350,
             "output_tokens": 240,
             "total_tokens": 590,
-            "input_token_details": {"cache_read_input_tokens": 100, "cache_creation_input_tokens": 200},
+            "input_token_details": {"cache_read": 100, "cache_creation": 200},
         }
         j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
         data = j.get_completion_data()
@@ -874,7 +874,7 @@ class TestCacheTokenTracking:
             "input_tokens": 350,
             "output_tokens": 240,
             "total_tokens": 590,
-            "input_token_details": {"cache_read_input_tokens": 100, "cache_creation_input_tokens": 200},
+            "input_token_details": {"cache_read": 100, "cache_creation": 200},
         }
         j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
         assert j._cache_read_tokens == 0
@@ -887,7 +887,7 @@ class TestCacheTokenTracking:
             "input_tokens": 350,
             "output_tokens": 240,
             "total_tokens": 590,
-            "input_token_details": {"cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            "input_token_details": {"cache_read": 0, "cache_creation": 0},
         }
         j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
         assert j._cache_read_tokens == 0

@@ -12,7 +12,7 @@ function TokenUsageSummary({
   inputTokens,
   outputTokens,
   totalTokens,
- cacheReadTokens,
+  cacheReadTokens,
   cacheCreationTokens,
   unavailable = false,
 }: {
@@ -20,7 +20,7 @@ function TokenUsageSummary({
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
- cacheReadTokens?: number;
+  cacheReadTokens?: number;
   cacheCreationTokens?: number;
   unavailable?: boolean;
 }) {
@@ -37,7 +37,7 @@ function TokenUsageSummary({
         <CoinsIcon className="size-3" />
         {t.tokenUsage.label}
       </span>
-     {!unavailable ? (
+      {!unavailable ? (
         <>
           <span>
             {t.tokenUsage.input}: {formatTokenCount(inputTokens ?? 0)}
@@ -94,7 +94,7 @@ export function MessageTokenUsageList({
   return (
     <TokenUsageSummary
       className={className}
-     inputTokens={usage.inputTokens}
+      inputTokens={usage.inputTokens}
       outputTokens={usage.outputTokens}
       totalTokens={usage.totalTokens}
       cacheReadTokens={usage.cacheReadTokens}

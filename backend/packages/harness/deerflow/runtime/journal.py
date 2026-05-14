@@ -293,8 +293,8 @@ class RunJournal(BaseCallbackHandler):
 
                     # Cache tokens (OpenAI: input_token_details.cache_read_*/cache_creation_*, Anthropic: cache_* metrics)
                     cache_details = usage_dict.get("input_token_details", {}) or {}
-                    cache_read = cache_details.get("cache_read_input_tokens", 0) or 0
-                    cache_creation = cache_details.get("cache_creation_input_tokens", 0) or 0
+                    cache_read = cache_details.get("cache_read", 0) or 0
+                    cache_creation = cache_details.get("cache_creation", 0) or 0
                     if cache_read > 0 or cache_creation > 0:
                         self._cache_read_tokens += cache_read
                         self._cache_creation_tokens += cache_creation

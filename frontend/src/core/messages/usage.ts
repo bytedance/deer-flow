@@ -16,24 +16,35 @@ export function getUsageMetadata(message: Message): TokenUsage | null {
   if (message.type !== "ai") {
     return null;
   }
-  const usage = (message as Record<string, unknown>).usage_metadata as
+  const usageMeta = (message as Record<string, unknown>).usage_metadata as
     | {
         input_tokens?: number;
         output_tokens?: number;
         total_tokens?: number;
         cache_read_tokens?: number;
         cache_creation_tokens?: number;
+        /** OpenAI stores cache counts nested: input_token_details.cache_read */
+        input_token_details?: {
+          cache_read?: number;
+          cache_creation?: number;
+        };
       }
     | undefined;
-  if (!usage) {
+  if (!usageMeta) {
     return null;
   }
   return {
-    inputTokens: usage.input_tokens ?? 0,
-    outputTokens: usage.output_tokens ?? 0,
-    totalTokens: usage.total_tokens ?? 0,
-    cacheReadTokens: usage.cache_read_tokens ?? 0,
-    cacheCreationTokens: usage.cache_creation_tokens ?? 0,
+    inputTokens: usageMeta.input_tokens ?? 0,
+    outputTokens: usageMeta.output_tokens ?? 0,
+    totalTokens: usageMeta.total_tokens ?? 0,
+    // Prefer flat fields (already normalized by backend), fall back to
+    // nested input_token_details shape used by LangChain OpenAI provider.
+    cacheReadTokens:
+      (usageMeta.cache_read_tokens ?? 0) ||
+      (usageMeta.input_token_details?.cache_read ?? 0),
+    cacheCreationTokens:
+      (usageMeta.cache_creation_tokens ?? 0) ||
+      (usageMeta.input_token_details?.cache_creation ?? 0),
   };
 }
 
