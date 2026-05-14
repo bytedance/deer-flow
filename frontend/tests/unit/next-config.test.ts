@@ -119,4 +119,19 @@ describe("next config rewrites", () => {
       ]),
     );
   });
+
+  test("treats blank external backend URL as unconfigured", async () => {
+    process.env.NEXT_PUBLIC_BACKEND_BASE_URL = "  ";
+
+    const rewrites = await loadRewrites();
+
+    expect(rewrites.beforeFiles).toContainEqual({
+      source: "/api/agents",
+      destination: "http://127.0.0.1:8001/api/agents",
+    });
+    expect(rewrites.fallback).toContainEqual({
+      source: "/api/:path*",
+      destination: "http://127.0.0.1:8001/api/:path*",
+    });
+  });
 });
