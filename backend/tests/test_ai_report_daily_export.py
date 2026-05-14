@@ -240,3 +240,218 @@ def test_export_result_pdf_hint(export_report, kpi_payload, tmp_path, monkeypatc
     result = export_report.build_export_result(kpi_payload, "pdf")
     assert result["present_files_hint"] == ["/mnt/user-data/outputs/daily_report.pdf"]
     assert result["filename"] == "daily_report.pdf"
+
+
+# --- Chart image embedding tests ---
+
+
+def test_render_markdown_with_chart_images(export_report, kpi_payload, tmp_path):
+    img = tmp_path / "chart_001.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+    markdown = export_report.render_markdown(kpi_payload, chart_images=[str(img)])
+    assert "## 运行趋势" in markdown
+    assert "data:image/png;base64," in markdown
+    assert "趋势图1" in markdown
+
+
+def test_render_markdown_with_multiple_chart_images(export_report, kpi_payload, tmp_path):
+    img1 = tmp_path / "chart_001.png"
+    img2 = tmp_path / "chart_002.png"
+    img1.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+    img2.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+    markdown = export_report.render_markdown(kpi_payload, chart_images=[str(img1), str(img2)])
+    assert "趋势图1" in markdown
+    assert "趋势图2" in markdown
+    assert markdown.count("data:image/png;base64,") == 2
+
+
+def test_render_markdown_no_chart_images(export_report, kpi_payload):
+    markdown = export_report.render_markdown(kpi_payload)
+    assert "## 运行趋势" not in markdown
+
+
+def test_render_markdown_empty_chart_images(export_report, kpi_payload):
+    markdown = export_report.render_markdown(kpi_payload, chart_images=[])
+    assert "## 运行趋势" not in markdown
+
+
+def test_render_html_with_chart_images(export_report, kpi_payload, tmp_path):
+    img = tmp_path / "chart_001.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+    html = export_report.render_html(kpi_payload, chart_images=[str(img)])
+    assert "data:image/png;base64," in html
+    assert "<!DOCTYPE html>" in html
+
+
+def test_write_report_with_chart_images(export_report, kpi_payload, tmp_path):
+    img = tmp_path / "chart_001.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+    out_path = export_report.write_report(kpi_payload, "md", chart_images=[str(img)])
+    content = out_path.read_text(encoding="utf-8")
+    assert "## 运行趋势" in content
+    assert "data:image/png;base64," in content
+
+
+def test_build_export_result_with_chart_images(export_report, kpi_payload, tmp_path):
+    img = tmp_path / "chart_001.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+    result = export_report.build_export_result(kpi_payload, "md", chart_images=[str(img)])
+    assert result["format"] == "md"
+    content = Path(result["path"]).read_text(encoding="utf-8")
+    assert "data:image/png;base64," in content
+
+
+# --- SVG trend chart fallback tests ---
+
+
+@pytest.fixture()
+def trend_chart_option():
+    """A realistic ECharts line-chart option with two series."""
+    return {
+        "title": {"text": "24h 振动趋势"},
+        "xAxis": {"data": [f"{h:02d}:00" for h in range(24)]},
+        "yAxis": {"name": "mm/s"},
+        "series": [
+            {
+                "name": "X轴振动",
+                "data": [0.12, 0.15, 0.14, 0.13, 0.16, 0.18, 0.22, 0.25,
+                         0.30, 0.28, 0.26, 0.24, 0.23, 0.21, 0.20, 0.19,
+                         0.18, 0.17, 0.16, 0.15, 0.14, 0.13, 0.12, 0.11],
+            },
+            {
+                "name": "Y轴振动",
+                "data": [0.08, 0.09, 0.10, 0.11, 0.12, 0.14, 0.16, 0.18,
+                         0.20, 0.19, 0.17, 0.15, 0.14, 0.13, 0.12, 0.11,
+                         0.10, 0.09, 0.08, 0.08, 0.07, 0.07, 0.06, 0.06],
+            },
+        ],
+    }
+
+
+def test_svg_basic_structure(export_report, trend_chart_option):
+    svg = export_report.trend_chart_to_svg(trend_chart_option)
+    assert svg.startswith("<svg")
+    assert svg.endswith("</svg>")
+    assert 'xmlns="http://www.w3.org/2000/svg"' in svg
+
+
+def test_svg_contains_title(export_report, trend_chart_option):
+    svg = export_report.trend_chart_to_svg(trend_chart_option)
+    assert "24h 振动趋势" in svg
+
+
+def test_svg_contains_y_axis_name(export_report, trend_chart_option):
+    svg = export_report.trend_chart_to_svg(trend_chart_option)
+    assert "mm/s" in svg
+
+
+def test_svg_contains_polylines(export_report, trend_chart_option):
+    svg = export_report.trend_chart_to_svg(trend_chart_option)
+    assert "<polyline" in svg
+    assert svg.count("<polyline") >= 2
+
+
+def test_svg_contains_legend(export_report, trend_chart_option):
+    svg = export_report.trend_chart_to_svg(trend_chart_option)
+    assert "X轴振动" in svg
+    assert "Y轴振动" in svg
+
+
+def test_svg_contains_x_labels(export_report, trend_chart_option):
+    svg = export_report.trend_chart_to_svg(trend_chart_option)
+    assert "00:00" in svg
+    assert "23:00" in svg
+
+
+def test_svg_empty_series_returns_empty(export_report):
+    chart = {"series": []}
+    assert export_report.trend_chart_to_svg(chart) == ""
+
+
+def test_svg_no_series_key_returns_empty(export_report):
+    chart = {"title": {"text": "Empty"}}
+    assert export_report.trend_chart_to_svg(chart) == ""
+
+
+def test_svg_all_none_data_returns_empty(export_report):
+    chart = {"series": [{"name": "test", "data": [None, None, None]}]}
+    assert export_report.trend_chart_to_svg(chart) == ""
+
+
+def test_svg_handles_none_gaps(export_report):
+    chart = {
+        "series": [{
+            "name": "gapped",
+            "data": [1.0, 2.0, None, None, 3.0, 4.0],
+        }],
+    }
+    svg = export_report.trend_chart_to_svg(chart)
+    assert "<polyline" in svg
+    assert svg.count("<polyline") == 2
+
+
+def test_svg_single_point_renders_circle(export_report):
+    chart = {
+        "series": [{
+            "name": "single",
+            "data": [None, None, 5.0, None, None],
+        }],
+    }
+    svg = export_report.trend_chart_to_svg(chart)
+    assert "<circle" in svg
+
+
+def test_svg_dashed_line_style(export_report):
+    chart = {
+        "series": [{
+            "name": "threshold",
+            "lineStyle": {"type": "dashed"},
+            "data": [1.0, 1.0, 1.0, 1.0],
+        }],
+    }
+    svg = export_report.trend_chart_to_svg(chart)
+    assert 'stroke-dasharray="6,3"' in svg
+
+
+def test_svg_escapes_special_chars(export_report):
+    chart = {
+        "title": {"text": "Temperature <high> & \"alert\""},
+        "series": [{"name": "T<1>", "data": [1.0, 2.0]}],
+    }
+    svg = export_report.trend_chart_to_svg(chart)
+    assert "&lt;high&gt;" in svg
+    assert "&amp;" in svg
+    assert "&quot;alert&quot;" in svg
+    assert "T&lt;1&gt;" in svg
+
+
+def test_svg_flat_line_handled(export_report):
+    """When all values are identical, y_min != y_max after adjustment."""
+    chart = {
+        "series": [{"name": "flat", "data": [5.0, 5.0, 5.0, 5.0]}],
+    }
+    svg = export_report.trend_chart_to_svg(chart)
+    assert "<polyline" in svg
+
+
+def test_markdown_fallback_uses_svg_when_no_images(export_report, kpi_payload, trend_chart_option):
+    payload = {**kpi_payload, "trend_chart": trend_chart_option}
+    markdown = export_report.render_markdown(payload)
+    assert "## 运行趋势" in markdown
+    assert "data:image/svg+xml;base64," in markdown
+
+
+def test_markdown_prefers_chart_images_over_svg(export_report, kpi_payload, trend_chart_option, tmp_path):
+    img = tmp_path / "chart_001.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+    payload = {**kpi_payload, "trend_chart": trend_chart_option}
+    markdown = export_report.render_markdown(payload, chart_images=[str(img)])
+    assert "data:image/png;base64," in markdown
+    assert "data:image/svg+xml;base64," not in markdown
+
+
+def test_html_fallback_uses_svg_when_no_images(export_report, kpi_payload, trend_chart_option):
+    payload = {**kpi_payload, "trend_chart": trend_chart_option}
+    html = export_report.render_html(payload)
+    assert "运行趋势" in html
+    assert "<svg" in html or "data:image/svg+xml;base64," in html

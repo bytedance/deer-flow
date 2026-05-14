@@ -17,7 +17,9 @@ Export formats:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -37,6 +39,141 @@ TYPE_DISPLAY = {
 
 def _output_dir() -> Path:
     return Path(os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
+
+
+_SERIES_COLORS = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de", "#3ba272"]
+
+
+def _svg_segments(data: list) -> list[list[tuple[int, float]]]:
+    """Split data into contiguous non-None segments for polyline rendering."""
+    segments: list[list[tuple[int, float]]] = []
+    current: list[tuple[int, float]] = []
+    for i, v in enumerate(data):
+        if v is None or not isinstance(v, (int, float)):
+            if current:
+                segments.append(current)
+                current = []
+        else:
+            current.append((i, float(v)))
+    if current:
+        segments.append(current)
+    return segments
+
+
+def trend_chart_to_svg(chart: dict) -> str:
+    """Convert an ECharts line-chart option dict into an SVG string.
+
+    Returns an empty string if chart has no renderable series data.
+    """
+    all_series = chart.get("series") or []
+    if not all_series:
+        return ""
+
+    x_labels = (chart.get("xAxis") or {}).get("data") or [f"{h:02d}:00" for h in range(24)]
+    title_text = (chart.get("title") or {}).get("text", "")
+    y_name = (chart.get("yAxis") or {}).get("name", "")
+
+    all_values: list[float] = []
+    for s in all_series:
+        for v in (s.get("data") or []):
+            if v is not None and isinstance(v, (int, float)):
+                all_values.append(float(v))
+    if not all_values:
+        return ""
+
+    SVG_W, SVG_H = 760, 300
+    ML, MR, MT, MB = 60, 20, 36, 50
+    PW = SVG_W - ML - MR
+    PH = SVG_H - MT - MB
+
+    raw_min, raw_max = min(all_values), max(all_values)
+    y_min = math.floor(raw_min * 10) / 10
+    y_max = math.ceil(raw_max * 10) / 10
+    if y_min == y_max:
+        y_min -= 0.1
+        y_max += 0.1
+    y_range = y_max - y_min
+
+    n_points = max(len(x_labels), 1)
+
+    def px(i: int) -> float:
+        return ML + (i / max(n_points - 1, 1)) * PW
+
+    def py(v: float) -> float:
+        return MT + PH * (1 - (v - y_min) / y_range)
+
+    ticks = [y_min + i * y_range / 4 for i in range(5)]
+
+    parts: list[str] = []
+    parts.append(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {SVG_W} {SVG_H}" '
+                 f'width="{SVG_W}" height="{SVG_H}" style="background:#fff">')
+    parts.append(f'<rect width="{SVG_W}" height="{SVG_H}" fill="#fff"/>')
+
+    if title_text:
+        parts.append(f'<text x="{SVG_W / 2}" y="22" text-anchor="middle" '
+                     f'font-size="13" font-family="SimSun,Noto Sans SC,sans-serif" fill="#333">'
+                     f'{_svg_escape(title_text)}</text>')
+
+    if y_name:
+        rx = -(MT + PH // 2)
+        parts.append(f'<text transform="rotate(-90)" x="{rx}" y="14" text-anchor="middle" '
+                     f'font-size="10" font-family="SimSun,sans-serif" fill="#666">'
+                     f'{_svg_escape(y_name)}</text>')
+
+    for t in ticks:
+        ty = py(t)
+        parts.append(f'<line x1="{ML}" y1="{ty:.1f}" x2="{ML + PW}" y2="{ty:.1f}" '
+                     f'stroke="#eee" stroke-width="1"/>')
+        parts.append(f'<text x="{ML - 6}" y="{ty + 4:.1f}" text-anchor="end" '
+                     f'font-size="10" fill="#666">{t:.2f}</text>')
+
+    show_indices = list(range(0, n_points, max(n_points // 6, 1)))
+    if n_points - 1 not in show_indices:
+        show_indices.append(n_points - 1)
+    for i in show_indices:
+        if i < len(x_labels):
+            parts.append(f'<text x="{px(i):.1f}" y="{MT + PH + 16}" text-anchor="middle" '
+                         f'font-size="10" fill="#666">{_svg_escape(str(x_labels[i]))}</text>')
+
+    for si, s in enumerate(all_series):
+        color = _SERIES_COLORS[si % len(_SERIES_COLORS)]
+        data = s.get("data") or []
+        is_dashed = (s.get("lineStyle") or {}).get("type") == "dashed"
+        dash_attr = ' stroke-dasharray="6,3"' if is_dashed else ""
+        for seg in _svg_segments(data):
+            if len(seg) < 2:
+                cx, cy = px(seg[0][0]), py(seg[0][1])
+                parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="2" fill="{color}"/>')
+                continue
+            points_str = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in seg)
+            parts.append(f'<polyline points="{points_str}" fill="none" '
+                         f'stroke="{color}" stroke-width="2"{dash_attr}/>')
+
+    legend_y = SVG_H - 12
+    legend_items: list[tuple[str, str]] = []
+    for si, s in enumerate(all_series):
+        name = str(s.get("name", f"Series {si + 1}"))
+        if len(name) > 20:
+            name = name[:18] + "…"
+        color = _SERIES_COLORS[si % len(_SERIES_COLORS)]
+        legend_items.append((name, color))
+
+    if legend_items:
+        item_w = 100
+        total_w = len(legend_items) * item_w
+        start_x = (SVG_W - total_w) / 2
+        for li, (name, color) in enumerate(legend_items):
+            lx = start_x + li * item_w
+            parts.append(f'<rect x="{lx:.1f}" y="{legend_y - 3}" width="20" height="3" fill="{color}"/>')
+            parts.append(f'<text x="{lx + 24:.1f}" y="{legend_y}" font-size="10" fill="#666">'
+                         f'{_svg_escape(name)}</text>')
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _svg_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def _format_number(value) -> str:
@@ -59,7 +196,25 @@ def _table_cell(value) -> str:
     return _format_number(value).replace("|", "\\|").replace("\n", " ")
 
 
-def render_markdown(payload: dict) -> str:
+def _read_image_as_data_uri(img_path: str) -> str | None:
+    """Read an image file and return a base64 data URI, or None if unreadable."""
+    p = Path(img_path)
+    if not p.is_file():
+        return None
+    suffix = p.suffix.lower()
+    mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}.get(
+        suffix.lstrip("."), "image/png"
+    )
+    try:
+        data = p.read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except OSError:
+        return None
+
+
+def render_markdown(payload: dict, chart_images: list[str] | None = None) -> str:
+    """Render KPI payload as a Markdown report string."""
     aggregation_mode = payload.get("aggregation_mode", "detail")
     equipment_type = payload.get("equipment_type", "all")
     equipment_count = payload.get("equipment_count")
@@ -129,6 +284,38 @@ def render_markdown(payload: dict) -> str:
             )
     lines.append("")
 
+    if chart_images:
+        embedded = False
+        for i, img_path in enumerate(chart_images):
+            data_uri = _read_image_as_data_uri(img_path)
+            if data_uri:
+                if not embedded:
+                    lines.append("## 运行趋势")
+                    lines.append("")
+                    embedded = True
+                lines.append(f'<img src="{data_uri}" alt="趋势图{i + 1}" width="760">')
+                lines.append("")
+        if not embedded:
+            trend_chart = payload.get("trend_chart")
+            if trend_chart and trend_chart.get("series"):
+                svg_str = trend_chart_to_svg(trend_chart)
+                if svg_str:
+                    b64 = base64.b64encode(svg_str.encode("utf-8")).decode("ascii")
+                    lines.append("## 运行趋势")
+                    lines.append("")
+                    lines.append(f'<img src="data:image/svg+xml;base64,{b64}" alt="运行趋势图" width="760">')
+                    lines.append("")
+    else:
+        trend_chart = payload.get("trend_chart")
+        if trend_chart and trend_chart.get("series"):
+            svg_str = trend_chart_to_svg(trend_chart)
+            if svg_str:
+                b64 = base64.b64encode(svg_str.encode("utf-8")).decode("ascii")
+                lines.append("## 运行趋势")
+                lines.append("")
+                lines.append(f'<img src="data:image/svg+xml;base64,{b64}" alt="运行趋势图" width="760">')
+                lines.append("")
+
     top_anomalies = payload.get("top_anomalies") or []
     if top_anomalies:
         lines.append("## 异常设备排行")
@@ -175,14 +362,28 @@ def render_markdown(payload: dict) -> str:
     return "\n".join(lines)
 
 
-def render_html(payload: dict) -> str:
+def render_html(payload: dict, chart_images: list[str] | None = None) -> str:
     """Render payload as a standalone HTML document with embedded CSS."""
-    md = render_markdown(payload)
+    md = render_markdown(payload, chart_images)
     try:
         import markdown as md_lib
         body = md_lib.markdown(md, extensions=["tables"])
     except ImportError:
         body = "<pre>" + md.replace("&", "&amp;").replace("<", "&lt;") + "</pre>"
+        chart_html = ""
+        if chart_images:
+            for i, img_path in enumerate(chart_images):
+                data_uri = _read_image_as_data_uri(img_path)
+                if data_uri:
+                    chart_html += f'\n<img src="{data_uri}" alt="趋势图{i + 1}" style="max-width:100%">\n'
+        if chart_html:
+            body += f"\n<h2>运行趋势</h2>\n{chart_html}"
+        else:
+            trend_chart = payload.get("trend_chart")
+            if trend_chart and trend_chart.get("series"):
+                svg_str = trend_chart_to_svg(trend_chart)
+                if svg_str:
+                    body += f"\n<h2>运行趋势</h2>\n{svg_str}\n"
 
     return (
         "<!DOCTYPE html>\n<html lang='zh'>\n<head>\n<meta charset='utf-8'>\n"
@@ -193,6 +394,7 @@ def render_html(payload: dict) -> str:
         "table { border-collapse: collapse; width: 100%; margin: 8pt 0; }\n"
         "th, td { border: 1px solid #ccc; padding: 6pt 8pt; text-align: left; }\n"
         "th { background: #f5f5f5; }\n"
+        "img { max-width: 100%; }\n"
         "</style>\n</head>\n<body>\n"
         + body
         + "\n</body>\n</html>"
@@ -211,22 +413,22 @@ def _write_pdf(html: str, out_path: Path) -> None:
     WeasyprintHTML(string=html).write_pdf(str(out_path))
 
 
-def write_report(payload: dict, fmt: str, path: Path | None = None) -> Path:
+def write_report(payload: dict, fmt: str, path: Path | None = None, chart_images: list[str] | None = None) -> Path:
     if fmt not in SUPPORTED_FORMATS:
         raise ValueError(f"Unsupported export format: {fmt}")
     out_path = path or (_output_dir() / f"daily_report.{fmt}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if fmt == "pdf":
-        html = render_html(payload)
+        html = render_html(payload, chart_images)
         _write_pdf(html, out_path)
     else:
-        content = render_markdown(payload)
+        content = render_markdown(payload, chart_images)
         out_path.write_text(content, encoding="utf-8")
     return out_path
 
 
-def build_export_result(payload: dict, fmt: str, path: Path | None = None) -> dict:
-    out_path = write_report(payload, fmt, path=path)
+def build_export_result(payload: dict, fmt: str, path: Path | None = None, chart_images: list[str] | None = None) -> dict:
+    out_path = write_report(payload, fmt, path=path, chart_images=chart_images)
     filename = out_path.name
     virtual_path = f"/mnt/user-data/outputs/{filename}"
     return {
@@ -248,6 +450,7 @@ def main() -> int:
     parser.add_argument("--input", default=None, help="Input KPI JSON path")
     parser.add_argument("--format", default="md", choices=sorted(SUPPORTED_FORMATS))
     parser.add_argument("--output", default=None, help="Output file path")
+    parser.add_argument("--chart-images", default="", help="JSON array of chart image paths")
     args = parser.parse_args()
 
     try:
@@ -259,8 +462,17 @@ def main() -> int:
         print(json.dumps({"error": f"invalid input JSON: {exc}"}, ensure_ascii=False))
         return 0
 
+    chart_images: list[str] = []
+    if args.chart_images:
+        try:
+            parsed = json.loads(args.chart_images)
+            if isinstance(parsed, list):
+                chart_images = [str(p) for p in parsed]
+        except json.JSONDecodeError:
+            pass
+
     try:
-        result = build_export_result(payload, args.format, path=Path(args.output) if args.output else None)
+        result = build_export_result(payload, args.format, path=Path(args.output) if args.output else None, chart_images=chart_images or None)
     except ImportError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 0

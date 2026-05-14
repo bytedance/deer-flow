@@ -11,6 +11,7 @@ import { BlockErrorBoundary } from "./BlockErrorBoundary";
 
 interface GenUIRendererProps {
   block: UIBlock;
+  threadId?: string;
   disableExpiration?: boolean;
   onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
 }
@@ -34,7 +35,7 @@ function UnsupportedBlock({ component }: { component: string }) {
   );
 }
 
-export function GenUIRenderer({ block, disableExpiration, onInteraction }: GenUIRendererProps) {
+export function GenUIRenderer({ block, threadId, disableExpiration, onInteraction }: GenUIRendererProps) {
   const interactionState = useBlockStore(
     (state) => block.callback_id ? state.interactions.get(block.callback_id) : undefined,
   );
@@ -110,7 +111,7 @@ export function GenUIRenderer({ block, disableExpiration, onInteraction }: GenUI
   return (
     <BlockErrorBoundary componentName={block.component}>
       <Suspense fallback={<BlockFallback />}>
-        <Component block={blockWithSanitizedProps} />
+        <Component block={blockWithSanitizedProps} threadId={threadId} />
       </Suspense>
     </BlockErrorBoundary>
   );

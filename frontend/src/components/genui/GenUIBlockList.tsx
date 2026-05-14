@@ -12,7 +12,7 @@ interface GenUIBlockListProps {
   onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
 }
 
-export function GenUIBlockList({ threadId: _threadId, blockIds, excludeBlockIds, disableExpiration, onInteraction }: GenUIBlockListProps) {
+export function GenUIBlockList({ threadId, blockIds, excludeBlockIds, disableExpiration, onInteraction }: GenUIBlockListProps) {
   const blocks = useBlockStore((state) => state.blocks);
 
   const filteredBlocks = Array.from(blocks.values()).filter((block) => {
@@ -32,6 +32,7 @@ export function GenUIBlockList({ threadId: _threadId, blockIds, excludeBlockIds,
         <GenUIRenderer
           key={block.block_id}
           block={block}
+          threadId={threadId}
           disableExpiration={disableExpiration}
           onInteraction={onInteraction}
         />

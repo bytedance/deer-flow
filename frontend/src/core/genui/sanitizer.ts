@@ -57,6 +57,32 @@ function sanitizeValue(value: unknown, depth = 0): unknown {
   return value;
 }
 
+function isValidOption(opt: unknown): boolean {
+  if (typeof opt !== "object" || opt === null) return false;
+  const o = opt as Record<string, unknown>;
+  return typeof o.label === "string" && o.label !== "" &&
+    typeof o.value === "string" && o.value !== "";
+}
+
+function isValidField(field: unknown): boolean {
+  if (typeof field !== "object" || field === null) return false;
+  const f = field as Record<string, unknown>;
+  return typeof f.name === "string" && typeof f.type === "string";
+}
+
+function sanitizeFormFields(fields: unknown): unknown {
+  if (!Array.isArray(fields)) return fields;
+  return fields
+    .filter(isValidField)
+    .map((field) => {
+      const f = field as Record<string, unknown>;
+      if (Array.isArray(f.options)) {
+        return { ...f, options: f.options.filter(isValidOption) };
+      }
+      return field;
+    });
+}
+
 export function sanitizeProps(
   component: string,
   props: Record<string, unknown>,
@@ -72,5 +98,10 @@ export function sanitizeProps(
       sanitized[key] = sanitizeValue(value);
     }
   }
+
+  if (component === "form" && Array.isArray(sanitized.fields)) {
+    sanitized.fields = sanitizeFormFields(sanitized.fields);
+  }
+
   return sanitized;
 }

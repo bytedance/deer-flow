@@ -1,7 +1,10 @@
 "use client";
 
+import { useCallback, useRef } from "react";
 import ReactEChartsCore from "echarts-for-react/lib/core";
+import type { ECharts } from "echarts";
 
+import { addChartCapture } from "@/core/genui/chart-screenshots";
 import { echarts } from "@/lib/echarts-init";
 
 interface EChartBlockProps {
@@ -12,7 +15,10 @@ interface EChartBlockProps {
       theme?: string;
       loading?: boolean;
     };
+    block_id?: string;
+    metadata?: Record<string, unknown>;
   };
+  threadId?: string;
 }
 
 function extractTitle(option: Record<string, unknown>): string | undefined {
@@ -26,11 +32,34 @@ function extractTitle(option: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
-export default function EChartBlock({ block }: EChartBlockProps) {
+export default function EChartBlock({ block, threadId }: EChartBlockProps) {
   const { props } = block;
   const { option, height = 400, theme = "default", loading = false } = props;
+  const capturedRef = useRef(false);
 
   const chartTitle = extractTitle(option);
+
+  const handleChartReady = useCallback(
+    (instance: ECharts) => {
+      if (capturedRef.current || !threadId) return;
+      capturedRef.current = true;
+
+      setTimeout(() => {
+        try {
+          const dataUrl = instance.getDataURL({
+            type: "png",
+            pixelRatio: 2,
+            backgroundColor: "#fff",
+          });
+          const filename = `chart_${block.block_id ?? Date.now()}.png`;
+          addChartCapture(threadId, dataUrl, filename);
+        } catch {
+          // Capture is best-effort; don't break the UI
+        }
+      }, 800);
+    },
+    [threadId, block.block_id],
+  );
 
   return (
     <div className="rounded-lg border bg-card p-4" role="img" aria-label={chartTitle ?? "ECharts visualization"}>
@@ -42,6 +71,7 @@ export default function EChartBlock({ block }: EChartBlockProps) {
         showLoading={loading}
         notMerge={true}
         lazyUpdate={true}
+        onChartReady={handleChartReady}
       />
     </div>
   );

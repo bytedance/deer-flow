@@ -1,5 +1,6 @@
 import { fetch as fetchWithCsrf } from "@/core/api/fetcher";
 
+import { uploadPendingScreenshots } from "./chart-screenshots";
 import { useBlockStore } from "./store";
 
 const MAX_RETRIES = 2;
@@ -39,6 +40,11 @@ export async function submitInteraction(
   const baseUrl = getBackendBaseUrl();
   const url = `${baseUrl}/api/threads/${threadId}/ui-interaction`;
 
+  const chartImages = await uploadPendingScreenshots(threadId);
+  const enrichedPayload = chartImages.length > 0
+    ? { ...payload, chart_images: chartImages }
+    : payload;
+
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -46,7 +52,7 @@ export async function submitInteraction(
       const response = await fetchWithCsrf(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ callback_id: callbackId, payload }),
+        body: JSON.stringify({ callback_id: callbackId, payload: enrichedPayload }),
       });
 
       if (response.status === 410) {

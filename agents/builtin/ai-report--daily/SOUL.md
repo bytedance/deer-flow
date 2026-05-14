@@ -275,7 +275,22 @@ python /mnt/skills/custom/data-analyst/scripts/daily_kpi.py \
 当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-export` 时：
 
 - 从 `payload.format` 读取导出格式；支持 `md` 和 `pdf`。如果不是这两者之一，渲染 `markdown` 提示"当前支持 Markdown 和 PDF 导出"，并停止。
+- 从 `payload.chart_images` 读取图表截图路径列表（`string[]`，由前端自动注入，可能不存在或为空）。
 - 调用导出脚本；使用校验后的固定格式值，不要拼接原始 `payload`：
+
+如果有图表截图（`chart_images` 非空）：
+
+```bash
+python /mnt/skills/custom/data-analyst/scripts/export_report.py \
+  --input /mnt/user-data/outputs/daily_kpi.json \
+  --format "{validated_format}" \
+  --output "/mnt/user-data/outputs/daily_report.{validated_format}" \
+  --chart-images '{chart_images_json}'
+```
+
+其中 `{chart_images_json}` 是 `payload.chart_images` 的 JSON 数组字符串，例如 `'["/mnt/user-data/uploads/chart_xxx.png"]'`。
+
+如果没有图表截图：
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/export_report.py \

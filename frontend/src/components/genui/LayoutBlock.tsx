@@ -17,9 +17,10 @@ interface LayoutBlockProps {
     };
     onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
   };
+  threadId?: string;
 }
 
-export default function LayoutBlock({ block }: LayoutBlockProps) {
+export default function LayoutBlock({ block, threadId }: LayoutBlockProps) {
   const { props, block_id, onInteraction } = block;
   const { layout_type, columns = 2, gap = 16, align = "stretch" } = props;
 
@@ -47,7 +48,7 @@ export default function LayoutBlock({ block }: LayoutBlockProps) {
   return (
     <div style={style} role="group" aria-label={`${layout_type} layout`}>
       {children.map((child) => (
-        <GenUIRenderer key={child.block_id} block={child} onInteraction={onInteraction} />
+        <GenUIRenderer key={child.block_id} block={child} threadId={threadId} onInteraction={onInteraction} />
       ))}
     </div>
   );
