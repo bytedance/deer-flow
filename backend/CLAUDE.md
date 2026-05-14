@@ -391,6 +391,24 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `resolve_variable(path)` - Import module and return variable (e.g., `module.path:variable_name`)
 - `resolve_class(path, base_class)` - Import and validate class against base class
 
+### Tracing System (`packages/harness/deerflow/tracing/`)
+
+LangSmith and Langfuse are both supported. The wiring lives in two layers:
+
+- `factory.py::build_tracing_callbacks()` — builds the LangChain `CallbackHandler` list at model-creation time (`models/factory.py`). Reads env vars (`LANGSMITH_TRACING`, `LANGFUSE_TRACING`, etc.) and attaches handlers to the model instance's `callbacks`.
+- `metadata.py::build_langfuse_trace_metadata()` — builds the Langfuse-reserved trace attributes for `RunnableConfig.metadata`. The Langfuse v4 `langchain.CallbackHandler` lifts these onto the root trace (see its `_parse_langfuse_trace_attributes`).
+
+**Trace-attribute injection point**: `runtime/runs/worker.py::run_agent` merges the metadata into `config["metadata"]` right before constructing `RunnableConfig`. Caller-supplied keys win via `setdefault`, so an external `session_id` override is preserved. Field mapping:
+
+| Langfuse field         | Source                                       |
+|-----------------------|----------------------------------------------|
+| `langfuse_session_id` | LangGraph `thread_id`                         |
+| `langfuse_user_id`    | `get_effective_user_id()` (`default` in no-auth) |
+| `langfuse_trace_name` | `RunRecord.assistant_id` (defaults to `lead-agent`) |
+| `langfuse_tags`       | `env:<DEER_FLOW_ENV>` + `model:<model_name>`  |
+
+Returns `{}` when Langfuse is not in the enabled providers — LangSmith-only deployments are unaffected. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment. Tests live in `tests/test_tracing_factory.py`, `tests/test_tracing_metadata.py`, and `tests/test_worker_langfuse_metadata.py`.
+
 ### Config Schema
 
 **`config.yaml`** key sections:
