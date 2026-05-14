@@ -186,6 +186,7 @@ export function useThreadStream({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
+    throttle: 100,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
@@ -567,6 +568,8 @@ export function useThreadHistory(threadId: string) {
   const runsRef = useRef(runs.data ?? []);
   const indexRef = useRef(-1);
   const loadingRef = useRef(false);
+  const initializedRef = useRef(false);
+  const loadedRunIdsRef = useRef<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
 
@@ -579,8 +582,13 @@ export function useThreadHistory(threadId: string) {
     if (!run || loadingRef.current) {
       return;
     }
+    if (loadedRunIdsRef.current.has(run.run_id)) {
+      indexRef.current -= 1;
+      return;
+    }
     try {
       setLoading(true);
+      loadedRunIdsRef.current.add(run.run_id);
       const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
         `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadIdRef.current)}/runs/${encodeURIComponent(run.run_id)}/messages`,
         {
@@ -596,28 +604,43 @@ export function useThreadHistory(threadId: string) {
       const _messages = result.data
         .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
         .map((m) => m.content);
-      setMessages((prev) => [..._messages, ...prev]);
+      setMessages((prev) => {
+        const existingIds = new Set(prev.map((m) => m.id));
+        const newMessages = _messages.filter((m) => !existingIds.has(m.id));
+        return [...newMessages, ...prev];
+      });
       indexRef.current -= 1;
     } catch (err) {
       console.error(err);
+      loadedRunIdsRef.current.delete(run.run_id);
     } finally {
       setLoading(false);
     }
   }, []);
   useEffect(() => {
-    threadIdRef.current = threadId;
+    if (threadIdRef.current !== threadId) {
+      threadIdRef.current = threadId;
+      initializedRef.current = false;
+      loadedRunIdsRef.current = new Set();
+      setMessages([]);
+    }
     if (runs.data && runs.data.length > 0) {
       runsRef.current = runs.data ?? [];
-      indexRef.current = runs.data.length - 1;
+      if (!initializedRef.current) {
+        initializedRef.current = true;
+        indexRef.current = runs.data.length - 1;
+        loadMessages().catch(() => {
+          toast.error("Failed to load thread history.");
+        });
+      }
     }
-    loadMessages().catch(() => {
-      toast.error("Failed to load thread history.");
-    });
   }, [threadId, runs.data, loadMessages]);
 
   const appendMessages = useCallback((_messages: Message[]) => {
     setMessages((prev) => {
-      return [...prev, ..._messages];
+      const existingIds = new Set(prev.map((m) => m.id));
+      const newMessages = _messages.filter((m) => !existingIds.has(m.id));
+      return [...prev, ...newMessages];
     });
   }, []);
   const hasMore = indexRef.current >= 0 || !runs.data;
