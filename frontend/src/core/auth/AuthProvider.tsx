@@ -12,6 +12,7 @@ import React, {
 
 import { type User, buildLoginUrl } from "./types";
 import { setCurrentTenantId } from "@/core/tenant/store";
+import { queryClient } from "@/components/query-client-provider";
 
 // Re-export for consumers
 export type { User };
@@ -95,8 +96,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * Per RFC-001: Immediately clear local state, don't wait for server confirmation
    */
   const logout = useCallback(async () => {
-    // Immediately clear local state to prevent UI flicker
     setUser(null);
+    queryClient.clear();
 
     try {
       await fetch("/api/v1/auth/logout", {
@@ -105,10 +106,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       });
     } catch (err) {
       console.error("Logout request failed:", err);
-      // Still redirect even if logout request fails
     }
 
-    // Redirect to home page
     router.push("/");
   }, [router]);
 

@@ -79,21 +79,21 @@ from unittest.mock import patch
 
 import pytest
 
-from app.gateway.auth.config import AuthConfig
+from app.gateway.auth.config import AuthConfig as GatewayAuthConfig
 
 
 def test_auth_config_defaults():
-    config = AuthConfig(jwt_secret="test-secret-key-123")
+    config = GatewayAuthConfig(jwt_secret="test-secret-key-123")
     assert config.token_expiry_days == 7
 
 
 def test_auth_config_token_expiry_range():
-    AuthConfig(jwt_secret="s", token_expiry_days=1)
-    AuthConfig(jwt_secret="s", token_expiry_days=30)
+    GatewayAuthConfig(jwt_secret="s", token_expiry_days=1)
+    GatewayAuthConfig(jwt_secret="s", token_expiry_days=30)
     with pytest.raises(Exception):
-        AuthConfig(jwt_secret="s", token_expiry_days=0)
+        GatewayAuthConfig(jwt_secret="s", token_expiry_days=0)
     with pytest.raises(Exception):
-        AuthConfig(jwt_secret="s", token_expiry_days=31)
+        GatewayAuthConfig(jwt_secret="s", token_expiry_days=31)
 
 
 def test_auth_config_from_env():

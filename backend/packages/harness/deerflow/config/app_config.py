@@ -198,6 +198,7 @@ class AppConfig(BaseModel):
 
         previous_checkpointer_config = get_checkpointer_config()
 
+        load_auth_config_from_dict(config.auth.model_dump())
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
@@ -208,6 +209,8 @@ class AppConfig(BaseModel):
         load_cost_config_from_dict(config.cost.model_dump())
         load_guardrails_config_from_dict(config.guardrails.model_dump())
         load_audio_input_config_from_dict(config.audio_input.model_dump())
+        load_content_safety_config_from_dict(config.content_safety.model_dump())
+        load_rate_limit_config_from_dict(config.rate_limit.model_dump())
         load_checkpointer_config_from_dict(config.checkpointer.model_dump() if config.checkpointer is not None else None)
         load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
         load_acp_config_from_dict({name: agent.model_dump() for name, agent in acp_agents.items()})
