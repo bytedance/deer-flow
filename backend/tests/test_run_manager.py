@@ -180,6 +180,14 @@ async def test_get_hydrates_store_only_run():
     assert record.kwargs == {"input": "value"}
     assert record.model_name == "model-a"
     assert record.task is None
+    assert record.store_only is True
+
+
+@pytest.mark.anyio
+async def test_create_record_is_not_store_only(manager: RunManager):
+    """In-memory records created via create() must have store_only=False."""
+    record = await manager.create("thread-1")
+    assert record.store_only is False
 
 
 @pytest.mark.anyio

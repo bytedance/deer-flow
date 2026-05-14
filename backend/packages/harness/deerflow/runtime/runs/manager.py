@@ -37,6 +37,7 @@ class RunRecord:
     abort_action: str = "interrupt"
     error: str | None = None
     model_name: str | None = None
+    store_only: bool = False
 
 
 class RunManager:
@@ -96,6 +97,7 @@ class RunManager:
             updated_at=row.get("updated_at") or "",
             error=row.get("error"),
             model_name=row.get("model_name"),
+            store_only=True,
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -150,6 +152,12 @@ class RunManager:
         except Exception:
             logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
             return None
+        # Re-check after store await: a concurrent create() may have inserted the
+        # in-memory record while the store call was in flight.
+        async with self._lock:
+            record = self._runs.get(run_id)
+        if record is not None:
+            return record
         if row is None:
             return None
         try:
