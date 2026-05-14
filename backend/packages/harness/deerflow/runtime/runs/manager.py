@@ -167,23 +167,22 @@ class RunManager:
             return None
 
     async def list_by_thread(self, thread_id: str, *, limit: int = 100) -> list[RunRecord]:
-        """Return runs for a given thread, newest first.
+        """Return runs for a given thread, newest first, at most ``limit`` records.
 
-        In-memory runs are always included.  When a store is configured,
-        historical rows are merged in up to ``limit`` (default 100, matching
-        the store's default page size).
+        In-memory runs take precedence and are sorted before store-only rows.
+        The final list is trimmed to ``limit`` after merging (default 100).
         """
         async with self._lock:
             # Dict insertion order gives deterministic results when timestamps tie.
             memory_records = [r for r in self._runs.values() if r.thread_id == thread_id]
         if self._store is None:
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)
+            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}
         try:
             rows = await self._store.list_by_thread(thread_id, limit=limit)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)
+            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         for row in rows:
             run_id = row.get("run_id")
             if run_id and run_id not in records_by_id:
@@ -191,7 +190,7 @@ class RunManager:
                     records_by_id[run_id] = self._record_from_store(row)
                 except Exception:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
-        return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)
+        return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
