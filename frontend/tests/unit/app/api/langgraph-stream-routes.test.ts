@@ -6,6 +6,11 @@ async function loadRunStreamRoute() {
   return await import("@/app/api/langgraph/threads/[threadId]/runs/stream/route");
 }
 
+async function loadStatelessRunStreamRoute() {
+  vi.resetModules();
+  return await import("@/app/api/langgraph/runs/stream/route");
+}
+
 async function loadJoinStreamRoute() {
   vi.resetModules();
   return await import("@/app/api/langgraph/threads/[threadId]/runs/[runId]/stream/route");
@@ -59,6 +64,26 @@ describe("LangGraph stream route proxies", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://gateway.example/base/api/threads/thread%2Fa%3Fb/runs/stream?after=a%2Fb",
+      expect.objectContaining({ method: "POST", signal: request.signal }),
+    );
+  });
+
+  test("proxies stateless run streams to the gateway stream endpoint", async () => {
+    const fetchMock = vi.fn(async () => new Response("ok"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { POST } = await loadStatelessRunStreamRoute();
+    const request = new NextRequest(
+      "http://localhost:3000/api/langgraph/runs/stream?after=a%2Fb",
+      {
+        method: "POST",
+        body: JSON.stringify({ ok: true }),
+      },
+    );
+    await POST(request);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://gateway.example/base/api/runs/stream?after=a%2Fb",
       expect.objectContaining({ method: "POST", signal: request.signal }),
     );
   });
