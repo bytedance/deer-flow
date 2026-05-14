@@ -1,5 +1,6 @@
-import { fetch as fetchWithAuth } from "./fetcher";
 import { getTenantHeaders } from "../tenant";
+
+import { fetch as fetchWithAuth } from "./fetcher";
 
 /**
  * Wraps fetch() with X-DeerFlow-Tenant header injected automatically.

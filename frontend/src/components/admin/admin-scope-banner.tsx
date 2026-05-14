@@ -1,7 +1,7 @@
 "use client";
 
-import { useAuth } from "@/core/auth/AuthProvider";
 import { isSystemAdminView } from "@/core/admin/scope";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 
 export function AdminScopeBanner() {

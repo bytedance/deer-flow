@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useRef } from "react";
-import ReactEChartsCore from "echarts-for-react/lib/core";
 import type { ECharts } from "echarts";
+import ReactEChartsCore from "echarts-for-react/lib/core";
+import { useCallback, useRef } from "react";
 
 import { addChartCapture } from "@/core/genui/chart-screenshots";
 import { echarts } from "@/lib/echarts-init";
@@ -51,6 +51,7 @@ export default function EChartBlock({ block, threadId }: EChartBlockProps) {
             pixelRatio: 2,
             backgroundColor: "#fff",
           });
+          if (!dataUrl?.startsWith("data:")) return;
           const filename = `chart_${block.block_id ?? Date.now()}.png`;
           addChartCapture(threadId, dataUrl, filename);
         } catch {

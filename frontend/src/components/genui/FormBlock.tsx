@@ -91,7 +91,7 @@ function MultiSelectField({
       (opt) =>
         opt.label.toLowerCase().includes(lower) ||
         opt.value.toLowerCase().includes(lower) ||
-        (opt.description && opt.description.toLowerCase().includes(lower)),
+        (opt.description?.toLowerCase().includes(lower)),
     );
   }, [options, search]);
 
@@ -156,7 +156,6 @@ function MultiSelectField({
   const maxHeight = maxVisible * 32;
 
   const ITEM_HEIGHT = 28;
-  const GROUP_HEADER_HEIGHT = 30;
   const VIRTUAL_THRESHOLD = 500;
   const useVirtual = filteredOptions.length > VIRTUAL_THRESHOLD && !hasGroups;
 
@@ -265,7 +264,7 @@ function MultiSelectField({
                       type="button"
                       className="text-xs text-primary hover:underline"
                       onClick={() => handleGroupSelectAll(groupOpts)}
-                      disabled={disabled || groupAllSelected}
+                      disabled={disabled ?? groupAllSelected}
                     >
                       全选
                     </button>
@@ -300,12 +299,13 @@ export default function FormBlock({ block }: FormBlockProps) {
   const { title, description, fields, submit_label = "Submit", default_values } = props;
 
   const { register, control, handleSubmit, formState: { errors } } = useForm({
-    defaultValues: default_values as Record<string, unknown>,
+    defaultValues: default_values!,
   });
 
   const isDisabled = interactionState?.status === "loading" ||
     interactionState?.status === "submitted" ||
-    interactionState?.status === "expired";
+    interactionState?.status === "expired" ||
+    interactionState?.status === "readonly";
 
   const onSubmit = (data: Record<string, unknown>) => {
     if (callback_id && onInteraction) {

@@ -59,7 +59,7 @@ vi.mock("@/env", () => ({
 import { WorkspaceHeader } from "@/components/workspace/workspace-header";
 
 describe("WorkspaceHeader", () => {
-  test("does not render tenant id badge for non-default tenants", () => {
+  test("renders brand and new chat link in expanded state", () => {
     mocks.useSidebar.mockReturnValue({ state: "expanded" });
     mocks.usePathname.mockReturnValue("/workspace/chats/new");
     mocks.useTenant.mockReturnValue(["test", vi.fn()]);
@@ -72,12 +72,13 @@ describe("WorkspaceHeader", () => {
 
     const html = renderToStaticMarkup(React.createElement(WorkspaceHeader));
 
-    expect(html).toContain("yanghai@shenguyun.com");
+    expect(html).toContain("EHM");
+    expect(html).toContain("New chat");
     expect(html).not.toContain(">test<");
   });
 
-  test("still renders the admin badge for admin users", () => {
-    mocks.useSidebar.mockReturnValue({ state: "expanded" });
+  test("renders collapsed state with short brand", () => {
+    mocks.useSidebar.mockReturnValue({ state: "collapsed" });
     mocks.usePathname.mockReturnValue("/workspace/chats/new");
     mocks.useTenant.mockReturnValue(["default", vi.fn()]);
     mocks.useAuth.mockReturnValue({
@@ -89,6 +90,7 @@ describe("WorkspaceHeader", () => {
 
     const html = renderToStaticMarkup(React.createElement(WorkspaceHeader));
 
-    expect(html).toContain(">superadmin<");
+    expect(html).toContain("DF");
+    expect(html).toContain("New chat");
   });
 });

@@ -1,7 +1,5 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-
 import {
   flexRender,
   getCoreRowModel,
@@ -10,6 +8,8 @@ import {
   useReactTable,
   type SortingState,
 } from "@tanstack/react-table";
+import { useEffect, useMemo, useState } from "react";
+
 
 import { AdminScopeBanner } from "@/components/admin/admin-scope-banner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";

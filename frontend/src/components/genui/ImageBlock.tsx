@@ -31,7 +31,7 @@ export default function ImageBlock({ block }: ImageBlockProps) {
   if (!isValidImageUrl(src)) {
     return (
       <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
-        {fallback || "Invalid image URL"}
+        {fallback ?? "Invalid image URL"}
       </div>
     );
   }
@@ -39,7 +39,7 @@ export default function ImageBlock({ block }: ImageBlockProps) {
   if (error) {
     return (
       <div className="rounded-lg border border-muted bg-muted/50 p-4 text-sm text-muted-foreground">
-        {fallback || "Image failed to load"}
+        {fallback ?? "Image failed to load"}
       </div>
     );
   }
@@ -48,7 +48,7 @@ export default function ImageBlock({ block }: ImageBlockProps) {
     <figure className="my-2 flex flex-col items-start gap-1">
       <img
         src={src}
-        alt={alt || ""}
+        alt={alt ?? ""}
         width={width}
         height={height}
         loading="lazy"

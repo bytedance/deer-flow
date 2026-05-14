@@ -47,7 +47,7 @@ export function GenUIRenderer({ block, threadId, disableExpiration, onInteractio
       block.callback_id &&
       (!interactionState || interactionState.status === "idle")
     ) {
-      return { status: "expired" as const };
+      return { status: "readonly" as const };
     }
     return interactionState;
   }, [disableExpiration, block.interactive, block.callback_id, interactionState]);

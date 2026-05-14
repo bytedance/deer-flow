@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("react-hook-form", async () => {
-  const actual = await vi.importActual<typeof import("react-hook-form")>("react-hook-form");
+  const actual = await vi.importActual("react-hook-form");
   return actual;
 });
 

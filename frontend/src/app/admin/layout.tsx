@@ -1,8 +1,9 @@
+import { redirect } from "next/navigation";
+
 import { AdminSidebar } from "@/components/admin/admin-sidebar";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { buildLoginUrl, type User } from "@/core/auth/types";
-import { redirect } from "next/navigation";
 
 export default async function AdminLayout({
   children,

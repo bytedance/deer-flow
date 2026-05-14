@@ -53,6 +53,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `memory/` — Persistent user memory system
   - `skills/` — Skills installation and management
   - `messages/` — Message processing and transformation
+  - `genui/` — Dynamic UI block store, history recovery, and render_ui component helpers
   - `mcp/` — Model Context Protocol integration
   - `models/` — TypeScript types and data models
 - **`hooks/`** — Shared React hooks

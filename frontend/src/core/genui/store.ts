@@ -15,7 +15,7 @@ export interface UIBlock {
 }
 
 export interface InteractionState {
-  status: "idle" | "loading" | "submitted" | "error" | "expired";
+  status: "idle" | "loading" | "submitted" | "error" | "expired" | "readonly";
   error?: string;
   submittedAt?: number;
 }

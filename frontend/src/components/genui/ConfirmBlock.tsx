@@ -23,7 +23,8 @@ export default function ConfirmBlock({ block }: ConfirmBlockProps) {
 
   const isDisabled = interactionState?.status === "loading" ||
     interactionState?.status === "submitted" ||
-    interactionState?.status === "expired";
+    interactionState?.status === "expired" ||
+    interactionState?.status === "readonly";
 
   const handleConfirm = () => {
     if (callback_id && onInteraction) {

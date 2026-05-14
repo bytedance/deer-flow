@@ -10,9 +10,10 @@ import React, {
   type ReactNode,
 } from "react";
 
-import { type User, buildLoginUrl } from "./types";
-import { setCurrentTenantId } from "@/core/tenant/store";
 import { queryClient } from "@/components/query-client-provider";
+import { setCurrentTenantId } from "@/core/tenant/store";
+
+import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers
 export type { User };

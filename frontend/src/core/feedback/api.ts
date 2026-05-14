@@ -1,5 +1,6 @@
 import { fetchGateway } from "@/core/api";
 import { getBackendBaseURL } from "@/core/config";
+
 import type { FeedbackSubmission, FeedbackSummary } from "./types";
 
 export async function submitFeedback(data: FeedbackSubmission): Promise<{ success: boolean; id: string }> {

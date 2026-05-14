@@ -1,11 +1,9 @@
 "use client";
 
+import { BotIcon } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
-import { BotIcon, CopyIcon, SearchIcon } from "lucide-react";
 
-import { useGroupedAgents } from "@/core/agents";
-import { type Agent } from "@/core/agents/types";
 import {
   Command,
   CommandEmpty,
@@ -20,6 +18,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useGroupedAgents } from "@/core/agents";
+import { type Agent } from "@/core/agents/types";
 import { cn } from "@/lib/utils";
 
 interface AgentSelectorProps {

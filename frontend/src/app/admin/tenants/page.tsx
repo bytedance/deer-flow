@@ -20,9 +20,9 @@ import {
   listTenants,
   updateTenant,
 } from "@/core/admin/api";
-import { useAuth } from "@/core/auth/AuthProvider";
 import { isSystemAdminView } from "@/core/admin/scope";
 import type { TenantSummary, TenantUser } from "@/core/admin/types";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 
 export default function AdminTenantsPage() {

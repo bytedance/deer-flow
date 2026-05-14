@@ -74,7 +74,13 @@ export async function uploadPendingScreenshots(threadId: string): Promise<string
     return [];
   }
 
-  const files = pending.map((p) => dataUrlToFile(p.dataUrl, p.filename));
+  const valid = pending.filter((p) => p.dataUrl?.startsWith("data:"));
+  if (valid.length === 0) {
+    state._setUploaded(threadId, []);
+    return [];
+  }
+
+  const files = valid.map((p) => dataUrlToFile(p.dataUrl, p.filename));
   try {
     const result = await uploadFiles(threadId, files);
     const paths = result.files

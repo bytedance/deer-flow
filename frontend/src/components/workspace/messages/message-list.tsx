@@ -1,15 +1,16 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import { ChevronUpIcon, Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Conversation,
   ConversationContent,
 } from "@/components/ai-elements/conversation";
-
+import { GenUIBlockList } from "@/components/genui";
 import { Button } from "@/components/ui/button";
 import { submitInteraction } from "@/core/genui";
+import { extractBlockIdsFromMessages } from "@/core/genui/history";
 import { recoverBlocksFromMessages } from "@/core/genui/sse-recovery";
 import { useBlockStore } from "@/core/genui/store";
 import { useI18n } from "@/core/i18n/hooks";
@@ -34,8 +35,6 @@ import { useUpdateSubtask } from "@/core/tasks/context";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
-import { GenUIBlockList } from "@/components/genui";
-
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
@@ -56,21 +55,19 @@ export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
 
-const BLOCK_ID_REGEX = /block_id=([a-f0-9-]+)/g;
+function getMessageKey(message: Message): string {
+  return (
+    message.id ??
+    ("tool_call_id" in message ? message.tool_call_id : undefined) ??
+    `${message.type}:${extractTextFromMessage(message)}`
+  );
+}
 
-function extractBlockIdsFromMessages(messages: Message[]): string[] {
-  const blockIds: string[] = [];
-  for (const msg of messages) {
-    if (msg.type === "tool") {
-      const text = extractTextFromMessage(msg);
-      let match: RegExpExecArray | null;
-      BLOCK_ID_REGEX.lastIndex = 0;
-      while ((match = BLOCK_ID_REGEX.exec(text)) !== null) {
-        blockIds.push(match[1]!);
-      }
-    }
-  }
-  return blockIds;
+function areAllMessagesHistorical(
+  messages: Message[],
+  liveMessageKeys: Set<string>,
+): boolean {
+  return messages.every((message) => !liveMessageKeys.has(getMessageKey(message)));
 }
 
 function LoadMoreHistoryIndicator({
@@ -201,6 +198,8 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
+  const blocks = useBlockStore((state) => state.blocks);
+  const storeBlockIds = useMemo(() => Array.from(blocks.keys()), [blocks]);
   const groupedMessages = getMessageGroups(messages);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
@@ -220,22 +219,95 @@ export function MessageList({
   }, [groupedMessages]);
 
   const preStreamBlockIdsRef = useRef<string[]>([]);
+  const preStreamMessageKeysRef = useRef<Set<string>>(new Set());
+  const [liveStreamMessageKeys, setLiveStreamMessageKeys] = useState<
+    Set<string>
+  >(() => new Set());
   const wasLoadingRef = useRef(false);
+  const effectiveLiveStreamMessageKeys = useMemo(() => {
+    if (!thread.isLoading && wasLoadingRef.current) {
+      return new Set(
+        messages
+          .map(getMessageKey)
+          .filter((key) => !preStreamMessageKeysRef.current.has(key)),
+      );
+    }
+    return liveStreamMessageKeys;
+  }, [thread.isLoading, liveStreamMessageKeys, messages]);
+
   useEffect(() => {
     if (thread.isLoading && !wasLoadingRef.current) {
       preStreamBlockIdsRef.current = Array.from(
         useBlockStore.getState().blocks.keys(),
       );
+      preStreamMessageKeysRef.current = new Set(messages.map(getMessageKey));
+      setLiveStreamMessageKeys(new Set());
     }
-    wasLoadingRef.current = thread.isLoading;
-  }, [thread.isLoading]);
 
-  const recoveredRef = useRef(false);
-  useEffect(() => {
-    if (recoveredRef.current || thread.isLoading || messages.length === 0) return;
-    recoveredRef.current = true;
-    recoverBlocksFromMessages(messages as { type?: string; content?: unknown }[]);
+    if (!thread.isLoading && wasLoadingRef.current) {
+      setLiveStreamMessageKeys(
+        new Set(
+          messages
+            .map(getMessageKey)
+            .filter((key) => !preStreamMessageKeysRef.current.has(key)),
+        ),
+      );
+    }
+
+    wasLoadingRef.current = thread.isLoading;
   }, [thread.isLoading, messages]);
+
+  const [historicalFallbackBlockIds, setHistoricalFallbackBlockIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    if (thread.isLoading || messages.length === 0) return;
+
+    recoverBlocksFromMessages(
+      messages as { type?: string; content?: unknown }[],
+    );
+
+    const historicalMessages = messages.filter(
+      (message) => !effectiveLiveStreamMessageKeys.has(getMessageKey(message)),
+    );
+    const historicalBlockIds = extractBlockIdsFromMessages(historicalMessages);
+
+    const storeIds = Array.from(useBlockStore.getState().blocks.keys());
+
+    const allHistoricalIds = new Set([...historicalBlockIds, ...storeIds]);
+    if (allHistoricalIds.size === 0) return;
+
+    setHistoricalFallbackBlockIds((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const id of allHistoricalIds) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [effectiveLiveStreamMessageKeys, thread.isLoading, messages, storeBlockIds]);
+
+  const interactions = useBlockStore((state) => state.interactions);
+
+  const unclaimedBlockIds = useMemo(() => {
+    const claimed = new Set(claimedBlockIds);
+    const preStream = new Set(preStreamBlockIdsRef.current);
+    const referenced = extractBlockIdsFromMessages(messages);
+    const ids = new Set([...storeBlockIds, ...referenced]);
+    return Array.from(ids).filter((id) => {
+      if (claimed.has(id) || !historicalFallbackBlockIds.has(id)) return false;
+      if (preStream.has(id)) return false;
+      const block = blocks.get(id);
+      if (block?.callback_id) {
+        const interaction = interactions.get(block.callback_id);
+        if (interaction?.status === "submitted") return false;
+      }
+      return true;
+    });
+  }, [claimedBlockIds, historicalFallbackBlockIds, messages, storeBlockIds, blocks, interactions]);
 
   const renderAssistantCopyButton = useCallback((messages: Message[]) => {
     const clipboardData = [...messages]
@@ -529,7 +601,13 @@ export function MessageList({
                   <GenUIBlockList
                     threadId={threadId}
                     blockIds={blockIds}
-                    disableExpiration={!thread.isLoading && blockIds.every((id) => preStreamBlockIdsRef.current.includes(id))}
+                    disableExpiration={
+                      !thread.isLoading &&
+                      areAllMessagesHistorical(
+                        group.messages,
+                        effectiveLiveStreamMessageKeys,
+                      )
+                    }
                     onInteraction={handleInteraction}
                   />
                 )}
@@ -542,6 +620,14 @@ export function MessageList({
             );
           }
         })}
+        {!thread.isLoading && unclaimedBlockIds.length > 0 && (
+          <GenUIBlockList
+            threadId={threadId}
+            blockIds={unclaimedBlockIds}
+            disableExpiration={true}
+            onInteraction={handleInteraction}
+          />
+        )}
         {thread.isLoading && <StreamingIndicator className="my-4" />}
         {thread.isLoading && (
           <GenUIBlockList
