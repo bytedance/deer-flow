@@ -1285,3 +1285,78 @@ def test_subagent_usage_cache_is_cleared_when_polling_raises(monkeypatch):
         )
 
     assert task_tool_module.pop_cached_subagent_usage("tc-error") is None
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for _find_usage_recorder (bug #2026-05-14):
+# AsyncCallbackManager is not directly iterable, but LangChain sometimes
+# returns one in config["callbacks"] instead of a plain list. Iterating it
+# crashes with TypeError, which propagates out of _report_subagent_usage and
+# leaves the lead agent in a permanently-hung state.
+# ---------------------------------------------------------------------------
+
+
+class _RecorderHandler:
+    """Stand-in for a usage-recording callback handler."""
+
+    def record_external_llm_usage_records(self, records):  # pragma: no cover - never called in unit
+        return None
+
+
+class _UnrelatedHandler:
+    """Stand-in for any other LangChain callback handler."""
+
+
+class _FakeCallbackManager:
+    """Minimal stand-in for ``AsyncCallbackManager`` / ``BaseCallbackManager``.
+
+    The real classes are NOT directly iterable; consumers must read ``.handlers``.
+    """
+
+    def __init__(self, handlers):
+        self.handlers = handlers
+
+    def __iter__(self):
+        raise TypeError("'AsyncCallbackManager' object is not iterable")
+
+
+def _runtime_with_callbacks(callbacks):
+    return SimpleNamespace(config={"callbacks": callbacks})
+
+
+def test_find_usage_recorder_accepts_plain_list():
+    """Original code path: callbacks is already a list."""
+    recorder = _RecorderHandler()
+    runtime = _runtime_with_callbacks([_UnrelatedHandler(), recorder])
+
+    found = task_tool_module._find_usage_recorder(runtime)
+
+    assert found is recorder
+
+
+def test_find_usage_recorder_unwraps_callback_manager():
+    """Regression: a CallbackManager-like object must be unwrapped via .handlers
+    instead of iterated directly, otherwise the lookup raises TypeError and
+    the lead agent hangs after each subagent completes."""
+    recorder = _RecorderHandler()
+    manager = _FakeCallbackManager([_UnrelatedHandler(), recorder])
+    runtime = _runtime_with_callbacks(manager)
+
+    found = task_tool_module._find_usage_recorder(runtime)
+
+    assert found is recorder
+
+
+def test_find_usage_recorder_returns_none_when_no_recorder_present():
+    """If no handler exposes record_external_llm_usage_records, return None
+    cleanly — both for list and manager shapes."""
+    assert task_tool_module._find_usage_recorder(_runtime_with_callbacks([_UnrelatedHandler()])) is None
+    assert task_tool_module._find_usage_recorder(_runtime_with_callbacks(_FakeCallbackManager([_UnrelatedHandler()]))) is None
+
+
+def test_find_usage_recorder_handles_missing_or_empty_config():
+    """Defensive branches: no runtime / no config dict / no callbacks key / empty."""
+    assert task_tool_module._find_usage_recorder(None) is None
+    assert task_tool_module._find_usage_recorder(SimpleNamespace(config=None)) is None
+    assert task_tool_module._find_usage_recorder(SimpleNamespace(config={})) is None
+    assert task_tool_module._find_usage_recorder(_runtime_with_callbacks([])) is None
