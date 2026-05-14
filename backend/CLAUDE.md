@@ -165,7 +165,7 @@ Lead-agent middlewares are assembled in strict append order across `packages/har
 8. **ToolErrorHandlingMiddleware** - Converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting
 9. **SummarizationMiddleware** - Context reduction when approaching token limits (optional, if enabled)
 10. **TodoListMiddleware** - Task tracking with `write_todos` tool (optional, if plan_mode)
-11. **TokenUsageMiddleware** - Records token usage metrics when token tracking is enabled (optional)
+11. **TokenUsageMiddleware** - Records token usage metrics when token tracking is enabled (optional); subagent usage is cached by `tool_call_id` only while token usage is enabled and merged back into the dispatching AIMessage by message position rather than message id
 12. **TitleMiddleware** - Auto-generates thread title after first complete exchange and normalizes structured message content before prompting the title model
 13. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
 14. **ViewImageMiddleware** - Injects base64 image data before LLM call (conditional on vision support)
