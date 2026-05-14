@@ -202,6 +202,11 @@ def query_equipment(
 
     filter_display = filter_str if filter_str else ("全部" if scope == "all" else "")
 
+    area_counts: dict[str, int] = {}
+    for e in matched:
+        area = e.get("area", "")
+        area_counts[area] = area_counts.get(area, 0) + 1
+
     return {
         "equipment_type": eq_type,
         "type_display": TYPE_DISPLAY.get(eq_type, eq_type),
@@ -210,6 +215,7 @@ def query_equipment(
         "total_matched": total_matched,
         "total_in_type": total_in_type,
         "areas": list(AREAS),
+        "area_counts": area_counts,
         "equipment": display_equipment,
         "equipment_truncated": truncated,
         "available_kpis": _build_available_kpis(eq_type),

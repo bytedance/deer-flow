@@ -1,15 +1,17 @@
 #!/usr/bin/env python
-"""Export daily KPI payload to a downloadable Markdown file.
+"""Export daily KPI payload to a downloadable report file.
 
 Reads ``$DAILY_REPORT_OUTPUT_DIR/daily_kpi.json`` (or ``--input``) and
-writes ``$DAILY_REPORT_OUTPUT_DIR/daily_report.md``.
+writes ``$DAILY_REPORT_OUTPUT_DIR/daily_report.{md,pdf}``.
 
 Supports two modes:
 - **detail**: per-device listing (original behavior)
 - **grouped**: aggregated display with device count and top_anomalies table
 
-PDF support is intentionally deferred (see Sprint plan Story 6) and
-raises ``ValueError`` when requested.
+Export formats:
+- **md**: Markdown (always available)
+- **pdf**: HTML→PDF via weasyprint (raises ``ImportError`` when weasyprint
+  is not installed)
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from pathlib import Path
 
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "daily_kpi.json"
-SUPPORTED_FORMATS = {"md"}
+SUPPORTED_FORMATS = {"md", "pdf"}
 
 TYPE_DISPLAY = {
     "static_equipment": "静设备",
@@ -173,24 +175,66 @@ def render_markdown(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def render_html(payload: dict) -> str:
+    """Render payload as a standalone HTML document with embedded CSS."""
+    md = render_markdown(payload)
+    try:
+        import markdown as md_lib
+        body = md_lib.markdown(md, extensions=["tables"])
+    except ImportError:
+        body = "<pre>" + md.replace("&", "&amp;").replace("<", "&lt;") + "</pre>"
+
+    return (
+        "<!DOCTYPE html>\n<html lang='zh'>\n<head>\n<meta charset='utf-8'>\n"
+        "<style>\n"
+        "body { font-family: 'SimSun','Noto Sans SC',sans-serif; margin: 2cm; font-size: 12pt; }\n"
+        "h1 { font-size: 18pt; border-bottom: 2px solid #333; padding-bottom: 6pt; }\n"
+        "h2 { font-size: 14pt; margin-top: 16pt; }\n"
+        "table { border-collapse: collapse; width: 100%; margin: 8pt 0; }\n"
+        "th, td { border: 1px solid #ccc; padding: 6pt 8pt; text-align: left; }\n"
+        "th { background: #f5f5f5; }\n"
+        "</style>\n</head>\n<body>\n"
+        + body
+        + "\n</body>\n</html>"
+    )
+
+
+def _write_pdf(html: str, out_path: Path) -> None:
+    """Write HTML string to PDF. Requires weasyprint."""
+    try:
+        from weasyprint import HTML as WeasyprintHTML
+    except ImportError:
+        raise ImportError(
+            "PDF export requires the 'weasyprint' package. "
+            "Install it with: pip install weasyprint"
+        ) from None
+    WeasyprintHTML(string=html).write_pdf(str(out_path))
+
+
 def write_report(payload: dict, fmt: str, path: Path | None = None) -> Path:
     if fmt not in SUPPORTED_FORMATS:
         raise ValueError(f"Unsupported export format: {fmt}")
     out_path = path or (_output_dir() / f"daily_report.{fmt}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    content = render_markdown(payload)
-    out_path.write_text(content, encoding="utf-8")
+    if fmt == "pdf":
+        html = render_html(payload)
+        _write_pdf(html, out_path)
+    else:
+        content = render_markdown(payload)
+        out_path.write_text(content, encoding="utf-8")
     return out_path
 
 
 def build_export_result(payload: dict, fmt: str, path: Path | None = None) -> dict:
     out_path = write_report(payload, fmt, path=path)
     filename = out_path.name
+    virtual_path = f"/mnt/user-data/outputs/{filename}"
     return {
         "format": fmt,
         "filename": filename,
         "path": str(out_path),
         "artifact_path": str(out_path),
+        "present_files_hint": [virtual_path],
     }
 
 
@@ -217,6 +261,9 @@ def main() -> int:
 
     try:
         result = build_export_result(payload, args.format, path=Path(args.output) if args.output else None)
+    except ImportError as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        return 0
     except ValueError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 0

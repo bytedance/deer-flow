@@ -131,26 +131,75 @@ def _build_trend_chart(
     report_date: str,
     compare_date: str | None,
     equipment_count: int | None = None,
+    per_equipment: dict | None = None,
 ) -> dict:
-    """Return a ready-to-render ECharts option object (see EChartBlock contract)."""
+    """Return a ready-to-render ECharts option object (see EChartBlock contract).
+
+    When ``per_equipment`` is provided (grouped mode), builds per-area
+    series showing the average hourly runtime rate for each area,
+    replacing the single fleet-level line.
+    """
     title_suffix = f"（{equipment_count}台均值）" if equipment_count else ""
-    current_label = f"{report_date} 均值" if equipment_count else report_date
-    series: list[dict] = [
-        {"name": current_label, "type": "line", "smooth": True, "data": list(current_hourly or [])},
-    ]
-    legend = [current_label]
-    if compare_hourly and compare_date:
-        compare_label = f"{compare_date} 均值" if equipment_count else compare_date
-        series.append({"name": compare_label, "type": "line", "smooth": True, "data": list(compare_hourly)})
-        legend.append(compare_label)
+    x_axis = [f"{h:02d}:00" for h in range(24)]
+
+    if per_equipment and equipment_count:
+        series, legend = _build_area_trend_series(per_equipment, report_date)
+        if compare_hourly and compare_date:
+            compare_label = f"{compare_date} 整体均值"
+            series.append({"name": compare_label, "type": "line", "smooth": True, "lineStyle": {"type": "dashed"}, "data": list(compare_hourly)})
+            legend.append(compare_label)
+    else:
+        current_label = f"{report_date} 均值" if equipment_count else report_date
+        series = [{"name": current_label, "type": "line", "smooth": True, "data": list(current_hourly or [])}]
+        legend = [current_label]
+        if compare_hourly and compare_date:
+            compare_label = f"{compare_date} 均值" if equipment_count else compare_date
+            series.append({"name": compare_label, "type": "line", "smooth": True, "data": list(compare_hourly)})
+            legend.append(compare_label)
+
     return {
         "title": {"text": f"24 小时运行率趋势{title_suffix}"},
         "tooltip": {"trigger": "axis"},
         "legend": {"data": legend},
-        "xAxis": {"type": "category", "data": [f"{h:02d}:00" for h in range(24)]},
+        "xAxis": {"type": "category", "data": x_axis},
         "yAxis": {"type": "value", "name": "运行率"},
         "series": series,
     }
+
+
+def _build_area_trend_series(per_equipment: dict, report_date: str) -> tuple[list[dict], list[str]]:
+    """Group per_equipment hourly data by area and build one series per area."""
+    area_hours: dict[str, list[list[float]]] = {}
+    for eq_data in per_equipment.values():
+        area = eq_data.get("area", "未知")
+        hourly = eq_data.get("hourly_runtime_rate")
+        if not hourly or len(hourly) != 24:
+            continue
+        if area not in area_hours:
+            area_hours[area] = []
+        area_hours[area].append(hourly)
+
+    if not area_hours or len(area_hours) <= 1:
+        all_hourly: list[list[float]] = []
+        for eq_data in per_equipment.values():
+            h = eq_data.get("hourly_runtime_rate")
+            if h and len(h) == 24:
+                all_hourly.append(h)
+        if all_hourly:
+            avg = [round(sum(vals) / len(vals), 4) for vals in zip(*all_hourly)]
+            label = f"{report_date} 整体均值"
+            return [{"name": label, "type": "line", "smooth": True, "data": avg}], [label]
+        return [], []
+
+    series: list[dict] = []
+    legend: list[str] = []
+    for area in sorted(area_hours.keys()):
+        hours_list = area_hours[area]
+        avg = [round(sum(vals) / len(vals), 4) for vals in zip(*hours_list)]
+        label = f"{area}（{len(hours_list)}台）"
+        series.append({"name": label, "type": "line", "smooth": True, "data": avg})
+        legend.append(label)
+    return series, legend
 
 
 def _compute_anomaly_score(eq_id: str, eq_kpis: dict) -> tuple[float, str]:
@@ -265,6 +314,7 @@ def compute(payload: dict) -> dict:
             payload.get("report_date", ""),
             payload.get("compare_date"),
             equipment_count=equipment_count or len(per_equipment),
+            per_equipment=per_equipment,
         )
         top_anomalies = _build_top_anomalies(per_equipment)
     else:

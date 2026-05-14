@@ -160,3 +160,44 @@ def test_main_success(list_equipment, monkeypatch, capsys):
     output = json.loads(capsys.readouterr().out)
     assert output["total_matched"] == 1000
     assert output["equipment_type"] == "pump"
+
+
+# --- area_counts tests ---
+
+
+def test_area_counts_present(list_equipment):
+    result = list_equipment.query_equipment("static_equipment", "all", "", limit=10000)
+    assert "area_counts" in result
+    assert isinstance(result["area_counts"], dict)
+
+
+def test_area_counts_static_equipment(list_equipment):
+    result = list_equipment.query_equipment("static_equipment", "all", "", limit=10000)
+    counts = result["area_counts"]
+    assert counts == {"A区": 250, "B区": 250, "C区": 250, "D区": 250}
+    assert sum(counts.values()) == result["total_matched"]
+
+
+def test_area_counts_rotating_machinery(list_equipment):
+    result = list_equipment.query_equipment("rotating_machinery", "all", "", limit=10000)
+    counts = result["area_counts"]
+    assert sum(counts.values()) == 100
+    assert len(counts) == 4
+
+
+def test_area_counts_filtered_by_area(list_equipment):
+    result = list_equipment.query_equipment("static_equipment", "area", "A区", limit=10000)
+    counts = result["area_counts"]
+    assert counts == {"A区": 250}
+
+
+def test_area_counts_filtered_specific(list_equipment):
+    result = list_equipment.query_equipment("static_equipment", "specific", "SE-001,SE-002", limit=10000)
+    counts = result["area_counts"]
+    assert sum(counts.values()) == 2
+
+
+def test_area_counts_all_types(list_equipment):
+    result = list_equipment.query_equipment("all", "all", "", limit=10000)
+    counts = result["area_counts"]
+    assert sum(counts.values()) == 2200

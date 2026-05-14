@@ -221,3 +221,87 @@ def test_new_kpi_better_when_higher(daily_kpi):
     assert "flow_rate" in daily_kpi.KPI_BETTER_WHEN_HIGHER
     assert "outlet_pressure" in daily_kpi.KPI_BETTER_WHEN_HIGHER
     assert "corrosion_rate" not in daily_kpi.KPI_BETTER_WHEN_HIGHER
+
+
+# --- Per-area trend chart tests ---
+
+
+def test_grouped_trend_chart_has_per_area_series(daily_kpi):
+    """Grouped mode with multiple areas should produce one series per area."""
+    payload = _aggregated_input(num_devices=50)
+    result = daily_kpi.compute(payload)
+    chart = result["trend_chart"]
+    series_names = [s["name"] for s in chart["series"]]
+    assert len(chart["series"]) >= 4
+    for area in ["A区", "B区", "C区", "D区"]:
+        matching = [n for n in series_names if area in n]
+        assert matching, f"Expected a series containing {area}"
+
+
+def test_grouped_trend_chart_area_series_has_device_count(daily_kpi):
+    """Each area series name should show device count like 'A区（13台）'."""
+    payload = _aggregated_input(num_devices=50)
+    result = daily_kpi.compute(payload)
+    chart = result["trend_chart"]
+    for s in chart["series"]:
+        assert "台" in s["name"]
+
+
+def test_grouped_trend_chart_each_series_has_24_points(daily_kpi):
+    payload = _aggregated_input(num_devices=50)
+    result = daily_kpi.compute(payload)
+    chart = result["trend_chart"]
+    for s in chart["series"]:
+        assert len(s["data"]) == 24
+
+
+def test_grouped_trend_chart_with_compare_adds_dashed_line(daily_kpi):
+    """When compare is provided in grouped mode, a dashed compare line is added."""
+    payload = _aggregated_input(num_devices=50)
+    payload["compare_type"] = "previous_day"
+    payload["compare_date"] = "2026-05-12"
+    payload["compare"] = {
+        "kpis": {"runtime_rate": 0.91, "corrosion_rate": 0.1},
+        "kpi_units": {"runtime_rate": "%", "corrosion_rate": "mm/a"},
+        "hourly_runtime_rate": [0.88] * 24,
+        "alarms": [],
+    }
+    result = daily_kpi.compute(payload)
+    chart = result["trend_chart"]
+    dashed = [s for s in chart["series"] if s.get("lineStyle", {}).get("type") == "dashed"]
+    assert len(dashed) == 1
+    assert "2026-05-12" in dashed[0]["name"]
+
+
+def test_single_area_grouped_falls_back_to_overall(daily_kpi):
+    """When all devices are in one area, use a single '整体均值' line instead."""
+    per_equipment = {}
+    for i in range(30):
+        eq_id = f"SE-{i+1:03d}"
+        per_equipment[eq_id] = {
+            "kpis": {"runtime_rate": 0.9},
+            "hourly_runtime_rate": [0.9] * 24,
+            "name": f"设备-{i+1}",
+            "area": "A区",
+        }
+    payload = {
+        "report_date": "2026-05-13",
+        "equipment_ids": list(per_equipment.keys()),
+        "equipment_type": "static_equipment",
+        "equipment_count": 30,
+        "kpi_keys": ["runtime_rate"],
+        "compare_type": "none",
+        "compare_date": None,
+        "current": {
+            "kpis": {"runtime_rate": 0.9},
+            "kpi_units": {"runtime_rate": "%"},
+            "hourly_runtime_rate": [0.9] * 24,
+            "alarms": [],
+            "per_equipment": per_equipment,
+        },
+        "compare": None,
+    }
+    result = daily_kpi.compute(payload)
+    chart = result["trend_chart"]
+    assert len(chart["series"]) == 1
+    assert "整体均值" in chart["series"][0]["name"]

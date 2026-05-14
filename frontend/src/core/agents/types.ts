@@ -1,5 +1,12 @@
 export type AgentSource = "builtin" | "tenant" | "user";
 
+export interface StarterConfig {
+  label: string;
+  prompt: string;
+  icon?: string | null;
+  auto_start?: boolean;
+}
+
 export interface Agent {
   name: string;
   description: string;
@@ -17,6 +24,7 @@ export interface Agent {
   type?: "agent" | "group" | null;
   parent?: string | null;
   order?: number | null;
+  starters?: StarterConfig[] | null;
 }
 
 export interface CreateAgentRequest {

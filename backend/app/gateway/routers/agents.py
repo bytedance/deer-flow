@@ -41,6 +41,7 @@ class AgentResponse(BaseModel):
     parent: str | None = Field(default=None, description="Parent agent name for child agents")
     order: int | None = Field(default=None, description="Display order for child agents within a group")
     soul: str | None = Field(default=None, description="SOUL.md content")
+    starters: list[dict] | None = Field(default=None, description="Starter prompts for agent welcome page")
 
 
 class AgentsListResponse(BaseModel):
@@ -127,6 +128,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         parent=agent_cfg.parent,
         order=agent_cfg.order,
         soul=soul,
+        starters=[s.model_dump() for s in agent_cfg.starters] if agent_cfg.starters else None,
     )
 
 

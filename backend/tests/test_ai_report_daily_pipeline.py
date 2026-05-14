@@ -85,6 +85,7 @@ def test_query_kpi_export_pipeline(monkeypatch, tmp_path, capsys):
         "filename": "daily_report.md",
         "path": str(tmp_path / "daily_report.md"),
         "artifact_path": str(tmp_path / "daily_report.md"),
+        "present_files_hint": ["/mnt/user-data/outputs/daily_report.md"],
     }
 
     markdown = (tmp_path / "daily_report.md").read_text(encoding="utf-8")

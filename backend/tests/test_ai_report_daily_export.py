@@ -73,7 +73,7 @@ def test_export_result_contract(export_report, kpi_payload, tmp_path):
 
 def test_rejects_unsupported_format(export_report, kpi_payload):
     with pytest.raises(ValueError, match="Unsupported export format"):
-        export_report.write_report(kpi_payload, "pdf")
+        export_report.write_report(kpi_payload, "docx")
 
 
 def test_load_input(export_report, kpi_payload, tmp_path):
@@ -165,3 +165,78 @@ def test_aggregated_no_anomalies_skips_section(export_report, aggregated_payload
     payload = {**aggregated_payload, "top_anomalies": []}
     markdown = export_report.render_markdown(payload)
     assert "## 异常设备排行" not in markdown
+
+
+# --- PDF export tests ---
+
+
+def test_pdf_format_accepted(export_report, kpi_payload, tmp_path, monkeypatch):
+    """PDF format is in SUPPORTED_FORMATS and render_html produces valid HTML."""
+    assert "pdf" in export_report.SUPPORTED_FORMATS
+    html = export_report.render_html(kpi_payload)
+    assert "<!DOCTYPE html>" in html
+    assert "<body>" in html
+    assert "KPI" in html
+
+
+def test_pdf_export_without_weasyprint(export_report, kpi_payload, monkeypatch):
+    """When weasyprint is not importable, write_report raises ImportError."""
+    import builtins
+    real_import = builtins.__import__
+
+    def block_weasyprint(name, *args, **kwargs):
+        if name == "weasyprint":
+            raise ImportError("no weasyprint")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_weasyprint)
+    with pytest.raises(ImportError, match="weasyprint"):
+        export_report.write_report(kpi_payload, "pdf")
+
+
+def test_render_html_escapes_special_chars(export_report):
+    payload = {
+        "report_date": "2026-05-14",
+        "equipment_ids": ["E<1>"],
+        "overall_status": {"level": "ok", "summary": "正常"},
+        "kpi_summary": [],
+        "alarm_table": [],
+        "recommendations": [],
+    }
+    html = export_report.render_html(payload)
+    assert "<script" not in html
+
+
+# --- present_files_hint tests ---
+
+
+def test_export_result_has_present_files_hint(export_report, kpi_payload, tmp_path):
+    result = export_report.build_export_result(kpi_payload, "md")
+    assert "present_files_hint" in result
+    assert result["present_files_hint"] == ["/mnt/user-data/outputs/daily_report.md"]
+
+
+def test_export_result_pdf_hint(export_report, kpi_payload, tmp_path, monkeypatch):
+    """present_files_hint uses the correct extension for PDF."""
+    import builtins
+    real_import = builtins.__import__
+
+    class FakeHTML:
+        def __init__(self, string=None):
+            pass
+        def write_pdf(self, target):
+            from pathlib import Path
+            Path(target).write_bytes(b"%PDF-fake")
+
+    def mock_import(name, *args, **kwargs):
+        if name == "weasyprint":
+            import types
+            mod = types.ModuleType("weasyprint")
+            mod.HTML = FakeHTML
+            return mod
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+    result = export_report.build_export_result(kpi_payload, "pdf")
+    assert result["present_files_hint"] == ["/mnt/user-data/outputs/daily_report.pdf"]
+    assert result["filename"] == "daily_report.pdf"

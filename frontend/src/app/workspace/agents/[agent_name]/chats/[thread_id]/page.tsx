@@ -2,7 +2,7 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -91,6 +91,23 @@ export default function AgentChatPage() {
       void sendMessage(threadId, message, { agent_name });
     },
     [sendMessage, threadId, agent_name],
+  );
+
+  const autoStartFired = useRef(false);
+  useEffect(() => {
+    if (!isNewThread || !agent?.starters || autoStartFired.current) return;
+    const autoStarter = agent.starters.find((s) => s.auto_start);
+    if (autoStarter) {
+      autoStartFired.current = true;
+      void sendMessage(threadId, { text: autoStarter.prompt, files: [] }, { agent_name }, { additionalKwargs: { hide_from_ui: true } });
+    }
+  }, [isNewThread, agent, sendMessage, threadId, agent_name]);
+
+  const handleStarterClick = useCallback(
+    (prompt: string) => {
+      handleSubmit({ text: prompt, files: [] });
+    },
+    [handleSubmit],
   );
 
   useEffect(() => {
@@ -219,7 +236,7 @@ export default function AgentChatPage() {
                   context={settings.context}
                   extraHeader={
                     isNewThread && (
-                      <AgentWelcome agent={agent} agentName={agent_name} />
+                      <AgentWelcome agent={agent} agentName={agent_name} onStarterClick={handleStarterClick} />
                     )
                   }
                   disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}

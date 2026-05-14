@@ -57,11 +57,18 @@ export const cardPropsSchema = z.object({
 
 const formFieldSchema = z.object({
   name: z.string(),
-  type: z.enum(["text", "number", "email", "password", "textarea", "select", "checkbox", "radio", "date"]),
+  type: z.enum(["text", "number", "email", "password", "textarea", "select", "checkbox", "radio", "date", "multi-select"]),
   label: z.string(),
   placeholder: z.string().optional(),
   required: z.boolean().optional(),
-  options: z.array(z.object({ label: z.string(), value: z.string() })).optional(),
+  options: z.array(z.object({
+    label: z.string(),
+    value: z.string(),
+    group: z.string().optional(),
+    description: z.string().optional(),
+  })).optional(),
+  searchable: z.boolean().optional(),
+  max_visible: z.number().min(1).optional(),
   validation: z.object({
     min: z.number().optional(),
     max: z.number().optional(),

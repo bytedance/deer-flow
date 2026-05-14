@@ -2,6 +2,7 @@
 
 import { BotIcon } from "lucide-react";
 
+import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { type Agent } from "@/core/agents";
 import { cn } from "@/lib/utils";
 
@@ -9,10 +10,12 @@ export function AgentWelcome({
   className,
   agent,
   agentName,
+  onStarterClick,
 }: {
   className?: string;
   agent: Agent | null | undefined;
   agentName: string;
+  onStarterClick?: (prompt: string) => void;
 }) {
   const displayName = agent?.display_name ?? agent?.name ?? agentName;
   const description = agent?.description;
@@ -35,6 +38,17 @@ export function AgentWelcome({
       <div className="text-2xl font-bold">{displayName}</div>
       {description && (
         <p className="text-muted-foreground max-w-sm text-sm">{description}</p>
+      )}
+      {agent?.starters && agent.starters.length > 0 && (
+        <Suggestions className="mt-2 justify-center">
+          {agent.starters.map((s) => (
+            <Suggestion
+              key={s.label}
+              suggestion={s.label}
+              onClick={() => onStarterClick?.(s.prompt)}
+            />
+          ))}
+        </Suggestions>
       )}
     </div>
   );

@@ -36,6 +36,15 @@ def validate_agent_name(name: str | None) -> str | None:
     return name
 
 
+class StarterConfig(BaseModel):
+    """A starter prompt that can be shown on the agent welcome page."""
+
+    label: str
+    prompt: str
+    icon: str | None = None
+    auto_start: bool = False
+
+
 class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
@@ -57,6 +66,7 @@ class AgentConfig(BaseModel):
     skills: list[str] | None = None
     mcp_servers: list[str] | None = None
     tags: list[str] | None = None
+    starters: list[StarterConfig] | None = None
     advanced: dict[str, Any] | None = None
 
 
@@ -78,6 +88,7 @@ class AgentInfo(BaseModel):
     tool_groups: list[str] | None = None
     skills: list[str] | None = None
     mcp_servers: list[str] | None = None
+    starters: list[StarterConfig] | None = None
 
 
 def to_agent_info(config: AgentConfig, *, source: str = "user", editable: bool = True, enabled: bool = True, tenant_id: str | None = None) -> AgentInfo:
@@ -98,6 +109,7 @@ def to_agent_info(config: AgentConfig, *, source: str = "user", editable: bool =
         tool_groups=config.tool_groups,
         skills=config.skills,
         mcp_servers=config.mcp_servers,
+        starters=config.starters,
     )
 
 
