@@ -120,9 +120,9 @@ async def get_thread_blocks(thread_id: str, request: Request) -> list[dict]:
         return blocks
 
     try:
-        from app.gateway.deps import get_event_store
+        from app.gateway.deps import get_run_event_store
 
-        event_store = get_event_store(request)
+        event_store = get_run_event_store(request)
         stored_messages = await event_store.list_messages(thread_id, limit=500)
         raw_messages = [m.get("content", m) if isinstance(m, dict) else m for m in stored_messages]
         blocks = extract_blocks_from_messages(raw_messages)

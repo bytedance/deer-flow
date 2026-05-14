@@ -157,9 +157,13 @@ export function useThreadStream({
     threadIdRef.current = normalizedThreadId;
 
     sseManagerRef.current?.disconnect();
-    sseManagerRef.current = normalizedThreadId
-      ? new GenUISSEManager(normalizedThreadId)
-      : null;
+    if (normalizedThreadId) {
+      const manager = new GenUISSEManager(normalizedThreadId);
+      sseManagerRef.current = manager;
+      void manager.recoverBlocks();
+    } else {
+      sseManagerRef.current = null;
+    }
 
     return () => {
       sseManagerRef.current?.disconnect();

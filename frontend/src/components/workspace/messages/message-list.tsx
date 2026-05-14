@@ -10,6 +10,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { submitInteraction } from "@/core/genui";
+import { recoverBlocksFromMessages } from "@/core/genui/sse-recovery";
 import { useBlockStore } from "@/core/genui/store";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -229,6 +230,13 @@ export function MessageList({
     wasLoadingRef.current = thread.isLoading;
   }, [thread.isLoading]);
 
+  const recoveredRef = useRef(false);
+  useEffect(() => {
+    if (recoveredRef.current || thread.isLoading || messages.length === 0) return;
+    recoveredRef.current = true;
+    recoverBlocksFromMessages(messages as { type?: string; content?: unknown }[]);
+  }, [thread.isLoading, messages]);
+
   const renderAssistantCopyButton = useCallback((messages: Message[]) => {
     const clipboardData = [...messages]
       .reverse()
@@ -323,7 +331,7 @@ export function MessageList({
           if (group.type === "human" || group.type === "assistant") {
             return (
               <div
-                key={group.id}
+                key={`${group.type}-${group.id}`}
                 className={cn(
                   "w-full",
                   group.type === "assistant" && "group/assistant-turn",
@@ -355,7 +363,7 @@ export function MessageList({
             const message = group.messages[0];
             if (message && hasContent(message)) {
               return (
-                <div key={group.id} className="w-full">
+                <div key={`clarification-${group.id}`} className="w-full">
                   <MarkdownContent
                     content={extractContentFromMessage(message)}
                     isLoading={thread.isLoading}
