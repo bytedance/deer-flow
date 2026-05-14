@@ -178,7 +178,6 @@ def test_cancel_store_only_run_returns_409():
 def test_join_store_only_run_returns_409():
     """join endpoint should return 409 for store-only runs (no local stream state)."""
     app = _make_app(run_manager=_make_store_only_run_manager())
-    app.state.stream_bridge = MagicMock()  # satisfy _require before the guard fires
     with TestClient(app) as client:
         response = client.get("/api/threads/thread-store/runs/store-only-run/join")
 

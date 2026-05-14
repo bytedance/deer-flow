@@ -166,8 +166,13 @@ class RunManager:
             logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
             return None
 
-    async def list_by_thread(self, thread_id: str) -> list[RunRecord]:
-        """Return all runs for a given thread, newest first."""
+    async def list_by_thread(self, thread_id: str, *, limit: int = 100) -> list[RunRecord]:
+        """Return runs for a given thread, newest first.
+
+        In-memory runs are always included.  When a store is configured,
+        historical rows are merged in up to ``limit`` (default 100, matching
+        the store's default page size).
+        """
         async with self._lock:
             # Dict insertion order gives deterministic results when timestamps tie.
             memory_records = [r for r in self._runs.values() if r.thread_id == thread_id]
@@ -175,7 +180,7 @@ class RunManager:
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)
         records_by_id = {record.run_id: record for record in memory_records}
         try:
-            rows = await self._store.list_by_thread(thread_id)
+            rows = await self._store.list_by_thread(thread_id, limit=limit)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)
