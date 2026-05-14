@@ -1,6 +1,6 @@
 import { type NextRequest } from "next/server";
 
-const DEFAULT_GATEWAY_BASE_URL = "http://127.0.0.1:8001";
+import { resolveInternalGatewayUrl } from "@/core/auth/gateway-url";
 
 const HOP_BY_HOP_HEADERS = [
   "connection",
@@ -12,13 +12,6 @@ const HOP_BY_HOP_HEADERS = [
   "transfer-encoding",
   "upgrade",
 ] as const;
-
-function getGatewayBaseUrl() {
-  const configured = process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL?.trim();
-  return (
-    configured && configured.length > 0 ? configured : DEFAULT_GATEWAY_BASE_URL
-  ).replace(/\/+$/, "");
-}
 
 function getConnectionHeaderNames(headers: Headers) {
   return (
@@ -41,7 +34,7 @@ function deleteHopByHopHeaders(
 
 function buildGatewayUrl(path: string[], search: string) {
   const pathname = ["api", ...path.map(encodeURIComponent)].join("/");
-  return `${getGatewayBaseUrl()}/${pathname}${search}`;
+  return `${resolveInternalGatewayUrl()}/${pathname}${search}`;
 }
 
 function buildHeaders(request: NextRequest) {

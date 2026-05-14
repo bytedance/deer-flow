@@ -3,13 +3,7 @@
  * for Docker builds.
  */
 import "./src/env.js";
-
-function getInternalServiceURL(envKey, fallbackURL) {
-  const configured = process.env[envKey]?.trim();
-  return configured && configured.length > 0
-    ? configured.replace(/\/+$/, "")
-    : fallbackURL;
-}
+import { resolveInternalGatewayUrl } from "./src/core/auth/gateway-url.js";
 
 function hasConfiguredEnvValue(envKey) {
   return Boolean(process.env[envKey]?.trim());
@@ -29,10 +23,7 @@ const config = {
   async rewrites() {
     const rewrites = [];
     const fallback = [];
-    const gatewayURL = getInternalServiceURL(
-      "DEER_FLOW_INTERNAL_GATEWAY_BASE_URL",
-      "http://127.0.0.1:8001",
-    );
+    const gatewayURL = resolveInternalGatewayUrl();
 
     if (!hasConfiguredEnvValue("NEXT_PUBLIC_LANGGRAPH_BASE_URL")) {
       fallback.push({
