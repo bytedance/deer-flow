@@ -169,8 +169,9 @@ class RunManager:
     async def list_by_thread(self, thread_id: str, *, limit: int = 100) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
 
-        In-memory runs take precedence and are sorted before store-only rows.
-        The final list is trimmed to ``limit`` after merging (default 100).
+        In-memory runs take precedence only when the same ``run_id`` exists in both
+        memory and the backing store. The merged result is then sorted newest-first
+        by ``created_at`` and trimmed to ``limit`` (default 100).
         """
         async with self._lock:
             # Dict insertion order gives deterministic results when timestamps tie.
