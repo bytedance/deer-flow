@@ -111,7 +111,8 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
     assert metadata.get("langfuse_session_id") == "thread-xyz"
     # conftest.py autouse fixture injects ``test-user-autouse`` into the
     # contextvar — the worker should read it via ``get_effective_user_id``.
-    assert metadata.get("langfuse_user_id") == "test-user-autouse"
+    user_id = metadata.get("langfuse_user_id")
+    assert user_id == "test-user-autouse", f"expected test-user-autouse, got {user_id}"
     assert metadata.get("langfuse_trace_name") == "lead-agent"
     tags = metadata.get("langfuse_tags") or []
     assert "model:gpt-4o" in tags
@@ -119,43 +120,47 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_agent_falls_back_to_default_user_when_unset(monkeypatch):
-    """When no user is in the contextvar, langfuse_user_id falls back to 'default'."""
+    """When no user is in the contextvar, langfuse_user_id falls back to 'default'.
+
+    Uses ``monkeypatch.setattr`` to redirect ``get_effective_user_id`` to return
+    ``"default"`` rather than directly mutating the contextvar — direct contextvar
+    operations across pytest test boundaries have produced spooky cross-file
+    pollution when combined with the langfuse OTel global tracer provider.
+    """
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
     from deerflow.config import tracing_config as tracing_module
-    from deerflow.runtime import user_context
+    from deerflow.runtime.runs import worker as worker_module
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
 
     tracing_module._tracing_config = None
-    # Clear the contextvar set by conftest's autouse fixture.
-    token = user_context._current_user.set(None)
-    try:
-        fake_agent = _FakeAgent()
+    monkeypatch.setattr(worker_module, "get_effective_user_id", lambda: DEFAULT_USER_ID)
 
-        def agent_factory(config):
-            return fake_agent
+    fake_agent = _FakeAgent()
 
-        record = RunRecord(
-            run_id="run-fallback",
-            thread_id="thread-fb",
-            assistant_id="lead-agent",
-            status=RunStatus.pending,
-            on_disconnect=DisconnectMode.cancel,
-        )
-        record.abort_event = asyncio.Event()
-        ctx = RunContext(checkpointer=None)
+    def agent_factory(config):
+        return fake_agent
 
-        await run_agent(
-            _FakeBridge(),
-            _FakeRunManager(),
-            record,
-            ctx=ctx,
-            agent_factory=agent_factory,
-            graph_input={"messages": []},
-            config={"configurable": {"thread_id": "thread-fb"}},
-        )
-    finally:
-        user_context._current_user.reset(token)
+    record = RunRecord(
+        run_id="run-fallback",
+        thread_id="thread-fb",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    ctx = RunContext(checkpointer=None)
+
+    await run_agent(
+        _FakeBridge(),
+        _FakeRunManager(),
+        record,
+        ctx=ctx,
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": "thread-fb"}},
+    )
 
     metadata = fake_agent.captured_config.get("metadata") or {}
     assert metadata.get("langfuse_user_id") == "default"
