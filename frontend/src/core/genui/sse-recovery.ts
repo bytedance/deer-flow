@@ -69,8 +69,11 @@ export function recoverBlocksFromMessages(messages: { type?: string; content?: u
   if (blocks.length === 0) return;
 
   const store = useBlockStore.getState();
+  const existing = store.blocks;
   for (const block of blocks) {
-    store.applyBlock({ ...block, action: "create" });
+    if (!existing.has(block.block_id)) {
+      store.applyBlock({ ...block, action: "create" });
+    }
   }
 }
 

@@ -1,7 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import { ChevronUpIcon, Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Conversation,
@@ -13,6 +13,10 @@ import { submitInteraction } from "@/core/genui";
 import { extractBlockIdsFromMessages } from "@/core/genui/history";
 import { recoverBlocksFromMessages } from "@/core/genui/sse-recovery";
 import { useBlockStore } from "@/core/genui/store";
+import {
+  buildStreamingBlockExclusions,
+  partitionStandaloneBlockIds,
+} from "@/core/genui/visibility";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildTokenDebugSteps,
@@ -218,13 +222,21 @@ export function MessageList({
     return ids;
   }, [groupedMessages]);
 
-  const preStreamBlockIdsRef = useRef<string[]>([]);
   const preStreamMessageKeysRef = useRef<Set<string>>(new Set());
+  const preStreamBlockIdsRef = useRef<Set<string>>(new Set());
   const [liveStreamMessageKeys, setLiveStreamMessageKeys] = useState<
     Set<string>
   >(() => new Set());
   const wasLoadingRef = useRef(false);
   const effectiveLiveStreamMessageKeys = useMemo(() => {
+    if (thread.isLoading) {
+      return new Set(
+        messages
+          .map(getMessageKey)
+          .filter((key) => !preStreamMessageKeysRef.current.has(key)),
+      );
+    }
+
     if (!thread.isLoading && wasLoadingRef.current) {
       return new Set(
         messages
@@ -237,10 +249,8 @@ export function MessageList({
 
   useEffect(() => {
     if (thread.isLoading && !wasLoadingRef.current) {
-      preStreamBlockIdsRef.current = Array.from(
-        useBlockStore.getState().blocks.keys(),
-      );
       preStreamMessageKeysRef.current = new Set(messages.map(getMessageKey));
+      preStreamBlockIdsRef.current = new Set(storeBlockIds);
       setLiveStreamMessageKeys(new Set());
     }
 
@@ -255,32 +265,40 @@ export function MessageList({
     }
 
     wasLoadingRef.current = thread.isLoading;
-  }, [thread.isLoading, messages]);
+  }, [thread.isLoading, messages, storeBlockIds]);
 
-  const [historicalFallbackBlockIds, setHistoricalFallbackBlockIds] = useState<Set<string>>(
+  const [historicalAnchoredBlockIds, setHistoricalAnchoredBlockIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const historicalMessages = useMemo(
+    () =>
+      messages.filter(
+        (message) => !effectiveLiveStreamMessageKeys.has(getMessageKey(message)),
+      ),
+    [effectiveLiveStreamMessageKeys, messages],
+  );
+  const liveMessages = useMemo(
+    () =>
+      messages.filter((message) =>
+        effectiveLiveStreamMessageKeys.has(getMessageKey(message)),
+      ),
+    [effectiveLiveStreamMessageKeys, messages],
+  );
+
   useEffect(() => {
-    if (thread.isLoading || messages.length === 0) return;
+    if (messages.length === 0) return;
 
     recoverBlocksFromMessages(
       messages as { type?: string; content?: unknown }[],
     );
 
-    const historicalMessages = messages.filter(
-      (message) => !effectiveLiveStreamMessageKeys.has(getMessageKey(message)),
-    );
     const historicalBlockIds = extractBlockIdsFromMessages(historicalMessages);
+    if (historicalBlockIds.length === 0) return;
 
-    const storeIds = Array.from(useBlockStore.getState().blocks.keys());
-
-    const allHistoricalIds = new Set([...historicalBlockIds, ...storeIds]);
-    if (allHistoricalIds.size === 0) return;
-
-    setHistoricalFallbackBlockIds((prev) => {
+    setHistoricalAnchoredBlockIds((prev) => {
       let changed = false;
       const next = new Set(prev);
-      for (const id of allHistoricalIds) {
+      for (const id of historicalBlockIds) {
         if (!next.has(id)) {
           next.add(id);
           changed = true;
@@ -288,26 +306,73 @@ export function MessageList({
       }
       return changed ? next : prev;
     });
-  }, [effectiveLiveStreamMessageKeys, thread.isLoading, messages, storeBlockIds]);
+  }, [historicalMessages, messages]);
 
   const interactions = useBlockStore((state) => state.interactions);
+  const historicalMessageBlockIds = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...historicalAnchoredBlockIds,
+          ...extractBlockIdsFromMessages(historicalMessages),
+        ]),
+      ),
+    [historicalAnchoredBlockIds, historicalMessages],
+  );
+  const liveMessageBlockIds = useMemo(
+    () => extractBlockIdsFromMessages(liveMessages),
+    [liveMessages],
+  );
 
-  const unclaimedBlockIds = useMemo(() => {
-    const claimed = new Set(claimedBlockIds);
-    const preStream = new Set(preStreamBlockIdsRef.current);
-    const referenced = extractBlockIdsFromMessages(messages);
-    const ids = new Set([...storeBlockIds, ...referenced]);
-    return Array.from(ids).filter((id) => {
-      if (claimed.has(id) || !historicalFallbackBlockIds.has(id)) return false;
-      if (preStream.has(id)) return false;
-      const block = blocks.get(id);
-      if (block?.callback_id) {
-        const interaction = interactions.get(block.callback_id);
-        if (interaction?.status === "submitted") return false;
+  const { historicalBlockIds: historicalStandaloneBlockIds, tailBlockIds: unclaimedBlockIds } =
+    useMemo(() => {
+      return partitionStandaloneBlockIds({
+        claimedBlockIds,
+        storeBlockIds,
+        historicalMessageBlockIds,
+        liveMessageBlockIds,
+        preStreamBlockIds: Array.from(preStreamBlockIdsRef.current),
+        blocks,
+        interactions,
+      });
+    }, [
+      claimedBlockIds,
+      storeBlockIds,
+      historicalMessageBlockIds,
+      liveMessageBlockIds,
+      blocks,
+      interactions,
+    ]);
+
+  const firstLiveGroupIndex = useMemo(
+    () =>
+      groupedMessages.findIndex((group) =>
+        group.messages.some((message) =>
+          effectiveLiveStreamMessageKeys.has(getMessageKey(message)),
+        ),
+      ),
+    [effectiveLiveStreamMessageKeys, groupedMessages],
+  );
+  const currentTurnStartIndex = useMemo(() => {
+    if (firstLiveGroupIndex >= 0) {
+      for (let index = firstLiveGroupIndex - 1; index >= 0; index -= 1) {
+        if (groupedMessages[index]?.type === "human") {
+          return index;
+        }
       }
-      return true;
-    });
-  }, [claimedBlockIds, historicalFallbackBlockIds, messages, storeBlockIds, blocks, interactions]);
+      return firstLiveGroupIndex;
+    }
+
+    if (thread.isLoading) {
+      for (let index = groupedMessages.length - 1; index >= 0; index -= 1) {
+        if (groupedMessages[index]?.type === "human") {
+          return index;
+        }
+      }
+    }
+
+    return -1;
+  }, [firstLiveGroupIndex, groupedMessages, thread.isLoading]);
 
   const renderAssistantCopyButton = useCallback((messages: Message[]) => {
     const clipboardData = [...messages]
@@ -399,9 +464,10 @@ export function MessageList({
         />
         {groupedMessages.map((group, groupIndex) => {
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
+          let renderedGroup: React.ReactNode = null;
 
           if (group.type === "human" || group.type === "assistant") {
-            return (
+            renderedGroup = (
               <div
                 key={`${group.type}-${group.id}`}
                 className={cn(
@@ -434,7 +500,7 @@ export function MessageList({
           } else if (group.type === "assistant:clarification") {
             const message = group.messages[0];
             if (message && hasContent(message)) {
-              return (
+              renderedGroup = (
                 <div key={`clarification-${group.id}`} className="w-full">
                   <MarkdownContent
                     content={extractContentFromMessage(message)}
@@ -448,7 +514,6 @@ export function MessageList({
                 </div>
               );
             }
-            return null;
           } else if (group.type === "assistant:present-files") {
             const files: string[] = [];
             for (const message of group.messages) {
@@ -570,7 +635,7 @@ export function MessageList({
                 );
               }
             }
-            return (
+            renderedGroup = (
               <div
                 key={"subtask-group-" + group.id}
                 className="relative z-1 flex flex-col gap-2"
@@ -619,7 +684,38 @@ export function MessageList({
               </div>
             );
           }
+
+          if (!renderedGroup) {
+            return null;
+          }
+
+          if (
+            groupIndex === currentTurnStartIndex &&
+            historicalStandaloneBlockIds.length > 0
+          ) {
+            return (
+              <Fragment key={`group-${group.id ?? groupIndex}`}>
+                <GenUIBlockList
+                  threadId={threadId}
+                  blockIds={historicalStandaloneBlockIds}
+                  disableExpiration={true}
+                  onInteraction={handleInteraction}
+                />
+                {renderedGroup}
+              </Fragment>
+            );
+          }
+
+          return renderedGroup;
         })}
+        {currentTurnStartIndex < 0 && historicalStandaloneBlockIds.length > 0 && (
+          <GenUIBlockList
+            threadId={threadId}
+            blockIds={historicalStandaloneBlockIds}
+            disableExpiration={true}
+            onInteraction={handleInteraction}
+          />
+        )}
         {!thread.isLoading && unclaimedBlockIds.length > 0 && (
           <GenUIBlockList
             threadId={threadId}
@@ -632,7 +728,10 @@ export function MessageList({
         {thread.isLoading && (
           <GenUIBlockList
             threadId={threadId}
-            excludeBlockIds={[...claimedBlockIds, ...preStreamBlockIdsRef.current]}
+            excludeBlockIds={buildStreamingBlockExclusions(
+              claimedBlockIds,
+              historicalStandaloneBlockIds,
+            )}
             onInteraction={handleInteraction}
           />
         )}
