@@ -2,6 +2,7 @@
 
 import { BotIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
 
 import { type Agent } from "@/core/agents";
 import { cn } from "@/lib/utils";
@@ -36,7 +37,7 @@ export function AgentChildSelector({
     }
   }
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-end justify-center"
       onClick={onClose}
@@ -89,6 +90,7 @@ export function AgentChildSelector({
           ))}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
