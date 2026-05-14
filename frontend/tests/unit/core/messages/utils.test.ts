@@ -63,3 +63,34 @@ test("aggregates token usage messages once per assistant turn", () => {
     ),
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
 });
+
+test("hides internal todo reminder messages from UI groups", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Start",
+    },
+    {
+      id: "todo-reminder",
+      type: "human",
+      name: "todo_reminder",
+      content: "<system_reminder>hidden</system_reminder>",
+    },
+    {
+      id: "todo-completion-reminder",
+      type: "human",
+      name: "todo_completion_reminder",
+      content: "<system_reminder>also hidden</system_reminder>",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Visible answer",
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.id)).toEqual(["human-1", "ai-1"]);
+});

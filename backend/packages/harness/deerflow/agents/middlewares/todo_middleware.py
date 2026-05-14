@@ -7,17 +7,20 @@ reminder message so the model still knows about the outstanding todo list.
 
 Additionally, this middleware prevents the agent from exiting the loop while
 there are still incomplete todo items. When the model produces a final response
-(no tool calls) but todos are not yet complete, the middleware injects a reminder
-and jumps back to the model node to force continued engagement.
+(no tool calls) but todos are not yet complete, the middleware queues a
+transient reminder for the next model request and jumps back to the model node
+to force continued engagement.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from threading import Lock
 from typing import Any, override
 
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.todo import PlanningState, Todo
-from langchain.agents.middleware.types import hook_config
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
@@ -63,6 +66,53 @@ class TodoMiddleware(TodoListMiddleware):
     todo list. This middleware detects that gap in `before_model` / `abefore_model`
     and injects a reminder message so the model can continue tracking progress.
     """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._completion_reminder_lock = Lock()
+        self._pending_completion_reminders: dict[str, HumanMessage] = {}
+        self._completion_reminder_counts: dict[str, int] = {}
+
+    @staticmethod
+    def _thread_id(runtime: Runtime) -> str:
+        context = getattr(runtime, "context", None) or {}
+        return str(context.get("thread_id") or "__default__")
+
+    def _clear_completion_reminder_state(self, thread_id: str) -> None:
+        with self._completion_reminder_lock:
+            self._pending_completion_reminders.pop(thread_id, None)
+            self._completion_reminder_counts.pop(thread_id, None)
+
+    def _queue_completion_reminder(self, thread_id: str, reminder: HumanMessage) -> None:
+        with self._completion_reminder_lock:
+            self._pending_completion_reminders[thread_id] = reminder
+            self._completion_reminder_counts[thread_id] = self._completion_reminder_counts.get(thread_id, 0) + 1
+
+    def _completion_reminder_count_for_thread(self, thread_id: str) -> int:
+        with self._completion_reminder_lock:
+            return self._completion_reminder_counts.get(thread_id, 0)
+
+    def _pop_pending_completion_reminder(self, thread_id: str) -> HumanMessage | None:
+        with self._completion_reminder_lock:
+            return self._pending_completion_reminders.pop(thread_id, None)
+
+    def before_agent(self, state: PlanningState, runtime: Runtime) -> dict[str, Any] | None:
+        """Clear stale completion reminders at run start."""
+        self._clear_completion_reminder_state(self._thread_id(runtime))
+        return None
+
+    def after_agent(self, state: PlanningState, runtime: Runtime) -> dict[str, Any] | None:
+        """Clear queued completion reminders at run end."""
+        self._clear_completion_reminder_state(self._thread_id(runtime))
+        return None
+
+    async def abefore_agent(self, state: PlanningState, runtime: Runtime) -> dict[str, Any] | None:
+        """Async version of before_agent."""
+        return self.before_agent(state, runtime)
+
+    async def aafter_agent(self, state: PlanningState, runtime: Runtime) -> dict[str, Any] | None:
+        """Async version of after_agent."""
+        return self.after_agent(state, runtime)
 
     @override
     def before_model(
@@ -125,7 +175,7 @@ class TodoMiddleware(TodoListMiddleware):
 
         In addition to the base class check for parallel ``write_todos`` calls,
         this override intercepts model responses that have no tool calls while
-        there are still incomplete todo items. It injects a reminder
+        there are still incomplete todo items. It queues a transient reminder
         ``HumanMessage`` and jumps back to the model node so the agent
         continues working through the todo list.
 
@@ -137,22 +187,31 @@ class TodoMiddleware(TodoListMiddleware):
         if base_result is not None:
             return base_result
 
+        thread_id = self._thread_id(runtime)
+
         # 2. Only intervene when the agent wants to exit (no tool calls).
         messages = state.get("messages") or []
         last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
         if not last_ai or last_ai.tool_calls:
             return None
+        if getattr(last_ai, "invalid_tool_calls", None):
+            return {"jump_to": "model"}
 
         # 3. Allow exit when all todos are completed or there are no todos.
         todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
         if not todos or all(t.get("status") == "completed" for t in todos):
+            self._clear_completion_reminder_state(thread_id)
             return None
 
         # 4. Enforce a reminder cap to prevent infinite re-engagement loops.
-        if _completion_reminder_count(messages) >= self._MAX_COMPLETION_REMINDERS:
+        persisted_count = _completion_reminder_count(messages)
+        transient_count = self._completion_reminder_count_for_thread(thread_id)
+        if max(persisted_count, transient_count) >= self._MAX_COMPLETION_REMINDERS:
             return None
 
-        # 5. Inject a reminder and force the agent back to the model.
+        # 5. Queue a transient reminder and force the agent back to the model.
+        # The reminder is injected in wrap_model_call so it is visible to the
+        # model but never persisted or streamed as a normal conversation message.
         incomplete = [t for t in todos if t.get("status") != "completed"]
         incomplete_text = "\n".join(f"- [{t.get('status', 'pending')}] {t.get('content', '')}" for t in incomplete)
         reminder = HumanMessage(
@@ -166,7 +225,32 @@ class TodoMiddleware(TodoListMiddleware):
                 "</system_reminder>"
             ),
         )
-        return {"jump_to": "model", "messages": [reminder]}
+        self._queue_completion_reminder(thread_id, reminder)
+        return {"jump_to": "model"}
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        thread_id = self._thread_id(request.runtime)
+        reminder = self._pop_pending_completion_reminder(thread_id)
+        if reminder is not None:
+            request = request.override(messages=[*request.messages, reminder])
+        return handler(request)
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        thread_id = self._thread_id(request.runtime)
+        reminder = self._pop_pending_completion_reminder(thread_id)
+        if reminder is not None:
+            request = request.override(messages=[*request.messages, reminder])
+        return await handler(request)
 
     @override
     @hook_config(can_jump_to=["model"])

@@ -53,10 +53,6 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       continue;
     }
 
-    if (message.name === "todo_reminder") {
-      continue;
-    }
-
     if (message.type === "human") {
       groups.push({ id: message.id, type: "human", messages: [message] });
       continue;
@@ -369,7 +365,9 @@ export function isHiddenFromUIMessage(message: Message) {
   return (
     message.additional_kwargs?.hide_from_ui === true ||
     message.name === "summary" ||
-    message.name === "loop_warning"
+    message.name === "loop_warning" ||
+    message.name === "todo_reminder" ||
+    message.name === "todo_completion_reminder"
   );
 }
 

@@ -22,10 +22,23 @@ def _reminder_msg():
     return HumanMessage(name="todo_reminder", content="reminder")
 
 
-def _make_runtime():
+def _make_runtime(thread_id="test-thread"):
     runtime = MagicMock()
-    runtime.context = {"thread_id": "test-thread"}
+    runtime.context = {"thread_id": thread_id}
     return runtime
+
+
+class _FakeModelRequest:
+    def __init__(self, messages, runtime=None):
+        self.messages = messages
+        self.runtime = runtime or _make_runtime()
+
+    def override(self, **kwargs):
+        request = _FakeModelRequest(
+            messages=kwargs.get("messages", self.messages),
+            runtime=kwargs.get("runtime", self.runtime),
+        )
+        return request
 
 
 def _sample_todos():
@@ -237,15 +250,24 @@ class TestAfterModel:
 
     def test_injects_reminder_and_jumps_to_model_when_incomplete(self):
         mw = TodoMiddleware()
+        runtime = _make_runtime()
         state = {
             "messages": [HumanMessage(content="hi"), _ai_no_tool_calls()],
             "todos": _incomplete_todos(),
         }
-        result = mw.after_model(state, _make_runtime())
+        result = mw.after_model(state, runtime)
         assert result is not None
         assert result["jump_to"] == "model"
-        assert len(result["messages"]) == 1
-        reminder = result["messages"][0]
+        assert "messages" not in result
+
+        captured = {}
+
+        def handler(request):
+            captured["messages"] = request.messages
+            return "ok"
+
+        assert mw.wrap_model_call(_FakeModelRequest(state["messages"], runtime), handler) == "ok"
+        reminder = captured["messages"][-1]
         assert isinstance(reminder, HumanMessage)
         assert reminder.name == "todo_completion_reminder"
         assert "Step 2" in reminder.content
@@ -253,12 +275,22 @@ class TestAfterModel:
 
     def test_reminder_lists_only_incomplete_items(self):
         mw = TodoMiddleware()
+        runtime = _make_runtime()
         state = {
             "messages": [_ai_no_tool_calls()],
             "todos": _incomplete_todos(),
         }
-        result = mw.after_model(state, _make_runtime())
-        content = result["messages"][0].content
+        result = mw.after_model(state, runtime)
+        assert result == {"jump_to": "model"}
+
+        captured = {}
+
+        def handler(request):
+            captured["messages"] = request.messages
+            return "ok"
+
+        mw.wrap_model_call(_FakeModelRequest(state["messages"], runtime), handler)
+        content = captured["messages"][-1].content
         assert "Step 1" not in content  # completed — should not appear
         assert "Step 2" in content
         assert "Step 3" in content
@@ -287,16 +319,162 @@ class TestAfterModel:
         result = mw.after_model(state, _make_runtime())
         assert result is not None
         assert result["jump_to"] == "model"
+        assert "messages" not in result
+
+    def test_wrap_model_call_does_not_persist_transient_reminder(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        messages = [HumanMessage(content="hi"), _ai_no_tool_calls()]
+        state = {"messages": messages, "todos": _incomplete_todos()}
+
+        result = mw.after_model(state, runtime)
+        assert result == {"jump_to": "model"}
+
+        captured = {}
+
+        def handler(request):
+            captured["messages"] = request.messages
+            return "ok"
+
+        mw.wrap_model_call(_FakeModelRequest(messages, runtime), handler)
+
+        assert captured["messages"][:-1] == messages
+        assert captured["messages"][-1].name == "todo_completion_reminder"
+        assert messages == state["messages"]
+
+    def test_transient_reminder_cap_does_not_depend_on_persisted_messages(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        messages = [_ai_no_tool_calls()]
+        state = {"messages": messages, "todos": _incomplete_todos()}
+
+        def handler(request):
+            return request.messages
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+        assert mw.wrap_model_call(_FakeModelRequest(messages, runtime), handler)[-1].name == "todo_completion_reminder"
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+        assert mw.wrap_model_call(_FakeModelRequest(messages, runtime), handler)[-1].name == "todo_completion_reminder"
+
+        assert mw.after_model(state, runtime) is None
+
+    def test_before_agent_clears_pending_completion_reminder(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        messages = [_ai_no_tool_calls()]
+        state = {"messages": messages, "todos": _incomplete_todos()}
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+        assert mw.before_agent(state, runtime) is None
+
+        captured = {}
+
+        def handler(request):
+            captured["messages"] = request.messages
+            return "ok"
+
+        mw.wrap_model_call(_FakeModelRequest(messages, runtime), handler)
+        assert captured["messages"] == messages
+
+    def test_after_agent_clears_pending_completion_reminder(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        messages = [_ai_no_tool_calls()]
+        state = {"messages": messages, "todos": _incomplete_todos()}
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+        assert mw.after_agent(state, runtime) is None
+
+        captured = {}
+
+        def handler(request):
+            captured["messages"] = request.messages
+            return "ok"
+
+        mw.wrap_model_call(_FakeModelRequest(messages, runtime), handler)
+        assert captured["messages"] == messages
+
+    def test_pending_completion_reminders_are_thread_scoped(self):
+        mw = TodoMiddleware()
+        runtime_a = _make_runtime("thread-a")
+        runtime_b = _make_runtime("thread-b")
+        messages = [_ai_no_tool_calls()]
+        state = {"messages": messages, "todos": _incomplete_todos()}
+
+        assert mw.after_model(state, runtime_a) == {"jump_to": "model"}
+
+        captured_b = {}
+
+        def handler_b(request):
+            captured_b["messages"] = request.messages
+            return "ok"
+
+        mw.wrap_model_call(_FakeModelRequest(messages, runtime_b), handler_b)
+        assert captured_b["messages"] == messages
+
+        captured_a = {}
+
+        def handler_a(request):
+            captured_a["messages"] = request.messages
+            return "ok"
+
+        mw.wrap_model_call(_FakeModelRequest(messages, runtime_a), handler_a)
+        assert captured_a["messages"][-1].name == "todo_completion_reminder"
+
+    def test_invalid_tool_calls_jump_without_completion_reminder(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        ai_message = AIMessage(
+            content="",
+            invalid_tool_calls=[{"id": "bad-call", "name": "write_todos", "args": "", "error": "bad json"}],
+        )
+        state = {
+            "messages": [ai_message],
+            "todos": _incomplete_todos(),
+        }
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+
+        captured = {}
+
+        def handler(request):
+            captured["messages"] = request.messages
+            return "ok"
+
+        mw.wrap_model_call(_FakeModelRequest(state["messages"], runtime), handler)
+        assert captured["messages"] == state["messages"]
 
 
 class TestAafterModel:
     def test_delegates_to_sync(self):
         mw = TodoMiddleware()
+        runtime = _make_runtime()
         state = {
             "messages": [_ai_no_tool_calls()],
             "todos": _incomplete_todos(),
         }
-        result = asyncio.run(mw.aafter_model(state, _make_runtime()))
+        result = asyncio.run(mw.aafter_model(state, runtime))
         assert result is not None
         assert result["jump_to"] == "model"
-        assert result["messages"][0].name == "todo_completion_reminder"
+        assert "messages" not in result
+
+    def test_awrap_model_call_injects_pending_reminder(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        messages = [_ai_no_tool_calls()]
+        state = {
+            "messages": messages,
+            "todos": _incomplete_todos(),
+        }
+        asyncio.run(mw.aafter_model(state, runtime))
+
+        captured = {}
+
+        async def handler(request):
+            captured["messages"] = request.messages
+            return "ok"
+
+        result = asyncio.run(mw.awrap_model_call(_FakeModelRequest(messages, runtime), handler))
+        assert result == "ok"
+        assert captured["messages"][-1].name == "todo_completion_reminder"
