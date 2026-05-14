@@ -329,6 +329,34 @@ models:
   #       chat_template_kwargs:
   #         enable_thinking: true
 
+  # Example: llama.cpp (local model inference)
+  # llama.cpp provides local LLM inference with OpenAI-compatible API.
+  # See: https://github.com/ggerganov/llama.cpp
+  #
+  # Start llama.cpp server:
+  #   ./llama-server --model ./qwen3.6-35b-a3b.gguf --port 8080 --host 0.0.0.0
+  #
+  # - name: llama-qwen3.6
+  #   display_name: Qwen3.6 35B (llama.cpp)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: qwen3.6-35b-a3b  # Use model name from GGUF filename or server --model alias
+  #   base_url: http://localhost:8080/v1
+  #   # api_key: $LLAMACPP_API_KEY  # Optional: langchain_openai requires api_key, but llama.cpp local server doesn't. Set env var to any non-empty value (e.g. "dummy").
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 4096
+  #   temperature: 0.7
+  #   supports_thinking: false
+  #   supports_vision: false
+  #
+  # For Docker deployments, use host.docker.internal instead of localhost:
+  #   base_url: http://host.docker.internal:8080/v1
+  #
+  # Note: llama.cpp also supports advanced features like:
+  # - --ctx-size <N> for custom context size
+  # - --n-gpu-layers <N> to offload layers to GPU
+  # - --metrics for monitoring endpoint
+
 
   # Example: Qwen3-Coder deployed on MindIE Engine
   # - name: Qwen3_Coder_480B_MindIE
