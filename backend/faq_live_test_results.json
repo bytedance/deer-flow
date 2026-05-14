@@ -1,0 +1,161 @@
+[
+  {
+    "input": {
+      "label": "高相关（原知识库问题）",
+      "question": "300works 的 Manual、Auto 1、Auto 2、Auto 3 自动化模式有什么区别？现场排查自动化卡点时应该怎么判断问题在哪一段？",
+      "tool": "faq_search",
+      "top_k": 3
+    },
+    "output": {
+      "user_question": "300works 的 Manual、Auto 1、Auto 2、Auto 3 自动化模式有什么区别？现场排查自动化卡点时应该怎么判断问题在哪一段？",
+      "best_faq": {
+        "question": "300works_daily_maintenance_QA.md",
+        "answer": "# 300works 日常维护 Q&A\n## Q1：300works 的 Manual、Auto 1、Auto 2、Auto 3 自动化模式有什么区别？现场排查自动化卡点时应该怎么判断问题在哪一段？\n**A：**\n\n300works 的自动化模式可以按“谁触发 Job Prep、谁执行 Job In/Job Out、谁负责 FOUP 搬运”来理解。\n\nManual 模式下，Job Prep、Job In、Job Out 都由 IUI 手动执行，自动化链路参与最少。Auto 1 是 Equipment Automation，Job Prep 仍由 IUI 发起，但 Job In 和 Job Out 由 EAP 执行。Auto 1.5/Auto 2 增加了 Transportation Automation，Job Prep 仍由 IUI 发起，但 MCS 会负责 Move to Load Port 和 Where to Go，EAP 继续负责 Job In/Job Out。Auto 3 是 Full Auto，Job Prep 由 AM/AMA 触发，MCS 负责搬运，EAP 负责 Job In/Job Out，因此它比 Auto 2 多了“AMA 根据实时事件选择 next lot 并触发 Job Prep”的能力。\n\n排查时可以先定位卡点：如果 lot 没有被选中或没有触发 Job Prep，Auto 3 场景应重点看 AMA 是否检测到 load port free、是否选出 next lot、RTD/What Next 是否给出可执行对象；Auto 2 场景则重点看人工 Job Prep 是否完成。如果 FOUP 没有移动到 load port 或没有去下一站，重点看 MCS 搬运和 MES Where Next。如果 FOUP 已到 load port，但 Job In/Job Out 没有推进，则重点看 EAP 与 MES 的 ReadyToLoad、LoadCompleted、ReadyToUnload、UnloadCompleted 等事件链路。\n\n**来源文档：**",
+        "score": 0.9157773995035251,
+        "faq_id": "7a6db06a4de911f198d46d41961130d5"
+      },
+      "all_matches": [
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "# 300works 日常维护 Q&A\n## Q1：300works 的 Manual、Auto 1、Auto 2、Auto 3 自动化模式有什么区别？现场排查自动化卡点时应该怎么判断问题在哪一段？\n**A：**\n\n300works 的自动化模式可以按“谁触发 Job Prep、谁执行 Job In/Job Out、谁负责 FOUP 搬运”来理解。\n\nManual 模式下，Job Prep、Job In、Job Out 都由 IUI 手动执行，自动化链路参与最少。Auto 1 是 Equipment Automation，Job Prep 仍由 IUI 发起，但 Job In 和 Job Out 由 EAP 执行。Auto 1.5/Auto 2 增加了 Transportation Automation，Job Prep 仍由 IUI 发起，但 MCS 会负责 Move to Load Port 和 Where to Go，EAP 继续负责 Job In/Job Out。Auto 3 是 Full Auto，Job Prep 由 AM/AMA 触发，MCS 负责搬运，EAP 负责 Job In/Job Out，因此它比 Auto 2 多了“AMA 根据实时事件选择 next lot 并触发 Job Prep”的能力。\n\n排查时可以先定位卡点：如果 lot 没有被选中或没有触发 Job Prep，Auto 3 场景应重点看 AMA 是否检测到 load port free、是否选出 next lot、RTD/What Next 是否给出可执行对象；Auto 2 场景则重点看人工 Job Prep 是否完成。如果 FOUP 没有移动到 load port 或没有去下一站，重点看 MCS 搬运和 MES Where Next。如果 FOUP 已到 load port，但 Job In/Job Out 没有推进，则重点看 EAP 与 MES 的 ReadyToLoad、LoadCompleted、ReadyToUnload、UnloadCompleted 等事件链路。\n\n**来源文档：**",
+          "score": 0.9157773995035251,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "- `DTJX_300works_Overview_Part2.pdf`：WIP Operation Flow，p6\n- `DTJX_300works_Overview_Part2.pdf`：Wafer Start 场景、FOSB/FOUP、UpdateSlotMap、ExchangeFOUP、T7 code，p7\n- `300works Overview.pdf`：WIP & Lot Mgt、Process Control、EQP & CAR Mgt 在 300works FullAuto 架构中的位置，p5\n\n**置信度：高**\n## Q3：设备状态在 300works 里是怎么变化的？为什么同一台设备在 Production、Engineer、Monitor、Season、Dummy 场景下会进入不同状态？",
+          "score": 0.6626803303804419,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "- `300works Overview.pdf`：Auto Mode 对照表、Auto 2/Auto 3 架构与触发逻辑，p6、p8\n- `P10-Modeling_Overview_202201.pdf`：300works events/jobs architecture 与 JobPrep、JobIn、JobOut、WhereNext 的事件流，p6\n\n**置信度：高**\n## Q2：Wafer Start 到 Job Out 的标准 WIP 执行链路是什么？如果 Wafer Start 或前段 WIP 卡住，应该重点检查哪些对象？",
+          "score": 0.569554991112484,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "**A：**\n\n300works 的设备状态不是单一字段，而是由 state model、lot type、runtime event、main/chamber 结构和配置表共同决定。常见状态包括 RUN、IDLE、TEST、TEST_CW、MON_R、MON_PM、MON_DOWN、PM、PROCESS_PM、WAIT_ENG、WAIT_MFG、DOWN、FAC、CIM、OFF 等。资料中把状态分为 Productive、Engineering、Standby、Scheduled Downtime、Unscheduled Downtime、Non-Scheduled Time 等类别。\n\n运行时，lot type 是决定状态转换的重要因素。Production lot type 如 PP、PC、PE、ZB 在 JobIn 时进入 RUN；Engineer lot 如 EE、EL，以及 TD lot 如 TT、TL，会进入 TEST；Monitor、FML、Season 的 CM lot 在目标 step 可以进入 MON_R，在其他 step 可进入 TEST_CW；Dummy 的 CD lot 在 dummy in/out 场景对状态 no effect，其他 step 可进入 TEST_CW。也就是说，设备是否“可跑生产片”“只跑工程/NPW/monitor 片”，不是靠人为解释，而是由 lot type 与 equipment state mapping 控制。\n\n对多腔设备，还要看 main tool 与 chamber 的状态传播。资料明确说明：如果 main tool 变为 IDLE，所有 chambers 会变为 IDLE；如果所有 chambers 都变为 DOWN，main tool 会变为 DOWN。更复杂的 cascade state transition 依赖 subEqpStateGroup、chamberId mapping 和 enableEqpCascade。若 subEqpStateGroup 未配置，cascade 不会触发。另一个关键配置是 `ChangeSubEqpStateAtJIJO`：为 true 时，chamber state 只在 JobIn/JobOut 改变，Process Start/End 不改变 sub EQP state；为 false 时，Process Start/End 会改变 sub EQP state。\n\n排查设备状态异常时，建议按五层检查：第一，当前 lot type 是 production、engineer、monitor、season 还是 dummy；第二，JobPrep/JobIn 是否通过 from-state validation；第三，JobIn/JobOut 是否命中 to-state mapping；第四，main/chamber 的 cascade 配置是否存在；第五，FabMisc 中的 special state、cascade flag、ChangeSubEqpStateAtJIJO 是否符合现场预期。\n\n**来源文档：**",
+          "score": 0.5586243371194657,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "- `DTJX_300works_Overview_Part2.pdf`：SPC On-Line Control & OCAP Flow，p17\n- `DTJX_300works_Overview_Part2.pdf`：Real Time SPC rule violation、OOC action、OCAP，p18\n- `P10-Modeling_Overview_202201.pdf`：EDC 模型对象与数据字段，p52\n- `P10-Modeling_Overview_202201.pdf`：SPC 规则、chart 类型和查询维度，p53\n\n**置信度：高**\n## Q5：Qtime 在 300works 中怎么建模和触发？如果 lot 因 Qtime 被 hold 或 speed up，应该如何检查？",
+          "score": 0.5536799986215459,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        }
+      ],
+      "metadata": {
+        "retrieval_time_ms": 1876.1
+      }
+    },
+    "elapsed_ms": 1876.5
+  },
+  {
+    "input": {
+      "label": "中相关（部分匹配）",
+      "question": "300works 自动化模式 Auto 1 和 Auto 2 有什么不同？",
+      "tool": "faq_search",
+      "top_k": 3
+    },
+    "output": {
+      "user_question": "300works 自动化模式 Auto 1 和 Auto 2 有什么不同？",
+      "best_faq": {
+        "question": "300works_daily_maintenance_QA.md",
+        "answer": "# 300works 日常维护 Q&A\n## Q1：300works 的 Manual、Auto 1、Auto 2、Auto 3 自动化模式有什么区别？现场排查自动化卡点时应该怎么判断问题在哪一段？\n**A：**\n\n300works 的自动化模式可以按“谁触发 Job Prep、谁执行 Job In/Job Out、谁负责 FOUP 搬运”来理解。\n\nManual 模式下，Job Prep、Job In、Job Out 都由 IUI 手动执行，自动化链路参与最少。Auto 1 是 Equipment Automation，Job Prep 仍由 IUI 发起，但 Job In 和 Job Out 由 EAP 执行。Auto 1.5/Auto 2 增加了 Transportation Automation，Job Prep 仍由 IUI 发起，但 MCS 会负责 Move to Load Port 和 Where to Go，EAP 继续负责 Job In/Job Out。Auto 3 是 Full Auto，Job Prep 由 AM/AMA 触发，MCS 负责搬运，EAP 负责 Job In/Job Out，因此它比 Auto 2 多了“AMA 根据实时事件选择 next lot 并触发 Job Prep”的能力。\n\n排查时可以先定位卡点：如果 lot 没有被选中或没有触发 Job Prep，Auto 3 场景应重点看 AMA 是否检测到 load port free、是否选出 next lot、RTD/What Next 是否给出可执行对象；Auto 2 场景则重点看人工 Job Prep 是否完成。如果 FOUP 没有移动到 load port 或没有去下一站，重点看 MCS 搬运和 MES Where Next。如果 FOUP 已到 load port，但 Job In/Job Out 没有推进，则重点看 EAP 与 MES 的 ReadyToLoad、LoadCompleted、ReadyToUnload、UnloadCompleted 等事件链路。\n\n**来源文档：**",
+        "score": 0.8524819109103297,
+        "faq_id": "7a6db06a4de911f198d46d41961130d5"
+      },
+      "all_matches": [
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "# 300works 日常维护 Q&A\n## Q1：300works 的 Manual、Auto 1、Auto 2、Auto 3 自动化模式有什么区别？现场排查自动化卡点时应该怎么判断问题在哪一段？\n**A：**\n\n300works 的自动化模式可以按“谁触发 Job Prep、谁执行 Job In/Job Out、谁负责 FOUP 搬运”来理解。\n\nManual 模式下，Job Prep、Job In、Job Out 都由 IUI 手动执行，自动化链路参与最少。Auto 1 是 Equipment Automation，Job Prep 仍由 IUI 发起，但 Job In 和 Job Out 由 EAP 执行。Auto 1.5/Auto 2 增加了 Transportation Automation，Job Prep 仍由 IUI 发起，但 MCS 会负责 Move to Load Port 和 Where to Go，EAP 继续负责 Job In/Job Out。Auto 3 是 Full Auto，Job Prep 由 AM/AMA 触发，MCS 负责搬运，EAP 负责 Job In/Job Out，因此它比 Auto 2 多了“AMA 根据实时事件选择 next lot 并触发 Job Prep”的能力。\n\n排查时可以先定位卡点：如果 lot 没有被选中或没有触发 Job Prep，Auto 3 场景应重点看 AMA 是否检测到 load port free、是否选出 next lot、RTD/What Next 是否给出可执行对象；Auto 2 场景则重点看人工 Job Prep 是否完成。如果 FOUP 没有移动到 load port 或没有去下一站，重点看 MCS 搬运和 MES Where Next。如果 FOUP 已到 load port，但 Job In/Job Out 没有推进，则重点看 EAP 与 MES 的 ReadyToLoad、LoadCompleted、ReadyToUnload、UnloadCompleted 等事件链路。\n\n**来源文档：**",
+          "score": 0.8524819109103297,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "- `DTJX_300works_Overview_Part2.pdf`：WIP Operation Flow，p6\n- `DTJX_300works_Overview_Part2.pdf`：Wafer Start 场景、FOSB/FOUP、UpdateSlotMap、ExchangeFOUP、T7 code，p7\n- `300works Overview.pdf`：WIP & Lot Mgt、Process Control、EQP & CAR Mgt 在 300works FullAuto 架构中的位置，p5\n\n**置信度：高**\n## Q3：设备状态在 300works 里是怎么变化的？为什么同一台设备在 Production、Engineer、Monitor、Season、Dummy 场景下会进入不同状态？",
+          "score": 0.6248132530824353,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "- `300works Overview.pdf`：Auto Mode 对照表、Auto 2/Auto 3 架构与触发逻辑，p6、p8\n- `P10-Modeling_Overview_202201.pdf`：300works events/jobs architecture 与 JobPrep、JobIn、JobOut、WhereNext 的事件流，p6\n\n**置信度：高**\n## Q2：Wafer Start 到 Job Out 的标准 WIP 执行链路是什么？如果 Wafer Start 或前段 WIP 卡住，应该重点检查哪些对象？",
+          "score": 0.5217994753421304,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "- `DTJX_300works_Overview_Part2.pdf`：SPC On-Line Control & OCAP Flow，p17\n- `DTJX_300works_Overview_Part2.pdf`：Real Time SPC rule violation、OOC action、OCAP，p18\n- `P10-Modeling_Overview_202201.pdf`：EDC 模型对象与数据字段，p52\n- `P10-Modeling_Overview_202201.pdf`：SPC 规则、chart 类型和查询维度，p53\n\n**置信度：高**\n## Q5：Qtime 在 300works 中怎么建模和触发？如果 lot 因 Qtime 被 hold 或 speed up，应该如何检查？",
+          "score": 0.5199874714346424,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "**A：**\n\n300works 的设备状态不是单一字段，而是由 state model、lot type、runtime event、main/chamber 结构和配置表共同决定。常见状态包括 RUN、IDLE、TEST、TEST_CW、MON_R、MON_PM、MON_DOWN、PM、PROCESS_PM、WAIT_ENG、WAIT_MFG、DOWN、FAC、CIM、OFF 等。资料中把状态分为 Productive、Engineering、Standby、Scheduled Downtime、Unscheduled Downtime、Non-Scheduled Time 等类别。\n\n运行时，lot type 是决定状态转换的重要因素。Production lot type 如 PP、PC、PE、ZB 在 JobIn 时进入 RUN；Engineer lot 如 EE、EL，以及 TD lot 如 TT、TL，会进入 TEST；Monitor、FML、Season 的 CM lot 在目标 step 可以进入 MON_R，在其他 step 可进入 TEST_CW；Dummy 的 CD lot 在 dummy in/out 场景对状态 no effect，其他 step 可进入 TEST_CW。也就是说，设备是否“可跑生产片”“只跑工程/NPW/monitor 片”，不是靠人为解释，而是由 lot type 与 equipment state mapping 控制。\n\n对多腔设备，还要看 main tool 与 chamber 的状态传播。资料明确说明：如果 main tool 变为 IDLE，所有 chambers 会变为 IDLE；如果所有 chambers 都变为 DOWN，main tool 会变为 DOWN。更复杂的 cascade state transition 依赖 subEqpStateGroup、chamberId mapping 和 enableEqpCascade。若 subEqpStateGroup 未配置，cascade 不会触发。另一个关键配置是 `ChangeSubEqpStateAtJIJO`：为 true 时，chamber state 只在 JobIn/JobOut 改变，Process Start/End 不改变 sub EQP state；为 false 时，Process Start/End 会改变 sub EQP state。\n\n排查设备状态异常时，建议按五层检查：第一，当前 lot type 是 production、engineer、monitor、season 还是 dummy；第二，JobPrep/JobIn 是否通过 from-state validation；第三，JobIn/JobOut 是否命中 to-state mapping；第四，main/chamber 的 cascade 配置是否存在；第五，FabMisc 中的 special state、cascade flag、ChangeSubEqpStateAtJIJO 是否符合现场预期。\n\n**来源文档：**",
+          "score": 0.5174493066364003,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        }
+      ],
+      "metadata": {
+        "retrieval_time_ms": 1286.5
+      }
+    },
+    "elapsed_ms": 1287.2
+  },
+  {
+    "input": {
+      "label": "低相关（不同主题）",
+      "question": "300works 系统怎么安装部署？",
+      "tool": "faq_search",
+      "top_k": 3
+    },
+    "output": {
+      "user_question": "300works 系统怎么安装部署？",
+      "best_faq": {
+        "question": "300works_daily_maintenance_QA.md",
+        "answer": "- `DTJX_300works_Overview_Part2.pdf`：WIP Operation Flow，p6\n- `DTJX_300works_Overview_Part2.pdf`：Wafer Start 场景、FOSB/FOUP、UpdateSlotMap、ExchangeFOUP、T7 code，p7\n- `300works Overview.pdf`：WIP & Lot Mgt、Process Control、EQP & CAR Mgt 在 300works FullAuto 架构中的位置，p5\n\n**置信度：高**\n## Q3：设备状态在 300works 里是怎么变化的？为什么同一台设备在 Production、Engineer、Monitor、Season、Dummy 场景下会进入不同状态？",
+        "score": 0.5507265606046513,
+        "faq_id": "7a6db06a4de911f198d46d41961130d5"
+      },
+      "all_matches": [
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "- `DTJX_300works_Overview_Part2.pdf`：WIP Operation Flow，p6\n- `DTJX_300works_Overview_Part2.pdf`：Wafer Start 场景、FOSB/FOUP、UpdateSlotMap、ExchangeFOUP、T7 code，p7\n- `300works Overview.pdf`：WIP & Lot Mgt、Process Control、EQP & CAR Mgt 在 300works FullAuto 架构中的位置，p5\n\n**置信度：高**\n## Q3：设备状态在 300works 里是怎么变化的？为什么同一台设备在 Production、Engineer、Monitor、Season、Dummy 场景下会进入不同状态？",
+          "score": 0.5507265606046513,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "# 300works 日常维护 Q&A\n## Q1：300works 的 Manual、Auto 1、Auto 2、Auto 3 自动化模式有什么区别？现场排查自动化卡点时应该怎么判断问题在哪一段？\n**A：**\n\n300works 的自动化模式可以按“谁触发 Job Prep、谁执行 Job In/Job Out、谁负责 FOUP 搬运”来理解。\n\nManual 模式下，Job Prep、Job In、Job Out 都由 IUI 手动执行，自动化链路参与最少。Auto 1 是 Equipment Automation，Job Prep 仍由 IUI 发起，但 Job In 和 Job Out 由 EAP 执行。Auto 1.5/Auto 2 增加了 Transportation Automation，Job Prep 仍由 IUI 发起，但 MCS 会负责 Move to Load Port 和 Where to Go，EAP 继续负责 Job In/Job Out。Auto 3 是 Full Auto，Job Prep 由 AM/AMA 触发，MCS 负责搬运，EAP 负责 Job In/Job Out，因此它比 Auto 2 多了“AMA 根据实时事件选择 next lot 并触发 Job Prep”的能力。\n\n排查时可以先定位卡点：如果 lot 没有被选中或没有触发 Job Prep，Auto 3 场景应重点看 AMA 是否检测到 load port free、是否选出 next lot、RTD/What Next 是否给出可执行对象；Auto 2 场景则重点看人工 Job Prep 是否完成。如果 FOUP 没有移动到 load port 或没有去下一站，重点看 MCS 搬运和 MES Where Next。如果 FOUP 已到 load port，但 Job In/Job Out 没有推进，则重点看 EAP 与 MES 的 ReadyToLoad、LoadCompleted、ReadyToUnload、UnloadCompleted 等事件链路。\n\n**来源文档：**",
+          "score": 0.5403284128009443,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "**A：**\n\n300works 的设备状态不是单一字段，而是由 state model、lot type、runtime event、main/chamber 结构和配置表共同决定。常见状态包括 RUN、IDLE、TEST、TEST_CW、MON_R、MON_PM、MON_DOWN、PM、PROCESS_PM、WAIT_ENG、WAIT_MFG、DOWN、FAC、CIM、OFF 等。资料中把状态分为 Productive、Engineering、Standby、Scheduled Downtime、Unscheduled Downtime、Non-Scheduled Time 等类别。\n\n运行时，lot type 是决定状态转换的重要因素。Production lot type 如 PP、PC、PE、ZB 在 JobIn 时进入 RUN；Engineer lot 如 EE、EL，以及 TD lot 如 TT、TL，会进入 TEST；Monitor、FML、Season 的 CM lot 在目标 step 可以进入 MON_R，在其他 step 可进入 TEST_CW；Dummy 的 CD lot 在 dummy in/out 场景对状态 no effect，其他 step 可进入 TEST_CW。也就是说，设备是否“可跑生产片”“只跑工程/NPW/monitor 片”，不是靠人为解释，而是由 lot type 与 equipment state mapping 控制。\n\n对多腔设备，还要看 main tool 与 chamber 的状态传播。资料明确说明：如果 main tool 变为 IDLE，所有 chambers 会变为 IDLE；如果所有 chambers 都变为 DOWN，main tool 会变为 DOWN。更复杂的 cascade state transition 依赖 subEqpStateGroup、chamberId mapping 和 enableEqpCascade。若 subEqpStateGroup 未配置，cascade 不会触发。另一个关键配置是 `ChangeSubEqpStateAtJIJO`：为 true 时，chamber state 只在 JobIn/JobOut 改变，Process Start/End 不改变 sub EQP state；为 false 时，Process Start/End 会改变 sub EQP state。\n\n排查设备状态异常时，建议按五层检查：第一，当前 lot type 是 production、engineer、monitor、season 还是 dummy；第二，JobPrep/JobIn 是否通过 from-state validation；第三，JobIn/JobOut 是否命中 to-state mapping；第四，main/chamber 的 cascade 配置是否存在；第五，FabMisc 中的 special state、cascade flag、ChangeSubEqpStateAtJIJO 是否符合现场预期。\n\n**来源文档：**",
+          "score": 0.48154179501095756,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "- `DTJX_300works_Overview_Part2.pdf`：SPC On-Line Control & OCAP Flow，p17\n- `DTJX_300works_Overview_Part2.pdf`：Real Time SPC rule violation、OOC action、OCAP，p18\n- `P10-Modeling_Overview_202201.pdf`：EDC 模型对象与数据字段，p52\n- `P10-Modeling_Overview_202201.pdf`：SPC 规则、chart 类型和查询维度，p53\n\n**置信度：高**\n## Q5：Qtime 在 300works 中怎么建模和触发？如果 lot 因 Qtime 被 hold 或 speed up，应该如何检查？",
+          "score": 0.4807973414245995,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        },
+        {
+          "question": "300works_daily_maintenance_QA.md",
+          "answer": "**A：**\n\n标准 WIP 执行链路从 Create Source Lot 开始，随后是 Create Lot、Create Foup、Wafer Start、Job Preparation、Job In、Job Out；后续还可能继续进入下一轮 Job Prepare、Job In、Data Collection、Job Out，最终 Wafer Out、Ship、To ERP。这个链路说明 300works 不是单纯维护 lot 状态，而是把 source lot、production lot、FOUP、sorter、equipment、data collection 和 ERP 回传串在一起。\n\nWafer Start 前段最关键的是 FOSB 到 FOUP 的转移与 slot map 信息。资料中描述：ERP 向 MES 下发物料后，FOSB 在 warehouse/fab 侧进入 FOSB Rack 或 Stocker；Create Source Lot 过程中会执行 Unpack FOSB load to Stocker、Start Qtime，并可由 MCS 自动创建 source lot。Sorter 动作包括 UpdateSlotMap，用于重新整理 slot map 信息；ExchangeFOUP 用于把 wafers 从 FOSB 移到 FOUP，并把 T7 code 更新到 MES。Source/Production Lot 执行 WaferStart 时，若 sorter available，可以由 AMA 通过 What’s Next 发起 WaferStart sorter action；也可以通过 manual lot start 执行，但需要 sorter action。\n\n因此排查 Wafer Start 卡点时，不要只看 lot 本身。应按顺序检查：ERP 是否已下发 schedule/create lot；source lot 是否创建；FOSB 是否已 unpack/load to stocker；Qtime 是否已启动；FOUP 是否创建并完成 slot map；UpdateSlotMap 是否正确；ExchangeFOUP 是否完成；T7 code 是否更新到 MES；sorter job prep/job in/job out 是否执行；最后再看 production lot 是否真正完成 WaferStart。\n\n**来源文档：**",
+          "score": 0.4476193318906431,
+          "faq_id": "7a6db06a4de911f198d46d41961130d5"
+        }
+      ],
+      "metadata": {
+        "retrieval_time_ms": 1104.4
+      }
+    },
+    "elapsed_ms": 1104.7
+  }
+]

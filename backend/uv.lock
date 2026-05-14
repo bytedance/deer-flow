@@ -741,7 +741,9 @@ dependencies = [
     { name = "langgraph-sdk" },
     { name = "markdownify" },
     { name = "markitdown", extra = ["all", "xlsx"] },
+    { name = "mcp" },
     { name = "pydantic" },
+    { name = "pymysql" },
     { name = "pyyaml" },
     { name = "readabilipy" },
     { name = "tavily-python" },
@@ -783,8 +785,10 @@ requires-dist = [
     { name = "langgraph-sdk", specifier = ">=0.1.51" },
     { name = "markdownify", specifier = ">=1.2.2" },
     { name = "markitdown", extras = ["all", "xlsx"], specifier = ">=0.0.1a2" },
+    { name = "mcp", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pymupdf4llm", marker = "extra == 'pymupdf'", specifier = ">=0.0.17" },
+    { name = "pymysql", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "readabilipy", specifier = ">=0.3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
@@ -3057,6 +3061,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f0/e7/8b97bf223ea2fd72efd862af3210ae3aa2fb15b39b55767de9e0a2fd0985/pymupdf4llm-1.27.2.2.tar.gz", hash = "sha256:f95e113d434958f8c63393c836fe965ad398d1fc07e7807c0a627c9ec1946e9f", size = 72877, upload-time = "2026-03-20T09:48:01.485Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/01/fc/a4977b84f9a7e70aac4c9beed55d4693b985cef89fab7d49c896335bf158/pymupdf4llm-1.27.2.2-py3-none-any.whl", hash = "sha256:ec3bbceed21c6f86289155f29c557aa54ae1c8282c4a45d6de984f16fb4c90cb", size = 84294, upload-time = "2026-03-20T09:45:55.365Z" },
+]
+
+[[package]]
+name = "pymysql"
+version = "1.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/ae/1fe3fcd9f959efa0ebe200b8de88b5a5ce3e767e38c7ac32fb179f16a388/pymysql-1.1.2.tar.gz", hash = "sha256:4961d3e165614ae65014e361811a724e2044ad3ea3739de9903ae7c21f539f03", size = 48258, upload-time = "2025-08-24T12:55:55.146Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/4c/ad33b92b9864cbde84f259d5df035a6447f91891f5be77788e2a3892bce3/pymysql-1.1.2-py3-none-any.whl", hash = "sha256:e6b1d89711dd51f8f74b1631fe08f039e7d76cf67a42a323d3178f0f25762ed9", size = 45300, upload-time = "2025-08-24T12:55:53.394Z" },
 ]
 
 [[package]]

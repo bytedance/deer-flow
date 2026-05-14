@@ -443,20 +443,25 @@ type CoTStep = CoTReasoningStep | CoTToolCallStep;
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
+  const seenIds = new Set<string>();
   for (const message of messages) {
     if (message.type === "ai") {
       const reasoning = extractReasoningContentFromMessage(message);
-      if (reasoning) {
+      if (reasoning && !seenIds.has(message.id)) {
         const step: CoTReasoningStep = {
           id: message.id,
           messageId: message.id,
           type: "reasoning",
-          reasoning: extractReasoningContentFromMessage(message),
+          reasoning,
         };
         steps.push(step);
+        seenIds.add(message.id);
       }
       for (const tool_call of message.tool_calls ?? []) {
         if (tool_call.name === "task") {
+          continue;
+        }
+        if (!tool_call.id || seenIds.has(tool_call.id)) {
           continue;
         }
         const step: CoTToolCallStep = {
@@ -466,19 +471,17 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           name: tool_call.name,
           args: tool_call.args,
         };
-        const toolCallId = tool_call.id;
-        if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
-          if (toolCallResult) {
-            try {
-              const json = JSON.parse(toolCallResult);
-              step.result = json;
-            } catch {
-              step.result = toolCallResult;
-            }
+        const toolCallResult = findToolCallResult(tool_call.id, messages);
+        if (toolCallResult) {
+          try {
+            const json = JSON.parse(toolCallResult);
+            step.result = json;
+          } catch {
+            step.result = toolCallResult;
           }
         }
         steps.push(step);
+        seenIds.add(tool_call.id);
       }
     }
   }

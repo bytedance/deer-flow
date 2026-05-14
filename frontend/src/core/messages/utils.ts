@@ -102,9 +102,10 @@ export function groupMessages<T>(
           type: "assistant:subagent",
           messages: [message],
         });
-      } else if (hasReasoning(message) || hasToolCalls(message)) {
+      } else if (hasToolCalls(message) || hasReasoning(message)) {
+        // Any AI message with tool calls or reasoning opens a processing group
+        // so that subsequent tool responses have a group to attach to.
         const lastGroup = groups[groups.length - 1];
-        // Accumulate consecutive intermediate AI messages into one processing group.
         if (lastGroup?.type !== "assistant:processing") {
           groups.push({
             id: message.id,
@@ -116,8 +117,9 @@ export function groupMessages<T>(
         }
       }
 
-      // Not an else-if: a message with reasoning + content (but no tool calls) goes
-      // into the processing group above AND gets its own assistant bubble here.
+      // Separate AI text content gets its own visible bubble (no tool calls).
+      // A message with reasoning + content goes into the processing group above
+      // AND gets its own assistant bubble here.
       if (hasContent(message) && !hasToolCalls(message)) {
         groups.push({ id: message.id, type: "assistant", messages: [message] });
       }
