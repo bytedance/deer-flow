@@ -107,4 +107,16 @@ describe("next config rewrites", () => {
       ]),
     );
   });
+
+  test("treats blank external LangGraph URL as unconfigured", async () => {
+    process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL = "  ";
+
+    const rewrites = await loadRewrites();
+
+    expect(rewrites.fallback).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "/api/langgraph/:path*" }),
+      ]),
+    );
+  });
 });

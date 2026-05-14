@@ -10,6 +10,11 @@ function getInternalServiceURL(envKey, fallbackURL) {
     ? configured.replace(/\/+$/, "")
     : fallbackURL;
 }
+
+function hasConfiguredEnvValue(envKey) {
+  return Boolean(process.env[envKey]?.trim());
+}
+
 import nextra from "nextra";
 
 const withNextra = nextra({});
@@ -29,7 +34,7 @@ const config = {
       "http://127.0.0.1:8001",
     );
 
-    if (!process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
+    if (!hasConfiguredEnvValue("NEXT_PUBLIC_LANGGRAPH_BASE_URL")) {
       fallback.push({
         source: "/api/langgraph",
         destination: `${gatewayURL}/api`,
@@ -40,7 +45,7 @@ const config = {
       });
     }
 
-    if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
+    if (!hasConfiguredEnvValue("NEXT_PUBLIC_BACKEND_BASE_URL")) {
       rewrites.push({
         source: "/api/agents",
         destination: `${gatewayURL}/api/agents`,

@@ -299,4 +299,28 @@ describe("LangGraph stream route proxies", () => {
     expect(response.status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  test("treats blank external LangGraph URL as unconfigured", async () => {
+    process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL = "  ";
+    const fetchMock = vi.fn(async () => new Response("ok"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { POST } = await loadRunStreamRoute();
+    const response = await POST(
+      new NextRequest(
+        "http://localhost:3000/api/langgraph/threads/thread-id/runs/stream",
+        {
+          method: "POST",
+          body: JSON.stringify({ ok: true }),
+        },
+      ),
+      makeRunContext("thread-id"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://gateway.example/base/api/threads/thread-id/runs/stream",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
 });

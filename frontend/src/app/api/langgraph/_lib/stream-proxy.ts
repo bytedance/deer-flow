@@ -58,7 +58,9 @@ export async function proxyLangGraphStream(
   request: NextRequest,
   path: string[],
 ) {
-  if (process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
+  const publicLangGraphBaseUrl =
+    process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL?.trim();
+  if (publicLangGraphBaseUrl && publicLangGraphBaseUrl.length > 0) {
     return new Response(null, { status: 404 });
   }
 
