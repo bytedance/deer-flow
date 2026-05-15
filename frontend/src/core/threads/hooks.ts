@@ -696,9 +696,7 @@ export function useThreadHistory(threadId: string) {
       if (threadIdRef.current !== requestThreadId) {
         return;
       }
-      setMessages((prev) =>
-        dedupeMessagesByIdentity([..._messages, ...prev]),
-      );
+      setMessages((prev) => dedupeMessagesByIdentity([..._messages, ...prev]));
       loadedRunIdsRef.current.add(run.run_id);
       indexRef.current = nextRunIndex - 1;
     } catch (err) {
