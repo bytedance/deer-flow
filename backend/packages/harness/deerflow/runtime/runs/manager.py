@@ -88,7 +88,7 @@ class RunManager:
             run_id=row["run_id"],
             thread_id=row["thread_id"],
             assistant_id=row.get("assistant_id"),
-            status=RunStatus(row.get("status", RunStatus.pending.value)),
+            status=RunStatus(row.get("status") or RunStatus.pending.value),
             on_disconnect=DisconnectMode(row.get("on_disconnect") or DisconnectMode.cancel.value),
             multitask_strategy=row.get("multitask_strategy") or "reject",
             metadata=row.get("metadata") or {},

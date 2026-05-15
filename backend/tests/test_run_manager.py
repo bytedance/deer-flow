@@ -184,6 +184,47 @@ async def test_get_hydrates_store_only_run():
 
 
 @pytest.mark.anyio
+async def test_get_hydrates_run_with_null_enum_fields():
+    """Rows with NULL status/on_disconnect must hydrate with safe defaults, not raise."""
+    store = MemoryRunStore()
+    # Simulate a SQL row where the nullable status column is NULL
+    await store.put(
+        "run-null-status",
+        thread_id="thread-1",
+        status=None,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    manager = RunManager(store=store)
+
+    record = await manager.get("run-null-status")
+
+    assert record is not None
+    assert record.status == RunStatus.pending
+    assert record.on_disconnect == DisconnectMode.cancel
+    assert record.store_only is True
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_hydrates_run_with_null_enum_fields():
+    """list_by_thread must not skip rows with NULL status; applies safe defaults."""
+    store = MemoryRunStore()
+    await store.put(
+        "run-null-status-list",
+        thread_id="thread-null",
+        status=None,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    manager = RunManager(store=store)
+
+    runs = await manager.list_by_thread("thread-null")
+
+    assert len(runs) == 1
+    assert runs[0].run_id == "run-null-status-list"
+    assert runs[0].status == RunStatus.pending
+    assert runs[0].on_disconnect == DisconnectMode.cancel
+
+
+@pytest.mark.anyio
 async def test_create_record_is_not_store_only(manager: RunManager):
     """In-memory records created via create() must have store_only=False."""
     record = await manager.create("thread-1")
