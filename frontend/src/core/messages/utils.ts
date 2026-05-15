@@ -26,6 +26,13 @@ export type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
+const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
+  "summary",
+  "loop_warning",
+  "todo_reminder",
+  "todo_completion_reminder",
+]);
+
 export function getMessageGroups(messages: Message[]): MessageGroup[] {
   if (messages.length === 0) {
     return [];
@@ -50,10 +57,6 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
 
   for (const message of messages) {
     if (isHiddenFromUIMessage(message)) {
-      continue;
-    }
-
-    if (message.name === "todo_reminder") {
       continue;
     }
 
@@ -368,8 +371,8 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 export function isHiddenFromUIMessage(message: Message) {
   return (
     message.additional_kwargs?.hide_from_ui === true ||
-    message.name === "summary" ||
-    message.name === "loop_warning"
+    (typeof message.name === "string" &&
+      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name))
   );
 }
 
