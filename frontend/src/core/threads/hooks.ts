@@ -18,6 +18,7 @@ import { getCurrentTenantId } from "../tenant";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
+import { appendUniqueMessages } from "./message-history";
 import type { AgentThread, AgentThreadState, RunMessage } from "./types";
 
 export type ToolEndEvent = {
@@ -309,8 +310,14 @@ export function useThreadStream({
       sseManagerRef.current?.scheduleReconnect();
     },
     onFinish(state) {
+      appendMessages(messagesRef.current);
       listeners.current.onFinish?.(state.values);
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      if (threadIdRef.current) {
+        void queryClient.invalidateQueries({
+          queryKey: ["thread", threadIdRef.current],
+        });
+      }
     },
   });
 
@@ -604,11 +611,7 @@ export function useThreadHistory(threadId: string) {
       const _messages = result.data
         .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
         .map((m) => m.content);
-      setMessages((prev) => {
-        const existingIds = new Set(prev.map((m) => m.id));
-        const newMessages = _messages.filter((m) => !existingIds.has(m.id));
-        return [...newMessages, ...prev];
-      });
+      setMessages((prev) => appendUniqueMessages(prev, _messages, "prepend"));
       indexRef.current -= 1;
     } catch (err) {
       console.error(err);
@@ -637,11 +640,7 @@ export function useThreadHistory(threadId: string) {
   }, [threadId, runs.data, loadMessages]);
 
   const appendMessages = useCallback((_messages: Message[]) => {
-    setMessages((prev) => {
-      const existingIds = new Set(prev.map((m) => m.id));
-      const newMessages = _messages.filter((m) => !existingIds.has(m.id));
-      return [...prev, ...newMessages];
-    });
+    setMessages((prev) => appendUniqueMessages(prev, _messages, "append"));
   }, []);
   const hasMore = indexRef.current >= 0 || !runs.data;
   return {
