@@ -62,3 +62,32 @@ test("mergeMessages deduplicates tool messages by tool_call_id", () => {
 
   expect(mergeMessages([oldTool], [liveTool], [])).toEqual([liveTool]);
 });
+
+test("mergeMessages preserves messages without an identity", () => {
+  const first = {
+    type: "ai",
+    content: "first anonymous",
+  } as Message;
+  const second = {
+    type: "ai",
+    content: "second anonymous",
+  } as Message;
+
+  expect(mergeMessages([], [first, second], [])).toEqual([first, second]);
+});
+
+test("mergeMessages keeps message ids distinct from tool call ids", () => {
+  const ai = {
+    id: "shared-id",
+    type: "ai",
+    content: "assistant message",
+  } as Message;
+  const tool = {
+    id: "tool-message-id",
+    type: "tool",
+    tool_call_id: "shared-id",
+    content: "tool result",
+  } as Message;
+
+  expect(mergeMessages([], [ai, tool], [])).toEqual([ai, tool]);
+});
