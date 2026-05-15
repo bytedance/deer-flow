@@ -48,4 +48,66 @@ test.describe("Chat workspace", () => {
       timeout: 10_000,
     });
   });
+
+  test("keeps attachments visible while upload submit is pending", async ({
+    page,
+  }) => {
+    let releaseUpload!: () => void;
+    const uploadCanFinish = new Promise<void>((resolve) => {
+      releaseUpload = resolve;
+    });
+    let uploadStarted!: () => void;
+    const uploadStartedPromise = new Promise<void>((resolve) => {
+      uploadStarted = resolve;
+    });
+
+    await page.route("**/api/threads/*/uploads", async (route) => {
+      uploadStarted();
+      await uploadCanFinish;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          message: "Uploaded",
+          files: [
+            {
+              filename: "report.docx",
+              size: 12,
+              path: "report.docx",
+              virtual_path: "/mnt/user-data/uploads/report.docx",
+              artifact_url: "/api/threads/test/uploads/report.docx",
+              extension: ".docx",
+            },
+          ],
+        }),
+      });
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    const promptForm = page.locator("form").filter({ has: textarea });
+
+    await page.getByLabel("Upload files").setInputFiles({
+      name: "report.docx",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      buffer: Buffer.from("fake docx"),
+    });
+    await expect(promptForm.getByText("report.docx")).toBeVisible();
+
+    await textarea.fill("Summarize this document");
+    await textarea.press("Enter");
+
+    await uploadStartedPromise;
+    await expect(promptForm.getByText("report.docx")).toBeVisible();
+
+    releaseUpload();
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(promptForm.getByText("report.docx")).toBeHidden();
+  });
 });
