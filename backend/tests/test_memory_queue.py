@@ -131,9 +131,10 @@ def test_add_nowait_cancels_existing_timer_and_starts_immediate_timer() -> None:
     created_timer.start.assert_called_once_with()
 
 
-def test_process_queue_reschedules_immediately_when_already_processing() -> None:
+def test_process_queue_reschedules_immediately_when_already_processing_and_work_pending() -> None:
     queue = MemoryUpdateQueue()
     queue._processing = True
+    queue._queue = [ConversationContext(thread_id="thread-1", messages=["msg"])]
     created_timer = MagicMock()
 
     with patch("deerflow.agents.memory.queue.threading.Timer", return_value=created_timer) as timer_cls:
@@ -142,6 +143,47 @@ def test_process_queue_reschedules_immediately_when_already_processing() -> None
     timer_cls.assert_called_once_with(0, queue._process_queue)
     assert created_timer.daemon is True
     created_timer.start.assert_called_once_with()
+
+
+def test_process_queue_does_not_reschedule_when_already_processing_and_queue_empty() -> None:
+    queue = MemoryUpdateQueue()
+    queue._processing = True
+    created_timer = MagicMock()
+
+    with patch("deerflow.agents.memory.queue.threading.Timer", return_value=created_timer) as timer_cls:
+        queue._process_queue()
+
+    timer_cls.assert_not_called()
+
+
+def test_enqueue_two_agents_same_thread_stored_independently() -> None:
+    queue = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch.object(queue, "_reset_timer"),
+    ):
+        queue.add(thread_id="thread-1", messages=["agent-a-msg"], agent_name="agent-a")
+        queue.add(thread_id="thread-1", messages=["agent-b-msg"], agent_name="agent-b")
+
+    assert len(queue._queue) == 2
+    names = {c.agent_name for c in queue._queue}
+    assert names == {"agent-a", "agent-b"}
+
+
+def test_enqueue_same_agent_same_thread_merges() -> None:
+    queue = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch.object(queue, "_reset_timer"),
+    ):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="agent-a", correction_detected=True)
+        queue.add(thread_id="thread-1", messages=["second"], agent_name="agent-a", correction_detected=False)
+
+    assert len(queue._queue) == 1
+    assert queue._queue[0].messages == ["second"]
+    assert queue._queue[0].correction_detected is True
 
 
 def test_flush_nowait_is_non_blocking() -> None:
