@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from _router_auth_helpers import call_unwrapped, make_authed_test_app
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.responses import FileResponse
@@ -102,3 +103,17 @@ def test_get_artifact_download_true_forces_attachment_for_skill_archive(tmp_path
     assert response.status_code == 200
     assert response.text == "hello"
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+
+
+def test_skill_archive_preview_rejects_oversized_member_before_decompression(tmp_path) -> None:
+    skill_path = tmp_path / "sample.skill"
+    payload = b"A" * (artifacts_router.MAX_SKILL_ARCHIVE_MEMBER_BYTES + 1)
+    with zipfile.ZipFile(skill_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zip_ref:
+        zip_ref.writestr("SKILL.md", payload)
+
+    assert skill_path.stat().st_size < artifacts_router.MAX_SKILL_ARCHIVE_MEMBER_BYTES
+
+    with pytest.raises(HTTPException) as exc_info:
+        artifacts_router._extract_file_from_skill_archive(skill_path, "SKILL.md")
+
+    assert exc_info.value.status_code == 413
