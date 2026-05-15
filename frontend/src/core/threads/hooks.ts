@@ -18,6 +18,10 @@ import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { fetchThreadTokenUsage } from "./api";
+import {
+  adjustHistoryIndex,
+  deduplicateHistoryMessages,
+} from "./history-utils";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
@@ -316,6 +320,9 @@ export function useThreadStream({
       );
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       if (threadIdRef.current && !isMock) {
+        void queryClient.invalidateQueries({
+          queryKey: ["thread", threadIdRef.current],
+        });
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
         });
@@ -629,6 +636,7 @@ export function useThreadHistory(threadId: string) {
   const loadingRef = useRef(false);
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
+  const initialLoadDoneRef = useRef(false);
 
   loadingRef.current = loading;
   const loadMessages = useCallback(async () => {
@@ -656,7 +664,10 @@ export function useThreadHistory(threadId: string) {
       const _messages = result.data
         .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
         .map((m) => m.content);
-      setMessages((prev) => [..._messages, ...prev]);
+      setMessages((prev) => {
+        const deduped = deduplicateHistoryMessages(prev, _messages);
+        return [...deduped, ...prev];
+      });
       indexRef.current -= 1;
     } catch (err) {
       console.error(err);
@@ -664,15 +675,39 @@ export function useThreadHistory(threadId: string) {
       setLoading(false);
     }
   }, []);
+
+  // Reset state when threadId changes
   useEffect(() => {
     threadIdRef.current = threadId;
+    runsRef.current = [];
+    indexRef.current = -1;
+    initialLoadDoneRef.current = false;
+    setMessages([]);
+  }, [threadId]);
+
+  // Load/update history when runs data changes
+  useEffect(() => {
     if (runs.data && runs.data.length > 0) {
-      runsRef.current = runs.data ?? [];
-      indexRef.current = runs.data.length - 1;
+      const prevLength = runsRef.current.length;
+      runsRef.current = runs.data;
+
+      if (!initialLoadDoneRef.current) {
+        // Initial load: start from the most recent run
+        initialLoadDoneRef.current = true;
+        indexRef.current = runs.data.length - 1;
+        loadMessages().catch(() => {
+          toast.error("Failed to load thread history.");
+        });
+      } else if (runs.data.length > prevLength) {
+        // New runs added (e.g., after query invalidation): adjust indexRef
+        // so the user can load older history by scrolling up
+        indexRef.current = adjustHistoryIndex(
+          indexRef.current,
+          prevLength,
+          runs.data.length,
+        );
+      }
     }
-    loadMessages().catch(() => {
-      toast.error("Failed to load thread history.");
-    });
   }, [threadId, runs.data, loadMessages]);
 
   const appendMessages = useCallback((_messages: Message[]) => {
