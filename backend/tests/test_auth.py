@@ -686,6 +686,7 @@ def test_missing_jwt_secret_generates_ephemeral(monkeypatch, caplog):
 
     config_module._auth_config = None
     monkeypatch.delenv("AUTH_JWT_SECRET", raising=False)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *args, **kwargs: None)
 
     with caplog.at_level(logging.WARNING):
         config = config_module.get_auth_config()

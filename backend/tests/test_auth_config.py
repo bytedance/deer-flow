@@ -46,8 +46,9 @@ def test_auth_config_missing_secret_generates_ephemeral(caplog):
     try:
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("AUTH_JWT_SECRET", None)
-            with caplog.at_level(logging.WARNING):
-                config = cfg.get_auth_config()
+            with patch("dotenv.load_dotenv"):
+                with caplog.at_level(logging.WARNING):
+                    config = cfg.get_auth_config()
             assert config.jwt_secret
             assert any("AUTH_JWT_SECRET" in msg for msg in caplog.messages)
     finally:
