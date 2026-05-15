@@ -41,16 +41,13 @@ async def submit_ui_interaction(
     as a follow-up message through the normal streaming path.
     """
     store = get_interaction_store()
-    record = store.get(req.callback_id)
+    record = store.get(thread_id, req.callback_id)
 
     if record is None:
         raise HTTPException(status_code=404, detail=f"Unknown callback: {req.callback_id}")
 
-    if record.thread_id != thread_id:
-        raise HTTPException(status_code=400, detail="Callback does not belong to this thread")
-
     try:
-        human_message = process_interaction(req.callback_id, req.payload)
+        human_message = process_interaction(thread_id, req.callback_id, req.payload)
     except TimeoutError:
         raise HTTPException(status_code=410, detail="Callback has expired")
     except ValueError as e:

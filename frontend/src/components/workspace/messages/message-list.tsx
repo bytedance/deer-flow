@@ -10,13 +10,14 @@ import {
 import { GenUIBlockList } from "@/components/genui";
 import { Button } from "@/components/ui/button";
 import { submitInteraction } from "@/core/genui";
-import { extractBlockIdsFromMessages } from "@/core/genui/history";
+import {
+  buildResolvedBlockHistory,
+  extractResolvedBlockIdsFromMessages,
+  getHistoryMessageKey,
+} from "@/core/genui/history";
 import { recoverBlocksFromMessages } from "@/core/genui/sse-recovery";
 import { useBlockStore } from "@/core/genui/store";
-import {
-  buildStreamingBlockExclusions,
-  partitionStandaloneBlockIds,
-} from "@/core/genui/visibility";
+import { partitionStandaloneBlockIds } from "@/core/genui/visibility";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildTokenDebugSteps,
@@ -59,12 +60,13 @@ export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
 
-function getMessageKey(message: Message): string {
-  return (
-    message.id ??
-    ("tool_call_id" in message ? message.tool_call_id : undefined) ??
-    `${message.type}:${extractTextFromMessage(message)}`
-  );
+const getMessageKey = getHistoryMessageKey;
+
+function getGroupRenderKey(
+  group: ReturnType<typeof getMessageGroups>[number],
+  index: number,
+): string {
+  return `${group.type}-${group.id ?? index}`;
 }
 
 function areAllMessagesHistorical(
@@ -203,7 +205,17 @@ export function MessageList({
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
   const blocks = useBlockStore((state) => state.blocks);
-  const storeBlockIds = useMemo(() => Array.from(blocks.keys()), [blocks]);
+  const resolvedBlockHistory = useMemo(
+    () => buildResolvedBlockHistory(messages),
+    [messages],
+  );
+  const storeBlockIds = useMemo(
+    () =>
+      Array.from(blocks.keys()).filter(
+        (blockId) => !resolvedBlockHistory.duplicatedRawBlockIds.has(blockId),
+      ),
+    [blocks, resolvedBlockHistory.duplicatedRawBlockIds],
+  );
   const groupedMessages = getMessageGroups(messages);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
@@ -216,11 +228,16 @@ export function MessageList({
     const ids: string[] = [];
     for (const group of groupedMessages) {
       if (group.type === "assistant:processing") {
-        ids.push(...extractBlockIdsFromMessages(group.messages));
+        ids.push(
+          ...extractResolvedBlockIdsFromMessages(
+            group.messages,
+            resolvedBlockHistory.blockIdsByMessageKey,
+          ),
+        );
       }
     }
     return ids;
-  }, [groupedMessages]);
+  }, [groupedMessages, resolvedBlockHistory.blockIdsByMessageKey]);
 
   const preStreamMessageKeysRef = useRef<Set<string>>(new Set());
   const preStreamBlockIdsRef = useRef<Set<string>>(new Set());
@@ -292,7 +309,10 @@ export function MessageList({
       messages as { type?: string; content?: unknown }[],
     );
 
-    const historicalBlockIds = extractBlockIdsFromMessages(historicalMessages);
+    const historicalBlockIds = extractResolvedBlockIdsFromMessages(
+      historicalMessages,
+      resolvedBlockHistory.blockIdsByMessageKey,
+    );
     if (historicalBlockIds.length === 0) return;
 
     setHistoricalAnchoredBlockIds((prev) => {
@@ -306,7 +326,11 @@ export function MessageList({
       }
       return changed ? next : prev;
     });
-  }, [historicalMessages, messages]);
+  }, [
+    historicalMessages,
+    messages,
+    resolvedBlockHistory.blockIdsByMessageKey,
+  ]);
 
   const interactions = useBlockStore((state) => state.interactions);
   const historicalMessageBlockIds = useMemo(
@@ -314,14 +338,25 @@ export function MessageList({
       Array.from(
         new Set([
           ...historicalAnchoredBlockIds,
-          ...extractBlockIdsFromMessages(historicalMessages),
+          ...extractResolvedBlockIdsFromMessages(
+            historicalMessages,
+            resolvedBlockHistory.blockIdsByMessageKey,
+          ),
         ]),
       ),
-    [historicalAnchoredBlockIds, historicalMessages],
+    [
+      historicalAnchoredBlockIds,
+      historicalMessages,
+      resolvedBlockHistory.blockIdsByMessageKey,
+    ],
   );
   const liveMessageBlockIds = useMemo(
-    () => extractBlockIdsFromMessages(liveMessages),
-    [liveMessages],
+    () =>
+      extractResolvedBlockIdsFromMessages(
+        liveMessages,
+        resolvedBlockHistory.blockIdsByMessageKey,
+      ),
+    [liveMessages, resolvedBlockHistory.blockIdsByMessageKey],
   );
 
   const { historicalBlockIds: historicalStandaloneBlockIds, tailBlockIds: unclaimedBlockIds } =
@@ -353,26 +388,166 @@ export function MessageList({
       ),
     [effectiveLiveStreamMessageKeys, groupedMessages],
   );
+
   const currentTurnStartIndex = useMemo(() => {
-    if (firstLiveGroupIndex >= 0) {
-      for (let index = firstLiveGroupIndex - 1; index >= 0; index -= 1) {
-        if (groupedMessages[index]?.type === "human") {
-          return index;
-        }
-      }
+    if (firstLiveGroupIndex < 0) {
+      return -1;
+    }
+
+    if (groupedMessages[firstLiveGroupIndex]?.type === "human") {
       return firstLiveGroupIndex;
     }
 
-    if (thread.isLoading) {
-      for (let index = groupedMessages.length - 1; index >= 0; index -= 1) {
-        if (groupedMessages[index]?.type === "human") {
-          return index;
+    for (let index = firstLiveGroupIndex - 1; index >= 0; index -= 1) {
+      if (groupedMessages[index]?.type === "human") {
+        return index;
+      }
+    }
+
+    return firstLiveGroupIndex;
+  }, [firstLiveGroupIndex, groupedMessages]);
+
+  const claimedBlockAnchorById = useMemo(() => {
+    const anchors = new Map<string, string>();
+
+    for (const [groupIndex, group] of groupedMessages.entries()) {
+      if (group.type !== "assistant:processing") {
+        continue;
+      }
+
+      const groupKey = getGroupRenderKey(group, groupIndex);
+      for (const blockId of extractResolvedBlockIdsFromMessages(
+        group.messages,
+        resolvedBlockHistory.blockIdsByMessageKey,
+      )) {
+        if (!anchors.has(blockId)) {
+          anchors.set(blockId, groupKey);
         }
       }
     }
 
-    return -1;
-  }, [firstLiveGroupIndex, groupedMessages, thread.isLoading]);
+    return anchors;
+  }, [groupedMessages, resolvedBlockHistory.blockIdsByMessageKey]);
+
+  const desiredHistoricalAnchorAfterGroupKey = useMemo(() => {
+    if (historicalStandaloneBlockIds.length === 0) {
+      return undefined;
+    }
+
+    if (currentTurnStartIndex > 0) {
+      const anchorGroup = groupedMessages[currentTurnStartIndex - 1];
+      return anchorGroup
+        ? getGroupRenderKey(anchorGroup, currentTurnStartIndex - 1)
+        : null;
+    }
+
+    if (currentTurnStartIndex === 0 || groupedMessages.length === 0) {
+      return null;
+    }
+
+    const lastGroupIndex = groupedMessages.length - 1;
+    const lastGroup = groupedMessages[lastGroupIndex];
+    return lastGroup ? getGroupRenderKey(lastGroup, lastGroupIndex) : null;
+  }, [
+    currentTurnStartIndex,
+    groupedMessages,
+    historicalStandaloneBlockIds.length,
+  ]);
+
+  const [
+    blockAnchorById,
+    setBlockAnchorById,
+  ] = useState<Map<string, string | null>>(() => new Map());
+
+  useEffect(() => {
+    setBlockAnchorById(new Map());
+  }, [threadId]);
+
+  useEffect(() => {
+    if (
+      claimedBlockAnchorById.size === 0 &&
+      historicalStandaloneBlockIds.length === 0
+    ) {
+      return;
+    }
+
+    setBlockAnchorById((prev) => {
+      let changed = false;
+      const next = new Map(prev);
+
+      for (const [blockId, anchorGroupKey] of claimedBlockAnchorById) {
+        if (next.has(blockId)) {
+          continue;
+        }
+        next.set(blockId, anchorGroupKey);
+        changed = true;
+      }
+
+      for (const blockId of historicalStandaloneBlockIds) {
+        if (next.has(blockId)) {
+          continue;
+        }
+        next.set(blockId, desiredHistoricalAnchorAfterGroupKey ?? null);
+        changed = true;
+      }
+
+      if (!changed) {
+        return prev;
+      }
+
+      return next;
+    });
+  }, [
+    claimedBlockAnchorById,
+    desiredHistoricalAnchorAfterGroupKey,
+    historicalStandaloneBlockIds.length,
+    historicalStandaloneBlockIds,
+  ]);
+
+  const groupedHistoricalStandaloneBlocks = useMemo(() => {
+    const beforeMessageBlockIds: string[] = [];
+    const fallbackBlockIds: string[] = [];
+    const blockIdsByAnchorGroupKey = new Map<string, string[]>();
+    const knownGroupKeys = new Set(
+      groupedMessages.map((group, index) => getGroupRenderKey(group, index)),
+    );
+
+    for (const blockId of historicalStandaloneBlockIds) {
+      const anchorAfterGroupKey =
+        blockAnchorById.get(blockId) ??
+        desiredHistoricalAnchorAfterGroupKey;
+
+      if (anchorAfterGroupKey === null) {
+        beforeMessageBlockIds.push(blockId);
+        continue;
+      }
+
+      if (
+        anchorAfterGroupKey !== undefined &&
+        knownGroupKeys.has(anchorAfterGroupKey)
+      ) {
+        const anchoredBlockIds =
+          blockIdsByAnchorGroupKey.get(anchorAfterGroupKey) ?? [];
+        anchoredBlockIds.push(blockId);
+        blockIdsByAnchorGroupKey.set(anchorAfterGroupKey, anchoredBlockIds);
+        continue;
+      }
+
+      fallbackBlockIds.push(blockId);
+    }
+
+    return {
+      beforeMessageBlockIds,
+      blockIdsByAnchorGroupKey,
+      fallbackBlockIds,
+    };
+  }, [
+    blockAnchorById,
+    desiredHistoricalAnchorAfterGroupKey,
+    groupedMessages,
+    historicalStandaloneBlockIds.length,
+    historicalStandaloneBlockIds,
+  ]);
 
   const renderAssistantCopyButton = useCallback((messages: Message[]) => {
     const clipboardData = [...messages]
@@ -442,8 +617,12 @@ export function MessageList({
   );
 
   const handleInteraction = useCallback(
-    (callbackId: string, payload: Record<string, unknown>) => {
-      void submitInteraction(threadId, callbackId, payload);
+    (
+      callbackId: string,
+      payload: Record<string, unknown>,
+      blockId?: string,
+    ) => {
+      void submitInteraction(threadId, blockId, callbackId, payload);
     },
     [threadId],
   );
@@ -462,6 +641,14 @@ export function MessageList({
           hasMore={hasMoreHistory}
           loadMore={loadMoreHistory}
         />
+        {groupedHistoricalStandaloneBlocks.beforeMessageBlockIds.length > 0 && (
+            <GenUIBlockList
+              threadId={threadId}
+              blockIds={groupedHistoricalStandaloneBlocks.beforeMessageBlockIds}
+              disableExpiration={true}
+              onInteraction={handleInteraction}
+            />
+          )}
         {groupedMessages.map((group, groupIndex) => {
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
           let renderedGroup: React.ReactNode = null;
@@ -649,8 +836,11 @@ export function MessageList({
               </div>
             );
           } else if (group.type === "assistant:processing") {
-            const blockIds = extractBlockIdsFromMessages(group.messages);
-            return (
+            const blockIds = extractResolvedBlockIdsFromMessages(
+              group.messages,
+              resolvedBlockHistory.blockIdsByMessageKey,
+            );
+            renderedGroup = (
               <div key={`processing-${group.id}`} className="w-full">
                 <MessageGroup
                   messages={group.messages}
@@ -667,7 +857,6 @@ export function MessageList({
                     threadId={threadId}
                     blockIds={blockIds}
                     disableExpiration={
-                      !thread.isLoading &&
                       areAllMessagesHistorical(
                         group.messages,
                         effectiveLiveStreamMessageKeys,
@@ -689,29 +878,32 @@ export function MessageList({
             return null;
           }
 
-          if (
-            groupIndex === currentTurnStartIndex &&
-            historicalStandaloneBlockIds.length > 0
-          ) {
+          const groupKey = getGroupRenderKey(group, groupIndex);
+          const anchoredBlockIds =
+            groupedHistoricalStandaloneBlocks.blockIdsByAnchorGroupKey.get(
+              groupKey,
+            );
+
+          if (anchoredBlockIds && anchoredBlockIds.length > 0) {
             return (
               <Fragment key={`group-${group.id ?? groupIndex}`}>
+                {renderedGroup}
                 <GenUIBlockList
                   threadId={threadId}
-                  blockIds={historicalStandaloneBlockIds}
+                  blockIds={anchoredBlockIds}
                   disableExpiration={true}
                   onInteraction={handleInteraction}
                 />
-                {renderedGroup}
               </Fragment>
             );
           }
 
           return renderedGroup;
         })}
-        {currentTurnStartIndex < 0 && historicalStandaloneBlockIds.length > 0 && (
+        {groupedHistoricalStandaloneBlocks.fallbackBlockIds.length > 0 && (
           <GenUIBlockList
             threadId={threadId}
-            blockIds={historicalStandaloneBlockIds}
+            blockIds={groupedHistoricalStandaloneBlocks.fallbackBlockIds}
             disableExpiration={true}
             onInteraction={handleInteraction}
           />
@@ -725,13 +917,10 @@ export function MessageList({
           />
         )}
         {thread.isLoading && <StreamingIndicator className="my-4" />}
-        {thread.isLoading && (
+        {thread.isLoading && unclaimedBlockIds.length > 0 && (
           <GenUIBlockList
             threadId={threadId}
-            excludeBlockIds={buildStreamingBlockExclusions(
-              claimedBlockIds,
-              historicalStandaloneBlockIds,
-            )}
+            blockIds={unclaimedBlockIds}
             onInteraction={handleInteraction}
           />
         )}

@@ -1,11 +1,12 @@
+import type { Message } from "@langchain/langgraph-sdk";
+
+import { buildResolvedBlockHistory } from "./history";
 import { useBlockStore } from "./store";
 import type { UIBlock } from "./store";
 
 const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30000;
 const BACKOFF_MULTIPLIER = 2;
-
-const UI_BLOCK_PATTERN = /<!--ui_block:(.+?)-->/g;
 
 function getBackendBaseUrl(): string {
   if (typeof window !== "undefined") {
@@ -20,44 +21,7 @@ function getBackendBaseUrl(): string {
  * Mirrors the backend's extract_blocks_from_messages logic.
  */
 export function extractBlocksFromMessages(messages: { type?: string; content?: unknown }[]): UIBlock[] {
-  const blocks = new Map<string, UIBlock>();
-
-  for (const msg of messages) {
-    if (msg.type !== "tool") continue;
-    const content = msg.content;
-    if (!content || typeof content !== "string") continue;
-    if (!content.includes("<!--ui_block:")) continue;
-
-    UI_BLOCK_PATTERN.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = UI_BLOCK_PATTERN.exec(content)) !== null) {
-      try {
-        const block = JSON.parse(match[1]!) as UIBlock;
-        if (!block.block_id) continue;
-
-        const action = block.action ?? "create";
-        if (action === "delete") {
-          blocks.delete(block.block_id);
-        } else if (action === "update") {
-          const existing = blocks.get(block.block_id);
-          if (existing) {
-            blocks.set(block.block_id, {
-              ...existing,
-              props: { ...existing.props, ...block.props },
-            });
-          } else {
-            blocks.set(block.block_id, block);
-          }
-        } else {
-          blocks.set(block.block_id, block);
-        }
-      } catch {
-        // skip malformed JSON
-      }
-    }
-  }
-
-  return Array.from(blocks.values());
+  return buildResolvedBlockHistory(messages as Message[]).blocks;
 }
 
 /**

@@ -61,7 +61,17 @@ def render_ui_tool(
     metrics = get_render_ui_metrics()
 
     with metrics.measure(component):
-        resolved_block_id = block_id or str(uuid.uuid4())
+        config = get_config()
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+
+        from deerflow.agents.genui_persistence import persist_block, resolve_create_block_id
+
+        if action == "create":
+            resolved_block_id = (
+                resolve_create_block_id(thread_id, block_id) or str(uuid.uuid4())
+            )
+        else:
+            resolved_block_id = block_id or str(uuid.uuid4())
 
         block = {
             "schema_version": SCHEMA_VERSION,
@@ -82,11 +92,6 @@ def render_ui_tool(
 
         writer = get_stream_writer()
         writer(block)
-
-        config = get_config()
-        thread_id = config.get("configurable", {}).get("thread_id", "")
-
-        from deerflow.agents.genui_persistence import persist_block
 
         persist_block(thread_id, block)
 

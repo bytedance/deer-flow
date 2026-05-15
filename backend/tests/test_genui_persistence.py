@@ -1,15 +1,32 @@
 """Tests for GenUI block persistence and checkpoint recovery."""
 
+import importlib.util
 import json
+from pathlib import Path
+import sys
 
 import pytest
 
-from deerflow.agents.genui_persistence import (
-    clear_thread_blocks,
-    extract_blocks_from_messages,
-    get_persisted_blocks,
-    persist_block,
+
+def _load_module(module_name: str, relative_path: str):
+    path = Path(__file__).resolve().parents[1] / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+genui_persistence = _load_module(
+    "test_genui_persistence_module",
+    "packages/harness/deerflow/agents/genui_persistence.py",
 )
+clear_thread_blocks = genui_persistence.clear_thread_blocks
+extract_blocks_from_messages = genui_persistence.extract_blocks_from_messages
+get_persisted_blocks = genui_persistence.get_persisted_blocks
+persist_block = genui_persistence.persist_block
+resolve_create_block_id = genui_persistence.resolve_create_block_id
 
 
 class TestInMemoryPersistence:
@@ -33,6 +50,118 @@ class TestInMemoryPersistence:
         persist_block("test-thread", {"block_id": "b2", "component": "table", "props": {}})
         blocks = get_persisted_blocks("test-thread")
         assert len(blocks) == 2
+
+    def test_get_persisted_blocks_returns_folded_final_state(self):
+        persist_block(
+            "test-thread",
+            {
+                "schema_version": "1.0",
+                "type": "ui_block",
+                "action": "create",
+                "block_id": "b1",
+                "component": "card",
+                "props": {"title": "Original", "value": "100"},
+                "interactive": False,
+            },
+        )
+        persist_block(
+            "test-thread",
+            {
+                "schema_version": "1.0",
+                "type": "ui_block",
+                "action": "update",
+                "block_id": "b1",
+                "component": "card",
+                "props": {"value": "200"},
+                "interactive": False,
+            },
+        )
+        persist_block(
+            "test-thread",
+            {
+                "schema_version": "1.0",
+                "type": "ui_block",
+                "action": "create",
+                "block_id": "b2",
+                "component": "table",
+                "props": {"rows": 3},
+                "interactive": False,
+            },
+        )
+        persist_block(
+            "test-thread",
+            {
+                "schema_version": "1.0",
+                "type": "ui_block",
+                "action": "delete",
+                "block_id": "b2",
+                "component": "table",
+                "props": {},
+                "interactive": False,
+            },
+        )
+
+        blocks = get_persisted_blocks("test-thread")
+
+        assert blocks == [
+            {
+                "schema_version": "1.0",
+                "type": "ui_block",
+                "action": "create",
+                "block_id": "b1",
+                "component": "card",
+                "props": {"title": "Original", "value": "200"},
+                "interactive": False,
+            }
+        ]
+
+    def test_resolve_create_block_id_uniquifies_visible_duplicate_ids(self):
+        persist_block(
+            "test-thread",
+            {
+                "schema_version": "1.0",
+                "type": "ui_block",
+                "action": "create",
+                "block_id": "daily-report-chart",
+                "component": "echart",
+                "props": {"title": "Round 1"},
+                "interactive": False,
+            },
+        )
+
+        resolved = resolve_create_block_id("test-thread", "daily-report-chart")
+
+        assert resolved == "daily-report-chart-2"
+
+    def test_resolve_create_block_id_reuses_deleted_ids(self):
+        persist_block(
+            "test-thread",
+            {
+                "schema_version": "1.0",
+                "type": "ui_block",
+                "action": "create",
+                "block_id": "daily-report-table",
+                "component": "table",
+                "props": {"rows": 1},
+                "interactive": False,
+            },
+        )
+        persist_block(
+            "test-thread",
+            {
+                "schema_version": "1.0",
+                "type": "ui_block",
+                "action": "delete",
+                "block_id": "daily-report-table",
+                "component": "table",
+                "props": {},
+                "interactive": False,
+            },
+        )
+
+        resolved = resolve_create_block_id("test-thread", "daily-report-table")
+
+        assert resolved == "daily-report-table"
 
 
 class TestExtractBlocksFromMessages:

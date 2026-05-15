@@ -20,6 +20,13 @@ export interface InteractionState {
   submittedAt?: number;
 }
 
+export function getInteractionKey(block: {
+  block_id?: string;
+  callback_id?: string;
+}): string | undefined {
+  return block.block_id ?? block.callback_id;
+}
+
 interface BlockStoreState {
   blocks: Map<string, UIBlock>;
   interactions: Map<string, InteractionState>;
@@ -42,12 +49,14 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
       const blocks = new Map(state.blocks);
       const interactions = new Map(state.interactions);
       switch (block.action) {
-        case "create":
+        case "create": {
           blocks.set(block.block_id, block);
-          if (block.callback_id) {
-            interactions.delete(block.callback_id);
+          const interactionKey = getInteractionKey(block);
+          if (interactionKey) {
+            interactions.delete(interactionKey);
           }
           break;
+        }
         case "update": {
           const existing = blocks.get(block.block_id);
           if (existing) {
@@ -60,9 +69,14 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
           }
           break;
         }
-        case "delete":
+        case "delete": {
           blocks.delete(block.block_id);
+          const interactionKey = getInteractionKey(block);
+          if (interactionKey) {
+            interactions.delete(interactionKey);
+          }
           break;
+        }
       }
       return { blocks, interactions };
     }),

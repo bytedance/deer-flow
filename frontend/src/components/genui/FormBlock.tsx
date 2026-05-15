@@ -33,6 +33,7 @@ interface FormField {
 
 interface FormBlockProps {
   block: {
+    block_id?: string;
     props: {
       title?: string;
       description?: string;
@@ -43,7 +44,11 @@ interface FormBlockProps {
     };
     callback_id?: string;
     interactionState?: InteractionState;
-    onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
+    onInteraction?: (
+      callbackId: string,
+      payload: Record<string, unknown>,
+      blockId?: string,
+    ) => void;
   };
 }
 
@@ -295,7 +300,7 @@ function MultiSelectField({
 }
 
 export default function FormBlock({ block }: FormBlockProps) {
-  const { props, callback_id, interactionState, onInteraction } = block;
+  const { block_id, props, callback_id, interactionState, onInteraction } = block;
   const { title, description, fields, submit_label = "Submit", default_values } = props;
 
   const { register, control, handleSubmit, formState: { errors } } = useForm({
@@ -309,7 +314,7 @@ export default function FormBlock({ block }: FormBlockProps) {
 
   const onSubmit = (data: Record<string, unknown>) => {
     if (callback_id && onInteraction) {
-      onInteraction(callback_id, data);
+      onInteraction(callback_id, data, block_id);
     }
   };
 

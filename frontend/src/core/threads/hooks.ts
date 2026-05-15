@@ -136,7 +136,7 @@ export function useThreadStream({
     listeners.current = { onSend, onStart, onFinish, onToolEnd };
   }, [onSend, onStart, onFinish, onToolEnd]);
 
-  const prevThreadIdRef = useRef<string | null>(threadId ?? null);
+  const prevThreadIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
@@ -150,7 +150,7 @@ export function useThreadStream({
       useBlockStore.getState().reset();
     } else {
       setOnStreamThreadId(normalizedThreadId);
-      if (prevThreadId && prevThreadId !== normalizedThreadId) {
+      if (prevThreadId !== normalizedThreadId) {
         useBlockStore.getState().reset();
       }
     }

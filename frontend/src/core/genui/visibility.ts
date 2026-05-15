@@ -1,4 +1,4 @@
-import type { InteractionState, UIBlock } from "./store";
+import { getInteractionKey, type InteractionState, type UIBlock } from "./store";
 
 type StandaloneBlockBucketsOptions = {
   claimedBlockIds: string[];
@@ -19,10 +19,43 @@ function isSubmittedBlock(
   block: UIBlock | undefined,
   interactions: Map<string, InteractionState>,
 ): boolean {
-  if (!block?.callback_id) {
+  if (!block) {
     return false;
   }
-  return interactions.get(block.callback_id)?.status === "submitted";
+  const interactionKey = getInteractionKey(block);
+  if (!interactionKey) {
+    return false;
+  }
+  return interactions.get(interactionKey)?.status === "submitted";
+}
+
+export function filterSupersededInteractiveBlockIds(
+  blockIds: string[],
+  blocks: Map<string, UIBlock>,
+): string[] {
+  const latestBlockIdByCallback = new Map<string, string>();
+
+  for (const block of blocks.values()) {
+    if (!block.parent_id && block.interactive && block.callback_id) {
+      latestBlockIdByCallback.set(block.callback_id, block.block_id);
+    }
+  }
+
+  const seen = new Set<string>();
+
+  return blockIds.filter((id) => {
+    if (seen.has(id)) {
+      return false;
+    }
+    seen.add(id);
+
+    const block = blocks.get(id);
+    if (!block?.interactive || !block.callback_id) {
+      return true;
+    }
+
+    return latestBlockIdByCallback.get(block.callback_id) === id;
+  });
 }
 
 export function partitionStandaloneBlockIds({
@@ -63,12 +96,11 @@ export function partitionStandaloneBlockIds({
     const hasMessageAnchor = hasHistoricalAnchor || hasLiveAnchor;
     const wasPresentBeforeStream = preStream.has(id);
 
-    // Recovered-only interactive blocks are usually stale historical forms.
-    // Keep them hidden unless they belong to the active stream.
+    // Hide interactive blocks from previous turns (wasPresentBeforeStream),
+    // and orphan interactive blocks on page refresh (no stream boundary + no anchor).
     if (
       block?.interactive &&
-      !hasMessageAnchor &&
-      (wasPresentBeforeStream || !hasStreamBoundary)
+      (wasPresentBeforeStream || (!hasStreamBoundary && !hasMessageAnchor))
     ) {
       continue;
     }

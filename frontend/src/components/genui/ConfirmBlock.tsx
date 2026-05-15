@@ -4,6 +4,7 @@ import type { InteractionState } from "@/core/genui/store";
 
 interface ConfirmBlockProps {
   block: {
+    block_id?: string;
     props: {
       title: string;
       message: string;
@@ -13,12 +14,16 @@ interface ConfirmBlockProps {
     };
     callback_id?: string;
     interactionState?: InteractionState;
-    onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
+    onInteraction?: (
+      callbackId: string,
+      payload: Record<string, unknown>,
+      blockId?: string,
+    ) => void;
   };
 }
 
 export default function ConfirmBlock({ block }: ConfirmBlockProps) {
-  const { props, callback_id, interactionState, onInteraction } = block;
+  const { block_id, props, callback_id, interactionState, onInteraction } = block;
   const { title, message, confirm_label = "Confirm", cancel_label = "Cancel", variant = "default" } = props;
 
   const isDisabled = interactionState?.status === "loading" ||
@@ -28,13 +33,13 @@ export default function ConfirmBlock({ block }: ConfirmBlockProps) {
 
   const handleConfirm = () => {
     if (callback_id && onInteraction) {
-      onInteraction(callback_id, { confirmed: true });
+      onInteraction(callback_id, { confirmed: true }, block_id);
     }
   };
 
   const handleCancel = () => {
     if (callback_id && onInteraction) {
-      onInteraction(callback_id, { confirmed: false });
+      onInteraction(callback_id, { confirmed: false }, block_id);
     }
   };
 

@@ -4,7 +4,11 @@ import { Suspense, useEffect, useMemo, useRef } from "react";
 
 import { getBlockComponent } from "@/core/genui/registry";
 import { sanitizeProps } from "@/core/genui/sanitizer";
-import { type UIBlock, useBlockStore } from "@/core/genui/store";
+import {
+  getInteractionKey,
+  type UIBlock,
+  useBlockStore,
+} from "@/core/genui/store";
 import { validateProps } from "@/core/genui/validator";
 
 import { BlockErrorBoundary } from "./BlockErrorBoundary";
@@ -13,7 +17,11 @@ interface GenUIRendererProps {
   block: UIBlock;
   threadId?: string;
   disableExpiration?: boolean;
-  onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
+  onInteraction?: (
+    callbackId: string,
+    payload: Record<string, unknown>,
+    blockId?: string,
+  ) => void;
 }
 
 function BlockFallback() {
@@ -36,8 +44,9 @@ function UnsupportedBlock({ component }: { component: string }) {
 }
 
 export function GenUIRenderer({ block, threadId, disableExpiration, onInteraction }: GenUIRendererProps) {
+  const interactionKey = getInteractionKey(block);
   const interactionState = useBlockStore(
-    (state) => block.callback_id ? state.interactions.get(block.callback_id) : undefined,
+    (state) => interactionKey ? state.interactions.get(interactionKey) : undefined,
   );
 
   const effectiveInteractionState = useMemo(() => {
@@ -58,7 +67,7 @@ export function GenUIRenderer({ block, threadId, disableExpiration, onInteractio
     if (
       disableExpiration ||
       !block.interactive ||
-      !block.callback_id ||
+      !interactionKey ||
       !block.callback_timeout_ms ||
       interactionState?.status === "submitted" ||
       interactionState?.status === "expired"
@@ -67,8 +76,8 @@ export function GenUIRenderer({ block, threadId, disableExpiration, onInteractio
     }
 
     timeoutRef.current = setTimeout(() => {
-      if (block.callback_id) {
-        useBlockStore.getState().setInteractionExpired(block.callback_id);
+      if (interactionKey) {
+        useBlockStore.getState().setInteractionExpired(interactionKey);
       }
     }, block.callback_timeout_ms);
 
@@ -77,7 +86,7 @@ export function GenUIRenderer({ block, threadId, disableExpiration, onInteractio
         clearTimeout(timeoutRef.current);
       }
     };
-  }, [disableExpiration, block.interactive, block.callback_id, block.callback_timeout_ms, interactionState?.status]);
+  }, [disableExpiration, block.interactive, block.callback_timeout_ms, interactionKey, interactionState?.status]);
 
   const Component = getBlockComponent(block.component, block.schema_version);
 

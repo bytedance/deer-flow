@@ -51,6 +51,10 @@ class InteractionStore:
         self._records: dict[str, InteractionRecord] = {}
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _make_key(thread_id: str, callback_id: str) -> str:
+        return f"{thread_id}\x1f{callback_id}"
+
     def register(
         self,
         callback_id: str,
@@ -65,22 +69,28 @@ class InteractionStore:
             timeout=timeout,
         )
         with self._lock:
-            self._records[callback_id] = record
+            self._records[self._make_key(thread_id, callback_id)] = record
         logger.debug("Registered interaction callback %s for thread %s", callback_id, thread_id)
         return record
 
-    def get(self, callback_id: str) -> InteractionRecord | None:
+    def get(self, thread_id: str, callback_id: str) -> InteractionRecord | None:
         with self._lock:
-            return self._records.get(callback_id)
+            return self._records.get(self._make_key(thread_id, callback_id))
 
-    def submit(self, callback_id: str, payload: dict) -> InteractionRecord | None:
+    def submit(
+        self,
+        thread_id: str,
+        callback_id: str,
+        payload: dict,
+    ) -> InteractionRecord | None:
         """Mark a callback as submitted. Returns the updated record or None if not found."""
         with self._lock:
-            record = self._records.get(callback_id)
+            key = self._make_key(thread_id, callback_id)
+            record = self._records.get(key)
             if record is None:
                 return None
             updated = record.with_submission(payload)
-            self._records[callback_id] = updated
+            self._records[key] = updated
             return updated
 
     def cleanup_expired(self) -> int:
@@ -98,9 +108,9 @@ class InteractionStore:
             logger.debug("Cleaned up %d expired interaction records", removed)
         return removed
 
-    def remove(self, callback_id: str) -> bool:
+    def remove(self, thread_id: str, callback_id: str) -> bool:
         with self._lock:
-            return self._records.pop(callback_id, None) is not None
+            return self._records.pop(self._make_key(thread_id, callback_id), None) is not None
 
 
 # Global singleton instance
@@ -119,6 +129,7 @@ def get_interaction_store() -> InteractionStore:
 
 
 def process_interaction(
+    thread_id: str,
     callback_id: str,
     payload: dict,
 ) -> HumanMessage | None:
@@ -132,19 +143,19 @@ def process_interaction(
         TimeoutError: If the callback has expired.
     """
     store = get_interaction_store()
-    record = store.get(callback_id)
+    record = store.get(thread_id, callback_id)
 
     if record is None:
-        raise ValueError(f"Unknown callback_id: {callback_id}")
+        raise ValueError(f"Unknown callback_id: {callback_id} for thread {thread_id}")
 
     if record.is_expired:
-        store.remove(callback_id)
+        store.remove(thread_id, callback_id)
         raise TimeoutError(f"Callback {callback_id} has expired")
 
     if record.submitted:
         return None
 
-    updated = store.submit(callback_id, payload)
+    updated = store.submit(thread_id, callback_id, payload)
     if updated is None:
         return None
 

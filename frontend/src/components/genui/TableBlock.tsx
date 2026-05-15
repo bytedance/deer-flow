@@ -12,6 +12,7 @@ interface TableColumn {
 
 interface TableBlockProps {
   block: {
+    block_id?: string;
     props: {
       columns: TableColumn[];
       data: Record<string, unknown>[];
@@ -22,12 +23,16 @@ interface TableBlockProps {
       onRowSelect?: boolean;
     };
     callback_id?: string;
-    onInteraction?: (callbackId: string, payload: Record<string, unknown>) => void;
+    onInteraction?: (
+      callbackId: string,
+      payload: Record<string, unknown>,
+      blockId?: string,
+    ) => void;
   };
 }
 
 export default function TableBlock({ block }: TableBlockProps) {
-  const { props, callback_id, onInteraction } = block;
+  const { block_id, props, callback_id, onInteraction } = block;
   const { columns, data, title, sortable, paginated, page_size = 10, onRowSelect } = props;
 
   const [sortKey, setSortKey] = useState<string | null>(null);
@@ -70,7 +75,7 @@ export default function TableBlock({ block }: TableBlockProps) {
     if (!onRowSelect) return;
     setSelectedRow(index);
     if (callback_id && onInteraction) {
-      onInteraction(callback_id, { selected_row: row, row_index: index });
+      onInteraction(callback_id, { selected_row: row, row_index: index }, block_id);
     }
   };
 

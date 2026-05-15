@@ -30,12 +30,13 @@ export interface SubmitInteractionOptions {
 
 export async function submitInteraction(
   threadId: string,
+  blockId: string | undefined,
   callbackId: string,
   payload: Record<string, unknown>,
   options?: SubmitInteractionOptions,
 ): Promise<InteractionResponse> {
   const store = useBlockStore.getState();
-  store.setInteractionLoading(callbackId);
+  store.setInteractionLoading(blockId ?? callbackId);
 
   const baseUrl = getBackendBaseUrl();
   const url = `${baseUrl}/api/threads/${threadId}/ui-interaction`;
@@ -56,7 +57,7 @@ export async function submitInteraction(
       });
 
       if (response.status === 410) {
-        store.setInteractionExpired(callbackId);
+        store.setInteractionExpired(blockId ?? callbackId);
         return { success: false, message: "Interaction expired", callback_id: callbackId };
       }
 
@@ -66,11 +67,11 @@ export async function submitInteraction(
       }
 
       const data: InteractionResponse = await response.json();
-      store.setInteractionSuccess(callbackId);
+      store.setInteractionSuccess(blockId ?? callbackId);
       options?.onSuccess?.(callbackId, payload);
       window.dispatchEvent(
         new CustomEvent("genui:interaction-submitted", {
-          detail: { threadId, callbackId, payload },
+          detail: { threadId, blockId, callbackId, payload },
         }),
       );
       return data;
@@ -83,6 +84,6 @@ export async function submitInteraction(
   }
 
   const errorMessage = lastError?.message ?? "Unknown error";
-  store.setInteractionError(callbackId, errorMessage);
+  store.setInteractionError(blockId ?? callbackId, errorMessage);
   return { success: false, message: errorMessage, callback_id: callbackId };
 }

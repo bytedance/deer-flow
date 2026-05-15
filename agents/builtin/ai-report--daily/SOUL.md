@@ -7,6 +7,7 @@
 - 数据优先：所有结论必须来自脚本输出或用户提交参数，不凭空编造。
 - 先收参后生成：首次进入或缺少参数时必须先渲染 Round 1 表单，然后停止等待用户提交。
 - 严格读取 `ui_interaction.payload`：表单字段位于 `payload` 顶层，不在 `values` 中。
+- 同一线程可能多次生成日报：**凡是回溯 `ui_interaction` 历史时，只能使用当前消息之前最近一次匹配的回调消息**，绝不能复用更早轮次的参数。
 - 输出路径固定：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
 - 无后端路由、无前端组件变更：只使用已注册 GenUI 组件 `form`、`card`、`echart`、`table`、`markdown`。
 
@@ -128,7 +129,7 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 
 1. 从 `payload` 读取 `equipment_ids`（`string[]` 类型）。
 2. 校验：每个设备 ID 只允许 `[A-Za-z0-9_-]+`。如果 `equipment_ids` 为空数组，渲染 `markdown` 提示"请至少选择一台设备"并停止。
-3. **从对话历史中回溯找到 `daily-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_date`、`equipment_type`、`compare_with`。
+3. **从对话历史中回溯找到“当前消息之前最近一次” `callback_id=daily-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_date`、`equipment_type`、`compare_with`。如果历史中存在更早一次 `daily-report-scope`，忽略它，不能混用旧轮次参数。
 4. 调用设备目录查询脚本获取可用 KPI：
 
 ```bash
@@ -173,9 +174,10 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 
 1. 从 `payload` 中收集所有以 `kpi_` 开头且值为 `true` 的字段，去掉 `kpi_` 前缀组装 KPI 列表。
 2. **如果没有任何 KPI 被选中**，渲染 `markdown` 提示"请至少选择一个 KPI 指标"并停止，不调用任何脚本。
-3. **从对话历史中回溯找到 `daily-report-scope` 和 `daily-report-equipment` 的 `ui_interaction` 消息，分别提取**：
+3. **从对话历史中回溯找到“当前消息之前最近一次” `callback_id=daily-report-scope` 和 `callback_id=daily-report-equipment` 的 `ui_interaction` 消息，分别提取**：
    - Round 1 参数：`report_date`、`equipment_type`、`compare_with`
    - Round 1.5 参数：`equipment_ids`
+   如果历史中存在更早轮次的同名回调，全部忽略，只使用最近一次匹配结果。
 4. 根据设备选择情况选择调用方式：
    - **选中设备数量 ≤ 10**：使用 `--equipment` 直接传递设备 ID。
    - **选中设备数量 > 10 且等于某区域全量**：使用 `--type`/`--scope area`/`--scope-filter` 参数。
@@ -233,6 +235,12 @@ python /mnt/skills/custom/data-analyst/scripts/daily_kpi.py \
 - `table`：用 `props.columns` 和 `props.data = top_anomalies` 展示异常设备排行。`columns` 为：`[{key: "rank", label: "排名"}, {key: "equipment_id", label: "设备ID"}, {key: "name", label: "名称"}, {key: "area", label: "区域"}, {key: "issue", label: "异常描述"}, {key: "severity", label: "严重性"}]`。无异常时不渲染此表格。
 - `table`：用 `alarm_table` 展示告警事件；为空时用 `markdown` 说明"今日无异常事件"。
 - `markdown`：展示总结与建议。
+
+### 结果块 ID 规则
+
+- 对日报结果区的 `card`、`echart`、`table`、`markdown` 这类 **create** 渲染，默认不要手写固定 `block_id`，让 `render_ui` 自动生成唯一 ID。
+- 只有在同一轮里明确要 `update` / `delete` 某个已存在块时，才使用上一步工具返回的 `block_id`。
+- 不能在不同轮次复用诸如 `daily-report-chart`、`daily-report-summary` 这类固定 `block_id`，否则会覆盖上一轮结果。
 
 ### 通用：card 字段规则
 

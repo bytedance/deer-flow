@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { InteractionState, UIBlock } from "@/core/genui/store";
 import {
   buildStreamingBlockExclusions,
+  filterSupersededInteractiveBlockIds,
   partitionStandaloneBlockIds,
 } from "@/core/genui/visibility";
 
@@ -148,7 +149,7 @@ describe("partitionStandaloneBlockIds", () => {
     });
 
     const interactions = new Map<string, InteractionState>();
-    interactions.set("cb-submitted", { status: "submitted" });
+    interactions.set(block.block_id, { status: "submitted" });
 
     const result = partitionStandaloneBlockIds({
       claimedBlockIds: [],
@@ -181,6 +182,47 @@ describe("partitionStandaloneBlockIds", () => {
     expect(result.historicalBlockIds).toEqual([block.block_id]);
     expect(result.tailBlockIds).toEqual([]);
   });
+
+  it("hides unsubmitted interactive blocks from previous turns (has anchor + wasPresentBeforeStream)", () => {
+    const block = makeBlock("old-form", {
+      component: "form",
+      interactive: true,
+      callback_id: "cb-old",
+    });
+
+    const result = partitionStandaloneBlockIds({
+      claimedBlockIds: [],
+      storeBlockIds: [block.block_id],
+      historicalMessageBlockIds: [block.block_id],
+      liveMessageBlockIds: [],
+      preStreamBlockIds: [block.block_id],
+      blocks: makeBlocksMap([block]),
+      interactions: new Map<string, InteractionState>(),
+    });
+
+    expect(result.historicalBlockIds).toEqual([]);
+    expect(result.tailBlockIds).toEqual([]);
+  });
+
+  it("keeps interactive blocks from current stream (not in preStream, has live anchor)", () => {
+    const block = makeBlock("new-form", {
+      component: "form",
+      interactive: true,
+      callback_id: "cb-new",
+    });
+
+    const result = partitionStandaloneBlockIds({
+      claimedBlockIds: [],
+      storeBlockIds: [block.block_id],
+      historicalMessageBlockIds: [],
+      liveMessageBlockIds: [block.block_id],
+      preStreamBlockIds: ["old-block"],
+      blocks: makeBlocksMap([block]),
+      interactions: new Map<string, InteractionState>(),
+    });
+
+    expect(result.tailBlockIds).toEqual([block.block_id]);
+  });
 });
 
 describe("buildStreamingBlockExclusions", () => {
@@ -199,5 +241,45 @@ describe("buildStreamingBlockExclusions", () => {
         ["c", "a"],
       ),
     ).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("filterSupersededInteractiveBlockIds", () => {
+  it("keeps only the latest interactive block for the same callback", () => {
+    const oldBlock = makeBlock("form-old", {
+      component: "form",
+      interactive: true,
+      callback_id: "daily-report-equipment",
+    });
+    const newBlock = makeBlock("form-new", {
+      component: "form",
+      interactive: true,
+      callback_id: "daily-report-equipment",
+    });
+
+    expect(
+      filterSupersededInteractiveBlockIds(
+        [oldBlock.block_id, newBlock.block_id],
+        makeBlocksMap([oldBlock, newBlock]),
+      ),
+    ).toEqual([newBlock.block_id]);
+  });
+
+  it("does not filter non-interactive blocks that share a callback id", () => {
+    const first = makeBlock("table-old", {
+      callback_id: "shared-callback",
+      interactive: false,
+    });
+    const second = makeBlock("table-new", {
+      callback_id: "shared-callback",
+      interactive: false,
+    });
+
+    expect(
+      filterSupersededInteractiveBlockIds(
+        [first.block_id, second.block_id],
+        makeBlocksMap([first, second]),
+      ),
+    ).toEqual([first.block_id, second.block_id]);
   });
 });

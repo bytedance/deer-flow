@@ -15,6 +15,71 @@ _store: dict[str, list[tuple[float, dict]]] = defaultdict(list)
 _UI_BLOCK_PATTERN = re.compile(r"<!--ui_block:(.+?)-->")
 
 
+def _fold_blocks(blocks: list[dict]) -> list[dict]:
+    """Fold create/update/delete block events into their final visible state."""
+    final_blocks: dict[str, dict] = {}
+
+    for block in blocks:
+        block_id = block.get("block_id")
+        if not block_id:
+            continue
+
+        action = block.get("action", "create")
+        if action == "delete":
+            final_blocks.pop(block_id, None)
+        elif action == "update":
+            existing = final_blocks.get(block_id)
+            if existing:
+                final_blocks[block_id] = {
+                    **existing,
+                    **block,
+                    "action": "create",
+                    "props": {
+                        **existing.get("props", {}),
+                        **block.get("props", {}),
+                    },
+                }
+            else:
+                final_blocks[block_id] = {**block, "action": "create"}
+        else:
+            final_blocks[block_id] = {**block, "action": "create"}
+
+    return list(final_blocks.values())
+
+
+def _prune_and_get_valid_entries(thread_id: str) -> list[tuple[float, dict]]:
+    now = time.time()
+    entries = _store.get(thread_id, [])
+    valid = [(ts, b) for ts, b in entries if now - ts < _BLOCK_TTL_SECONDS]
+    _store[thread_id] = valid
+    return valid
+
+
+def resolve_create_block_id(thread_id: str, requested_block_id: str | None) -> str | None:
+    """Return a thread-safe create block id that won't overwrite a visible block."""
+    if not requested_block_id:
+        return None
+
+    with _lock:
+        valid = _prune_and_get_valid_entries(thread_id)
+        existing_ids = {
+            block.get("block_id")
+            for block in _fold_blocks([block for _, block in valid])
+            if block.get("block_id")
+        }
+
+        if requested_block_id not in existing_ids:
+            return requested_block_id
+
+        suffix = 2
+        candidate = f"{requested_block_id}-{suffix}"
+        while candidate in existing_ids:
+            suffix += 1
+            candidate = f"{requested_block_id}-{suffix}"
+
+        return candidate
+
+
 def persist_block(thread_id: str, block: dict) -> None:
     """Store a UIBlock for later recovery."""
     with _lock:
@@ -23,12 +88,9 @@ def persist_block(thread_id: str, block: dict) -> None:
 
 def get_persisted_blocks(thread_id: str) -> list[dict]:
     """Retrieve non-expired blocks for a thread."""
-    now = time.time()
     with _lock:
-        entries = _store.get(thread_id, [])
-        valid = [(ts, b) for ts, b in entries if now - ts < _BLOCK_TTL_SECONDS]
-        _store[thread_id] = valid
-        return [b for _, b in valid]
+        valid = _prune_and_get_valid_entries(thread_id)
+        return _fold_blocks([b for _, b in valid])
 
 
 def clear_thread_blocks(thread_id: str) -> None:
@@ -44,7 +106,7 @@ def extract_blocks_from_messages(messages: list) -> list[dict]:
     the block list. Applies create/update/delete actions in order to produce the
     final state.
     """
-    blocks: dict[str, dict] = {}
+    blocks: list[dict] = []
 
     for msg in messages:
         content = getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
@@ -63,16 +125,6 @@ def extract_blocks_from_messages(messages: list) -> list[dict]:
             if not block_id:
                 continue
 
-            action = block.get("action", "create")
-            if action == "delete":
-                blocks.pop(block_id, None)
-            elif action == "update":
-                existing = blocks.get(block_id)
-                if existing:
-                    existing["props"] = {**existing.get("props", {}), **block.get("props", {})}
-                else:
-                    blocks[block_id] = block
-            else:
-                blocks[block_id] = block
+            blocks.append(block)
 
-    return list(blocks.values())
+    return _fold_blocks(blocks)
