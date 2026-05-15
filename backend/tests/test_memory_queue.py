@@ -1,6 +1,6 @@
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from deerflow.agents.memory.queue import ConversationContext, MemoryUpdateQueue
 from deerflow.config.memory_config import MemoryConfig
@@ -164,3 +164,85 @@ def test_flush_nowait_is_non_blocking() -> None:
     assert elapsed < 0.1
     assert finished.is_set() is False
     assert finished.wait(1.0) is True
+
+
+def test_queue_keeps_updates_for_different_agents_in_same_thread() -> None:
+    queue = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch.object(queue, "_reset_timer"),
+    ):
+        queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
+        queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
+
+    assert queue.pending_count == 2
+    assert [context.agent_name for context in queue._queue] == ["agent-a", "agent-b"]
+
+
+def test_queue_still_coalesces_updates_for_same_agent_in_same_thread() -> None:
+    queue = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch.object(queue, "_reset_timer"),
+    ):
+        queue.add(
+            thread_id="thread-1",
+            messages=["first"],
+            agent_name="agent-a",
+            correction_detected=True,
+        )
+        queue.add(
+            thread_id="thread-1",
+            messages=["second"],
+            agent_name="agent-a",
+            correction_detected=False,
+        )
+
+    assert queue.pending_count == 1
+    assert queue._queue[0].agent_name == "agent-a"
+    assert queue._queue[0].messages == ["second"]
+    assert queue._queue[0].correction_detected is True
+
+
+def test_process_queue_updates_different_agents_in_same_thread_separately() -> None:
+    queue = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch.object(queue, "_reset_timer"),
+    ):
+        queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
+        queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
+
+    mock_updater = MagicMock()
+    mock_updater.update_memory.return_value = True
+
+    with (
+        patch("deerflow.agents.memory.updater.MemoryUpdater", return_value=mock_updater),
+        patch("deerflow.agents.memory.queue.time.sleep"),
+    ):
+        queue.flush()
+
+    assert mock_updater.update_memory.call_count == 2
+    mock_updater.update_memory.assert_has_calls(
+        [
+            call(
+                messages=["agent-a"],
+                thread_id="thread-1",
+                agent_name="agent-a",
+                correction_detected=False,
+                reinforcement_detected=False,
+                user_id=None,
+            ),
+            call(
+                messages=["agent-b"],
+                thread_id="thread-1",
+                agent_name="agent-b",
+                correction_detected=False,
+                reinforcement_detected=False,
+                user_id=None,
+            ),
+        ]
+    )

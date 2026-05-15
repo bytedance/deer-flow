@@ -38,3 +38,42 @@ def test_queue_process_passes_user_id_to_updater():
     mock_updater.update_memory.assert_called_once()
     call_kwargs = mock_updater.update_memory.call_args.kwargs
     assert call_kwargs["user_id"] == "alice"
+
+
+def test_queue_keeps_updates_for_different_users_in_same_thread_and_agent():
+    q = MemoryUpdateQueue()
+
+    with patch("deerflow.agents.memory.queue.get_memory_config", return_value=MemoryConfig(enabled=True)), patch.object(q, "_reset_timer"):
+        q.add(thread_id="main", messages=["alice update"], agent_name="researcher", user_id="alice")
+        q.add(thread_id="main", messages=["bob update"], agent_name="researcher", user_id="bob")
+
+    assert q.pending_count == 2
+    assert [context.user_id for context in q._queue] == ["alice", "bob"]
+    assert [context.messages for context in q._queue] == [["alice update"], ["bob update"]]
+
+
+def test_queue_still_coalesces_updates_for_same_user_thread_and_agent():
+    q = MemoryUpdateQueue()
+
+    with patch("deerflow.agents.memory.queue.get_memory_config", return_value=MemoryConfig(enabled=True)), patch.object(q, "_reset_timer"):
+        q.add(thread_id="main", messages=["first"], agent_name="researcher", user_id="alice")
+        q.add(thread_id="main", messages=["second"], agent_name="researcher", user_id="alice")
+
+    assert q.pending_count == 1
+    assert q._queue[0].messages == ["second"]
+    assert q._queue[0].user_id == "alice"
+    assert q._queue[0].agent_name == "researcher"
+
+
+def test_add_nowait_keeps_different_users_separate():
+    q = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=MemoryConfig(enabled=True)),
+        patch.object(q, "_schedule_timer"),
+    ):
+        q.add_nowait(thread_id="main", messages=["alice update"], agent_name="researcher", user_id="alice")
+        q.add_nowait(thread_id="main", messages=["bob update"], agent_name="researcher", user_id="bob")
+
+    assert q.pending_count == 2
+    assert [context.user_id for context in q._queue] == ["alice", "bob"]
