@@ -242,6 +242,10 @@ backend/
 └── Dockerfile                  # Container build
 ```
 
+`langgraph.json` is not the default service entrypoint.  The scripts and Docker
+deployments run the Gateway embedded runtime; the file is kept for LangGraph
+tooling, Studio, or direct LangGraph Server compatibility.
+
 ---
 
 ## Configuration
