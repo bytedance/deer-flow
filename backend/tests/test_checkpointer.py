@@ -94,12 +94,15 @@ class TestHarnessPackaging:
             "psycopg-pool>=3.3.0",
         ]
 
-    def test_workspace_pyproject_forwards_postgres_extra_to_harness(self):
+    def test_workspace_pyproject_forwards_postgres_extra_to_storage_packages(self):
         pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
         data = tomllib.loads(pyproject_path.read_text())
 
         optional_dependencies = data["project"]["optional-dependencies"]
-        assert optional_dependencies["postgres"] == ["deerflow-harness[postgres]"]
+        assert optional_dependencies["postgres"] == [
+            "deerflow-harness[postgres]",
+            "deerflow-storage[postgres]",
+        ]
 
     def test_postgres_missing_dependency_messages_recommend_package_extra(self):
         assert "deerflow-harness[postgres]" in POSTGRES_INSTALL
