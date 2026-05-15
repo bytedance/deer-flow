@@ -207,6 +207,15 @@ class RunManager:
         await self._persist_status(run_id, status, error=error)
         logger.info("Run %s -> %s", run_id, status.value)
 
+    async def _persist_model_name(self, run_id: str, model_name: str | None) -> None:
+        """Best-effort persist model_name update to the backing store."""
+        if self._store is None:
+            return
+        try:
+            await self._store.update_model_name(run_id, model_name)
+        except Exception:
+            logger.warning("Failed to persist model_name update for run %s", run_id, exc_info=True)
+
     async def update_model_name(self, run_id: str, model_name: str | None) -> None:
         """Update the model name for a run."""
         async with self._lock:
@@ -216,7 +225,7 @@ class RunManager:
                 return
             record.model_name = model_name
             record.updated_at = _now_iso()
-        await self._persist_to_store(record)
+        await self._persist_model_name(run_id, model_name)
         logger.info("Run %s model_name=%s", run_id, model_name)
 
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> bool:

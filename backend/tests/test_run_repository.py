@@ -370,3 +370,62 @@ class TestRunRepository:
         assert row is not None
         assert row["status"] == "interrupted"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_model_name(self, tmp_path):
+        """RunRepository.update_model_name should update model_name for existing run."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="initial-model")
+        await repo.update_model_name("r1", "updated-model")
+        row = await repo.get("r1")
+        assert row["model_name"] == "updated-model"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_model_name_normalizes_value(self, tmp_path):
+        """RunRepository.update_model_name should normalize and truncate model_name."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1")
+        long_name = "a" * 200
+        await repo.update_model_name("r1", long_name)
+        row = await repo.get("r1")
+        assert row["model_name"] == "a" * 128
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_model_name_to_none(self, tmp_path):
+        """RunRepository.update_model_name should allow setting model_name to None."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="initial-model")
+        await repo.update_model_name("r1", None)
+        row = await repo.get("r1")
+        assert row["model_name"] is None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_run_manager_update_model_name_persists_to_sql(self, tmp_path):
+        """RunManager.update_model_name should persist to SQL-backed store without integrity error."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+        record = await manager.create("thread-1")
+
+        await manager.update_model_name(record.run_id, "gpt-4o")
+
+        row = await repo.get(record.run_id)
+        assert row is not None
+        assert row["model_name"] == "gpt-4o"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_run_manager_update_model_name_twice(self, tmp_path):
+        """RunManager.update_model_name should support multiple updates."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+        record = await manager.create("thread-1")
+
+        await manager.update_model_name(record.run_id, "model-1")
+        await manager.update_model_name(record.run_id, "model-2")
+
+        row = await repo.get(record.run_id)
+        assert row["model_name"] == "model-2"
+        await _cleanup()
