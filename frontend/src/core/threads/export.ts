@@ -3,6 +3,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
+  filterVisibleMessages,
   hasContent,
   hasToolCalls,
   stripUploadedFilesTag,
@@ -41,7 +42,7 @@ export function formatThreadAsMarkdown(
     "",
   ];
 
-  for (const message of messages) {
+  for (const message of filterVisibleMessages(messages)) {
     if (message.type === "human") {
       const content = formatMessageContent(message);
       if (content) {
@@ -92,7 +93,7 @@ export function formatThreadAsJSON(
     thread_id: thread.thread_id,
     created_at: thread.created_at,
     exported_at: new Date().toISOString(),
-    messages: messages.map((msg) => ({
+    messages: filterVisibleMessages(messages).map((msg) => ({
       type: msg.type,
       id: msg.id,
       content: typeof msg.content === "string" ? msg.content : msg.content,

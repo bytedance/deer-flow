@@ -21,6 +21,7 @@ import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
+import { filterVisibleMessages } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
@@ -92,7 +93,7 @@ export default function ChatPage() {
     onFinish: (state) => {
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
-        const lastMessage = state.messages.at(-1);
+        const lastMessage = filterVisibleMessages(state.messages).at(-1);
         if (lastMessage) {
           const textContent = textOfMessage(lastMessage);
           if (textContent) {

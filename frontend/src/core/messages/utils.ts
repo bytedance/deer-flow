@@ -373,6 +373,10 @@ export function isHiddenFromUIMessage(message: Message) {
   );
 }
 
+export function filterVisibleMessages(messages: Message[]) {
+  return messages.filter((message) => !isHiddenFromUIMessage(message));
+}
+
 /**
  * Represents a file stored in message additional_kwargs.files.
  * Used for optimistic UI (uploading state) and structured file metadata.

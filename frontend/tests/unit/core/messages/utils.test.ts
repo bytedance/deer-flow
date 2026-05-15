@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
+  filterVisibleMessages,
   getAssistantTurnUsageMessages,
   getMessageGroups,
 } from "@/core/messages/utils";
@@ -62,4 +63,46 @@ test("aggregates token usage messages once per assistant turn", () => {
       (groupMessages) => groupMessages?.map((message) => message.id) ?? null,
     ),
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
+});
+
+test("filters hidden summary messages before display", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Visible user request",
+    },
+    {
+      id: "summary-1",
+      type: "human",
+      name: "summary",
+      content: "Here is a summary of the conversation to date...",
+    },
+    {
+      id: "hidden-1",
+      type: "ai",
+      content: "Hidden internal task",
+      additional_kwargs: { hide_from_ui: true },
+    },
+    {
+      id: "loop-warning-1",
+      type: "ai",
+      name: "loop_warning",
+      content: "Hidden loop warning",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Visible answer",
+    },
+  ] as Message[];
+
+  expect(filterVisibleMessages(messages).map((message) => message.id)).toEqual([
+    "human-1",
+    "ai-1",
+  ]);
+  expect(getMessageGroups(messages).map((group) => group.id)).toEqual([
+    "human-1",
+    "ai-1",
+  ]);
 });
