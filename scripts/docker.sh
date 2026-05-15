@@ -220,6 +220,23 @@ start() {
         fi
     fi
 
+    export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$PROJECT_ROOT/backend/.deer-flow}"
+    _jwt_secret_file="$DEER_FLOW_HOME/.auth-jwt-secret"
+    if [ -z "$AUTH_JWT_SECRET" ]; then
+        if [ -f "$_jwt_secret_file" ]; then
+            export AUTH_JWT_SECRET
+            AUTH_JWT_SECRET="$(cat "$_jwt_secret_file")"
+            echo -e "${GREEN}✓ AUTH_JWT_SECRET loaded from $_jwt_secret_file${NC}"
+        else
+            export AUTH_JWT_SECRET
+            AUTH_JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+            mkdir -p "$DEER_FLOW_HOME"
+            echo "$AUTH_JWT_SECRET" > "$_jwt_secret_file"
+            chmod 600 "$_jwt_secret_file"
+            echo -e "${GREEN}✓ AUTH_JWT_SECRET generated → $_jwt_secret_file${NC}"
+        fi
+    fi
+
     echo "Building and starting containers..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services
     echo ""

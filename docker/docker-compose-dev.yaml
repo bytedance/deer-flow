@@ -163,6 +163,7 @@ services:
           create_host_path: true
     working_dir: /app
     environment:
+      - AUTH_JWT_SECRET=${AUTH_JWT_SECRET}
       - CI=true
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
