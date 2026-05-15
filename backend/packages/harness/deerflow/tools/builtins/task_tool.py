@@ -35,7 +35,7 @@ def _token_usage_cache_enabled(app_config: "AppConfig | None") -> bool:
     if app_config is None:
         try:
             app_config = get_app_config()
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError):
             return False
     return bool(getattr(getattr(app_config, "token_usage", None), "enabled", False))
 
