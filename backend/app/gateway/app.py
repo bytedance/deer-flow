@@ -62,7 +62,7 @@ async def _ensure_admin_user(app: FastAPI) -> None:
 
     Subsequent boots (admin already exists):
       - Runs the one-time "no-auth → with-auth" orphan thread migration for
-        existing LangGraph thread metadata that has no owner_id.
+        existing LangGraph thread metadata that has no user_id.
 
     No SQL persistence migration is needed: the four user_id columns
     (threads_meta, runs, run_events, feedback) only come into existence
@@ -177,7 +177,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with langgraph_runtime(app):
         logger.info("LangGraph runtime initialised")
 
-        # Ensure admin user exists (auto-create on first boot)
+        # Check admin bootstrap state and migrate orphan threads after admin exists.
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
