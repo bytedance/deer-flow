@@ -79,6 +79,19 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   });
 }
 
+function findLatestUnloadedRunIndex(
+  runs: Run[],
+  loadedRunIds: ReadonlySet<string>,
+): number {
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const run = runs[i];
+    if (run && !loadedRunIds.has(run.run_id)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
@@ -650,59 +663,81 @@ export function useThreadHistory(threadId: string) {
   const runsRef = useRef(runs.data ?? []);
   const indexRef = useRef(-1);
   const loadingRef = useRef(false);
+  const pendingLoadRef = useRef(false);
+  const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
 
   const loadMessages = useCallback(async () => {
-    if (loadingRef.current || runsRef.current.length === 0) {
-      return;
-    }
-
-    let nextRunIndex = indexRef.current;
-    while (nextRunIndex >= 0) {
-      const candidate = runsRef.current[nextRunIndex];
-      if (candidate && !loadedRunIdsRef.current.has(candidate.run_id)) {
-        break;
+    if (loadingRef.current) {
+      const pendingRunIndex = findLatestUnloadedRunIndex(
+        runsRef.current,
+        loadedRunIdsRef.current,
+      );
+      const pendingRun = runsRef.current[pendingRunIndex];
+      if (pendingRun && pendingRun.run_id !== loadingRunIdRef.current) {
+        pendingLoadRef.current = true;
       }
-      nextRunIndex -= 1;
+      return;
     }
-
-    const run = runsRef.current[nextRunIndex];
-    if (!run) {
-      indexRef.current = -1;
+    if (runsRef.current.length === 0) {
       return;
     }
 
-    const requestThreadId = threadIdRef.current;
     loadingRef.current = true;
+    setLoading(true);
+
     try {
-      setLoading(true);
-      const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
-        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages`,
-        {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
+      do {
+        pendingLoadRef.current = false;
+
+        const nextRunIndex = findLatestUnloadedRunIndex(
+          runsRef.current,
+          loadedRunIdsRef.current,
+        );
+        indexRef.current = nextRunIndex;
+
+        const run = runsRef.current[nextRunIndex];
+        if (!run) {
+          indexRef.current = -1;
+          return;
+        }
+
+        const requestThreadId = threadIdRef.current;
+        loadingRunIdRef.current = run.run_id;
+        const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
+          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages`,
+          {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            credentials: "include",
           },
-          credentials: "include",
-        },
-      ).then((res) => {
-        return res.json();
-      });
-      const _messages = result.data
-        .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
-        .map((m) => m.content);
-      if (threadIdRef.current !== requestThreadId) {
-        return;
-      }
-      setMessages((prev) => dedupeMessagesByIdentity([..._messages, ...prev]));
-      loadedRunIdsRef.current.add(run.run_id);
-      indexRef.current = nextRunIndex - 1;
+        ).then((res) => {
+          return res.json();
+        });
+        const _messages = result.data
+          .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
+          .map((m) => m.content);
+        if (threadIdRef.current !== requestThreadId) {
+          return;
+        }
+        setMessages((prev) =>
+          dedupeMessagesByIdentity([..._messages, ...prev]),
+        );
+        loadedRunIdsRef.current.add(run.run_id);
+        indexRef.current = findLatestUnloadedRunIndex(
+          runsRef.current,
+          loadedRunIdsRef.current,
+        );
+      } while (pendingLoadRef.current);
     } catch (err) {
       console.error(err);
     } finally {
       loadingRef.current = false;
+      loadingRunIdRef.current = null;
       setLoading(false);
     }
   }, []);
@@ -713,6 +748,8 @@ export function useThreadHistory(threadId: string) {
     if (threadChanged) {
       runsRef.current = [];
       indexRef.current = -1;
+      pendingLoadRef.current = false;
+      loadingRunIdRef.current = null;
       loadedRunIdsRef.current = new Set();
       loadingRef.current = false;
       setLoading(false);
@@ -721,15 +758,10 @@ export function useThreadHistory(threadId: string) {
 
     if (runs.data && runs.data.length > 0) {
       runsRef.current = runs.data ?? [];
-      let latestUnloadedRunIndex = -1;
-      for (let i = runs.data.length - 1; i >= 0; i--) {
-        const run = runs.data[i];
-        if (run && !loadedRunIdsRef.current.has(run.run_id)) {
-          latestUnloadedRunIndex = i;
-          break;
-        }
-      }
-      indexRef.current = latestUnloadedRunIndex;
+      indexRef.current = findLatestUnloadedRunIndex(
+        runs.data,
+        loadedRunIdsRef.current,
+      );
     }
     loadMessages().catch(() => {
       toast.error("Failed to load thread history.");
