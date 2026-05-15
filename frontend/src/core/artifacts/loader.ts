@@ -1,5 +1,6 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
+import { getToolCalls } from "../messages/utils";
 import type { AgentThreadState } from "../threads";
 
 import { urlOfArtifact } from "./utils";
@@ -35,12 +36,15 @@ export function loadArtifactContentFromToolCall({
   const messageId = url.searchParams.get("message_id");
   if (messageId && toolCallId) {
     const message = thread.messages.find((message) => message.id === messageId);
-    if (message?.type === "ai" && message.tool_calls) {
-      const toolCall = message.tool_calls.find(
+    if (message?.type === "ai") {
+      const toolCall = getToolCalls(message).find(
         (toolCall) => toolCall.id === toolCallId,
       );
       if (toolCall) {
-        return toolCall.args.content;
+        const content = toolCall.args.content;
+        if (typeof content === "string") {
+          return content;
+        }
       }
     }
   }

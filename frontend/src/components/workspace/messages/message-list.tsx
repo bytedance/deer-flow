@@ -18,6 +18,7 @@ import {
   extractPresentFilesFromMessage,
   extractReasoningContentFromMessage,
   extractTextFromMessage,
+  getToolCalls,
   getAssistantTurnUsageMessages,
   getMessageGroups,
   hasContent,
@@ -151,6 +152,14 @@ function LoadMoreHistoryIndicator({
       </Button>
     </div>
   );
+}
+
+function readStringArg(
+  args: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = args[key];
+  return typeof value === "string" ? value : undefined;
 }
 
 export function MessageList({
@@ -343,13 +352,30 @@ export function MessageList({
             const tasks = new Set<Subtask>();
             for (const message of group.messages) {
               if (message.type === "ai") {
-                for (const toolCall of message.tool_calls ?? []) {
+                for (const toolCall of getToolCalls(message)) {
                   if (toolCall.name === "task") {
+                    const subagentType = readStringArg(
+                      toolCall.args,
+                      "subagent_type",
+                    );
+                    const description = readStringArg(
+                      toolCall.args,
+                      "description",
+                    );
+                    const prompt = readStringArg(toolCall.args, "prompt");
+                    if (
+                      !toolCall.id ||
+                      !subagentType ||
+                      !description ||
+                      !prompt
+                    ) {
+                      continue;
+                    }
                     const task: Subtask = {
-                      id: toolCall.id!,
-                      subagent_type: toolCall.args.subagent_type,
-                      description: toolCall.args.description,
-                      prompt: toolCall.args.prompt,
+                      id: toolCall.id,
+                      subagent_type: subagentType,
+                      description,
+                      prompt,
                       status: "in_progress",
                     };
                     updateSubtask(task);
@@ -422,8 +448,16 @@ export function MessageList({
               } else if (message.id) {
                 subagentDebugMessageIds.push(message.id);
               }
-              const taskIds = message.tool_calls
-                ?.filter((toolCall) => toolCall.name === "task")
+             results.push(
+                <div
+                  key="subtask-count"
+                  className="text-muted-foreground pt-2 text-sm font-normal"
+                >
+                  {t.subtasks.executing(tasks.size)}
+                </div>,
+               );
+              const taskIds = getToolCalls(message)
+                .filter((toolCall) => toolCall.name === "task")
                 .map((toolCall) => toolCall.id);
               for (const taskId of taskIds ?? []) {
                 results.push(

@@ -30,13 +30,14 @@ import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
   extractReasoningContentFromMessage,
   findToolCallResult,
+  getToolCalls,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { useArtifacts } from "../artifacts";
+import { useOptionalArtifacts } from "../artifacts";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
@@ -430,17 +431,16 @@ function ToolCall({
   tokenDebugStep?: TokenDebugStep;
 }) {
   const { t } = useI18n();
-  const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
-    useArtifacts();
-  const tokenLabel = tokenDebugStep
-    ? formatDebugToken(tokenDebugStep, t)
-    : null;
-  const resolveLabel = (fallback: React.ReactNode) =>
-    tokenDebugStep ? (
-      <DebugStepLabel label={tokenDebugStep.label} token={tokenLabel} />
-    ) : (
-      fallback
-    );
+const artifacts = useOptionalArtifacts();
+const tokenLabel = tokenDebugStep
+  ? formatDebugToken(tokenDebugStep, t)
+  : null;
+const resolveLabel = (fallback: React.ReactNode) =>
+  tokenDebugStep ? (
+    <DebugStepLabel label={tokenDebugStep.label} token={tokenLabel} />
+  ) : (
+    fallback
+  );
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -526,8 +526,18 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={resolveLabel(t.toolCalls.viewWebPage)}
+className={url ? "cursor-pointer" : undefined}
+label={resolveLabel(t.toolCalls.viewWebPage)}
         icon={GlobeIcon}
+        onClick={() => {
+          if (!url) {
+            return;
+          }
+          const newWindow = window.open(url, "_blank", "noopener,noreferrer");
+          if (newWindow) {
+            newWindow.opener = null;
+          }
+        }}
       >
         <ChainOfThoughtSearchResult>
           {url && (
@@ -535,7 +545,9 @@ function ToolCall({
               href={url}
               target="_blank"
               rel="noopener noreferrer"
-              className="cursor-pointer"
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
             >
               {title}
             </a>
@@ -590,16 +602,26 @@ function ToolCall({
       description = t.toolCalls.writeFile;
     }
     const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
+    
+    if (
+      isLoading &&
+      isLast &&
+      artifacts &&
+      artifacts.autoOpen &&
+      artifacts.autoSelect &&
+      path &&
+      !result
+    ) {
+      const artifactsContext = artifacts;
       setTimeout(() => {
         const url = new URL(
           `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
         ).toString();
-        if (selectedArtifact === url) {
+        if (artifactsContext.selectedArtifact === url) {
           return;
         }
-        select(url, true);
-        setOpen(true);
+        artifactsContext.select(url, true);
+        artifactsContext.setOpen(true);
       }, 100);
     }
 
@@ -610,12 +632,12 @@ function ToolCall({
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
         onClick={() => {
-          select(
+          artifacts?.select(
             new URL(
               `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
             ).toString(),
           );
-          setOpen(true);
+          artifacts?.setOpen(true);
         }}
       >
         {path && (
@@ -628,16 +650,29 @@ function ToolCall({
   } else if (name === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
+    const command: string | undefined = (args as { command: string })?.command;
     if (!description) {
       return (
         <ChainOfThoughtStep
           key={id}
-          label={resolveLabel(t.toolCalls.executeCommand)}
-          icon={SquareTerminalIcon}
-        />
+return (
+  <ChainOfThoughtStep
+    key={id}
+    label={resolveLabel(t.toolCalls.executeCommand)}
+    icon={SquareTerminalIcon}
+  >
+    {command && (
+      <CodeBlock
+        className="mx-0 cursor-pointer border-none px-0"
+        showLineNumbers={false}
+        language="bash"
+        code={command}
+      />
+    )}
+  </ChainOfThoughtStep>
+);
       );
     }
-    const command: string | undefined = (args as { command: string })?.command;
     return (
       <ChainOfThoughtStep
         key={id}
@@ -715,7 +750,8 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         steps.push(step);
       }
-      for (const tool_call of message.tool_calls ?? []) {
+      const toolCalls = getToolCalls(message);
+      for (const tool_call of toolCalls) {
         if (tool_call.name === "task") {
           continue;
         }

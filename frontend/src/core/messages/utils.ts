@@ -1,4 +1,7 @@
+import type { ToolCall } from "@langchain/core/messages";
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
+
+import { tryParseJSON } from "../utils/json";
 
 interface GenericMessageGroup<T = string> {
   type: T;
@@ -25,6 +28,36 @@ export type MessageGroup =
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
+
+export function getToolCalls(message: Message): NormalizedToolCall[] {
+  if (message.type !== "ai") {
+    return [];
+  }
+  const rawToolCalls = Array.isArray(message.tool_calls)
+    ? message.tool_calls
+    : typeof message.tool_calls === "string"
+      ? parseToolCallsString(message.tool_calls)
+      : [];
+  if (!Array.isArray(rawToolCalls)) {
+    return [];
+  }
+  return rawToolCalls.flatMap((toolCall) => {
+    if (
+      !toolCall ||
+      typeof toolCall !== "object" ||
+      typeof toolCall.name !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: typeof toolCall.id === "string" ? toolCall.id : undefined,
+        name: toolCall.name,
+        args: normalizeToolCallArgs(toolCall.args),
+      },
+    ];
+  });
+}
 
 export function getMessageGroups(messages: Message[]): MessageGroup[] {
   if (messages.length === 0) {
@@ -312,15 +345,13 @@ export function hasReasoning(message: Message) {
 }
 
 export function hasToolCalls(message: Message) {
-  return (
-    message.type === "ai" && message.tool_calls && message.tool_calls.length > 0
-  );
+  return message.type === "ai" && getToolCalls(message).length > 0;
 }
 
 export function hasPresentFiles(message: Message) {
   return (
     message.type === "ai" &&
-    message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
+    getToolCalls(message).some((toolCall) => toolCall.name === "present_files")
   );
 }
 
@@ -333,7 +364,7 @@ export function extractPresentFilesFromMessage(message: Message) {
     return [];
   }
   const files: string[] = [];
-  for (const toolCall of message.tool_calls ?? []) {
+  for (const toolCall of getToolCalls(message)) {
     if (
       toolCall.name === "present_files" &&
       Array.isArray(toolCall.args.filepaths)
@@ -345,7 +376,7 @@ export function extractPresentFilesFromMessage(message: Message) {
 }
 
 export function hasSubagent(message: AIMessage) {
-  for (const toolCall of message.tool_calls ?? []) {
+  for (const toolCall of getToolCalls(message)) {
     if (toolCall.name === "task") {
       return true;
     }
