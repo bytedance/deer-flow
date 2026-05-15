@@ -64,6 +64,7 @@ def test_queue_still_coalesces_updates_for_same_user_thread_and_agent():
     assert q._queue[0].user_id == "alice"
     assert q._queue[0].agent_name == "researcher"
 
+
 def test_add_nowait_keeps_different_users_separate():
     q = MemoryUpdateQueue()
 
