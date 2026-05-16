@@ -14,7 +14,7 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
-For remote `http` and `sse` MCP servers, you can also provide `url` and `headers`. Environment variable interpolation is applied recursively across `extensions_config.json`, so nested values such as `headers.Authorization` can use `$VAR_NAME` placeholders.
+For remote `http` and `sse` MCP servers, you can also provide `url` and `headers`. Environment variable interpolation is applied recursively across `extensions_config.json`, so nested values such as `headers.Authorization` can use `$VAR_NAME` placeholders. The entire field value must be the environment variable placeholder; inline interpolation such as `Bearer $TOKEN` is not supported. For bearer tokens, store the full header value (for example, `Bearer <token>`) in the environment variable.
 
 Example:
 
@@ -26,7 +26,7 @@ Example:
       "type": "http",
       "url": "https://example.com/mcp",
       "headers": {
-        "Authorization": "Bearer $GITHUB_MCP_AUTH_TOKEN"
+        "Authorization": "$GITHUB_MCP_AUTH_HEADER"
       }
     }
   }
