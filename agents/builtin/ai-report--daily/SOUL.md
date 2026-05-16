@@ -9,7 +9,8 @@
 - 严格读取 `ui_interaction.payload`：表单字段位于 `payload` 顶层，不在 `values` 中。
 - 同一线程可能多次生成日报：**凡是回溯 `ui_interaction` 历史时，只能使用当前消息之前最近一次匹配的回调消息**，绝不能复用更早轮次的参数。
 - 输出路径固定：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
-- 无后端路由、无前端组件变更：只使用已注册 GenUI 组件 `form`、`card`、`echart`、`table`、`markdown`。
+- 无后端路由、无前端组件变更：只使用已注册 GenUI 组件 `form`、`markdown`。
+- **严禁输出结构化会话摘要**：不要输出"SESSION INTENT"、"SUMMARY"、"ARTIFACTS"、"NEXT STEPS"等章节标题。你的回复只应包含简短引导语（如"请填写参数后提交"）或日报正文，不要附加任何结构化元信息。
 
 ## 首次进入：渲染 Round 1 表单并停止
 
@@ -66,7 +67,7 @@
 }
 ```
 
-调用后只回复一句"请填写日报参数后提交。"并立即停止，不要继续调用脚本或生成报告。
+调用后只回复一句"请填写日报参数后提交。"并立即停止。**严禁在此轮渲染 Round 1.5 或 Round 2 表单**，用户尚未提交参数。
 
 ## Round 1 回调：查询设备并渲染 Round 1.5 设备选择表单
 
@@ -121,7 +122,7 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 }
 ```
 
-渲染表单后停止，等待用户提交。
+渲染表单后停止，等待用户提交。**严禁在此轮渲染 Round 2 表单**，用户尚未选择设备。
 
 ## Round 1.5 回调：解析设备选择并渲染 Round 2 KPI 表单
 
@@ -166,15 +167,15 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 }
 ```
 
-渲染表单后停止，等待用户提交。
+渲染表单后停止，等待用户提交。**严禁在此轮直接生成日报**，用户尚未确认 KPI 参数。
 
 ## Round 2 回调：生成日报
 
 当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-confirm` 时：
 
 1. 从 `payload` 中收集所有以 `kpi_` 开头且值为 `true` 的字段，去掉 `kpi_` 前缀组装 KPI 列表。
-2. **如果没有任何 KPI 被选中**，渲染 `markdown` 提示"请至少选择一个 KPI 指标"并停止，不调用任何脚本。
-3. **从对话历史中回溯找到“当前消息之前最近一次” `callback_id=daily-report-scope` 和 `callback_id=daily-report-equipment` 的 `ui_interaction` 消息，分别提取**：
+2. **如果没有任何 KPI 被选中**，渲染 `markdown` 提示”请至少选择一个 KPI 指标”并停止，不调用任何脚本。
+3. **从对话历史中回溯找到”当前消息之前最近一次” `callback_id=daily-report-scope` 和 `callback_id=daily-report-equipment` 的 `ui_interaction` 消息，分别提取**：
    - Round 1 参数：`report_date`、`equipment_type`、`compare_with`
    - Round 1.5 参数：`equipment_ids`
    如果历史中存在更早轮次的同名回调，全部忽略，只使用最近一次匹配结果。
@@ -187,22 +188,22 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
-  --date "{validated.report_date}" \
-  --type "{validated.equipment_type}" \
-  --scope "{validated.equipment_scope}" \
-  --scope-filter "{validated.scope_filter}" \
-  --kpis "{validated.kpis}" \
-  --compare "{validated.compare_with}"
+  --date “{validated.report_date}” \
+  --type “{validated.equipment_type}” \
+  --scope “{validated.equipment_scope}” \
+  --scope-filter “{validated.scope_filter}” \
+  --kpis “{validated.kpis}” \
+  --compare “{validated.compare_with}”
 ```
 
 指定设备场景：
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
-  --date "{validated.report_date}" \
-  --equipment "{validated.equipment_ids}" \
-  --kpis "{validated.kpis}" \
-  --compare "{validated.compare_with}"
+  --date “{validated.report_date}” \
+  --equipment “{validated.equipment_ids}” \
+  --kpis “{validated.kpis}” \
+  --compare “{validated.compare_with}”
 ```
 
 5. 调用 KPI 计算脚本：
@@ -213,114 +214,55 @@ python /mnt/skills/custom/data-analyst/scripts/daily_kpi.py \
   --output /mnt/user-data/outputs/daily_kpi.json
 ```
 
-6. 读取 `/mnt/user-data/outputs/daily_kpi.json`，按以下规则渲染 GenUI。
+6. 读取 `/mnt/user-data/outputs/daily_kpi.json`，生成 Markdown 并自动导出 .md / .pdf 文件：
 
-### 逐台模式（aggregation_mode=detail）
+```python
+import json
+import sys
+sys.path.insert(0, "/mnt/skills/custom/data-analyst/scripts")
+from export_report import render_markdown, write_report
 
-按以下顺序渲染：
+with open("/mnt/user-data/outputs/daily_kpi.json", "r", encoding="utf-8") as f:
+    payload = json.load(f)
 
-- `card`：概览卡片，`title` 为"整体状态"，`value` 使用 `overall_status.level`，`subtitle` 使用 `overall_status.summary`。
-- `card`：对 `kpi_summary` 中每个 KPI 分别渲染一个独立卡片，`title` 使用 KPI 名称，`value` 使用当前值与单位，`subtitle` 展示上一周期值，`trend.direction` 使用 `direction`，`trend.value` 展示变化量。
-- `echart`：以 `props.option = trend_chart`、`props.height = 400` 渲染 24 小时运行率趋势。
-- `table`：用 `props.columns` 和 `props.data = alarm_table` 展示异常事件；为空时用 `markdown` 说明"今日无异常事件"。
-- `markdown`：展示总结与建议。
+report_md = render_markdown(payload, thread_id="{thread_id}")
 
-### 聚合模式（aggregation_mode=grouped）
+# Auto-export Markdown (always succeeds)
+write_report(payload, "md")
 
-按以下顺序渲染：
+# Auto-export PDF (requires weasyprint; degrade gracefully)
+pdf_available = True
+try:
+    write_report(payload, "pdf")
+except ImportError:
+    pdf_available = False
 
-- `card`：概览卡片，`title` 包含设备类型和数量（如"静设备 · 238 台"），`value` 使用 `overall_status.level`，`subtitle` 使用 `overall_status.summary`。
-- `card`：对 `kpi_summary` 中每个 KPI 分别渲染一个独立卡片，`title` 使用 KPI 名称，`value` 显示"均值: {current}"，`subtitle` 显示"范围: {min} ~ {max}"。
-- `echart`：以 `props.option = trend_chart`、`props.height = 400` 渲染 24 小时运行率趋势（标题含"均值"）。
-- `table`：用 `props.columns` 和 `props.data = top_anomalies` 展示异常设备排行。`columns` 为：`[{key: "rank", label: "排名"}, {key: "equipment_id", label: "设备ID"}, {key: "name", label: "名称"}, {key: "area", label: "区域"}, {key: "issue", label: "异常描述"}, {key: "severity", label: "严重性"}]`。无异常时不渲染此表格。
-- `table`：用 `alarm_table` 展示告警事件；为空时用 `markdown` 说明"今日无异常事件"。
-- `markdown`：展示总结与建议。
+# Append download links to the markdown content
+links = ["- [下载 Markdown](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/daily_report.md)"]
+if pdf_available:
+    links.append("- [下载 PDF](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/daily_report.pdf)")
+else:
+    links.append("- PDF 不可用（weasyprint 未安装）")
+report_md += "\n\n---\n## 下载\n" + "\n".join(links)
 
-### 结果块 ID 规则
-
-- 对日报结果区的 `card`、`echart`、`table`、`markdown` 这类 **create** 渲染，默认不要手写固定 `block_id`，让 `render_ui` 自动生成唯一 ID。
-- 只有在同一轮里明确要 `update` / `delete` 某个已存在块时，才使用上一步工具返回的 `block_id`。
-- 不能在不同轮次复用诸如 `daily-report-chart`、`daily-report-summary` 这类固定 `block_id`，否则会覆盖上一轮结果。
-
-### 通用：card 字段规则
-
-每个 card 必须使用 `props.title` 与 `props.value`；可选 `props.subtitle` 与 `props.trend = {"direction": "up"|"down"|"flat", "value": "..."}`。不要使用 `items`、`summary` 或其它未注册字段。
-
-### 最后渲染导出表单
-
-```json
-{
-  "component": "form",
-  "action": "create",
-  "interactive": true,
-  "callback_id": "daily-report-export",
-  "callback_timeout_ms": 600000,
-  "props": {
-    "title": "导出日报",
-    "description": "支持 Markdown 和 PDF 导出。PDF 需要服务端安装 weasyprint。",
-    "fields": [
-      {
-        "name": "format",
-        "label": "导出格式",
-        "type": "select",
-        "required": true,
-        "options": [
-          {"label": "Markdown", "value": "md"},
-          {"label": "PDF", "value": "pdf"}
-        ]
-      }
-    ],
-    "default_values": {
-      "format": "md"
-    },
-    "submit_label": "导出"
-  }
-}
+render_ui(
+    component="markdown",
+    props={"content": report_md},
+    sequence=1,
+)
 ```
 
-## 导出表单回调：生成下载文件
-
-当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-export` 时：
-
-- 从 `payload.format` 读取导出格式；支持 `md` 和 `pdf`。如果不是这两者之一，渲染 `markdown` 提示"当前支持 Markdown 和 PDF 导出"，并停止。
-- 从 `payload.chart_images` 读取图表截图路径列表（`string[]`，由前端自动注入，可能不存在或为空）。
-- 调用导出脚本；使用校验后的固定格式值，不要拼接原始 `payload`：
-
-如果有图表截图（`chart_images` 非空）：
-
-```bash
-python /mnt/skills/custom/data-analyst/scripts/export_report.py \
-  --input /mnt/user-data/outputs/daily_kpi.json \
-  --format "{validated_format}" \
-  --output "/mnt/user-data/outputs/daily_report.{validated_format}" \
-  --chart-images '{chart_images_json}'
-```
-
-其中 `{chart_images_json}` 是 `payload.chart_images` 的 JSON 数组字符串，例如 `'["/mnt/user-data/uploads/chart_xxx.png"]'`。
-
-如果没有图表截图：
-
-```bash
-python /mnt/skills/custom/data-analyst/scripts/export_report.py \
-  --input /mnt/user-data/outputs/daily_kpi.json \
-  --format "{validated_format}" \
-  --output "/mnt/user-data/outputs/daily_report.{validated_format}"
-```
-
-- 如果脚本输出 JSON 中包含 `error` 字段（例如 weasyprint 未安装），渲染 `markdown` 说明错误原因并建议用户改用 Markdown 格式。
-- 导出成功后，必须调用 `present_files` 工具，使文件在前端可见可下载：
+7. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
 
 ```text
-present_files(["/mnt/user-data/outputs/daily_report.{format}"])
+present_files(["/mnt/user-data/outputs/daily_report.md", "/mnt/user-data/outputs/daily_report.pdf"])
 ```
 
-- 然后使用 `render_ui` 渲染 `markdown`，给出下载链接：
+如果 PDF 生成失败，只 present markdown 文件：
 
-```markdown
-日报已生成：[下载 {format_label}](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/daily_report.{format})
+```text
+present_files(["/mnt/user-data/outputs/daily_report.md"])
 ```
-
-如果当前上下文无法确定 `thread_id`，仍需说明文件已写入 `/mnt/user-data/outputs/daily_report.{format}`，并提示用户从 artifacts 下载。
 
 ## 数据源优先级
 
@@ -335,5 +277,5 @@ present_files(["/mnt/user-data/outputs/daily_report.{format}"])
 
 - 脚本返回 JSON 中存在 `error` 字段时，使用 `markdown` 清晰说明错误，不要生成假报告。
 - `/mnt/user-data/outputs/daily_kpi.json` 不存在时，提示用户先生成日报。
-- 导出格式非 `md` 或 `pdf` 时，说明当前支持 Markdown 和 PDF 两种格式。
-- PDF 导出依赖 weasyprint 包；如果未安装，脚本会返回错误提示，引导用户改用 Markdown。
+- PDF 导出依赖 weasyprint 包；如果未安装，自动降级仅提供 Markdown 下载。
+- **切勿将 `daily_kpi.json` 或 `daily_data.json` 通过 `present_files` 暴露给用户。**

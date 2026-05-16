@@ -394,6 +394,8 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
+    generationProcess: "Generation Process",
+    generationProcessSteps: (count: number) => `${count} steps`,
   },
 
   // Subtasks

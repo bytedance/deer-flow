@@ -15,7 +15,7 @@ type StandaloneBlockBuckets = {
   tailBlockIds: string[];
 };
 
-function isSubmittedBlock(
+export function isSubmittedBlock(
   block: UIBlock | undefined,
   interactions: Map<string, InteractionState>,
 ): boolean {
@@ -95,6 +95,16 @@ export function partitionStandaloneBlockIds({
     const hasLiveAnchor = live.has(id);
     const hasMessageAnchor = hasHistoricalAnchor || hasLiveAnchor;
     const wasPresentBeforeStream = preStream.has(id);
+
+    // Keep blocks with functional_interaction visible across historical turns.
+    if (
+      block?.interactive &&
+      block?.functional_interaction &&
+      wasPresentBeforeStream
+    ) {
+      historicalBlockIds.push(id);
+      continue;
+    }
 
     // Hide interactive blocks from previous turns (wasPresentBeforeStream),
     // and orphan interactive blocks on page refresh (no stream boundary + no anchor).

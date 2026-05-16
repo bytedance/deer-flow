@@ -12,6 +12,9 @@ export interface UIBlock {
   callback_timeout_ms?: number;
   parent_id?: string;
   metadata?: Record<string, unknown>;
+  sequence?: number;
+  functional_interaction?: boolean;
+  interaction_status?: "submitted" | "idle";
 }
 
 export interface InteractionState {
@@ -31,7 +34,8 @@ interface BlockStoreState {
   blocks: Map<string, UIBlock>;
   interactions: Map<string, InteractionState>;
 
-  applyBlock: (block: UIBlock) => void;
+  replaceAllBlocks: (newBlocks: UIBlock[]) => void;
+  updateBlockProps: (blockId: string, props: Record<string, unknown>) => void;
   getChildBlocks: (parentId: string) => UIBlock[];
   setInteractionLoading: (callbackId: string) => void;
   setInteractionSuccess: (callbackId: string) => void;
@@ -44,41 +48,39 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   blocks: new Map(),
   interactions: new Map(),
 
-  applyBlock: (block: UIBlock) =>
+  replaceAllBlocks: (newBlocks: UIBlock[]) =>
     set((state) => {
-      const blocks = new Map(state.blocks);
+      const blocks = new Map<string, UIBlock>();
+      for (const block of newBlocks) {
+        blocks.set(block.block_id, block);
+      }
+
       const interactions = new Map(state.interactions);
-      switch (block.action) {
-        case "create": {
-          blocks.set(block.block_id, block);
-          const interactionKey = getInteractionKey(block);
-          if (interactionKey) {
-            interactions.delete(interactionKey);
+      for (const [key] of state.interactions) {
+        let found = false;
+        for (const block of blocks.values()) {
+          if (getInteractionKey(block) === key) {
+            found = true;
+            break;
           }
-          break;
         }
-        case "update": {
-          const existing = blocks.get(block.block_id);
-          if (existing) {
-            blocks.set(block.block_id, {
-              ...existing,
-              props: { ...existing.props, ...block.props },
-            });
-          } else {
-            blocks.set(block.block_id, block);
-          }
-          break;
-        }
-        case "delete": {
-          blocks.delete(block.block_id);
-          const interactionKey = getInteractionKey(block);
-          if (interactionKey) {
-            interactions.delete(interactionKey);
-          }
-          break;
+        if (!found) {
+          interactions.delete(key);
         }
       }
+
       return { blocks, interactions };
+    }),
+
+  updateBlockProps: (blockId: string, props: Record<string, unknown>) =>
+    set((state) => {
+      const existing = state.blocks.get(blockId);
+      if (!existing) {
+        return state;
+      }
+      const blocks = new Map(state.blocks);
+      blocks.set(blockId, { ...existing, props: { ...existing.props, ...props } });
+      return { blocks };
     }),
 
   getChildBlocks: (parentId: string) => {

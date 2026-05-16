@@ -26,7 +26,7 @@ export type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
-export function getMessageGroups(messages: Message[]): MessageGroup[] {
+export function getMessageGroups(messages: Message[], isLoading?: boolean): MessageGroup[] {
   if (messages.length === 0) {
     return [];
   }
@@ -49,7 +49,7 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   }
 
   for (const message of messages) {
-    if (isHiddenFromUIMessage(message)) {
+    if (isHiddenFromUIMessage(message, isLoading)) {
       continue;
     }
 
@@ -76,7 +76,7 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         const open = lastOpenGroup();
         if (open) {
           open.messages.push(message);
-        } else {
+        } else if (message.name || message.tool_call_id) {
           console.error(
             "Unexpected tool message outside a processing group",
             message,
@@ -127,8 +127,9 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
 export function groupMessages<T>(
   messages: Message[],
   mapper: (group: MessageGroup) => T,
+  isLoading?: boolean,
 ): T[] {
-  return getMessageGroups(messages)
+  return getMessageGroups(messages, isLoading)
     .map(mapper)
     .filter((result) => result !== undefined && result !== null) as T[];
 }
@@ -365,11 +366,34 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
   return undefined;
 }
 
-export function isHiddenFromUIMessage(message: Message) {
+export function isTransientMessageName(name?: string | null): boolean {
+  const lower = (name ?? "").toLowerCase();
+  return new Set(["summary", "intent", "agent_intent", "session_intent"]).has(lower);
+}
+
+export function isHiddenFromUIMessage(message: Message, isLoading?: boolean): boolean {
+  // During streaming, show summary/intent so the user can see the agent's plan.
+  // After streaming completes, hide them so the conversation is clean.
+  const isTransient = isTransientMessageName(message.name);
+  const hideTransient = isTransient && !isLoading;
+
+  const text = extractTextFromMessage(message);
+  const isInteractionPayload =
+    typeof text === "string" && text.startsWith('{"type":"ui_interaction"');
+
+  // Hide structured-summary text the model spontaneously generates
+  // (## SESSION INTENT / ## SUMMARY / ## ARTIFACTS / ## NEXT STEPS).
+  // It's pure process documentation, not a user-facing reply.
+  const isStructuredSummary =
+    typeof text === "string" &&
+    /^\s*##\s+(SESSION\s+INTENT|SUMMARY|ARTIFACTS|NEXT\s+STEPS)\b/i.test(text);
+
   return (
     message.additional_kwargs?.hide_from_ui === true ||
-    message.name === "summary" ||
-    message.name === "loop_warning"
+    message.name === "loop_warning" ||
+    hideTransient ||
+    isInteractionPayload ||
+    isStructuredSummary
   );
 }
 

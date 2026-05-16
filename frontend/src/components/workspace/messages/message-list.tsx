@@ -11,13 +11,12 @@ import { GenUIBlockList } from "@/components/genui";
 import { Button } from "@/components/ui/button";
 import { submitInteraction } from "@/core/genui";
 import {
-  buildResolvedBlockHistory,
+  fetchResolvedBlockHistory,
   extractResolvedBlockIdsFromMessages,
   getHistoryMessageKey,
 } from "@/core/genui/history";
-import { recoverBlocksFromMessages } from "@/core/genui/sse-recovery";
-import { useBlockStore } from "@/core/genui/store";
-import { partitionStandaloneBlockIds } from "@/core/genui/visibility";
+import { useBlockStore, type UIBlock } from "@/core/genui/store";
+import { partitionStandaloneBlockIds, isSubmittedBlock, filterSupersededInteractiveBlockIds } from "@/core/genui/visibility";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildTokenDebugSteps,
@@ -33,6 +32,7 @@ import {
   hasContent,
   hasPresentFiles,
   hasReasoning,
+  isTransientMessageName,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
@@ -44,6 +44,7 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
 
+import { GenerationProcessPanel } from "./generation-process-panel";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
@@ -57,6 +58,7 @@ import { SubtaskCard } from "./subtask-card";
 
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 160;
 export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
+const DUPLICATE_MARKDOWN_MIN_LENGTH = 20;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
 
@@ -74,6 +76,10 @@ function areAllMessagesHistorical(
   liveMessageKeys: Set<string>,
 ): boolean {
   return messages.every((message) => !liveMessageKeys.has(getMessageKey(message)));
+}
+
+function normalizeComparableMarkdown(content: string): string {
+  return content.replace(/\r\n/g, "\n").trim().replace(/\n{3,}/g, "\n\n");
 }
 
 function LoadMoreHistoryIndicator({
@@ -203,12 +209,47 @@ export function MessageList({
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  const messages = thread.messages;
-  const blocks = useBlockStore((state) => state.blocks);
-  const resolvedBlockHistory = useMemo(
-    () => buildResolvedBlockHistory(messages),
-    [messages],
+  // LangGraph streaming sometimes yields the same final AI message twice
+  // (different chunk updates not merged by the SDK). Dedup by message id so
+  // downstream grouping/extraction sees each message exactly once.
+  const messages = useMemo(() => {
+    const seen = new Set<string>();
+    const result: Message[] = [];
+    for (const m of thread.messages) {
+      if (m.id) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+      }
+      result.push(m);
+    }
+    return result;
+  }, [thread.messages]);
+  const messagesStableKey = useMemo(
+    () => `${messages.length}:${messages[messages.length - 1]?.id ?? "none"}`,
+    [messages.length, messages[messages.length - 1]?.id],
   );
+  const blocks = useBlockStore((state) => state.blocks);
+  const [resolvedBlockHistory, setResolvedBlockHistory] = useState<
+    Awaited<ReturnType<typeof fetchResolvedBlockHistory>>
+  >({
+    blocks: [],
+    blockIdsByMessageKey: new Map(),
+    duplicatedRawBlockIds: new Set(),
+  });
+
+  useEffect(() => {
+    fetchResolvedBlockHistory(threadId, messages).then((history) => {
+      setResolvedBlockHistory(history);
+      // Populate interaction state from backend data (survives page refresh).
+      const store = useBlockStore.getState();
+      for (const block of history.blocks) {
+        if (block.interaction_status === "submitted" && block.block_id) {
+          store.setInteractionSuccess(block.block_id);
+        }
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId, messagesStableKey]);
   const storeBlockIds = useMemo(
     () =>
       Array.from(blocks.keys()).filter(
@@ -216,28 +257,10 @@ export function MessageList({
       ),
     [blocks, resolvedBlockHistory.duplicatedRawBlockIds],
   );
-  const groupedMessages = getMessageGroups(messages);
-  const turnUsageMessagesByGroupIndex =
-    getAssistantTurnUsageMessages(groupedMessages);
   const tokenDebugSteps = useMemo(
     () => buildTokenDebugSteps(messages, t),
     [messages, t],
   );
-
-  const claimedBlockIds = useMemo(() => {
-    const ids: string[] = [];
-    for (const group of groupedMessages) {
-      if (group.type === "assistant:processing") {
-        ids.push(
-          ...extractResolvedBlockIdsFromMessages(
-            group.messages,
-            resolvedBlockHistory.blockIdsByMessageKey,
-          ),
-        );
-      }
-    }
-    return ids;
-  }, [groupedMessages, resolvedBlockHistory.blockIdsByMessageKey]);
 
   const preStreamMessageKeysRef = useRef<Set<string>>(new Set());
   const preStreamBlockIdsRef = useRef<Set<string>>(new Set());
@@ -301,13 +324,152 @@ export function MessageList({
       ),
     [effectiveLiveStreamMessageKeys, messages],
   );
+  const liveTurnHasVisibleOutput = useMemo(
+    () =>
+      liveMessages.some((message) => {
+        if (isTransientMessageName(message.name)) {
+          return false;
+        }
+
+        if (message.type === "ai") {
+          return hasContent(message);
+        }
+
+        if (message.type !== "tool") {
+          return false;
+        }
+
+        if (message.name === "present_files") {
+          return true;
+        }
+
+        const text = extractTextFromMessage(message);
+        return text.includes("<!--ui_block:") || text.includes("block_id=");
+      }),
+    [liveMessages],
+  );
+  const visibleMessages = useMemo(
+    () =>
+      messages.filter((message) => {
+        if (!isTransientMessageName(message.name)) {
+          return true;
+        }
+
+        return (
+          thread.isLoading &&
+          !liveTurnHasVisibleOutput &&
+          effectiveLiveStreamMessageKeys.has(getMessageKey(message))
+        );
+      }),
+    [
+      effectiveLiveStreamMessageKeys,
+      liveTurnHasVisibleOutput,
+      messages,
+      thread.isLoading,
+    ],
+  );
+  const groupedMessages = useMemo(
+    () => getMessageGroups(visibleMessages, thread.isLoading),
+    [visibleMessages, thread.isLoading],
+  );
+  const turnUsageMessagesByGroupIndex =
+    getAssistantTurnUsageMessages(groupedMessages);
+  const claimedBlockIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const group of groupedMessages) {
+      if (group.type === "assistant:processing") {
+        ids.push(
+          ...extractResolvedBlockIdsFromMessages(
+            group.messages,
+            resolvedBlockHistory.blockIdsByMessageKey,
+          ),
+        );
+      }
+    }
+    return ids;
+  }, [groupedMessages, resolvedBlockHistory.blockIdsByMessageKey]);
+  const blocksById = useMemo(() => {
+    const next = new Map<string, UIBlock>();
+    for (const block of resolvedBlockHistory.blocks) {
+      next.set(block.block_id, block);
+    }
+    for (const block of blocks.values()) {
+      next.set(block.block_id, block);
+    }
+    return next;
+  }, [blocks, resolvedBlockHistory.blocks]);
+  const interactions = useBlockStore((state) => state.interactions);
+  const guidanceGroupIndices = useMemo(() => {
+    const indices = new Set<number>();
+    for (let i = 0; i < groupedMessages.length; i++) {
+      const group = groupedMessages[i];
+      if (group?.type !== "assistant") continue;
+
+      // Look BACKWARD past any consecutive assistant groups to find the processing group
+      let prevNonAssistant = i > 0 ? groupedMessages[i - 1] : undefined;
+      let p = i - 1;
+      while (prevNonAssistant?.type === "assistant" && p > 0) {
+        p--;
+        prevNonAssistant = groupedMessages[p];
+      }
+      if (prevNonAssistant?.type !== "assistant:processing") continue;
+      const prevBlockIds = extractResolvedBlockIdsFromMessages(
+        prevNonAssistant.messages,
+        resolvedBlockHistory.blockIdsByMessageKey,
+      );
+      const interactiveFormBlocks = prevBlockIds
+        .map((id) => blocksById.get(id))
+        .filter(
+          (block): block is UIBlock =>
+            !!block && !!block.interactive && !block.functional_interaction,
+        );
+      if (interactiveFormBlocks.length === 0) continue;
+
+      // Look FORWARD past any consecutive assistant groups to find the next non-assistant
+      let nextNonAssistant = i + 1 < groupedMessages.length ? groupedMessages[i + 1] : undefined;
+      let j = i + 1;
+      while (nextNonAssistant?.type === "assistant" && j < groupedMessages.length) {
+        j++;
+        nextNonAssistant = groupedMessages[j];
+      }
+      // Hide guidance text when:
+      //   (a) followed by a human message (visible chat reply), OR
+      //   (b) the preceding interactive form has already been submitted —
+      //       form submissions are hidden messages, so there is no human group
+      //       to anchor against, but a stale "please submit" text after a
+      //       submitted form is the same kind of noise we want to drop.
+      const followedByHuman = nextNonAssistant?.type === "human";
+      const formSubmitted = interactiveFormBlocks.some((block) =>
+        isSubmittedBlock(block, interactions),
+      );
+      if (!followedByHuman && !formSubmitted) continue;
+
+      indices.add(i);
+    }
+    return indices;
+  }, [groupedMessages, resolvedBlockHistory.blockIdsByMessageKey, blocksById, interactions]);
+  const comparableMarkdownBlockContents = useMemo(() => {
+    const contents = new Set<string>();
+    for (const block of blocksById.values()) {
+      const content =
+        block.component === "markdown" ? block.props.content : undefined;
+      if (typeof content !== "string") {
+        continue;
+      }
+
+      const normalized = normalizeComparableMarkdown(content);
+      if (
+        normalized.startsWith("# ") &&
+        normalized.length >= DUPLICATE_MARKDOWN_MIN_LENGTH
+      ) {
+        contents.add(normalized);
+      }
+    }
+    return contents;
+  }, [blocksById]);
 
   useEffect(() => {
     if (messages.length === 0) return;
-
-    recoverBlocksFromMessages(
-      messages as { type?: string; content?: unknown }[],
-    );
 
     const historicalBlockIds = extractResolvedBlockIdsFromMessages(
       historicalMessages,
@@ -332,7 +494,6 @@ export function MessageList({
     resolvedBlockHistory.blockIdsByMessageKey,
   ]);
 
-  const interactions = useBlockStore((state) => state.interactions);
   const historicalMessageBlockIds = useMemo(
     () =>
       Array.from(
@@ -549,6 +710,114 @@ export function MessageList({
     historicalStandaloneBlockIds,
   ]);
 
+  type MessageGroupType = (typeof groupedMessages)[number];
+
+  type RenderItem =
+    | { type: "group"; group: MessageGroupType; groupIndex: number }
+    | {
+        type: "merged-processing";
+        groups: MessageGroupType[];
+        startIndex: number;
+        totalSteps: number;
+        isLive: boolean;
+        hasBlocks: boolean;
+      };
+
+  const renderItems = useMemo<RenderItem[]>(() => {
+    const items: RenderItem[] = [];
+    let i = 0;
+
+    while (i < groupedMessages.length) {
+      const group = groupedMessages[i];
+      if (!group) {
+        i++;
+        continue;
+      }
+
+      if (group.type !== "assistant:processing") {
+        items.push({ type: "group", group, groupIndex: i });
+        i++;
+        continue;
+      }
+
+      // Find consecutive processing groups
+      let end = i;
+      while (
+        end + 1 < groupedMessages.length &&
+        groupedMessages[end + 1]?.type === "assistant:processing"
+      ) {
+        end++;
+      }
+
+      const processingGroups = groupedMessages.slice(i, end + 1);
+      const isLive = processingGroups.some((g) =>
+        g.messages.some((msg) =>
+          effectiveLiveStreamMessageKeys.has(getMessageKey(msg)),
+        ),
+      );
+
+      // Count total steps and check if any group has GenUI blocks
+      let totalSteps = 0;
+      let hasBlocks = false;
+      for (const pg of processingGroups) {
+        for (const msg of pg.messages) {
+          if (msg.type === "ai") {
+            if (extractReasoningContentFromMessage(msg)) totalSteps++;
+            for (const tc of msg.tool_calls ?? []) {
+              if (tc.name !== "task") totalSteps++;
+            }
+          }
+        }
+        if (
+          extractResolvedBlockIdsFromMessages(
+            pg.messages,
+            resolvedBlockHistory.blockIdsByMessageKey,
+          ).length > 0
+        ) {
+          hasBlocks = true;
+        }
+      }
+
+      items.push({
+        type: "merged-processing",
+        groups: processingGroups,
+        startIndex: i,
+        totalSteps,
+        isLive,
+        hasBlocks,
+      });
+
+      i = end + 1;
+    }
+
+    return items;
+  }, [groupedMessages, effectiveLiveStreamMessageKeys, resolvedBlockHistory.blockIdsByMessageKey]);
+
+  // Each block_id is "owned" by the first merged-processing item whose messages
+  // reference it. Later merged items must skip blocks they don't own — otherwise
+  // a block_id that leaks into a subsequent turn's messages (e.g. the model
+  // re-invoking render_ui on the same callback, or a tool response echoing the
+  // marker) gets rendered twice.
+  const blockOwnerByItemIdx = useMemo(() => {
+    const ownerByBlockId = new Map<string, number>();
+    for (let idx = 0; idx < renderItems.length; idx++) {
+      const item = renderItems[idx];
+      if (item?.type !== "merged-processing") continue;
+      for (const pg of item.groups) {
+        const ids = extractResolvedBlockIdsFromMessages(
+          pg.messages,
+          resolvedBlockHistory.blockIdsByMessageKey,
+        );
+        for (const id of ids) {
+          if (!ownerByBlockId.has(id)) {
+            ownerByBlockId.set(id, idx);
+          }
+        }
+      }
+    }
+    return ownerByBlockId;
+  }, [renderItems, resolvedBlockHistory.blockIdsByMessageKey]);
+
   const renderAssistantCopyButton = useCallback((messages: Message[]) => {
     const clipboardData = [...messages]
       .reverse()
@@ -649,9 +918,200 @@ export function MessageList({
               onInteraction={handleInteraction}
             />
           )}
-        {groupedMessages.map((group, groupIndex) => {
+        {renderItems.map((item, itemIndex) => {
+          if (item.type === "merged-processing") {
+            const firstGroup = item.groups[0];
+            const lastGroup = item.groups[item.groups.length - 1];
+            if (!firstGroup || !lastGroup) return null;
+
+            const panelKey = `merged-${item.startIndex}-${firstGroup.id ?? item.startIndex}`;
+
+            // Collect blocks for all processing groups in the merge.
+            // Only keep blocks owned by this merged item — block_ids that leak
+            // into a later turn's messages are skipped here so they only render
+            // once (in the item that first introduced them).
+            const allBlockIds: string[] = [];
+            for (const pg of item.groups) {
+              for (const id of extractResolvedBlockIdsFromMessages(
+                pg.messages,
+                resolvedBlockHistory.blockIdsByMessageKey,
+              )) {
+                if (blockOwnerByItemIdx.get(id) === itemIndex) {
+                  allBlockIds.push(id);
+                }
+              }
+            }
+
+            // Split into output blocks (always visible) and process blocks (collapsible).
+            // Submitted interactive blocks are excluded — interaction status comes
+            // from the backend via fetchResolvedBlockHistory.
+
+            // Determine if the entire merged item is historical
+            const allGroupsHistorical = item.groups.every((pg) =>
+              areAllMessagesHistorical(
+                pg.messages,
+                effectiveLiveStreamMessageKeys,
+              ),
+            );
+
+            const outputBlockIds: string[] = [];
+            const rawProcessBlockIds: string[] = [];
+            for (const id of allBlockIds) {
+              const block = blocksById.get(id);
+              if (!block) continue;
+              if (isSubmittedBlock(block, interactions)) continue;
+              if (!block.interactive || block.functional_interaction) {
+                outputBlockIds.push(id);
+              } else {
+                rawProcessBlockIds.push(id);
+              }
+            }
+            // Deduplicate by callback_id in case the backend model called
+            // render_ui twice for the same interactive form in one turn.
+            const processBlockIds = filterSupersededInteractiveBlockIds(
+              rawProcessBlockIds,
+              blocksById,
+            );
+
+            // Collect anchored blocks for all groups in the merge
+            const anchoredBlockIds: string[] = [];
+            for (let gi = item.startIndex; gi < item.startIndex + item.groups.length; gi++) {
+              const g = groupedMessages[gi];
+              if (!g) continue;
+              const gk = getGroupRenderKey(g, gi);
+              const anchored = groupedHistoricalStandaloneBlocks.blockIdsByAnchorGroupKey.get(gk);
+              if (anchored) anchoredBlockIds.push(...anchored);
+            }
+
+            return (
+              <Fragment key={panelKey}>
+                {(processBlockIds.length > 0 || item.totalSteps > 0) && (
+                  <GenerationProcessPanel
+                    stepCount={item.totalSteps}
+                    defaultExpanded={item.isLive || thread.isLoading || processBlockIds.length > 0}
+                  >
+                    <div className="flex flex-col gap-3">
+                      {item.groups.map((pg, pgOffset) => {
+                        const origIndex = item.startIndex + pgOffset;
+                        const turnUsageMessages = turnUsageMessagesByGroupIndex[origIndex];
+
+                        return (
+                          <div key={`${origIndex}-processing-${pg.id}`} className="w-full">
+                            <MessageGroup
+                              messages={pg.messages}
+                              isLoading={thread.isLoading}
+                              tokenDebugSteps={tokenDebugSteps.filter((step) =>
+                                pg.messages.some(
+                                  (message) => message.id === step.messageId,
+                                ),
+                              )}
+                              showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
+                            />
+                            {renderTokenUsage({
+                              messages: pg.messages,
+                              turnUsageMessages,
+                              inlineDebug: false,
+                            })}
+                          </div>
+                        );
+                      })}
+                      {processBlockIds.length > 0 && (
+                        <GenUIBlockList
+                          threadId={threadId}
+                          blockIds={processBlockIds}
+                          disableExpiration={allGroupsHistorical}
+                          onInteraction={handleInteraction}
+                        />
+                      )}
+                    </div>
+                  </GenerationProcessPanel>
+                )}
+                {outputBlockIds.length > 0 && (
+                  <GenUIBlockList
+                    threadId={threadId}
+                    blockIds={outputBlockIds}
+                    disableExpiration={allGroupsHistorical}
+                    onInteraction={handleInteraction}
+                  />
+                )}
+                {anchoredBlockIds.length > 0 && (
+                  <GenUIBlockList
+                    threadId={threadId}
+                    blockIds={anchoredBlockIds}
+                    disableExpiration={true}
+                    onInteraction={handleInteraction}
+                  />
+                )}
+              </Fragment>
+            );
+          }
+
+          // Regular (non-merged) group rendering
+          const group = item.group;
+          const groupIndex = item.groupIndex;
+
+          // Hide AI guidance text that sits between form creation and submission
+          if (
+            group.type === "assistant" &&
+            guidanceGroupIndices.has(groupIndex)
+          ) {
+            return null;
+          }
+
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
+          const previousItem = itemIndex > 0 ? renderItems[itemIndex - 1] : null;
+          const previousGroup =
+            previousItem?.type === "group"
+              ? previousItem.group
+              : previousItem?.type === "merged-processing"
+                ? previousItem.groups[previousItem.groups.length - 1] ?? null
+                : null;
+          const assistantGroupContent =
+            group.type === "assistant"
+              ? normalizeComparableMarkdown(
+                  group.messages
+                    .map((message) => extractContentFromMessage(message))
+                    .filter((content) => content.length > 0)
+                    .join("\n\n"),
+                )
+              : "";
+          const previousProcessingMarkdownMatches =
+            previousGroup?.type === "assistant:processing" &&
+            assistantGroupContent.startsWith("# ")
+              ? extractResolvedBlockIdsFromMessages(
+                  previousGroup.messages,
+                  resolvedBlockHistory.blockIdsByMessageKey,
+                ).some((blockId) => {
+                  const block = blocksById.get(blockId);
+                  const content =
+                    block?.component === "markdown"
+                      ? block.props.content
+                      : undefined;
+                  if (typeof content !== "string") return false;
+                  const normalizedBlock = normalizeComparableMarkdown(content);
+                  return (
+                    assistantGroupContent.includes(normalizedBlock) ||
+                    normalizedBlock.includes(assistantGroupContent)
+                  );
+                })
+              : false;
+          const shouldHideDuplicateAssistantMarkdown =
+            group.type === "assistant" &&
+            assistantGroupContent.startsWith("# ") &&
+            assistantGroupContent.length >= DUPLICATE_MARKDOWN_MIN_LENGTH &&
+            (previousProcessingMarkdownMatches ||
+              comparableMarkdownBlockContents.has(assistantGroupContent) ||
+              Array.from(comparableMarkdownBlockContents).some(
+                (blockContent) =>
+                  blockContent.length > DUPLICATE_MARKDOWN_MIN_LENGTH &&
+                  (assistantGroupContent.includes(blockContent) ||
+                    blockContent.includes(assistantGroupContent)),
+              ));
           let renderedGroup: React.ReactNode = null;
+
+          if (shouldHideDuplicateAssistantMarkdown) {
+            return null;
+          }
 
           if (group.type === "human" || group.type === "assistant") {
             renderedGroup = (

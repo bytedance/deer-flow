@@ -313,6 +313,8 @@ export interface Translations {
     clickToViewContent: string;
     writeTodos: string;
     skillInstallTooltip: string;
+    generationProcess: string;
+    generationProcessSteps: (count: number) => string;
   };
 
   // Uploads

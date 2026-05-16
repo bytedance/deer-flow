@@ -5,9 +5,16 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import override
 
-from langchain_core.messages import HumanMessage
+from langchain.agents import AgentState
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import HumanMessage, ToolMessage
+from langgraph.graph import END
+from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +168,10 @@ def process_interaction(
 
     import json
 
+    from deerflow.agents.genui_persistence import clear_blocks_by_callback_id
+
+    clear_blocks_by_callback_id(thread_id, callback_id)
+
     content = json.dumps(
         {
             "type": "ui_interaction",
@@ -171,3 +182,70 @@ def process_interaction(
     )
 
     return HumanMessage(content=content, id=f"ui-interaction:{callback_id}")
+
+
+# ---------------------------------------------------------------------------
+# GenUI Interrupt Middleware
+# ---------------------------------------------------------------------------
+
+
+class GenUIInterruptMiddlewareState(AgentState):
+    """Compatible with the `ThreadState` schema."""
+
+    pass
+
+
+class GenUIInterruptMiddleware(AgentMiddleware[GenUIInterruptMiddlewareState]):
+    """Intercepts render_ui calls with interactive=True and interrupts execution.
+
+    When the model calls render_ui with interactive=True (e.g., a form or confirm
+    dialog), this middleware lets the tool execute normally to create/stream/persist
+    the UI block, then returns Command(goto=END) to halt the agent until the user
+    submits the interaction.
+
+    Without this, the LLM may continue executing after creating an interactive form
+    because the "stop after render_ui" instruction in the system prompt is only a
+    soft constraint — there is no programmatic guarantee the model will obey it.
+    """
+
+    state_schema = GenUIInterruptMiddlewareState
+
+    def _should_interrupt(self, request: ToolCallRequest) -> bool:
+        if request.tool_call.get("name") != "render_ui":
+            return False
+        return bool(request.tool_call.get("args", {}).get("interactive"))
+
+    def _wrap_result(self, result: ToolMessage | Command) -> Command:
+        if isinstance(result, Command):
+            return result
+        return Command(update={"messages": [result]}, goto=END)
+
+    @override
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        if not self._should_interrupt(request):
+            return handler(request)
+
+        logger.info(
+            "GenUI interrupt: render_ui interactive=True, callback=%s",
+            request.tool_call.get("args", {}).get("callback_id", ""),
+        )
+        return self._wrap_result(handler(request))
+
+    @override
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        if not self._should_interrupt(request):
+            return await handler(request)
+
+        logger.info(
+            "GenUI interrupt: render_ui interactive=True, callback=%s",
+            request.tool_call.get("args", {}).get("callback_id", ""),
+        )
+        return self._wrap_result(await handler(request))

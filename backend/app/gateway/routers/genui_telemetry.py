@@ -9,7 +9,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
-from deerflow.agents.genui_persistence import extract_blocks_from_messages, get_persisted_blocks
+from deerflow.agents.genui_persistence import extract_blocks_from_messages, extract_blocks_from_messages_with_metadata, get_persisted_blocks
 from deerflow.tools.render_ui_metrics import get_render_ui_metrics
 
 logger = logging.getLogger(__name__)
@@ -112,12 +112,12 @@ async def get_backend_metrics() -> dict:
 async def get_thread_blocks(thread_id: str, request: Request) -> list[dict]:
     """Retrieve persisted UI blocks for SSE recovery.
 
-    First checks in-memory store. If empty, falls back to extracting blocks
-    from checkpoint messages (durable persistence via tool return values).
+    Returns the union of the in-memory store (current turn) and checkpoint
+    message extraction (all turns), so recovery always sees the complete
+    history even after the in-memory store is cleared at turn boundaries.
     """
-    blocks = get_persisted_blocks(thread_id)
-    if blocks:
-        return blocks
+    persisted = get_persisted_blocks(thread_id)
+    persisted_ids = {b.get("block_id") for b in persisted if b.get("block_id")}
 
     try:
         from app.gateway.deps import get_run_event_store
@@ -125,8 +125,47 @@ async def get_thread_blocks(thread_id: str, request: Request) -> list[dict]:
         event_store = get_run_event_store(request)
         stored_messages = await event_store.list_messages(thread_id, limit=500)
         raw_messages = [m.get("content", m) if isinstance(m, dict) else m for m in stored_messages]
-        blocks = extract_blocks_from_messages(raw_messages)
+        from_messages = extract_blocks_from_messages(raw_messages)
+
+        for b in from_messages:
+            bid = b.get("block_id")
+            if bid and bid not in persisted_ids:
+                persisted.append(b)
     except Exception:
         logger.debug("Checkpoint-based block recovery failed for thread %s", thread_id, exc_info=True)
 
-    return blocks
+    return persisted
+
+
+class ExtractBlocksRequest(BaseModel):
+    messages: list[dict] = Field(..., description="Messages to extract UI blocks from")
+
+
+class ExtractBlocksResponse(BaseModel):
+    blocks: list[dict]
+    blockIdsByMessageKey: dict[str, list[str]]
+    duplicatedRawBlockIds: list[str]
+
+
+@router.post("/threads/{thread_id}/ui-blocks/extract", response_model=ExtractBlocksResponse)
+async def extract_thread_blocks(thread_id: str, req: ExtractBlocksRequest) -> ExtractBlocksResponse:
+    """Extract and fold UI blocks from historical messages.
+
+    Parses <!--ui_block:...--> markers from message content, applies
+    create/update/delete folding with block ID deduplication, enriches
+    interactive blocks with their submission status from the InteractionStore,
+    and returns folded blocks along with visibility metadata (message-to-block
+    mapping and duplicated block IDs).
+    """
+    result = extract_blocks_from_messages_with_metadata(req.messages)
+
+    # Enrich interactive blocks with submission status from the InteractionStore.
+    from deerflow.agents.middlewares.genui_middleware import get_interaction_store
+
+    store = get_interaction_store()
+    for block in result["blocks"]:
+        if block.get("interactive") and block.get("callback_id"):
+            record = store.get(thread_id, block["callback_id"])
+            block["interaction_status"] = "submitted" if (record and record.submitted) else "idle"
+
+    return ExtractBlocksResponse(**result)

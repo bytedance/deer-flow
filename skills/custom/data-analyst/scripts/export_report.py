@@ -22,6 +22,7 @@ import json
 import math
 import os
 import sys
+import uuid
 from pathlib import Path
 
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
@@ -60,8 +61,11 @@ def _svg_segments(data: list) -> list[list[tuple[int, float]]]:
     return segments
 
 
-def trend_chart_to_svg(chart: dict) -> str:
+def trend_chart_to_svg(chart: dict, theme: str = "transparent") -> str:
     """Convert an ECharts line-chart option dict into an SVG string.
+
+    theme: 'light' | 'dark' | 'transparent' (default). 'transparent' uses
+    currentColor and opacity so the SVG adapts to both color modes via CSS.
 
     Returns an empty string if chart has no renderable series data.
     """
@@ -96,6 +100,17 @@ def trend_chart_to_svg(chart: dict) -> str:
 
     n_points = max(len(x_labels), 1)
 
+    # Theme colours
+    if theme == "dark":
+        bg, fg, grid, muted = "#161820", "#E8ECF1", "#2A2D36", "#8B919B"
+    elif theme == "transparent":
+        bg = "transparent"
+        fg = "currentColor"
+        grid = "currentColor"
+        muted = "currentColor"
+    else:
+        bg, fg, grid, muted = "#fff", "#333", "#eee", "#666"
+
     def px(i: int) -> float:
         return ML + (i / max(n_points - 1, 1)) * PW
 
@@ -106,26 +121,28 @@ def trend_chart_to_svg(chart: dict) -> str:
 
     parts: list[str] = []
     parts.append(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {SVG_W} {SVG_H}" '
-                 f'width="{SVG_W}" height="{SVG_H}" style="background:#fff">')
-    parts.append(f'<rect width="{SVG_W}" height="{SVG_H}" fill="#fff"/>')
+                 f'width="{SVG_W}" height="{SVG_H}">')
+    parts.append(f'<rect width="{SVG_W}" height="{SVG_H}" fill="{bg}"/>')
 
     if title_text:
         parts.append(f'<text x="{SVG_W / 2}" y="22" text-anchor="middle" '
-                     f'font-size="13" font-family="SimSun,Noto Sans SC,sans-serif" fill="#333">'
+                     f'font-size="13" font-family="SimSun,Noto Sans SC,sans-serif" fill="{fg}">'
                      f'{_svg_escape(title_text)}</text>')
 
     if y_name:
         rx = -(MT + PH // 2)
         parts.append(f'<text transform="rotate(-90)" x="{rx}" y="14" text-anchor="middle" '
-                     f'font-size="10" font-family="SimSun,sans-serif" fill="#666">'
+                     f'font-size="10" font-family="SimSun,sans-serif" '
+                     f'fill="{muted}"{_opacity_attr(theme, "text")}>'
                      f'{_svg_escape(y_name)}</text>')
 
     for t in ticks:
         ty = py(t)
         parts.append(f'<line x1="{ML}" y1="{ty:.1f}" x2="{ML + PW}" y2="{ty:.1f}" '
-                     f'stroke="#eee" stroke-width="1"/>')
+                     f'stroke="{grid}" stroke-width="1"'
+                     f'{_opacity_attr(theme, "grid")}/>')
         parts.append(f'<text x="{ML - 6}" y="{ty + 4:.1f}" text-anchor="end" '
-                     f'font-size="10" fill="#666">{t:.2f}</text>')
+                     f'font-size="10" fill="{muted}"{_opacity_attr(theme, "text")}>{t:.2f}</text>')
 
     show_indices = list(range(0, n_points, max(n_points // 6, 1)))
     if n_points - 1 not in show_indices:
@@ -133,7 +150,8 @@ def trend_chart_to_svg(chart: dict) -> str:
     for i in show_indices:
         if i < len(x_labels):
             parts.append(f'<text x="{px(i):.1f}" y="{MT + PH + 16}" text-anchor="middle" '
-                         f'font-size="10" fill="#666">{_svg_escape(str(x_labels[i]))}</text>')
+                         f'font-size="10" fill="{muted}"{_opacity_attr(theme, "text")}>'
+                         f'{_svg_escape(str(x_labels[i]))}</text>')
 
     for si, s in enumerate(all_series):
         color = _SERIES_COLORS[si % len(_SERIES_COLORS)]
@@ -165,7 +183,8 @@ def trend_chart_to_svg(chart: dict) -> str:
         for li, (name, color) in enumerate(legend_items):
             lx = start_x + li * item_w
             parts.append(f'<rect x="{lx:.1f}" y="{legend_y - 3}" width="20" height="3" fill="{color}"/>')
-            parts.append(f'<text x="{lx + 24:.1f}" y="{legend_y}" font-size="10" fill="#666">'
+            parts.append(f'<text x="{lx + 24:.1f}" y="{legend_y}" font-size="10" '
+                         f'fill="{muted}"{_opacity_attr(theme, "text")}>'
                          f'{_svg_escape(name)}</text>')
 
     parts.append("</svg>")
@@ -174,6 +193,21 @@ def trend_chart_to_svg(chart: dict) -> str:
 
 def _svg_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _opacity_attr(theme: str, element: str) -> str:
+    """Return SVG opacity attributes for the transparent theme.
+
+    In transparent mode, secondary elements use reduced opacity so they don't
+    visually compete with primary content.  Light/dark themes use explicit
+    muted/grid colours instead and don't need opacity.
+    """
+    if theme == "transparent":
+        if element == "text":
+            return ' fill-opacity="0.55"'
+        if element == "grid":
+            return ' stroke-opacity="0.15"'
+    return ""
 
 
 def _format_number(value) -> str:
@@ -213,7 +247,29 @@ def _read_image_as_data_uri(img_path: str) -> str | None:
         return None
 
 
-def render_markdown(payload: dict, chart_images: list[str] | None = None) -> str:
+def _embed_chart_image(svg_str: str, alt: str, thread_id: str | None = None) -> str:
+    """Embed a chart SVG as Markdown image syntax.
+
+    For SVGs ≤50KB, returns an inline base64 data URI.
+    For SVGs >50KB, writes the file and returns an artifact URL reference.
+    """
+    b64 = base64.b64encode(svg_str.encode("utf-8")).decode("ascii")
+    data_uri = f"data:image/svg+xml;base64,{b64}"
+
+    if len(data_uri) <= 50 * 1024:
+        return f"![{alt}]({data_uri})"
+
+    output_dir = _output_dir()
+    filename = f"chart_{uuid.uuid4().hex[:8]}.svg"
+    filepath = output_dir / filename
+    filepath.write_text(svg_str, encoding="utf-8")
+
+    if thread_id:
+        return f"![{alt}](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/{filename})"
+    return f"![{alt}]({data_uri})"
+
+
+def render_markdown(payload: dict, chart_images: list[str] | None = None, thread_id: str | None = None) -> str:
     """Render KPI payload as a Markdown report string."""
     aggregation_mode = payload.get("aggregation_mode", "detail")
     equipment_type = payload.get("equipment_type", "all")
@@ -293,27 +349,25 @@ def render_markdown(payload: dict, chart_images: list[str] | None = None) -> str
                     lines.append("## 运行趋势")
                     lines.append("")
                     embedded = True
-                lines.append(f'<img src="{data_uri}" alt="趋势图{i + 1}" width="760">')
+                lines.append(f'![趋势图{i + 1}]({data_uri})')
                 lines.append("")
         if not embedded:
             trend_chart = payload.get("trend_chart")
             if trend_chart and trend_chart.get("series"):
                 svg_str = trend_chart_to_svg(trend_chart)
                 if svg_str:
-                    b64 = base64.b64encode(svg_str.encode("utf-8")).decode("ascii")
                     lines.append("## 运行趋势")
                     lines.append("")
-                    lines.append(f'<img src="data:image/svg+xml;base64,{b64}" alt="运行趋势图" width="760">')
+                    lines.append(_embed_chart_image(svg_str, "运行趋势图", thread_id))
                     lines.append("")
     else:
         trend_chart = payload.get("trend_chart")
         if trend_chart and trend_chart.get("series"):
             svg_str = trend_chart_to_svg(trend_chart)
             if svg_str:
-                b64 = base64.b64encode(svg_str.encode("utf-8")).decode("ascii")
                 lines.append("## 运行趋势")
                 lines.append("")
-                lines.append(f'<img src="data:image/svg+xml;base64,{b64}" alt="运行趋势图" width="760">')
+                lines.append(_embed_chart_image(svg_str, "运行趋势图", thread_id))
                 lines.append("")
 
     top_anomalies = payload.get("top_anomalies") or []

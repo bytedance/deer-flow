@@ -1,6 +1,3 @@
-import type { Message } from "@langchain/langgraph-sdk";
-
-import { buildResolvedBlockHistory } from "./history";
 import { useBlockStore } from "./store";
 import type { UIBlock } from "./store";
 
@@ -14,31 +11,6 @@ function getBackendBaseUrl(): string {
     return ((window as any).__NEXT_PUBLIC_BACKEND_BASE_URL as string) ?? "";
   }
   return process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "";
-}
-
-/**
- * Extract UI blocks embedded in message content (frontend-side checkpoint recovery).
- * Mirrors the backend's extract_blocks_from_messages logic.
- */
-export function extractBlocksFromMessages(messages: { type?: string; content?: unknown }[]): UIBlock[] {
-  return buildResolvedBlockHistory(messages as Message[]).blocks;
-}
-
-/**
- * Recover blocks from messages and apply them to the store.
- * This is a frontend-side fallback that doesn't depend on the backend API.
- */
-export function recoverBlocksFromMessages(messages: { type?: string; content?: unknown }[]): void {
-  const blocks = extractBlocksFromMessages(messages);
-  if (blocks.length === 0) return;
-
-  const store = useBlockStore.getState();
-  const existing = store.blocks;
-  for (const block of blocks) {
-    if (!existing.has(block.block_id)) {
-      store.applyBlock({ ...block, action: "create" });
-    }
-  }
 }
 
 export class GenUISSEManager {
@@ -70,14 +42,7 @@ export class GenUISSEManager {
       const blocks: UIBlock[] = await response.json();
       if (this.disposed) return;
 
-      const store = useBlockStore.getState();
-
-      for (const block of blocks) {
-        store.applyBlock({
-          ...block,
-          action: "create",
-        });
-      }
+      useBlockStore.getState().replaceAllBlocks(blocks);
 
       this.resetBackoff();
     } catch {

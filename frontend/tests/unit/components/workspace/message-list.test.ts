@@ -39,8 +39,27 @@ vi.mock("@/core/genui", () => ({
 }));
 
 vi.mock("@/core/genui/sse-recovery", () => ({
-  recoverBlocksFromMessages: vi.fn(),
+  GenUISSEManager: vi.fn().mockImplementation(() => ({
+    recoverBlocks: vi.fn().mockResolvedValue(undefined),
+    scheduleReconnect: vi.fn(),
+    disconnect: vi.fn(),
+    get connected() {
+      return false;
+    },
+  })),
 }));
+
+vi.mock("@/core/genui/history", async () => {
+  const actual = await vi.importActual("@/core/genui/history");
+  return {
+    ...actual,
+    fetchResolvedBlockHistory: vi.fn().mockResolvedValue({
+      blocks: [],
+      blockIdsByMessageKey: new Map(),
+      duplicatedRawBlockIds: new Set(),
+    }),
+  };
+});
 
 vi.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({
@@ -54,6 +73,13 @@ vi.mock("@/core/i18n/hooks", () => ({
       },
       uploads: {
         uploadingFiles: "Uploading files",
+      },
+      toolCalls: {
+        generationProcess: "Generation Process",
+        generationProcessSteps: (count: number) => `${count} steps`,
+      },
+      tokenUsage: {
+        sharedAttribution: "Shared attribution",
       },
     },
   }),
@@ -86,7 +112,11 @@ vi.mock("@/components/workspace/messages/message-group", () => ({
 }));
 
 vi.mock("@/components/workspace/messages/message-list-item", () => ({
-  MessageListItem: ({ message }: { message: { id?: string; type: string } }) =>
+  MessageListItem: ({
+    message,
+  }: {
+    message: { id?: string; type: string; content?: unknown };
+  }) =>
     React.createElement(
       "div",
       { "data-testid": "message-item" },
@@ -124,8 +154,9 @@ vi.mock("@/components/workspace/streaming-indicator", () => ({
 }));
 
 import { MessageList } from "@/components/workspace/messages/message-list";
+import { fetchResolvedBlockHistory } from "@/core/genui/history";
 
-function makeBlock(block_id: string): UIBlock {
+function makeBlock(block_id: string, overrides?: Partial<UIBlock>): UIBlock {
   return {
     schema_version: "1.0",
     type: "ui_block",
@@ -134,6 +165,7 @@ function makeBlock(block_id: string): UIBlock {
     component: "table",
     props: {},
     interactive: false,
+    ...overrides,
   };
 }
 
@@ -154,6 +186,12 @@ describe("MessageList standalone block placement", () => {
 
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    vi.clearAllMocks();
+    vi.mocked(fetchResolvedBlockHistory).mockResolvedValue({
+      blocks: [],
+      blockIdsByMessageKey: new Map(),
+      duplicatedRawBlockIds: new Set(),
+    });
     useBlockStore.getState().reset();
     useBlockStore.setState({
       blocks: new Map([["old-block", makeBlock("old-block")]]),
@@ -322,7 +360,10 @@ describe("MessageList standalone block placement", () => {
       );
     });
 
-    expect(container.textContent?.indexOf("GROUP:ai-1,tool-1")).toBeLessThan(
+    // Panel label visible, output block renders outside the collapsed panel
+    expect(
+      container.textContent?.indexOf("Generation Process"),
+    ).toBeLessThan(
       container.textContent?.indexOf("BLOCK:old-block") ?? Number.POSITIVE_INFINITY,
     );
 
@@ -335,17 +376,18 @@ describe("MessageList standalone block placement", () => {
       );
     });
 
-    expect(container.textContent).toContain("GROUP:ai-1");
+    // old-block is a standalone output block, visible outside the collapsed panel
+    expect(container.textContent).toContain("Generation Process");
     expect(container.textContent).toContain("BLOCK:old-block");
 
-    const processingGroupIndex =
-      container.textContent?.indexOf("GROUP:ai-1") ?? -1;
+    const panelIndex =
+      container.textContent?.indexOf("Generation Process") ?? -1;
     const oldBlockIndex = container.textContent?.indexOf("BLOCK:old-block") ?? -1;
     const secondTurnIndex =
       container.textContent?.indexOf("HUMAN:human-2") ?? Number.POSITIVE_INFINITY;
 
-    expect(processingGroupIndex).toBeGreaterThanOrEqual(0);
-    expect(oldBlockIndex).toBeGreaterThan(processingGroupIndex);
+    expect(panelIndex).toBeGreaterThanOrEqual(0);
+    expect(oldBlockIndex).toBeGreaterThan(panelIndex);
     expect(oldBlockIndex).toBeLessThan(secondTurnIndex);
   });
 
@@ -395,6 +437,34 @@ describe("MessageList standalone block placement", () => {
       },
     ];
 
+    vi.mocked(fetchResolvedBlockHistory).mockResolvedValue({
+      blocks: [
+        {
+          schema_version: "1.0",
+          type: "ui_block" as const,
+          action: "create" as const,
+          block_id: "daily-report-chart__1",
+          component: "card",
+          props: { title: "Round 1" },
+          interactive: false,
+        },
+        {
+          schema_version: "1.0",
+          type: "ui_block" as const,
+          action: "create" as const,
+          block_id: "daily-report-chart__2",
+          component: "card",
+          props: { title: "Round 2" },
+          interactive: false,
+        },
+      ],
+      blockIdsByMessageKey: new Map([
+        ["tool-1", ["daily-report-chart__1"]],
+        ["tool-2", ["daily-report-chart__2"]],
+      ]),
+      duplicatedRawBlockIds: new Set(["daily-report-chart"]),
+    });
+
     await React.act(async () => {
       root.render(
         React.createElement(MessageList, {
@@ -416,5 +486,485 @@ describe("MessageList standalone block placement", () => {
     ).toBeGreaterThan(
       container.textContent?.indexOf("HUMAN:human-2") ?? Number.NEGATIVE_INFINITY,
     );
+  });
+
+  it("hides transient intent/summary once a visible report block is available", async () => {
+    useBlockStore.setState({
+      blocks: new Map([
+        [
+          "report-block-1",
+          makeBlock("report-block-1", {
+            component: "markdown",
+            props: { content: "# 设备运行日报\n\n这是最终报告。" },
+          }),
+        ],
+      ]),
+      interactions: new Map(),
+    });
+
+    const messages = [
+      {
+        type: "human" as const,
+        id: "human-1",
+        content: [{ type: "text" as const, text: "生成日报" }],
+      },
+      {
+        type: "ai" as const,
+        id: "intent-1",
+        name: "intent",
+        content: "SESSION INTENT\n- generate daily report",
+      },
+      {
+        type: "ai" as const,
+        id: "ai-1",
+        content: "",
+        tool_calls: [{ id: "tool-call-1", name: "render_ui", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-1",
+        tool_call_id: "tool-call-1",
+        content:
+          "UI component 'markdown' (create) rendered successfully. block_id=report-block-1\n<!--ui_block:{\"schema_version\":\"1.0\",\"type\":\"ui_block\",\"action\":\"create\",\"block_id\":\"report-block-1\",\"component\":\"markdown\",\"props\":{\"content\":\"# 设备运行日报\\n\\n这是最终报告。\"},\"interactive\":false}-->",
+      },
+    ];
+
+    await React.act(async () => {
+      root.render(
+        React.createElement(MessageList, {
+          threadId: "thread-1",
+          thread: makeThread(true, messages),
+        }),
+      );
+    });
+
+    expect(container.textContent).toContain("BLOCK:report-block-1");
+    expect(container.textContent).not.toContain("AI:intent-1");
+  });
+
+  it("suppresses assistant markdown that duplicates a rendered markdown block", async () => {
+    useBlockStore.setState({
+      blocks: new Map([
+        [
+          "report-block-2",
+          makeBlock("report-block-2", {
+            component: "markdown",
+            props: {
+              content:
+                "# 设备运行日报\n\n## 概览\n\n这是最终日报内容，用于验证不会重复显示。",
+            },
+          }),
+        ],
+      ]),
+      interactions: new Map(),
+    });
+
+    const messages = [
+      {
+        type: "human" as const,
+        id: "human-1",
+        content: [{ type: "text" as const, text: "生成日报" }],
+      },
+      {
+        type: "ai" as const,
+        id: "ai-1",
+        content: "",
+        tool_calls: [{ id: "tool-call-1", name: "render_ui", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-1",
+        tool_call_id: "tool-call-1",
+        content:
+          "UI component 'markdown' (create) rendered successfully. block_id=report-block-2\n<!--ui_block:{\"schema_version\":\"1.0\",\"type\":\"ui_block\",\"action\":\"create\",\"block_id\":\"report-block-2\",\"component\":\"markdown\",\"props\":{\"content\":\"# 设备运行日报\\n\\n## 概览\\n\\n这是最终日报内容，用于验证不会重复显示。\"},\"interactive\":false}-->",
+      },
+      {
+        type: "ai" as const,
+        id: "ai-2",
+        content:
+          "# 设备运行日报\n\n## 概览\n\n这是最终日报内容，用于验证不会重复显示。",
+      },
+    ];
+
+    await React.act(async () => {
+      root.render(
+        React.createElement(MessageList, {
+          threadId: "thread-1",
+          thread: makeThread(false, messages),
+        }),
+      );
+    });
+
+    expect(container.textContent).toContain("BLOCK:report-block-2");
+    expect(container.textContent).not.toContain("AI:ai-2");
+  });
+
+  it("renders active KPI form block only once at the correct location", async () => {
+    useBlockStore.setState({
+      blocks: new Map([
+        [
+          "form-kpi",
+          makeBlock("form-kpi", {
+            component: "form",
+            interactive: true,
+            callback_id: "daily-report-confirm",
+          }),
+        ],
+      ]),
+      interactions: new Map(),
+    });
+
+    const messages = [
+      {
+        type: "human" as const,
+        id: "human-1",
+        content: [{ type: "text" as const, text: "form submission payload" }],
+      },
+      {
+        type: "ai" as const,
+        id: "ai-1",
+        content: "",
+        tool_calls: [{ id: "tc-1", name: "render_ui", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-1",
+        tool_call_id: "tc-1",
+        content:
+          "UI component 'form' (create) rendered successfully. block_id=form-kpi",
+      },
+      {
+        type: "ai" as const,
+        id: "ai-2",
+        content: [{ type: "text" as const, text: "请选择要包含的KPI指标" }],
+      },
+    ];
+
+    vi.mocked(fetchResolvedBlockHistory).mockResolvedValue({
+      blocks: [
+        {
+          schema_version: "1.0",
+          type: "ui_block" as const,
+          action: "create" as const,
+          block_id: "form-kpi",
+          component: "form",
+          props: { title: "KPI确认" },
+          interactive: true,
+          callback_id: "daily-report-confirm",
+        },
+      ],
+      blockIdsByMessageKey: new Map([["tool-1", ["form-kpi"]]]),
+      duplicatedRawBlockIds: new Set(),
+    });
+
+    await React.act(async () => {
+      root.render(
+        React.createElement(MessageList, {
+          threadId: "thread-1",
+          thread: makeThread(false, messages),
+        }),
+      );
+    });
+
+    // Form block must appear exactly once
+    const blockMatches =
+      container.textContent?.match(/BLOCK:form-kpi/g) ?? [];
+    expect(blockMatches).toHaveLength(1);
+
+    // Form block must appear after the processing panel label
+    const panelIndex =
+      container.textContent?.indexOf("Generation Process") ?? -1;
+    const formIndex =
+      container.textContent?.indexOf("BLOCK:form-kpi") ?? -1;
+    expect(panelIndex).toBeGreaterThanOrEqual(0);
+    expect(formIndex).toBeGreaterThan(panelIndex);
+
+    // Guidance text at the end of the stream (no human response yet) should be visible
+    // — user needs to read it to know what to do next.
+    expect(container.textContent).toContain("AI:ai-2");
+  });
+
+  it("renders only the current-turn form and hides previously-submitted forms after page refresh", async () => {
+    // Simulate page refresh: multiple rounds of history loaded from backend,
+    // interactions map is empty (no submission state persisted).
+    const blockRound1Form = makeBlock("form-round1", {
+      component: "form",
+      interactive: true,
+      callback_id: "daily-report-basic",
+      interaction_status: "submitted",
+      props: { title: "基础参数" },
+    });
+    const blockMarkdown = makeBlock("markdown-report", {
+      component: "markdown",
+      props: { content: "# 设备运行日报\n\n报告内容" },
+    });
+    const blockExport = makeBlock("export-form", {
+      component: "form",
+      interactive: true,
+      functional_interaction: true,
+      callback_id: "export-report",
+      props: { title: "导出" },
+    });
+    const blockRound2Form = makeBlock("form-round2", {
+      component: "form",
+      interactive: true,
+      callback_id: "daily-report-kpi",
+      props: { title: "KPI确认" },
+    });
+
+    useBlockStore.setState({
+      blocks: new Map([
+        ["form-round1", blockRound1Form],
+        ["markdown-report", blockMarkdown],
+        ["export-form", blockExport],
+        ["form-round2", blockRound2Form],
+      ]),
+      interactions: new Map(), // page refresh — no interaction state
+    });
+
+    // Full daily report history spanning Round 1 → Round 2 KPI form
+    const messages = [
+      // Round 1: ask for daily report
+      {
+        type: "human" as const,
+        id: "human-1",
+        content: [{ type: "text" as const, text: "生成日报" }],
+      },
+      // Round 1: processing creates basic form
+      {
+        type: "ai" as const,
+        id: "ai-round1",
+        content: "",
+        tool_calls: [{ id: "tc-round1", name: "render_ui", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-round1",
+        tool_call_id: "tc-round1",
+        content:
+          "UI component 'form' (create) rendered successfully. block_id=form-round1",
+      },
+      // Round 1: guidance text (should be hidden after submission happened)
+      {
+        type: "ai" as const,
+        id: "ai-guide1",
+        content: [{ type: "text" as const, text: "请填写日报参数后提交" }],
+      },
+      // Round 1: human submits form
+      {
+        type: "human" as const,
+        id: "human-submit1",
+        content: [{ type: "text" as const, text: "提交的KPI数据..." }],
+      },
+      // Round 1 cont: processing creates markdown + export form
+      {
+        type: "ai" as const,
+        id: "ai-bash",
+        content: "",
+        tool_calls: [{ id: "tc-bash", name: "bash", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-bash",
+        tool_call_id: "tc-bash",
+        content: "execution complete",
+      },
+      // Consecutive processing: render_ui markdown
+      {
+        type: "ai" as const,
+        id: "ai-md",
+        content: "",
+        tool_calls: [{ id: "tc-md", name: "render_ui", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-md",
+        tool_call_id: "tc-md",
+        content:
+          "UI component 'markdown' (create) rendered successfully. block_id=markdown-report",
+      },
+      // Consecutive processing: render_ui export form
+      {
+        type: "ai" as const,
+        id: "ai-export",
+        content: "",
+        tool_calls: [{ id: "tc-export", name: "render_ui", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-export",
+        tool_call_id: "tc-export",
+        content:
+          "UI component 'form' (create) rendered successfully. block_id=export-form",
+      },
+      // Round 2: human submits export or next prompt
+      {
+        type: "human" as const,
+        id: "human-round2",
+        content: [{ type: "text" as const, text: "继续" }],
+      },
+      // Round 2: processing creates KPI form
+      {
+        type: "ai" as const,
+        id: "ai-round2",
+        content: "",
+        tool_calls: [{ id: "tc-round2", name: "render_ui", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-round2",
+        tool_call_id: "tc-round2",
+        content:
+          "UI component 'form' (create) rendered successfully. block_id=form-round2",
+      },
+      // Round 2: guidance text (user hasn't responded yet, should be visible)
+      {
+        type: "ai" as const,
+        id: "ai-guide2",
+        content: [{ type: "text" as const, text: "请选择要包含的KPI指标" }],
+      },
+    ];
+
+    vi.mocked(fetchResolvedBlockHistory).mockResolvedValue({
+      blocks: [blockRound1Form, blockMarkdown, blockExport, blockRound2Form],
+      blockIdsByMessageKey: new Map([
+        ["tool-round1", ["form-round1"]],
+        ["tool-md", ["markdown-report"]],
+        ["tool-export", ["export-form"]],
+        ["tool-round2", ["form-round2"]],
+      ]),
+      duplicatedRawBlockIds: new Set(),
+    });
+
+    await React.act(async () => {
+      root.render(
+        React.createElement(MessageList, {
+          threadId: "thread-1",
+          thread: makeThread(false, messages),
+        }),
+      );
+    });
+
+    // Only Round 2's KPI form should be visible
+    expect(container.textContent).toContain("BLOCK:form-round2");
+    // Round 1 submitted form should NOT appear (unsubmitted interactive form from past)
+    expect(container.textContent).not.toContain("BLOCK:form-round1");
+    // Output blocks (markdown + export) should appear (combined in one GenUIBlockList)
+    expect(container.textContent).toContain("markdown-report");
+    expect(container.textContent).toContain("export-form");
+    // Round 1 guidance (between form creation and submission) should be hidden
+    expect(container.textContent).not.toContain("AI:ai-guide1");
+    // Round 2 guidance is the last assistant message — should be visible
+    expect(container.textContent).toContain("AI:ai-guide2");
+
+    // form-round2 must appear exactly once
+    const round2Matches =
+      container.textContent?.match(/BLOCK:form-round2/g) ?? [];
+    expect(round2Matches).toHaveLength(1);
+  });
+
+  it("hides stale guidance text after form submission even when no visible human message follows", async () => {
+    // Reproduces the bug where each form round leaves a stale "请填写..."
+    // guidance line on screen because form submissions are hidden messages
+    // (no visible human group to anchor against). After the form is submitted,
+    // its preceding guidance text should be hidden — the next round's form
+    // (or end of stream) is enough signal that the user has moved on.
+    const round1Form = makeBlock("form-round1", {
+      component: "form",
+      interactive: true,
+      callback_id: "daily-report-scope",
+      props: { title: "Round 1" },
+    });
+    const round2Form = makeBlock("form-round2", {
+      component: "form",
+      interactive: true,
+      callback_id: "daily-report-equipment",
+      props: { title: "Round 2" },
+    });
+
+    useBlockStore.setState({
+      blocks: new Map([
+        ["form-round1", round1Form],
+        ["form-round2", round2Form],
+      ]),
+      // Round 1 submitted, Round 2 still pending
+      interactions: new Map([
+        ["form-round1", { status: "submitted", submittedAt: Date.now() }],
+      ]),
+    });
+
+    const messages = [
+      {
+        type: "human" as const,
+        id: "human-1",
+        content: [{ type: "text" as const, text: "生成日报" }],
+      },
+      // Round 1: render form
+      {
+        type: "ai" as const,
+        id: "ai-round1",
+        content: "",
+        tool_calls: [{ id: "tc-round1", name: "render_ui", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-round1",
+        tool_call_id: "tc-round1",
+        content:
+          "UI component 'form' (create) rendered successfully. block_id=form-round1",
+      },
+      // Round 1: stale guidance text (form already submitted — should be hidden)
+      {
+        type: "ai" as const,
+        id: "ai-guide1",
+        content: [{ type: "text" as const, text: "请填写日报参数后提交。" }],
+      },
+      // No visible human message — form submission is a hidden message that
+      // never reaches getMessageGroups. The next visible group is the next
+      // round's processing.
+      // Round 2: render next form
+      {
+        type: "ai" as const,
+        id: "ai-round2",
+        content: "",
+        tool_calls: [{ id: "tc-round2", name: "render_ui", args: {} }],
+      },
+      {
+        type: "tool" as const,
+        id: "tool-round2",
+        tool_call_id: "tc-round2",
+        content:
+          "UI component 'form' (create) rendered successfully. block_id=form-round2",
+      },
+      // Round 2: guidance for the active (unsubmitted) form — should stay visible
+      {
+        type: "ai" as const,
+        id: "ai-guide2",
+        content: [{ type: "text" as const, text: "请选择设备后提交。" }],
+      },
+    ];
+
+    vi.mocked(fetchResolvedBlockHistory).mockResolvedValue({
+      blocks: [round1Form, round2Form],
+      blockIdsByMessageKey: new Map([
+        ["tool-round1", ["form-round1"]],
+        ["tool-round2", ["form-round2"]],
+      ]),
+      duplicatedRawBlockIds: new Set(),
+    });
+
+    await React.act(async () => {
+      root.render(
+        React.createElement(MessageList, {
+          threadId: "thread-1",
+          thread: makeThread(false, messages),
+        }),
+      );
+    });
+
+    // Stale Round 1 guidance must be hidden (form already submitted)
+    expect(container.textContent).not.toContain("AI:ai-guide1");
+    // Round 2 guidance is for the active form — must stay visible
+    expect(container.textContent).toContain("AI:ai-guide2");
   });
 });

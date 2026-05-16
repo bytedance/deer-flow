@@ -9,6 +9,9 @@ import sys
 import types
 
 
+# ---------------------------------------------------------------------------
+# Mock langchain_core
+# ---------------------------------------------------------------------------
 langchain_core = types.ModuleType("langchain_core")
 langchain_core_messages = types.ModuleType("langchain_core.messages")
 
@@ -19,10 +22,89 @@ class HumanMessage:
         self.id = id
 
 
+class ToolMessage:
+    def __init__(self, content: str, tool_call_id: str, name: str | None = None):
+        self.content = content
+        self.tool_call_id = tool_call_id
+        self.name = name
+
+
 langchain_core_messages.HumanMessage = HumanMessage
+langchain_core_messages.ToolMessage = ToolMessage
 langchain_core.messages = langchain_core_messages
 sys.modules.setdefault("langchain_core", langchain_core)
 sys.modules.setdefault("langchain_core.messages", langchain_core_messages)
+
+# ---------------------------------------------------------------------------
+# Mock langchain.agents
+# ---------------------------------------------------------------------------
+langchain_agents = types.ModuleType("langchain.agents")
+langchain_agents_middleware = types.ModuleType("langchain.agents.middleware")
+
+
+class AgentState(dict):
+    pass
+
+
+class AgentMiddleware:
+    def __class_getitem__(cls, item):
+        return cls
+
+
+langchain_agents.AgentState = AgentState
+langchain_agents.middleware = langchain_agents_middleware
+langchain_agents_middleware.AgentMiddleware = AgentMiddleware
+sys.modules.setdefault("langchain.agents", langchain_agents)
+sys.modules.setdefault("langchain.agents.middleware", langchain_agents_middleware)
+
+# ---------------------------------------------------------------------------
+# Mock langgraph
+# ---------------------------------------------------------------------------
+langgraph_graph = types.ModuleType("langgraph.graph")
+langgraph_graph.END = "__end__"
+sys.modules.setdefault("langgraph.graph", langgraph_graph)
+
+langgraph_prebuilt = types.ModuleType("langgraph.prebuilt")
+langgraph_prebuilt_tool_node = types.ModuleType("langgraph.prebuilt.tool_node")
+
+
+class ToolCallRequest:
+    def __init__(self, tool_call: dict):
+        self.tool_call = tool_call
+
+
+langgraph_prebuilt_tool_node.ToolCallRequest = ToolCallRequest
+langgraph_prebuilt.tool_node = langgraph_prebuilt_tool_node
+sys.modules.setdefault("langgraph.prebuilt", langgraph_prebuilt)
+sys.modules.setdefault("langgraph.prebuilt.tool_node", langgraph_prebuilt_tool_node)
+
+langgraph_types = types.ModuleType("langgraph.types")
+
+
+class Command:
+    def __init__(self, update: dict | None = None, goto: str | None = None):
+        self.update = update or {}
+        self.goto = goto
+
+
+langgraph_types.Command = Command
+sys.modules.setdefault("langgraph.types", langgraph_types)
+
+# ---------------------------------------------------------------------------
+# Mock deerflow.agents.genui_persistence (lazy import in process_interaction)
+# ---------------------------------------------------------------------------
+deerflow_agents = types.ModuleType("deerflow.agents")
+deerflow_agents_genui_persistence = types.ModuleType("deerflow.agents.genui_persistence")
+
+
+def clear_blocks_by_callback_id(thread_id: str, callback_id: str) -> int:
+    return 0
+
+
+deerflow_agents_genui_persistence.clear_blocks_by_callback_id = clear_blocks_by_callback_id
+deerflow_agents.genui_persistence = deerflow_agents_genui_persistence
+sys.modules["deerflow.agents"] = deerflow_agents
+sys.modules["deerflow.agents.genui_persistence"] = deerflow_agents_genui_persistence
 
 
 def _load_module(module_name: str, relative_path: str):

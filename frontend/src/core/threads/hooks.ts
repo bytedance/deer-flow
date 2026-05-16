@@ -270,9 +270,10 @@ export function useThreadStream({
         typeof event === "object" &&
         event !== null &&
         "type" in event &&
-        event.type === "ui_block"
+        event.type === "ui_blocks_folded"
       ) {
-        useBlockStore.getState().applyBlock(event as UIBlock);
+        const e = event as { type: "ui_blocks_folded"; blocks: UIBlock[] };
+        useBlockStore.getState().replaceAllBlocks(e.blocks);
         return;
       }
 

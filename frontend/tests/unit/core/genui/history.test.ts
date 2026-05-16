@@ -1,10 +1,10 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
-  buildResolvedBlockHistory,
   extractBlockIdsFromMessages,
   extractResolvedBlockIdsFromMessages,
+  fetchResolvedBlockHistory,
 } from "@/core/genui/history";
 
 describe("GenUI history helpers", () => {
@@ -48,7 +48,7 @@ describe("GenUI history helpers", () => {
     expect(extractBlockIdsFromMessages(messages)).toEqual(["form-1"]);
   });
 
-  it("keeps duplicate create block ids as separate historical instances", () => {
+  it("delegates block history resolution to the backend extract API", async () => {
     const messages = [
       {
         type: "tool",
@@ -68,12 +68,39 @@ describe("GenUI history helpers", () => {
       },
     ] as Message[];
 
-    const resolved = buildResolvedBlockHistory(messages);
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            blocks: [
+              {
+                block_id: "daily-report-chart__1",
+                component: "card",
+                props: { title: "Round 1" },
+              },
+              {
+                block_id: "daily-report-chart__2",
+                component: "card",
+                props: { title: "Round 2" },
+              },
+            ],
+            blockIdsByMessageKey: {
+              "tool-1": ["daily-report-chart__1"],
+              "tool-2": ["daily-report-chart__2"],
+            },
+            duplicatedRawBlockIds: ["daily-report-chart"],
+          }),
+      }),
+    );
+
+    const resolved = await fetchResolvedBlockHistory("thread-1", messages);
 
     expect(resolved.blocks.map((block) => block.block_id)).toEqual([
       "daily-report-chart__1",
       "daily-report-chart__2",
     ]);
+    expect(resolved.duplicatedRawBlockIds.has("daily-report-chart")).toBe(true);
     expect(
       extractResolvedBlockIdsFromMessages(
         [messages[0]!],

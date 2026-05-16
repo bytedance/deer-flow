@@ -2,8 +2,8 @@
 
 import { useMemo } from "react";
 
-import { filterSupersededInteractiveBlockIds } from "@/core/genui/visibility";
 import { useBlockStore } from "@/core/genui/store";
+import { filterSupersededInteractiveBlockIds } from "@/core/genui/visibility";
 
 import { GenUIRenderer } from "./GenUIRenderer";
 
@@ -37,7 +37,9 @@ export function GenUIBlockList({ threadId, blockIds, excludeBlockIds, disableExp
       ),
     );
 
-    return candidateBlocks.filter((block) => visibleBlockIds.has(block.block_id));
+    return candidateBlocks
+      .filter((block) => visibleBlockIds.has(block.block_id))
+      .sort((a, b) => (a.sequence ?? Infinity) - (b.sequence ?? Infinity));
   }, [blockIds, blocks, excludeBlockIds]);
 
   if (filteredBlocks.length === 0) {
