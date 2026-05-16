@@ -22,3 +22,26 @@ export interface AgentThreadContext extends Record<string, unknown> {
 export interface AgentThread extends Thread<AgentThreadState> {
   context?: AgentThreadContext;
 }
+
+export interface RunMessage {
+  run_id: string;
+  content: Message;
+  metadata: {
+    caller: string;
+  };
+  created_at: string;
+}
+
+export interface ThreadTokenUsageResponse {
+  thread_id: string;
+  total_tokens: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_runs: number;
+  by_model: Record<string, { tokens: number; runs: number }>;
+  by_caller: {
+    lead_agent: number;
+    subagent: number;
+    middleware: number;
+  };
+}

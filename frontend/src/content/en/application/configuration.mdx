@@ -1,3 +1,280 @@
+---
+title: Configuration
+description: DeerFlow App is configured through two files and a set of environment variables. This page covers the application-level configuration that most operators need to set up before deploying.
+---
+
+import { Callout, Cards, Tabs } from "nextra/components";
+
 # Configuration
 
-TBD
+DeerFlow App is configured through two files and a set of environment variables. This page covers the application-level configuration that most operators need to set up before deploying.
+
+## Configuration files
+
+| File                     | Purpose                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------- |
+| `config.yaml`            | Backend configuration: models, sandbox, tools, skills, memory, and all Harness settings |
+| `extensions_config.json` | MCP servers and skill enable/disable state (managed by the App UI and Gateway API)      |
+
+Frontend environment variables control the Next.js build and runtime behavior.
+
+## config.yaml
+
+Start by copying the example:
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+The most important sections for application configuration are:
+
+### Models
+
+Configure the LLM providers the agent can use. At least one model is required.
+
+<Tabs items={["OpenAI", "Anthropic", "DeepSeek", "Ollama", "Gemini"]}>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: claude-3-5-sonnet
+    use: langchain_anthropic:ChatAnthropic
+    model: claude-3-5-sonnet-20241022
+    api_key: $ANTHROPIC_API_KEY
+    default_request_timeout: 600.0
+    max_retries: 2
+    max_tokens: 8192
+    supports_vision: true
+    supports_thinking: true
+    when_thinking_enabled:
+      thinking:
+        type: enabled
+    when_thinking_disabled:
+      thinking:
+        type: disabled
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: deepseek-v3
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: deepseek-reasoner
+    api_key: $DEEPSEEK_API_KEY
+    timeout: 600.0
+    max_retries: 2
+    supports_thinking: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: qwen3-local
+    use: langchain_ollama:ChatOllama
+    model: qwen3:32b
+    base_url: http://localhost:11434  # No /v1 suffix — uses native Ollama API
+    num_predict: 8192
+    temperature: 0.7
+    reasoning: true
+    supports_thinking: true
+    supports_vision: false
+```
+
+Install Ollama provider: `cd backend && uv add 'deerflow-harness[ollama]'`
+
+<Callout type="warning">
+  Use <code>langchain_ollama:ChatOllama</code> (not the OpenAI-compatible
+  endpoint) for Ollama models. The native API correctly separates thinking
+  content; the OpenAI-compatible endpoint may flatten or drop it.
+</Callout>
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: gemini-2.5-pro
+    use: langchain_google_genai:ChatGoogleGenerativeAI
+    model: gemini-2.5-pro
+    gemini_api_key: $GEMINI_API_KEY
+    timeout: 600.0
+    max_retries: 2
+    max_tokens: 8192
+    supports_vision: true
+```
+  </Tabs.Tab>
+</Tabs>
+
+### Sandbox
+
+Choose the execution environment for agent file and command operations:
+
+<Tabs items={["Local (default)", "Docker container", "K8s Provisioner"]}>
+  <Tabs.Tab>
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false  # set true only for trusted single-user workflows
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+  replicas: 3
+  idle_timeout: 600
+```
+
+Install: `cd backend && uv add 'deerflow-harness[aio-sandbox]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+```
+  </Tabs.Tab>
+</Tabs>
+
+### Tools
+
+Configure which tools the agent has access to. The defaults use DuckDuckGo (no API key) and Jina AI for web operations:
+
+```yaml
+tools:
+  # Web search (choose one)
+  - use: deerflow.community.ddg_search.tools:web_search_tool # default, no key required
+  # - use: deerflow.community.tavily.tools:web_search_tool
+  #   api_key: $TAVILY_API_KEY
+
+  # Web fetch (choose one)
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+
+  # Image search
+  - use: deerflow.community.image_search.tools:image_search_tool
+
+  # File operations
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:glob_tool
+  - use: deerflow.sandbox.tools:grep_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:str_replace_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+### Thread state persistence (checkpointer)
+
+By default, DeerFlow uses an SQLite checkpointer for thread state persistence:
+
+```yaml
+checkpointer:
+  type: sqlite
+  connection_string: checkpoints.db # stored in backend/.deer-flow/
+```
+
+For production deployments with multiple processes:
+
+```yaml
+checkpointer:
+  type: postgres
+  connection_string: postgresql://user:password@localhost:5432/deerflow
+```
+
+Install PostgreSQL support: `cd backend && uv add langgraph-checkpoint-postgres psycopg[binary] psycopg-pool`
+
+For in-memory only (state lost on restart):
+
+```yaml
+checkpointer:
+  type: memory
+```
+
+### Memory
+
+```yaml
+memory:
+  enabled: true
+  storage_path: memory.json
+  debounce_seconds: 30
+  max_facts: 100
+  injection_enabled: true
+  max_injection_tokens: 2000
+```
+
+## Frontend environment variables
+
+Set these before running `pnpm build` or starting the frontend in production:
+
+| Variable              | Required                   | Description                                                      |
+| --------------------- | -------------------------- | ---------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET`  | **Required** in production | Secret for session signing. Use `openssl rand -base64 32`.       |
+| `BETTER_AUTH_URL`     | Recommended                | Public-facing base URL (e.g., `https://your-domain.com`)         |
+| `SKIP_ENV_VALIDATION` | Optional                   | Set to `1` to skip env validation during build (not recommended) |
+| `NEXT_PUBLIC_API_URL` | Optional                   | Override the API base URL for the frontend                       |
+
+In development, set these in a `.env` file at the repo root:
+
+```bash
+BETTER_AUTH_SECRET=your-strong-secret-here-min-32-chars
+```
+
+## extensions_config.json
+
+This file manages MCP server connections and skill enable/disable state. It is created automatically when you first manage extensions through the App UI or Gateway API.
+
+Manual example:
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"],
+      "enabled": true
+    }
+  },
+  "skills": {
+    "deep-research": { "enabled": true },
+    "data-analysis": { "enabled": true }
+  }
+}
+```
+
+## Config upgrade
+
+When the config schema changes, `config_version` is bumped. To merge new fields into your existing config without losing customizations:
+
+```bash
+make config-upgrade
+```
+
+<Cards num={2}>
+  <Cards.Card
+    title="Deployment Guide"
+    href="/docs/application/deployment-guide"
+  />
+  <Cards.Card
+    title="Harness Configuration"
+    href="/docs/harness/configuration"
+  />
+</Cards>

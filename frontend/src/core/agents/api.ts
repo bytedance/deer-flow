@@ -1,3 +1,4 @@
+import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import type { Agent, CreateAgentRequest, UpdateAgentRequest } from "./types";
@@ -17,13 +18,15 @@ export class AgentNameCheckError extends Error {
   }
 }
 
-export function isAgentsApiDisabledError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    /agents_api\.enabled=true|Custom-agent management API is disabled/i.test(
-      error.message,
-    )
-  );
+export class AgentsApiDisabledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentsApiDisabledError";
+  }
+}
+
+function isAgentsApiDisabledDetail(detail: string | undefined): boolean {
+  return typeof detail === "string" && detail.includes("agents_api.enabled");
 }
 
 export async function listAgents(): Promise<Agent[]> {
@@ -47,6 +50,9 @@ export async function createAgent(request: CreateAgentRequest): Promise<Agent> {
   });
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    if (isAgentsApiDisabledDetail(err.detail)) {
+      throw new AgentsApiDisabledError(err.detail!);
+    }
     throw new Error(err.detail ?? `Failed to create agent: ${res.statusText}`);
   }
   return res.json() as Promise<Agent>;
@@ -94,18 +100,16 @@ export async function checkAgentName(
     const err = (await res.json().catch(() => ({}))) as { detail?: string };
     const message =
       err.detail ?? `Failed to check agent name: ${res.statusText}`;
+    if (isAgentsApiDisabledDetail(err.detail)) {
+      throw new AgentsApiDisabledError(err.detail!);
+    }
     if (BACKEND_UNAVAILABLE_STATUSES.has(res.status)) {
       throw new AgentNameCheckError(
         "Could not reach the DeerFlow backend.",
         "backend_unreachable",
       );
     }
-    throw new AgentNameCheckError(
-      message,
-      res.status === 403 && isAgentsApiDisabledError(new Error(message))
-        ? "api_disabled"
-        : "request_failed",
-    );
+    throw new AgentNameCheckError(message, "request_failed");
   }
   return res.json() as Promise<{ available: boolean; name: string }>;
 }

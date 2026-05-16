@@ -33,10 +33,9 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
 import {
   AgentNameCheckError,
+  AgentsApiDisabledError,
   checkAgentName,
-  createAgent,
   getAgent,
-  isAgentsApiDisabledError,
 } from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreadStream } from "@/core/threads/hooks";
@@ -71,24 +70,6 @@ async function getAgentWithRetry(agentName: string) {
   return null;
 }
 
-function getCreateAgentErrorMessage(
-  error: unknown,
-  networkErrorMessage: string,
-  apiDisabledMessage: string,
-  fallbackMessage: string,
-) {
-  if (error instanceof TypeError && error.message === "Failed to fetch") {
-    return networkErrorMessage;
-  }
-  if (isAgentsApiDisabledError(error)) {
-    return apiDisabledMessage;
-  }
-  if (error instanceof Error && error.message) {
-    return fallbackMessage.replace("{message}", error.message);
-  }
-  return fallbackMessage.replace("{message}", "");
-}
-
 export default function NewAgentPage() {
   const { t } = useI18n();
   const router = useRouter();
@@ -97,7 +78,6 @@ export default function NewAgentPage() {
   const [nameInput, setNameInput] = useState("");
   const [nameError, setNameError] = useState("");
   const [isCheckingName, setIsCheckingName] = useState(false);
-  const [isCreatingAgent, setIsCreatingAgent] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agent, setAgent] = useState<Agent | null>(null);
   const [showSaveHint, setShowSaveHint] = useState(false);
@@ -106,8 +86,8 @@ export default function NewAgentPage() {
 
   const threadId = useMemo(() => uuid(), []);
 
-  const [thread, sendMessage] = useThreadStream({
-    threadId: step === "chat" ? threadId : undefined,
+  const { thread, sendMessage } = useThreadStream({
+    threadId: undefined,
     context: {
       mode: "flash",
       is_bootstrap: true,
@@ -159,14 +139,13 @@ export default function NewAgentPage() {
         return;
       }
     } catch (err) {
-      if (err instanceof AgentNameCheckError) {
-        setNameError(
-          err.reason === "backend_unreachable"
-            ? t.agents.nameStepNetworkError
-            : err.reason === "api_disabled"
-              ? t.agents.nameStepApiDisabledError
-              : err.message || t.agents.nameStepCheckError,
-        );
+      if (err instanceof AgentsApiDisabledError) {
+        setNameError(t.agents.nameStepApiDisabledError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "backend_unreachable"
+      ) {
+        setNameError(t.agents.nameStepNetworkError);
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
@@ -175,42 +154,24 @@ export default function NewAgentPage() {
       setIsCheckingName(false);
     }
 
-    setIsCreatingAgent(true);
-    try {
-      await createAgent({
-        name: trimmed,
-        description: "",
-        soul: "",
-      });
-    } catch (err) {
-      setNameError(
-        getCreateAgentErrorMessage(
-          err,
-          t.agents.nameStepNetworkError,
-          t.agents.nameStepApiDisabledError,
-          t.agents.nameStepCreateError,
-        ),
-      );
-      return;
-    } finally {
-      setIsCreatingAgent(false);
-    }
-
     setAgentName(trimmed);
     setStep("chat");
-    await sendMessage(threadId, {
-      text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
-      files: [],
-    });
+    await sendMessage(
+      threadId,
+      {
+        text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
+        files: [],
+      },
+      { agent_name: trimmed },
+    );
   }, [
     nameInput,
     sendMessage,
     t.agents.nameStepAlreadyExistsError,
-    t.agents.nameStepNetworkError,
     t.agents.nameStepApiDisabledError,
+    t.agents.nameStepNetworkError,
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
-    t.agents.nameStepCreateError,
     t.agents.nameStepInvalidError,
     threadId,
   ]);
@@ -293,9 +254,11 @@ export default function NewAgentPage() {
           <DropdownMenuContent align="end">
             <DropdownMenuItem
               onSelect={() => void handleSaveAgent()}
-              disabled={
-                !!agent || thread.isLoading || setupAgentStatus !== "idle"
-              }
+              disabled={[
+                Boolean(agent),
+                thread.isLoading,
+                setupAgentStatus !== "idle",
+              ].some(Boolean)}
             >
               <SaveIcon className="h-4 w-4" />
               {setupAgentStatus === "requested"
@@ -346,9 +309,7 @@ export default function NewAgentPage() {
               <Button
                 className="w-full"
                 onClick={() => void handleConfirmName()}
-                disabled={
-                  !nameInput.trim() || isCheckingName || isCreatingAgent
-                }
+                disabled={!nameInput.trim() || isCheckingName}
               >
                 {t.agents.nameStepContinue}
               </Button>

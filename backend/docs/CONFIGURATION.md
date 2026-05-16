@@ -259,6 +259,8 @@ sandbox:
 
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
 
+For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
+
 ### Skills
 
 Configure the skills directory for specialized workflows:
@@ -319,11 +321,16 @@ models:
 - `DEEPSEEK_API_KEY` - DeepSeek API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
+- `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
+- `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
+- `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
+- `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
+- `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 
 ## Configuration Location
 
-The configuration file should be placed in the **project root directory** (`deer-flow/config.yaml`), not in the backend directory.
+The configuration file should be placed in the **project root directory** (`deer-flow/config.yaml`). Set `DEER_FLOW_PROJECT_ROOT` when the process may start from another working directory, or set `DEER_FLOW_CONFIG_PATH` to point at a specific file.
 
 ## Configuration Priority
 
@@ -331,12 +338,12 @@ DeerFlow searches for configuration in this order:
 
 1. Path specified in code via `config_path` argument
 2. Path from `DEER_FLOW_CONFIG_PATH` environment variable
-3. `config.yaml` in current working directory (typically `backend/` when running)
-4. `config.yaml` in parent directory (project root: `deer-flow/`)
+3. `config.yaml` under `DEER_FLOW_PROJECT_ROOT`, or under the current working directory when `DEER_FLOW_PROJECT_ROOT` is unset
+4. Legacy backend/repository-root locations for monorepo compatibility
 
 ## Best Practices
 
-1. **Place `config.yaml` in project root** - Not in `backend/` directory
+1. **Place `config.yaml` in project root** - Set `DEER_FLOW_PROJECT_ROOT` if the runtime starts elsewhere
 2. **Never commit `config.yaml`** - It's already in `.gitignore`
 3. **Use environment variables for secrets** - Don't hardcode API keys
 4. **Keep `config.example.yaml` updated** - Document all new options
@@ -347,7 +354,7 @@ DeerFlow searches for configuration in this order:
 
 ### "Config file not found"
 - Ensure `config.yaml` exists in the **project root** directory (`deer-flow/config.yaml`)
-- The backend searches parent directory by default, so root location is preferred
+- If the runtime starts outside the project root, set `DEER_FLOW_PROJECT_ROOT`
 - Alternatively, set `DEER_FLOW_CONFIG_PATH` environment variable to custom location
 
 ### "Invalid API key"
@@ -357,7 +364,7 @@ DeerFlow searches for configuration in this order:
 ### "Skills not loading"
 - Check that `deer-flow/skills/` directory exists
 - Verify skills have valid `SKILL.md` files
-- Check `skills.path` configuration if using custom path
+- Check `skills.path` or `DEER_FLOW_SKILLS_PATH` if using a custom path
 
 ### "Docker sandbox fails to start"
 - Ensure Docker is running
