@@ -1,0 +1,59 @@
+---
+title: 使用记忆系统
+description: 本教程介绍如何在 DeerFlow 中启用和使用记忆系统，让 Agent 在多次会话中记住关于你的重要信息。
+---
+
+# 使用记忆系统
+
+本教程介绍如何在 DeerFlow 中启用和使用记忆系统，让 Agent 在多次会话中记住关于你的重要信息。
+
+## 启用记忆
+
+在 `config.yaml` 中启用记忆：
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  max_injection_tokens: 2000
+  debounce_seconds: 30
+```
+
+## 记忆的工作方式
+
+记忆通过 `MemoryMiddleware` 自动工作：
+
+1. **第一次对话**：告诉 Agent 关于你的偏好、项目或背景。
+2. **自动学习**：Agent 在后台提取并保存重要事实。
+3. **后续对话**：记忆事实自动注入到系统提示中，Agent 无需你重新解释背景。
+
+## 示例
+
+**第一次对话**：
+
+```
+我是一名 Python 后端开发者，主要使用 FastAPI 和 PostgreSQL。
+我的团队遵循 PEP 8 代码规范，偏好类型注解。
+请记住这些信息，在以后的代码建议中遵循这些规范。
+```
+
+**后续对话**（无需重复背景）：
+
+```
+帮我写一个用户认证模块
+```
+
+Agent 会自动生成符合 FastAPI 风格、带类型注解的代码。
+
+## 查看记忆
+
+记忆存储在 `backend/.deer-flow/memory.json`，你可以直接查看和编辑：
+
+```bash
+cat backend/.deer-flow/memory.json
+```
+
+## 下一步
+
+- [部署你的 DeerFlow](/docs/tutorials/deploy-your-own-deerflow)
+- [记忆系统文档](/docs/harness/memory)
