@@ -1,13 +1,18 @@
+import ipaddress
 import logging
 import re
+import socket
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.authz import require_permission
+from app.gateway.deps import get_config
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig, reload_app_config
 
@@ -95,7 +100,6 @@ class ModelUpsertRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     frequency_penalty: float | None = None
-    system_prompt: str | None = None
     supports_thinking: bool = False
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
@@ -232,7 +236,6 @@ def _request_to_config(request: ModelUpsertRequest, existing: dict[str, Any] | N
         "temperature": request.temperature,
         "top_p": request.top_p,
         "frequency_penalty": request.frequency_penalty,
-        "system_prompt": request.system_prompt,
         "supports_thinking": request.supports_thinking,
         "supports_reasoning_effort": request.supports_reasoning_effort,
         "supports_vision": request.supports_vision,
@@ -244,6 +247,7 @@ def _request_to_config(request: ModelUpsertRequest, existing: dict[str, Any] | N
 
 
 async def _fetch_models(base_url: str, api_key: str | None) -> tuple[str, dict[str, Any]]:
+    _validate_detection_base_url(base_url)
     normalized_base = base_url.rstrip("/")
     candidates = [f"{normalized_base}/models"]
     if not normalized_base.endswith("/v1"):
@@ -265,13 +269,32 @@ async def _fetch_models(base_url: str, api_key: str | None) -> tuple[str, dict[s
     raise HTTPException(status_code=502, detail=f"Failed to detect models: {last_error}")
 
 
+def _validate_detection_base_url(base_url: str) -> None:
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="base_url must be an http(s) URL")
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=422, detail="base_url must not include credentials")
+
+    host = parsed.hostname
+    try:
+        addresses = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise HTTPException(status_code=422, detail=f"Unable to resolve base_url host: {host}") from exc
+
+    for *_, sockaddr in addresses:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            raise HTTPException(status_code=422, detail="base_url host must resolve to a public address")
+
+
 @router.get(
     "/models",
     response_model=ModelsListResponse,
     summary="List All Models",
     description="Retrieve a list of all available AI models configured in the system.",
 )
-async def list_models() -> ModelsListResponse:
+async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResponse:
     """List all available models from configuration.
 
     Returns model information suitable for frontend display,
@@ -307,7 +330,6 @@ async def list_models() -> ModelsListResponse:
         }
         ```
     """
-    config = get_app_config()
     models = [_public_model_response(model) for model in config.models]
     return ModelsListResponse(
         models=models,
@@ -321,7 +343,7 @@ async def list_models() -> ModelsListResponse:
     summary="Get Model Details",
     description="Retrieve detailed information about a specific AI model by its name.",
 )
-async def get_model(model_name: str) -> ModelResponse:
+async def get_model(model_name: str, config: AppConfig = Depends(get_config)) -> ModelResponse:
     """Get a specific model by name.
 
     Args:
@@ -343,7 +365,6 @@ async def get_model(model_name: str) -> ModelResponse:
         }
         ```
     """
-    config = get_app_config()
     model = config.get_model_config(model_name)
     if model is None:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
@@ -357,8 +378,9 @@ async def get_model(model_name: str) -> ModelResponse:
     summary="Detect OpenAI-Compatible Models",
     description="Probe an OpenAI-compatible provider /models endpoint and return discovered model metadata.",
 )
-async def detect_models(request: DetectModelsRequest) -> DetectModelsResponse:
-    endpoint, data = await _fetch_models(str(request.base_url), request.api_key)
+@require_permission("models", "write")
+async def detect_models(body: DetectModelsRequest, request: Request) -> DetectModelsResponse:
+    endpoint, data = await _fetch_models(str(body.base_url), body.api_key)
     raw_models = data.get("data", data.get("models", []))
     if not isinstance(raw_models, list):
         raise HTTPException(status_code=502, detail="Provider response did not include a model list")
@@ -372,13 +394,14 @@ async def detect_models(request: DetectModelsRequest) -> DetectModelsResponse:
     summary="Create Model",
     description="Add an OpenAI-compatible model to config.yaml and reload the active configuration.",
 )
-async def create_model(request: ModelUpsertRequest) -> ModelResponse:
+@require_permission("models", "write")
+async def create_model(body: ModelUpsertRequest, request: Request) -> ModelResponse:
     config_path, data = _load_config_data()
-    model_name = _slugify_model_name(request.name)
+    model_name = _slugify_model_name(body.name)
     if any(model.get("name") == model_name for model in data["models"] if isinstance(model, dict)):
         raise HTTPException(status_code=409, detail=f"Model '{model_name}' already exists")
-    request.name = model_name
-    data["models"].append(_request_to_config(request))
+    body.name = model_name
+    data["models"].append(_request_to_config(body))
     _write_config_data(config_path, data)
     model = get_app_config().get_model_config(model_name)
     if model is None:
@@ -392,17 +415,20 @@ async def create_model(request: ModelUpsertRequest) -> ModelResponse:
     summary="Update Model",
     description="Update a model in config.yaml and reload the active configuration.",
 )
-async def update_model(model_name: str, request: ModelUpsertRequest) -> ModelResponse:
+@require_permission("models", "write")
+async def update_model(model_name: str, body: ModelUpsertRequest, request: Request) -> ModelResponse:
     config_path, data = _load_config_data()
     index = next((idx for idx, model in enumerate(data["models"]) if isinstance(model, dict) and model.get("name") == model_name), None)
     if index is None:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
-    request.name = _slugify_model_name(request.name)
-    data["models"][index] = _request_to_config(request, data["models"][index])
+    body.name = _slugify_model_name(body.name)
+    if body.name != model_name and any(model.get("name") == body.name for model in data["models"] if isinstance(model, dict)):
+        raise HTTPException(status_code=409, detail=f"Model '{body.name}' already exists")
+    data["models"][index] = _request_to_config(body, data["models"][index])
     _write_config_data(config_path, data)
-    model = get_app_config().get_model_config(request.name)
+    model = get_app_config().get_model_config(body.name)
     if model is None:
-        raise HTTPException(status_code=500, detail=f"Model '{request.name}' was saved but could not be reloaded")
+        raise HTTPException(status_code=500, detail=f"Model '{body.name}' was saved but could not be reloaded")
     return _public_model_response(model)
 
 
@@ -411,8 +437,11 @@ async def update_model(model_name: str, request: ModelUpsertRequest) -> ModelRes
     summary="Delete Model",
     description="Remove a model from config.yaml and reload the active configuration.",
 )
-async def delete_model(model_name: str) -> dict[str, str]:
+@require_permission("models", "write")
+async def delete_model(model_name: str, request: Request) -> dict[str, str]:
     config_path, data = _load_config_data()
+    if len([model for model in data["models"] if isinstance(model, dict)]) <= 1:
+        raise HTTPException(status_code=409, detail="Cannot delete the last configured model")
     original_len = len(data["models"])
     data["models"] = [model for model in data["models"] if not (isinstance(model, dict) and model.get("name") == model_name)]
     if len(data["models"]) == original_len:

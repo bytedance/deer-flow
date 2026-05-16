@@ -48,7 +48,6 @@ export interface ModelUpsertPayload {
   temperature?: number | null;
   top_p?: number | null;
   frequency_penalty?: number | null;
-  system_prompt?: string | null;
   supports_thinking?: boolean;
   supports_reasoning_effort?: boolean;
   supports_vision?: boolean;

@@ -1,11 +1,13 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway import authz
 from app.gateway.routers import models as models_router
-from deerflow.agents.lead_agent.agent import _apply_model_system_prompt_override
 from deerflow.config.app_config import reset_app_config
 
 
@@ -20,6 +22,11 @@ models:
     use: langchain_openai:ChatOpenAI
     model: existing-model
     api_key: old-key
+  - name: second
+    display_name: Second
+    use: langchain_openai:ChatOpenAI
+    model: second-model
+    api_key: second-key
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 """.strip(),
@@ -31,6 +38,17 @@ def _client() -> TestClient:
     app = FastAPI()
     app.include_router(models_router.router)
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_models_writer(monkeypatch):
+    async def fake_authenticate(request):  # noqa: ARG001
+        return authz.AuthContext(
+            user=SimpleNamespace(id="test-user"),
+            permissions=[*authz._ALL_PERMISSIONS, "models:write"],
+        )
+
+    monkeypatch.setattr(authz, "_authenticate", fake_authenticate)
 
 
 def test_create_model_writes_config_and_redacts_api_key(tmp_path, monkeypatch):
@@ -89,6 +107,8 @@ def test_update_model_keeps_existing_api_key_when_blank(tmp_path, monkeypatch):
 
 
 def test_detect_models_reads_openai_compatible_payload(monkeypatch):
+    monkeypatch.setattr(models_router, "_validate_detection_base_url", lambda base_url: None)
+
     async def fake_get(self, url, headers=None):  # noqa: ARG001
         return httpx.Response(
             200,
@@ -120,9 +140,58 @@ def test_detect_models_reads_openai_compatible_payload(monkeypatch):
     assert body["models"][0]["supports_vision"] is True
 
 
-def test_model_system_prompt_override_is_injected():
-    prompt = _apply_model_system_prompt_override("base prompt", "prefer terse answers")
+def test_detect_models_rejects_localhost_url():
+    with _client() as client:
+        response = client.post(
+            "/api/models/detect",
+            json={"base_url": "http://127.0.0.1:11434/v1", "api_key": "key"},
+        )
 
-    assert "base prompt" in prompt
-    assert "<model_system_prompt_override>" in prompt
-    assert "prefer terse answers" in prompt
+    assert response.status_code == 422
+    assert "public address" in response.json()["detail"]
+
+
+def test_update_model_rejects_duplicate_target_name(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    reset_app_config()
+
+    with _client() as client:
+        response = client.put(
+            "/api/models/existing",
+            json={
+                "name": "second",
+                "model": "new-model",
+                "display_name": "Duplicate",
+                "api_key": "",
+            },
+        )
+
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+
+
+def test_delete_model_rejects_last_model(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+config_version: 7
+log_level: info
+models:
+  - name: only
+    use: langchain_openai:ChatOpenAI
+    model: only-model
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    reset_app_config()
+
+    with _client() as client:
+        response = client.delete("/api/models/only")
+
+    assert response.status_code == 409
+    assert "last configured model" in response.json()["detail"]

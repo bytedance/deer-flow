@@ -886,6 +886,84 @@ def test_thinking_disabled_vllm_enable_thinking_format(monkeypatch):
     assert captured.get("reasoning_effort") is None
 
 
+# ---------------------------------------------------------------------------
+# stream_usage injection
+# ---------------------------------------------------------------------------
+
+
+class _FakeWithStreamUsage(FakeChatModel):
+    """Fake model that declares stream_usage in model_fields (like BaseChatOpenAI)."""
+
+    stream_usage: bool | None = None
+
+
+def test_stream_usage_injected_for_openai_compatible_model(monkeypatch):
+    """Factory should set stream_usage=True for models with stream_usage field."""
+    cfg = _make_app_config([_make_model("deepseek", use="langchain_deepseek:ChatDeepSeek")])
+    _patch_factory(monkeypatch, cfg, model_class=_FakeWithStreamUsage)
+
+    captured: dict = {}
+
+    class CapturingModel(_FakeWithStreamUsage):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="deepseek")
+
+    assert captured.get("stream_usage") is True
+
+
+def test_stream_usage_not_injected_for_non_openai_model(monkeypatch):
+    """Factory should NOT inject stream_usage for models without the field."""
+    cfg = _make_app_config([_make_model("claude", use="langchain_anthropic:ChatAnthropic")])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="claude")
+
+    assert "stream_usage" not in captured
+
+
+def test_stream_usage_not_overridden_when_explicitly_set_in_config(monkeypatch):
+    """If config dumps stream_usage=False, factory should respect it."""
+    cfg = _make_app_config([_make_model("deepseek", use="langchain_deepseek:ChatDeepSeek")])
+    _patch_factory(monkeypatch, cfg, model_class=_FakeWithStreamUsage)
+
+    captured: dict = {}
+
+    class CapturingModel(_FakeWithStreamUsage):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    # Simulate config having stream_usage explicitly set by patching model_dump
+    original_get_model_config = cfg.get_model_config
+
+    def patched_get_model_config(name):
+        mc = original_get_model_config(name)
+        mc.stream_usage = False  # type: ignore[attr-defined]
+        return mc
+
+    monkeypatch.setattr(cfg, "get_model_config", patched_get_model_config)
+
+    factory_module.create_chat_model(name="deepseek")
+
+    assert captured.get("stream_usage") is False
+
+
 def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
     model = ModelConfig(
         name="gpt-5-responses",

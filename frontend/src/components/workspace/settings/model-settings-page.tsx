@@ -44,7 +44,6 @@ type ModelForm = {
   temperature: string;
   topP: string;
   frequencyPenalty: string;
-  systemPrompt: string;
   supportsThinking: boolean;
   supportsReasoningEffort: boolean;
   supportsVision: boolean;
@@ -62,7 +61,6 @@ const emptyForm: ModelForm = {
   temperature: "",
   topP: "",
   frequencyPenalty: "",
-  systemPrompt: "",
   supportsThinking: false,
   supportsReasoningEffort: false,
   supportsVision: false,
@@ -125,7 +123,6 @@ function formToPayload(form: ModelForm): ModelUpsertPayload {
     temperature: numberOrNull(form.temperature),
     top_p: numberOrNull(form.topP),
     frequency_penalty: numberOrNull(form.frequencyPenalty),
-    system_prompt: form.systemPrompt.trim() || null,
     supports_thinking: form.supportsThinking,
     supports_reasoning_effort: form.supportsReasoningEffort,
     supports_vision: form.supportsVision,
@@ -445,15 +442,6 @@ export function ModelSettingsPage() {
               value={form.description}
               onChange={(event) =>
                 setForm({ ...form, description: event.target.value })
-              }
-              disabled={isStatic}
-            />
-          </Field>
-          <Field label={copy.systemPrompt}>
-            <Textarea
-              value={form.systemPrompt}
-              onChange={(event) =>
-                setForm({ ...form, systemPrompt: event.target.value })
               }
               disabled={isStatic}
             />
