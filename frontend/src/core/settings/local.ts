@@ -1,8 +1,13 @@
+import type { TokenUsageInlineMode } from "../messages/usage-model";
 import type { AgentThreadContext } from "../threads";
 
 export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   notification: {
     enabled: true,
+  },
+  tokenUsage: {
+    headerTotal: true,
+    inlineMode: "per_turn",
   },
   context: {
     model_name: undefined,
@@ -25,6 +30,10 @@ export interface LocalSettings {
   notification: {
     enabled: boolean;
   };
+  tokenUsage: {
+    headerTotal: boolean;
+    inlineMode: TokenUsageInlineMode;
+  };
   context: Omit<
     AgentThreadContext,
     | "thread_id"
@@ -46,6 +55,10 @@ function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
     context: {
       ...DEFAULT_LOCAL_SETTINGS.context,
       ...settings?.context,
+    },
+    tokenUsage: {
+      ...DEFAULT_LOCAL_SETTINGS.tokenUsage,
+      ...settings?.tokenUsage,
     },
     notification: {
       ...DEFAULT_LOCAL_SETTINGS.notification,
