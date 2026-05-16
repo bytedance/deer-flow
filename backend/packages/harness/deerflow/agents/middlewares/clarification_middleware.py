@@ -66,11 +66,6 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         return f"clarification:{digest}"
 
     def _is_chinese(self, text: str) -> bool:
-        """Check if text contains Chinese characters.
-
-    # ── Helpers ──────────────────────────────────────────────────────────
-
-    def _is_chinese(self, text: str) -> bool:
         """Check if text contains Chinese characters."""
         return any("\u4e00" <= char <= "\u9fff" for char in text)
 
