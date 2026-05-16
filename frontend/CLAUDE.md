@@ -93,3 +93,10 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:2024
 ```
 
 Requires Node.js 22+ and pnpm 10.26.2+.
+
+## Design System
+
+The daily report feature follows the visual and interaction design spec at
+[docs/plans/2026-05-16-daily-report-visual-and-interaction-design.md](../docs/plans/2026-05-16-daily-report-visual-and-interaction-design.md).
+All font choices, colors, spacing, component states, and interaction flows for the daily report
+are defined there. Do not deviate without explicit user approval.
