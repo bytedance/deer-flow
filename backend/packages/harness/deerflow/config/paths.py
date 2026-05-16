@@ -3,16 +3,18 @@ import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
+from deerflow.config.runtime_paths import runtime_home
+
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+_SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
 def _default_local_base_dir() -> Path:
-    """Return the repo-local DeerFlow state directory without relying on cwd."""
-    backend_dir = Path(__file__).resolve().parents[4]
-    return backend_dir / ".deer-flow"
+    """Return the caller project's writable DeerFlow state directory."""
+    return runtime_home()
 
 
 def _validate_thread_id(thread_id: str) -> str:
@@ -20,6 +22,13 @@ def _validate_thread_id(thread_id: str) -> str:
     if not _SAFE_THREAD_ID_RE.match(thread_id):
         raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return thread_id
+
+
+def _validate_user_id(user_id: str) -> str:
+    """Validate a user ID before using it in filesystem paths."""
+    if not _SAFE_USER_ID_RE.match(user_id):
+        raise ValueError(f"Invalid user_id {user_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+    return user_id
 
 
 def _join_host_path(base: str, *parts: str) -> str:
@@ -73,7 +82,7 @@ class Paths:
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
         2. DEER_FLOW_HOME environment variable
-        3. Repo-local fallback derived from this module path: `{backend_dir}/.deer-flow`
+        3. Caller project fallback: `{project_root}/.deer-flow`
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
@@ -123,55 +132,87 @@ class Paths:
 
     @property
     def agents_dir(self) -> Path:
-        """Root directory for all custom agents: `{base_dir}/agents/`."""
+        """Legacy root for shared (pre user-isolation) custom agents: `{base_dir}/agents/`.
+
+        New code should use :meth:`user_agents_dir` instead. This property remains
+        only as a read-side fallback for installations that have not yet run the
+        ``migrate_user_isolation.py`` script.
+        """
         return self.base_dir / "agents"
 
     def agent_dir(self, name: str) -> Path:
-        """Directory for a specific agent: `{base_dir}/agents/{name}/`."""
+        """Legacy per-agent directory (no user isolation): `{base_dir}/agents/{name}/`."""
         return self.agents_dir / name.lower()
 
     def agent_memory_file(self, name: str) -> Path:
-        """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
+        """Legacy per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
         return self.agent_dir(name) / "memory.json"
 
-    def thread_dir(self, thread_id: str) -> Path:
+    def user_dir(self, user_id: str) -> Path:
+        """Directory for a specific user: `{base_dir}/users/{user_id}/`."""
+        return self.base_dir / "users" / _validate_user_id(user_id)
+
+    def user_memory_file(self, user_id: str) -> Path:
+        """Per-user memory file: `{base_dir}/users/{user_id}/memory.json`."""
+        return self.user_dir(user_id) / "memory.json"
+
+    def user_agents_dir(self, user_id: str) -> Path:
+        """Per-user root for that user's custom agents: `{base_dir}/users/{user_id}/agents/`."""
+        return self.user_dir(user_id) / "agents"
+
+    def user_agent_dir(self, user_id: str, agent_name: str) -> Path:
+        """Per-user per-agent directory: `{base_dir}/users/{user_id}/agents/{name}/`."""
+        return self.user_agents_dir(user_id) / agent_name.lower()
+
+    def user_agent_memory_file(self, user_id: str, agent_name: str) -> Path:
+        """Per-user per-agent memory: `{base_dir}/users/{user_id}/agents/{name}/memory.json`."""
+        return self.user_agent_dir(user_id, agent_name) / "memory.json"
+
+    def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
-        Host path for a thread's data: `{base_dir}/threads/{thread_id}/`
+        Host path for a thread's data.
+
+        When *user_id* is provided:
+            `{base_dir}/users/{user_id}/threads/{thread_id}/`
+        Otherwise (legacy layout):
+            `{base_dir}/threads/{thread_id}/`
 
         This directory contains a `user-data/` subdirectory that is mounted
         as `/mnt/user-data/` inside the sandbox.
 
         Raises:
-            ValueError: If `thread_id` contains unsafe characters (path separators
-                        or `..`) that could cause directory traversal.
+            ValueError: If `thread_id` or `user_id` contains unsafe characters (path
+                        separators or `..`) that could cause directory traversal.
         """
+        if user_id is not None:
+            return self.user_dir(user_id) / "threads" / _validate_thread_id(thread_id)
         return self.base_dir / "threads" / _validate_thread_id(thread_id)
 
-    def sandbox_work_dir(self, thread_id: str) -> Path:
+    def sandbox_work_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for the agent's workspace directory.
         Host: `{base_dir}/threads/{thread_id}/user-data/workspace/`
         Sandbox: `/mnt/user-data/workspace/`
         """
-        return self.thread_dir(thread_id) / "user-data" / "workspace"
+        return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "workspace"
 
-    def sandbox_uploads_dir(self, thread_id: str) -> Path:
+    def sandbox_uploads_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for user-uploaded files.
         Host: `{base_dir}/threads/{thread_id}/user-data/uploads/`
         Sandbox: `/mnt/user-data/uploads/`
         """
-        return self.thread_dir(thread_id) / "user-data" / "uploads"
+        return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "uploads"
 
-    def sandbox_outputs_dir(self, thread_id: str) -> Path:
+    def sandbox_outputs_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for agent-generated artifacts.
         Host: `{base_dir}/threads/{thread_id}/user-data/outputs/`
         Sandbox: `/mnt/user-data/outputs/`
         """
-        return self.thread_dir(thread_id) / "user-data" / "outputs"
+        return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "outputs"
 
-    def acp_workspace_dir(self, thread_id: str) -> Path:
+    def acp_workspace_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for the ACP workspace of a specific thread.
         Host: `{base_dir}/threads/{thread_id}/acp-workspace/`
@@ -180,41 +221,43 @@ class Paths:
         Each thread gets its own isolated ACP workspace so that concurrent
         sessions cannot read each other's ACP agent outputs.
         """
-        return self.thread_dir(thread_id) / "acp-workspace"
+        return self.thread_dir(thread_id, user_id=user_id) / "acp-workspace"
 
-    def sandbox_user_data_dir(self, thread_id: str) -> Path:
+    def sandbox_user_data_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for the user-data root.
         Host: `{base_dir}/threads/{thread_id}/user-data/`
         Sandbox: `/mnt/user-data/`
         """
-        return self.thread_dir(thread_id) / "user-data"
+        return self.thread_dir(thread_id, user_id=user_id) / "user-data"
 
-    def host_thread_dir(self, thread_id: str) -> str:
+    def host_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for a thread directory, preserving Windows path syntax."""
+        if user_id is not None:
+            return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "threads", _validate_thread_id(thread_id))
         return _join_host_path(self._host_base_dir_str(), "threads", _validate_thread_id(thread_id))
 
-    def host_sandbox_user_data_dir(self, thread_id: str) -> str:
+    def host_sandbox_user_data_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for a thread's user-data root."""
-        return _join_host_path(self.host_thread_dir(thread_id), "user-data")
+        return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "user-data")
 
-    def host_sandbox_work_dir(self, thread_id: str) -> str:
+    def host_sandbox_work_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for the workspace mount source."""
-        return _join_host_path(self.host_sandbox_user_data_dir(thread_id), "workspace")
+        return _join_host_path(self.host_sandbox_user_data_dir(thread_id, user_id=user_id), "workspace")
 
-    def host_sandbox_uploads_dir(self, thread_id: str) -> str:
+    def host_sandbox_uploads_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for the uploads mount source."""
-        return _join_host_path(self.host_sandbox_user_data_dir(thread_id), "uploads")
+        return _join_host_path(self.host_sandbox_user_data_dir(thread_id, user_id=user_id), "uploads")
 
-    def host_sandbox_outputs_dir(self, thread_id: str) -> str:
+    def host_sandbox_outputs_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for the outputs mount source."""
-        return _join_host_path(self.host_sandbox_user_data_dir(thread_id), "outputs")
+        return _join_host_path(self.host_sandbox_user_data_dir(thread_id, user_id=user_id), "outputs")
 
-    def host_acp_workspace_dir(self, thread_id: str) -> str:
+    def host_acp_workspace_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for the ACP workspace mount source."""
-        return _join_host_path(self.host_thread_dir(thread_id), "acp-workspace")
+        return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "acp-workspace")
 
-    def ensure_thread_dirs(self, thread_id: str) -> None:
+    def ensure_thread_dirs(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Create all standard sandbox directories for a thread.
 
         Directories are created with mode 0o777 so that sandbox containers
@@ -228,24 +271,24 @@ class Paths:
         ACP agent invocation.
         """
         for d in [
-            self.sandbox_work_dir(thread_id),
-            self.sandbox_uploads_dir(thread_id),
-            self.sandbox_outputs_dir(thread_id),
-            self.acp_workspace_dir(thread_id),
+            self.sandbox_work_dir(thread_id, user_id=user_id),
+            self.sandbox_uploads_dir(thread_id, user_id=user_id),
+            self.sandbox_outputs_dir(thread_id, user_id=user_id),
+            self.acp_workspace_dir(thread_id, user_id=user_id),
         ]:
             d.mkdir(parents=True, exist_ok=True)
             d.chmod(0o777)
 
-    def delete_thread_dir(self, thread_id: str) -> None:
+    def delete_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Delete all persisted data for a thread.
 
         The operation is idempotent: missing thread directories are ignored.
         """
-        thread_dir = self.thread_dir(thread_id)
+        thread_dir = self.thread_dir(thread_id, user_id=user_id)
         if thread_dir.exists():
             shutil.rmtree(thread_dir)
 
-    def resolve_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
+    def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, user_id: str | None = None) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.
 
         Args:
@@ -253,6 +296,7 @@ class Paths:
             virtual_path: Virtual path as seen inside the sandbox, e.g.
                           ``/mnt/user-data/outputs/report.pdf``.
                           Leading slashes are stripped before matching.
+            user_id: Optional user ID for user-scoped path resolution.
 
         Returns:
             The resolved absolute host filesystem path.
@@ -270,7 +314,7 @@ class Paths:
             raise ValueError(f"Path must start with /{prefix}")
 
         relative = stripped[len(prefix) :].lstrip("/")
-        base = self.sandbox_user_data_dir(thread_id).resolve()
+        base = self.sandbox_user_data_dir(thread_id, user_id=user_id).resolve()
         actual = (base / relative).resolve()
 
         try:
