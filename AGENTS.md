@@ -101,4 +101,4 @@ See `frontend/AGENTS.md` for architecture and interaction ownership rules.
 - Use `backend/AGENTS.md` and `frontend/AGENTS.md` as entry points for deeper guidance
 - Backend architecture details are in `backend/CLAUDE.md` (LangGraph runtime, Gateway API, subagents, memory, sandbox)
 - Frontend has detailed architecture docs in `frontend/AGENTS.md`
-- Always run linters/tests after changes: `make dev` + backend `uvx ruff` + frontend `pnpm check` + `pnpm test`
+- Always run linters/tests after changes: `make dev` + backend `uvx ruff` + frontend `pnpm format` + `pnpm lint:fix` + `pnpm test`
