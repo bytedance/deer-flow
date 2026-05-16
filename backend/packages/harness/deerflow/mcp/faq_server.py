@@ -23,7 +23,25 @@ logger = logging.getLogger(__name__)
 def _load_service() -> FaqService:
     base_url = os.environ.get("RAGFLOW_BASE_URL", "http://localhost:9380")
     api_key = os.environ.get("RAGFLOW_API_KEY", "")
-    return FaqService(base_url=base_url, api_key=api_key)
+    high_threshold = _get_float_env("FAQ_HIGH_THRESHOLD", 0.85)
+    medium_threshold = _get_float_env("FAQ_MEDIUM_THRESHOLD", 0.6)
+    return FaqService(
+        base_url=base_url,
+        api_key=api_key,
+        high_threshold=high_threshold,
+        medium_threshold=medium_threshold,
+    )
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("[FAQ MCP] Invalid %s=%r; using default %.2f", name, raw, default)
+        return default
 
 
 def _get_dataset_ids() -> list[str]:
@@ -60,16 +78,36 @@ def faq_search(
         keyword: Enable keyword search mode.
 
     Returns:
-        JSON string with best FAQ answer, score, and all matching candidates.
+        JSON string with best FAQ answer, score, all matching candidates, and
+        deterministic route fields:
+        - match_level: high, medium, low, none, or error
+        - route_decision: faq_only, faq_plus_rag, or rag_only
+        - should_call_rag: whether the caller should retrieve broader RAG context
     """
     logger.info("[FAQ MCP] faq_search: question='%s', context=%s, top_k=%d", question, context, top_k)
 
     dataset_ids = _get_dataset_ids()
     if not dataset_ids:
-        return json.dumps({"error": "FAQ_DATASET_IDS not configured"}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "error": "FAQ_DATASET_IDS not configured",
+                "match_level": "error",
+                "route_decision": "rag_only",
+                "should_call_rag": True,
+            },
+            ensure_ascii=False,
+        )
 
     if not question or not question.strip():
-        return json.dumps({"error": "question must not be empty"}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "error": "question must not be empty",
+                "match_level": "error",
+                "route_decision": "rag_only",
+                "should_call_rag": False,
+            },
+            ensure_ascii=False,
+        )
 
     service = _load_service()
     query = FaqQuery(
@@ -86,6 +124,9 @@ def faq_search(
         result = service.search(query)
         response = {
             "user_question": result.user_question,
+            "match_level": result.match_level,
+            "route_decision": result.route_decision,
+            "should_call_rag": result.should_call_rag,
             "best_faq": {
                 "question": result.best_faq.question,
                 "answer": result.best_faq.answer,
@@ -104,15 +145,24 @@ def faq_search(
             "metadata": result.metadata,
         }
         logger.info(
-            "[FAQ MCP] faq_search: score=%s, matches=%d",
+            "[FAQ MCP] faq_search: score=%s, matches=%d, route=%s",
             result.best_faq.score if result.best_faq else "N/A",
             len(result.all_matches),
+            result.route_decision,
         )
         return json.dumps(response, ensure_ascii=False)
 
     except Exception as e:
         logger.exception("[FAQ MCP] faq_search failed")
-        return json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "error": f"{type(e).__name__}: {e}",
+                "match_level": "error",
+                "route_decision": "rag_only",
+                "should_call_rag": True,
+            },
+            ensure_ascii=False,
+        )
 
 
 if __name__ == "__main__":

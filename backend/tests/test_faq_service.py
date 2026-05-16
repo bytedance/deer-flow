@@ -54,6 +54,9 @@ class TestFaqTypes:
         r = FaqResult(user_question="q")
         assert r.best_faq is None
         assert r.all_matches == []
+        assert r.match_level == "none"
+        assert r.route_decision == "rag_only"
+        assert r.should_call_rag is True
         assert r.metadata == {}
 
 
@@ -82,6 +85,9 @@ class TestSearchResultBuilding:
         assert result.best_faq is not None
         assert result.best_faq.score == 0.92
         assert len(result.all_matches) == 1
+        assert result.match_level == "high"
+        assert result.route_decision == "faq_only"
+        assert result.should_call_rag is False
 
     def test_medium_score_result(self, monkeypatch):
         import httpx
@@ -101,6 +107,9 @@ class TestSearchResultBuilding:
 
         assert result.best_faq is not None
         assert result.best_faq.score == 0.72
+        assert result.match_level == "medium"
+        assert result.route_decision == "faq_plus_rag"
+        assert result.should_call_rag is True
 
     def test_low_score_result(self, monkeypatch):
         import httpx
@@ -120,6 +129,9 @@ class TestSearchResultBuilding:
 
         assert result.best_faq is not None
         assert result.best_faq.score == 0.3
+        assert result.match_level == "low"
+        assert result.route_decision == "rag_only"
+        assert result.should_call_rag is True
 
     def test_empty_chunks(self, monkeypatch):
         import httpx
@@ -136,6 +148,30 @@ class TestSearchResultBuilding:
 
         assert result.best_faq is None
         assert result.all_matches == []
+        assert result.match_level == "none"
+        assert result.route_decision == "rag_only"
+        assert result.should_call_rag is True
+
+    def test_custom_thresholds(self, monkeypatch):
+        import httpx
+
+        service = FaqService(base_url="http://fake", api_key="key", high_threshold=0.9, medium_threshold=0.75)
+
+        def mock_post(self_client, url, json=None):
+            resp = httpx.Response(
+                200,
+                json=_ragflow_response([_ragflow_chunk(0.82)]),
+            )
+            resp._request = httpx.Request("POST", "http://fake" + url)
+            return resp
+
+        monkeypatch.setattr(httpx.Client, "post", mock_post)
+        result = service.search(_make_query())
+
+        assert result.match_level == "medium"
+        assert result.route_decision == "faq_plus_rag"
+        assert result.metadata["high_threshold"] == 0.9
+        assert result.metadata["medium_threshold"] == 0.75
 
 
 # ── Error degradation ───────────────────────────────────────────────────────
@@ -158,6 +194,9 @@ class TestErrorDegradation:
         assert result.best_faq is None
         assert result.all_matches == []
         assert result.metadata.get("error") is True
+        assert result.match_level == "error"
+        assert result.route_decision == "rag_only"
+        assert result.should_call_rag is True
 
     def test_http_error(self, monkeypatch):
         import httpx

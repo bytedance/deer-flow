@@ -1,7 +1,10 @@
 """FAQ module structured types — zero external dependencies."""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+FaqMatchLevel = Literal["high", "medium", "low", "none", "error"]
+FaqRouteDecision = Literal["faq_only", "faq_plus_rag", "rag_only"]
 
 
 @dataclass
@@ -40,4 +43,7 @@ class FaqResult:
     user_question: str  # Original question echo
     best_faq: FaqItem | None = None  # Best match
     all_matches: list[FaqItem] = field(default_factory=list)  # Top-K candidates
+    match_level: FaqMatchLevel = "none"  # high, medium, low, none, or error
+    route_decision: FaqRouteDecision = "rag_only"  # faq_only, faq_plus_rag, or rag_only
+    should_call_rag: bool = True  # Whether the caller should retrieve broader RAG context
     metadata: dict[str, Any] = field(default_factory=dict)  # retrieval_time_ms etc.

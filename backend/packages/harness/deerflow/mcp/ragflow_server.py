@@ -10,11 +10,16 @@ Required environment variables:
 
 import logging
 import os
+import re
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
+
+_SOURCE_RE = re.compile(r"\[SOURCE\s+([^\]]+)\]")
+_SOURCE_ATTR_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*)=([^\s\]]+)")
+_IMAGE_FIELDS = ("crop_image", "page_image", "image")
 
 
 def _load_config() -> tuple[str, str]:
@@ -45,6 +50,107 @@ def _make_client() -> httpx.Client:
         headers=headers,
         timeout=30.0,
     )
+
+
+def _parse_source_metadata(content: str) -> list[dict[str, str]]:
+    """Extract RAGFlow inline SOURCE metadata blocks from chunk content."""
+    sources: list[dict[str, str]] = []
+    for source_match in _SOURCE_RE.finditer(content):
+        attrs = {
+            key: value
+            for key, value in _SOURCE_ATTR_RE.findall(source_match.group(1))
+        }
+        if attrs:
+            sources.append(attrs)
+    return sources
+
+
+def _strip_source_metadata(content: str) -> str:
+    """Remove inline SOURCE metadata blocks from user-facing chunk text."""
+    return _SOURCE_RE.sub("", content).strip()
+
+
+def _select_image_url(source: dict[str, str]) -> tuple[str, str] | None:
+    """Pick the best image URL from SOURCE metadata."""
+    for field in _IMAGE_FIELDS:
+        url = source.get(field)
+        if url:
+            return field, url
+    return None
+
+
+def _build_image_alt(doc_name: str, chunk_index: int, source: dict[str, str]) -> str:
+    parts = [doc_name or "RAGFlow source"]
+    if page := source.get("page"):
+        parts.append(f"page {page}")
+    if chunk_id := source.get("chunk_id"):
+        parts.append(chunk_id)
+    parts.append(f"chunk {chunk_index}")
+    return " - ".join(parts)
+
+
+def _append_source_metadata(
+    lines: list[str],
+    source: dict[str, str],
+    *,
+    doc_id: str,
+) -> None:
+    source_doc_id = source.get("doc_id")
+    if source_doc_id and source_doc_id != doc_id:
+        lines.append(f"- **Source Doc ID**: {source_doc_id}")
+    if page := source.get("page"):
+        lines.append(f"- **Page**: {page}")
+    if chunk_id := source.get("chunk_id"):
+        lines.append(f"- **Chunk ID**: {chunk_id}")
+    if block_type := source.get("block_type"):
+        lines.append(f"- **Block Type**: {block_type}")
+
+
+def _format_retrieval_results(query: str, chunks: list[dict], top_k: int) -> str:
+    """Format RAGFlow chunks as markdown, including optional source images."""
+    selected_chunks = chunks[:top_k]
+    lines = [
+        f"## Retrieval Results for: \"{query}\"\n",
+        f"Found {len(selected_chunks)} chunk(s):\n",
+    ]
+    displayed_images: set[str] = set()
+
+    for i, chunk in enumerate(selected_chunks, 1):
+        content = chunk.get("content", "No content").strip()
+        display_content = _strip_source_metadata(content) or "No content"
+        doc_name = chunk.get("document_keyword", "Unknown document")
+        similarity = chunk.get("similarity", 0)
+        doc_id = chunk.get("document_id", "")
+        sources = _parse_source_metadata(content)
+
+        logger.info(
+            "[RAGFlow MCP] retrieve_knowledge: Chunk %d: doc='%s', similarity=%.4f, content_len=%d",
+            i,
+            doc_name,
+            similarity,
+            len(content),
+        )
+        lines.append(f"### Chunk {i}")
+        lines.append(f"- **Source**: {doc_name}")
+        if doc_id:
+            lines.append(f"- **Doc ID**: {doc_id}")
+        lines.append(f"- **Similarity**: {similarity:.4f}")
+        if sources:
+            _append_source_metadata(lines, sources[0], doc_id=doc_id)
+        lines.append(f"- **Content**:\n{display_content}\n")
+
+        for source in sources:
+            selected_image = _select_image_url(source)
+            if not selected_image:
+                continue
+            image_field, image_url = selected_image
+            if image_url in displayed_images:
+                continue
+            displayed_images.add(image_url)
+            alt = _build_image_alt(doc_name, i, source)
+            lines.append(f"- **Image ({image_field})**:\n![{alt}]({image_url})\n")
+
+    return "\n".join(lines)
 
 
 mcp = FastMCP(
@@ -190,27 +296,7 @@ def retrieve_knowledge(
             logger.warning("[RAGFlow MCP] retrieve_knowledge: %s", no_result_msg)
             return no_result_msg
 
-        lines = [
-            f"## Retrieval Results for: \"{query}\"\n",
-            f"Found {len(chunks)} chunk(s):\n",
-        ]
-        for i, chunk in enumerate(chunks, 1):
-            content = chunk.get("content", "No content").strip()
-            doc_name = chunk.get("document_keyword", "Unknown document")
-            similarity = chunk.get("similarity", 0)
-            doc_id = chunk.get("document_id", "")
-            logger.info(
-                "[RAGFlow MCP] retrieve_knowledge: Chunk %d: doc='%s', similarity=%.4f, content_len=%d",
-                i, doc_name, similarity, len(content),
-            )
-            lines.append(f"### Chunk {i}")
-            lines.append(f"- **Source**: {doc_name}")
-            if doc_id:
-                lines.append(f"- **Doc ID**: {doc_id}")
-            lines.append(f"- **Similarity**: {similarity:.4f}")
-            lines.append(f"- **Content**:\n{content}\n")
-
-        result = "\n".join(lines)
+        result = _format_retrieval_results(query, chunks, top_k)
         logger.info("[RAGFlow MCP] retrieve_knowledge: Returning %d chars", len(result))
         return result
 

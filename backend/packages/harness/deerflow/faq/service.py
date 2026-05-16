@@ -5,7 +5,7 @@ import time
 
 import httpx
 
-from deerflow.faq.types import FaqItem, FaqQuery, FaqResult
+from deerflow.faq.types import FaqItem, FaqMatchLevel, FaqQuery, FaqResult, FaqRouteDecision
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,8 @@ class FaqService:
         timeout: float = 10.0,
         similarity_threshold: float = 0.0,
         vector_similarity_weight: float = 1.0,
+        high_threshold: float = 0.85,
+        medium_threshold: float = 0.6,
         rerank_id: str | None = None,
         tenant_rerank_id: int | None = None,
     ) -> None:
@@ -41,6 +43,8 @@ class FaqService:
         self._timeout = timeout
         self._similarity_threshold = similarity_threshold
         self._vector_similarity_weight = vector_similarity_weight
+        self._high_threshold = high_threshold
+        self._medium_threshold = medium_threshold
         self._rerank_id = rerank_id
         self._tenant_rerank_id = tenant_rerank_id
 
@@ -68,8 +72,13 @@ class FaqService:
         elapsed_ms: float,
     ) -> FaqResult:
         best = items[0] if items else None
+        match_level, route_decision, should_call_rag = self._classify_route(best)
 
-        result_metadata = {"retrieval_time_ms": round(elapsed_ms, 1)}
+        result_metadata = {
+            "retrieval_time_ms": round(elapsed_ms, 1),
+            "high_threshold": self._high_threshold,
+            "medium_threshold": self._medium_threshold,
+        }
         if query.metadata:
             result_metadata["request_metadata"] = query.metadata
 
@@ -77,6 +86,9 @@ class FaqService:
             user_question=query.question,
             best_faq=best,
             all_matches=items,
+            match_level=match_level,
+            route_decision=route_decision,
+            should_call_rag=should_call_rag,
             metadata=result_metadata,
         )
 
@@ -85,8 +97,26 @@ class FaqService:
             user_question=query.question,
             best_faq=None,
             all_matches=[],
-            metadata={"retrieval_time_ms": round(elapsed_ms, 1), "error": True},
+            match_level="error",
+            route_decision="rag_only",
+            should_call_rag=True,
+            metadata={
+                "retrieval_time_ms": round(elapsed_ms, 1),
+                "error": True,
+                "high_threshold": self._high_threshold,
+                "medium_threshold": self._medium_threshold,
+            },
         )
+
+    def _classify_route(self, best: FaqItem | None) -> tuple[FaqMatchLevel, FaqRouteDecision, bool]:
+        """Classify the FAQ result into a deterministic routing decision."""
+        if best is None:
+            return "none", "rag_only", True
+        if best.score >= self._high_threshold:
+            return "high", "faq_only", False
+        if best.score >= self._medium_threshold:
+            return "medium", "faq_plus_rag", True
+        return "low", "rag_only", True
 
     def _build_payload(self, query: FaqQuery) -> dict:
         payload: dict = {
