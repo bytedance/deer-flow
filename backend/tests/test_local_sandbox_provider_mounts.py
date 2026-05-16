@@ -1,4 +1,5 @@
 import errno
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -6,6 +7,13 @@ import pytest
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+
+
+def _symlink_to(target, link, *, target_is_directory=False):
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks are not available: {exc}")
 
 
 class TestPathMapping:
@@ -29,7 +37,7 @@ class TestLocalSandboxPathResolution:
             ],
         )
         resolved = sandbox._resolve_path("/mnt/skills")
-        assert resolved == "/home/user/skills"
+        assert resolved == str(Path("/home/user/skills").resolve())
 
     def test_resolve_path_nested_path(self):
         sandbox = LocalSandbox(
@@ -39,7 +47,7 @@ class TestLocalSandboxPathResolution:
             ],
         )
         resolved = sandbox._resolve_path("/mnt/skills/agent/prompt.py")
-        assert resolved == "/home/user/skills/agent/prompt.py"
+        assert resolved == str(Path("/home/user/skills/agent/prompt.py").resolve())
 
     def test_resolve_path_no_mapping(self):
         sandbox = LocalSandbox(
@@ -61,7 +69,7 @@ class TestLocalSandboxPathResolution:
         )
         resolved = sandbox._resolve_path("/mnt/skills/file.py")
         # Should match /mnt/skills first (longer prefix)
-        assert resolved == "/home/user/skills/file.py"
+        assert resolved == str(Path("/home/user/skills/file.py").resolve())
 
     def test_reverse_resolve_path_exact_match(self, tmp_path):
         skills_dir = tmp_path / "skills"
@@ -175,6 +183,157 @@ class TestReadOnlyPath:
         assert exc_info.value.errno == errno.EROFS
 
 
+class TestSymlinkEscapes:
+    def test_read_file_blocks_symlink_escape_from_mount(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(PermissionError) as exc_info:
+            sandbox.read_file("/mnt/data/escape/secret.txt")
+
+        assert exc_info.value.errno == errno.EACCES
+
+    def test_write_file_blocks_symlink_escape_from_mount(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        victim = outside_dir / "victim.txt"
+        victim.write_text("original")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(PermissionError) as exc_info:
+            sandbox.write_file("/mnt/data/escape/victim.txt", "changed")
+
+        assert exc_info.value.errno == errno.EACCES
+        assert victim.read_text() == "original"
+
+    def test_write_file_uses_matched_read_only_mount_for_symlink_target(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        writable_dir = repo_dir / "writable"
+        writable_dir.mkdir()
+        _symlink_to(writable_dir, repo_dir / "link-to-writable", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/repo", local_path=str(repo_dir), read_only=True),
+                PathMapping(container_path="/mnt/repo/writable", local_path=str(writable_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.write_file("/mnt/repo/link-to-writable/file.txt", "bypass")
+
+        assert exc_info.value.errno == errno.EROFS
+        assert not (writable_dir / "file.txt").exists()
+
+    def test_list_dir_does_not_follow_symlink_escape_from_mount(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+        (mount_dir / "visible.txt").write_text("visible")
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        entries = sandbox.list_dir("/mnt/data", max_depth=2)
+
+        assert "/mnt/data/visible.txt" in entries
+        assert all("secret.txt" not in entry for entry in entries)
+        assert all("outside" not in entry for entry in entries)
+
+    def test_list_dir_formats_internal_directory_symlink_like_directory(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        nested_dir = mount_dir / "nested"
+        linked_dir = nested_dir / "linked-dir"
+        linked_dir.mkdir(parents=True)
+        _symlink_to(linked_dir, mount_dir / "dir-link", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        entries = sandbox.list_dir("/mnt/data", max_depth=1)
+
+        assert "/mnt/data/nested/" in entries
+        assert "/mnt/data/nested/linked-dir/" in entries
+        assert "/mnt/data/dir-link" not in entries
+
+    def test_write_file_blocks_symlink_into_nested_read_only_mount(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        protected_dir = repo_dir / "protected"
+        protected_dir.mkdir()
+        _symlink_to(protected_dir, repo_dir / "link-to-protected", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/repo", local_path=str(repo_dir), read_only=False),
+                PathMapping(container_path="/mnt/repo/protected", local_path=str(protected_dir), read_only=True),
+            ],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.write_file("/mnt/repo/link-to-protected/file.txt", "bypass")
+
+        assert exc_info.value.errno == errno.EROFS
+        assert not (protected_dir / "file.txt").exists()
+
+    def test_update_file_blocks_symlink_into_nested_read_only_mount(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        protected_dir = repo_dir / "protected"
+        protected_dir.mkdir()
+        existing = protected_dir / "file.txt"
+        existing.write_bytes(b"original")
+        _symlink_to(protected_dir, repo_dir / "link-to-protected", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/repo", local_path=str(repo_dir), read_only=False),
+                PathMapping(container_path="/mnt/repo/protected", local_path=str(protected_dir), read_only=True),
+            ],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.update_file("/mnt/repo/link-to-protected/file.txt", b"changed")
+
+        assert exc_info.value.errno == errno.EROFS
+        assert existing.read_bytes() == b"original"
+
+
 class TestMultipleMounts:
     def test_multiple_read_write_mounts(self, tmp_path):
         skills_dir = tmp_path / "skills"
@@ -255,7 +414,9 @@ class TestMultipleMounts:
 
         sandbox.execute_command("cat /mnt/data/test.txt")
         # Verify the command received the resolved local path
-        assert str(data_dir) in captured.get("command", "")
+        command = captured.get("command", [])
+        assert isinstance(command, list) and len(command) >= 3
+        assert str(data_dir) in command[2]
 
     def test_reverse_resolve_path_does_not_match_partial_prefix(self, tmp_path):
         foo_dir = tmp_path / "foo"
@@ -308,7 +469,7 @@ class TestLocalSandboxProviderMounts:
             ],
         )
         config = SimpleNamespace(
-            skills=SimpleNamespace(container_path="/custom-skills", get_skills_path=lambda: skills_dir),
+            skills=SimpleNamespace(container_path="/custom-skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
             sandbox=sandbox_config,
         )
 
@@ -330,7 +491,7 @@ class TestLocalSandboxProviderMounts:
             ],
         )
         config = SimpleNamespace(
-            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir),
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
             sandbox=sandbox_config,
         )
 
@@ -354,7 +515,7 @@ class TestLocalSandboxProviderMounts:
             ],
         )
         config = SimpleNamespace(
-            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir),
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
             sandbox=sandbox_config,
         )
 
@@ -470,7 +631,7 @@ class TestLocalSandboxProviderMounts:
             ],
         )
         config = SimpleNamespace(
-            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir),
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
             sandbox=sandbox_config,
         )
 
@@ -478,3 +639,148 @@ class TestLocalSandboxProviderMounts:
             provider = LocalSandboxProvider()
 
         assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills", "/mnt/data"]
+
+
+class TestLocalSandboxProviderResetClearsSingleton:
+    """Regression coverage for issue #2815.
+
+    The module-level LocalSandbox singleton must be cleared whenever the
+    provider is reset or shut down — otherwise stale path mappings and
+    mount policy survive config reloads and test teardown.
+    """
+
+    def _build_config(self, skills_dir, mounts):
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        sandbox_config = SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=mounts,
+        )
+        return SimpleNamespace(
+            skills=SimpleNamespace(
+                container_path="/mnt/skills",
+                get_skills_path=lambda: skills_dir,
+                use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+            ),
+            sandbox=sandbox_config,
+        )
+
+    def test_reset_sandbox_provider_clears_local_singleton(self, tmp_path):
+        from deerflow.config.sandbox_config import VolumeMountConfig
+        from deerflow.sandbox import local as local_module
+        from deerflow.sandbox.local import local_sandbox_provider as lsp_module
+        from deerflow.sandbox.sandbox_provider import (
+            get_sandbox_provider,
+            reset_sandbox_provider,
+        )
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        first_dir = tmp_path / "first"
+        first_dir.mkdir()
+        second_dir = tmp_path / "second"
+        second_dir.mkdir()
+
+        first_cfg = self._build_config(
+            skills_dir,
+            [VolumeMountConfig(host_path=str(first_dir), container_path="/mnt/first", read_only=False)],
+        )
+        second_cfg = self._build_config(
+            skills_dir,
+            [VolumeMountConfig(host_path=str(second_dir), container_path="/mnt/second", read_only=False)],
+        )
+
+        # Make sure no leftover singleton from a prior test interferes.
+        lsp_module._singleton = None
+        reset_sandbox_provider()
+
+        try:
+            with patch("deerflow.sandbox.sandbox_provider.get_app_config", return_value=first_cfg), patch("deerflow.config.get_app_config", return_value=first_cfg):
+                provider = get_sandbox_provider()
+                provider.acquire()
+
+            assert lsp_module._singleton is not None
+            first_container_paths = {m.container_path for m in lsp_module._singleton.path_mappings}
+            assert "/mnt/first" in first_container_paths
+
+            reset_sandbox_provider()
+
+            # The whole point of the regression: reset must drop the cached LocalSandbox.
+            assert lsp_module._singleton is None
+
+            with patch("deerflow.sandbox.sandbox_provider.get_app_config", return_value=second_cfg), patch("deerflow.config.get_app_config", return_value=second_cfg):
+                provider2 = get_sandbox_provider()
+                provider2.acquire()
+
+            assert provider2 is not provider
+            second_container_paths = {m.container_path for m in lsp_module._singleton.path_mappings}
+            assert "/mnt/second" in second_container_paths
+            assert "/mnt/first" not in second_container_paths
+        finally:
+            lsp_module._singleton = None
+            reset_sandbox_provider()
+
+        # Sanity: the local sandbox module still exposes the singleton symbol
+        # at the same module path (guards against accidental rename).
+        assert hasattr(local_module.local_sandbox_provider, "_singleton")
+
+    def test_shutdown_sandbox_provider_clears_local_singleton(self, tmp_path):
+        from deerflow.config.sandbox_config import VolumeMountConfig
+        from deerflow.sandbox.local import local_sandbox_provider as lsp_module
+        from deerflow.sandbox.sandbox_provider import (
+            get_sandbox_provider,
+            reset_sandbox_provider,
+            shutdown_sandbox_provider,
+        )
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+
+        cfg = self._build_config(
+            skills_dir,
+            [VolumeMountConfig(host_path=str(mount_dir), container_path="/mnt/data", read_only=False)],
+        )
+
+        lsp_module._singleton = None
+        reset_sandbox_provider()
+
+        try:
+            with patch("deerflow.sandbox.sandbox_provider.get_app_config", return_value=cfg), patch("deerflow.config.get_app_config", return_value=cfg):
+                provider = get_sandbox_provider()
+                provider.acquire()
+
+            assert lsp_module._singleton is not None
+
+            shutdown_sandbox_provider()
+
+            assert lsp_module._singleton is None
+        finally:
+            lsp_module._singleton = None
+            reset_sandbox_provider()
+
+    def test_provider_reset_method_is_idempotent(self, tmp_path):
+        from deerflow.sandbox.local import local_sandbox_provider as lsp_module
+        from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        cfg = self._build_config(skills_dir, [])
+
+        lsp_module._singleton = None
+
+        try:
+            with patch("deerflow.config.get_app_config", return_value=cfg):
+                provider = LocalSandboxProvider()
+                provider.acquire()
+            assert lsp_module._singleton is not None
+
+            provider.reset()
+            assert lsp_module._singleton is None
+
+            # Calling reset again on an already-cleared singleton is safe.
+            provider.reset()
+            assert lsp_module._singleton is None
+        finally:
+            lsp_module._singleton = None

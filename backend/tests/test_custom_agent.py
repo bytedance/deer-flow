@@ -26,6 +26,17 @@ def _make_paths(base_dir: Path):
 def _write_agent(base_dir: Path, name: str, config: dict, soul: str = "You are helpful.") -> None:
     """Write an agent directory with config.yaml and SOUL.md."""
     agent_dir = base_dir / "agents" / name
+    _write_agent_files(agent_dir, name, config, soul)
+
+
+def _write_user_agent(base_dir: Path, user_id: str, name: str, config: dict, soul: str = "You are helpful.") -> None:
+    """Write a user-scoped agent directory with config.yaml and SOUL.md."""
+    agent_dir = base_dir / "users" / user_id / "agents" / name
+    _write_agent_files(agent_dir, name, config, soul)
+
+
+def _write_agent_files(agent_dir: Path, name: str, config: dict, soul: str) -> None:
+    """Write an agent directory with config.yaml and SOUL.md."""
     agent_dir.mkdir(parents=True, exist_ok=True)
 
     config_copy = dict(config)
@@ -36,6 +47,10 @@ def _write_agent(base_dir: Path, name: str, config: dict, soul: str = "You are h
         yaml.dump(config_copy, f)
 
     (agent_dir / "SOUL.md").write_text(soul, encoding="utf-8")
+
+
+def _user_agent_config_path(base_dir: Path, name: str) -> Path:
+    return base_dir / "users" / "test-user-autouse" / "agents" / name / "config.yaml"
 
 
 # ===========================================================================
@@ -472,7 +487,7 @@ class TestAgentsAPI:
         assert response.status_code == 201
         assert response.json()["display_name"] == "测试助手"
 
-        config = yaml.safe_load((tmp_path / "agents" / "trim-agent" / "config.yaml").read_text(encoding="utf-8"))
+        config = yaml.safe_load(_user_agent_config_path(tmp_path, "trim-agent").read_text(encoding="utf-8"))
         assert config["display_name"] == "测试助手"
 
         response = agent_client.post(
@@ -482,7 +497,7 @@ class TestAgentsAPI:
         assert response.status_code == 201
         assert response.json()["display_name"] is None
 
-        blank_config = yaml.safe_load((tmp_path / "agents" / "blank-agent" / "config.yaml").read_text(encoding="utf-8"))
+        blank_config = yaml.safe_load(_user_agent_config_path(tmp_path, "blank-agent").read_text(encoding="utf-8"))
         assert "display_name" not in blank_config
 
     def test_create_agent_accepts_display_name_with_extra_whitespace(self, agent_client):
@@ -584,7 +599,7 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["display_name"] == "更新名称"
 
-        config_path = tmp_path / "agents" / "clearable-agent" / "config.yaml"
+        config_path = _user_agent_config_path(tmp_path, "clearable-agent")
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert config["display_name"] == "更新名称"
 
@@ -597,8 +612,9 @@ class TestAgentsAPI:
         assert cleared_config["description"] == "desc"
 
     def test_update_agent_preserves_existing_skills_config(self, agent_client, tmp_path):
-        _write_agent(
+        _write_user_agent(
             tmp_path,
+            "test-user-autouse",
             "skilled-agent",
             {
                 "name": "skilled-agent",
@@ -611,7 +627,7 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new"
 
-        config_path = tmp_path / "agents" / "skilled-agent" / "config.yaml"
+        config_path = _user_agent_config_path(tmp_path, "skilled-agent")
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert config["description"] == "new"
         assert config["skills"] == ["research", "coding"]
@@ -664,7 +680,10 @@ class TestAgentsAPI:
     def test_create_persists_files_on_disk(self, agent_client, tmp_path):
         agent_client.post("/api/agents", json={"name": "disk-check", "soul": "disk soul"})
 
-        agent_dir = tmp_path / "agents" / "disk-check"
+        # tests/conftest.py installs an autouse fixture that sets the
+        # contextvar to "test-user-autouse", so the agent is persisted under
+        # users/test-user-autouse/agents/ rather than the legacy shared dir.
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "disk-check"
         assert agent_dir.exists()
         assert (agent_dir / "config.yaml").exists()
         assert (agent_dir / "SOUL.md").exists()
@@ -672,11 +691,22 @@ class TestAgentsAPI:
 
     def test_delete_removes_files_from_disk(self, agent_client, tmp_path):
         agent_client.post("/api/agents", json={"name": "remove-me", "soul": "bye"})
-        agent_dir = tmp_path / "agents" / "remove-me"
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "remove-me"
         assert agent_dir.exists()
 
         agent_client.delete("/api/agents/remove-me")
         assert not agent_dir.exists()
+
+    def test_create_rejects_legacy_name_collision(self, agent_client, tmp_path):
+        """An unmigrated legacy agent must still block name collision so that
+        running the migration script later won't shadow the legacy entry."""
+        legacy_dir = tmp_path / "agents" / "legacy-agent"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: legacy-agent\n", encoding="utf-8")
+        (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
+
+        response = agent_client.post("/api/agents", json={"name": "legacy-agent", "soul": "x"})
+        assert response.status_code == 409
 
 
 # ===========================================================================

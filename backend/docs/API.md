@@ -6,16 +6,16 @@ This document provides a complete reference for the DeerFlow backend APIs.
 
 DeerFlow backend exposes two sets of APIs:
 
-1. **LangGraph API** - Agent interactions, threads, and streaming (`/api/langgraph/*`)
+1. **LangGraph-compatible API** - Agent interactions, threads, and streaming (`/api/langgraph/*`)
 2. **Gateway API** - Models, MCP, skills, uploads, and artifacts (`/api/*`)
 
 All APIs are accessed through the Nginx reverse proxy at port 2026.
 
-## LangGraph API
+## LangGraph-compatible API
 
 Base URL: `/api/langgraph`
 
-The LangGraph API is provided by the LangGraph server and follows the LangGraph SDK conventions.
+The public LangGraph-compatible API follows LangGraph SDK conventions. In the unified nginx deployment, Gateway owns `/api/langgraph/*` and translates those paths to its native `/api/*` run, thread, and streaming routers.
 
 ### Threads
 
@@ -104,17 +104,11 @@ Content-Type: application/json
 **Recursion Limit:**
 
 `config.recursion_limit` caps the number of graph steps LangGraph will execute
-in a single run. The `/api/langgraph/*` endpoints go straight to the LangGraph
-server and therefore inherit LangGraph's native default of **25**, which is
-too low for plan-mode or subagent-heavy runs — the agent typically errors out
-with `GraphRecursionError` after the first round of subagent results comes
-back, before the lead agent can synthesize the final answer.
-
-DeerFlow's own Gateway and IM-channel paths mitigate this by defaulting to
-`100` in `build_run_config` (see `backend/app/gateway/services.py`), but
-clients calling the LangGraph API directly must set `recursion_limit`
-explicitly in the request body. `100` matches the Gateway default and is a
-safe starting point; increase it if you run deeply nested subagent graphs.
+in a single run. The unified Gateway path defaults to `100` in
+`build_run_config` (see `backend/app/gateway/services.py`), which is a safer
+starting point for plan-mode or subagent-heavy runs. Clients can still set
+`recursion_limit` explicitly in the request body; increase it if you run deeply
+nested subagent graphs.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -541,14 +535,28 @@ All APIs return errors in a consistent format:
 
 ## Authentication
 
-Currently, DeerFlow does not implement authentication. All APIs are accessible without credentials.
+DeerFlow enforces authentication for all non-public HTTP routes. Public routes are limited to health/docs metadata and these public auth endpoints:
 
-Note: This is about DeerFlow API authentication. MCP outbound connections can still use OAuth for configured HTTP/SSE MCP servers.
+- `POST /api/v1/auth/initialize` creates the first admin account when no admin exists.
+- `POST /api/v1/auth/login/local` logs in with email/password and sets an HttpOnly `access_token` cookie.
+- `POST /api/v1/auth/register` creates a regular `user` account and sets the session cookie.
+- `POST /api/v1/auth/logout` clears the session cookie.
+- `GET /api/v1/auth/setup-status` reports whether the first admin still needs to be created.
 
-For production deployments, it is recommended to:
-1. Use Nginx for basic auth or OAuth integration
-2. Deploy behind a VPN or private network
-3. Implement custom authentication middleware
+The authenticated auth endpoints are:
+
+- `GET /api/v1/auth/me` returns the current user.
+- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
+
+Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
+
+User isolation is enforced from the authenticated user context:
+
+- Thread metadata is scoped by `threads_meta.user_id`; search/read/write/delete APIs only expose the current user's threads.
+- Thread files live under `{base_dir}/users/{user_id}/threads/{thread_id}/user-data/` and are exposed inside the sandbox as `/mnt/user-data/`.
+- Memory and custom agents are stored under `{base_dir}/users/{user_id}/...`.
+
+Note: MCP outbound connections can still use OAuth for configured HTTP/SSE MCP servers; that is separate from DeerFlow API authentication.
 
 ---
 
@@ -567,12 +575,13 @@ location /api/ {
 
 ---
 
-## WebSocket Support
+## Streaming Support
 
-The LangGraph server supports WebSocket connections for real-time streaming. Connect to:
+Gateway's LangGraph-compatible API streams run events with Server-Sent Events (SSE):
 
-```
-ws://localhost:2026/api/langgraph/threads/{thread_id}/runs/stream
+```http
+POST /api/langgraph/threads/{thread_id}/runs/stream
+Accept: text/event-stream
 ```
 
 ---
@@ -608,13 +617,21 @@ const response = await fetch('/api/models');
 const data = await response.json();
 console.log(data.models);
 
-// Using EventSource for streaming
-const eventSource = new EventSource(
-  `/api/langgraph/threads/${threadId}/runs/stream`
-);
-eventSource.onmessage = (event) => {
-  console.log(JSON.parse(event.data));
-};
+// Create a run and stream SSE events
+const streamResponse = await fetch(`/api/langgraph/threads/${threadId}/runs/stream`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  },
+  body: JSON.stringify({
+    input: { messages: [{ role: "user", content: "Hello" }] },
+    stream_mode: ["values", "messages-tuple", "custom"],
+  }),
+});
+
+const reader = streamResponse.body?.getReader();
+// Decode and parse SSE frames from reader in your client code.
 ```
 
 ### cURL Examples
@@ -649,7 +666,7 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs \
   }'
 ```
 
-> The `/api/langgraph/*` endpoints bypass DeerFlow's Gateway and inherit
-> LangGraph's native `recursion_limit` default of 25, which is too low for
-> plan-mode or subagent runs. Set `config.recursion_limit` explicitly — see
-> the [Create Run](#create-run) section for details.
+> The unified Gateway path defaults `config.recursion_limit` to 100 for
+> plan-mode and subagent-heavy runs. Clients may still set
+> `config.recursion_limit` explicitly — see the [Create Run](#create-run)
+> section for details.
