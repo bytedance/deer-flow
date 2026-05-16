@@ -1,12 +1,20 @@
 """Tests for LoopDetectionMiddleware."""
 
 import copy
+from collections import OrderedDict
+from typing import Any
 from unittest.mock import MagicMock
 
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import Runnable
+from langchain_core.tools import tool as as_tool
+from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
+    _MAX_PENDING_WARNINGS_PER_RUN,
     LoopDetectionMiddleware,
     _hash_tool_calls,
 )
@@ -50,6 +58,34 @@ def _capture_handler():
         return MagicMock()
 
     return captured, handler
+
+
+class _CapturingFakeMessagesListChatModel(FakeMessagesListChatModel):
+    """Fake chat model that records each model request's messages."""
+
+    _seen_messages: list[list[Any]] = PrivateAttr(default_factory=list)
+
+    @property
+    def seen_messages(self) -> list[list[Any]]:
+        return self._seen_messages
+
+    def bind_tools(
+        self,
+        tools: Any,
+        *,
+        tool_choice: Any = None,
+        **kwargs: Any,
+    ) -> Runnable:
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self._seen_messages.append(list(messages))
+        return super()._generate(
+            messages,
+            stop=stop,
+            run_manager=run_manager,
+            **kwargs,
+        )
 
 
 def _make_state(tool_calls=None, content=""):
@@ -461,6 +497,55 @@ class TestLoopDetection:
         assert "thread-new" in mw._history
         assert len(mw._history) == 3
 
+    def test_warned_hashes_are_pruned_to_sliding_window(self):
+        """A long-lived thread should not keep every historical warned hash."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=100, window_size=4)
+        runtime = _make_runtime()
+
+        for i in range(12):
+            call = [_bash_call(f"cmd_{i}")]
+            mw._apply(_make_state(tool_calls=call), runtime)
+            mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert len(mw._history["test-thread"]) <= 4
+        assert set(mw._warned["test-thread"]).issubset(set(mw._history["test-thread"]))
+        assert len(mw._warned["test-thread"]) <= 4
+
+    def test_pending_warning_keys_are_capped(self):
+        """Abnormal same-thread runs cannot grow pending-warning keys forever."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, max_tracked_threads=2)
+
+        for i in range(10):
+            runtime = _make_runtime(thread_id="same-thread", run_id=f"run-{i}")
+            mw._queue_pending_warning(runtime, f"warning-{i}")
+
+        assert len(mw._pending_warnings) == mw._max_pending_warning_keys
+        assert len(mw._pending_warning_touch_order) == mw._max_pending_warning_keys
+        assert _pending_key("same-thread", "run-9") in mw._pending_warnings
+
+    def test_pending_warning_list_is_capped_and_deduped(self):
+        """One run cannot accumulate an unbounded warning list."""
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+
+        for i in range(_MAX_PENDING_WARNINGS_PER_RUN + 4):
+            mw._queue_pending_warning(runtime, f"warning-{i}")
+        mw._queue_pending_warning(runtime, f"warning-{_MAX_PENDING_WARNINGS_PER_RUN + 3}")
+
+        warnings = mw._pending_warnings[_pending_key()]
+        assert len(warnings) == _MAX_PENDING_WARNINGS_PER_RUN
+        assert warnings == [f"warning-{i}" for i in range(4, _MAX_PENDING_WARNINGS_PER_RUN + 4)]
+
+    def test_pending_warning_touch_order_cleared_with_pending_key(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        mw._queue_pending_warning(runtime, "warning")
+
+        mw.after_agent({"messages": []}, runtime)
+
+        assert mw._pending_warnings == {}
+        assert mw._pending_warning_touch_order == OrderedDict()
+
     def test_thread_safe_mutations(self):
         """Verify lock is used for mutations (basic structural test)."""
         mw = LoopDetectionMiddleware()
@@ -477,6 +562,53 @@ class TestLoopDetection:
 
         mw._apply(_make_state(tool_calls=call), runtime)
         assert "default" in mw._history
+
+
+class TestLoopDetectionAgentGraphIntegration:
+    def test_loop_warning_is_transient_in_real_agent_graph(self):
+        """after_model queues the warning; wrap_model_call injects it request-only."""
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Run a fake shell command."""
+            return f"ran: {command}"
+
+        repeated_calls = [[{"name": "bash", "id": f"call_ls_{i}", "args": {"command": "ls"}}] for i in range(3)]
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(content="", tool_calls=repeated_calls[0]),
+                AIMessage(content="", tool_calls=repeated_calls[1]),
+                AIMessage(content="", tool_calls=repeated_calls[2]),
+                AIMessage(content="final answer"),
+            ],
+        )
+        graph = create_agent(model=model, tools=[bash], middleware=[mw])
+
+        result = graph.invoke(
+            {"messages": [("user", "inspect the directory")]},
+            context={"thread_id": "integration-thread", "run_id": "integration-run"},
+            config={"recursion_limit": 20},
+        )
+
+        assert len(model.seen_messages) == 4
+        loop_warnings_by_call = [[message for message in messages if isinstance(message, HumanMessage) and message.name == "loop_warning"] for messages in model.seen_messages]
+        assert loop_warnings_by_call[0] == []
+        assert loop_warnings_by_call[1] == []
+        assert loop_warnings_by_call[2] == []
+        assert len(loop_warnings_by_call[3]) == 1
+        assert "LOOP DETECTED" in loop_warnings_by_call[3][0].content
+
+        fourth_request = model.seen_messages[3]
+        assert isinstance(fourth_request[-2], ToolMessage)
+        assert fourth_request[-2].tool_call_id == "call_ls_2"
+        assert fourth_request[-1] is loop_warnings_by_call[3][0]
+
+        persisted_loop_warnings = [message for message in result["messages"] if isinstance(message, HumanMessage) and message.name == "loop_warning"]
+        assert persisted_loop_warnings == []
+        assert result["messages"][-1].content == "final answer"
+        assert mw._pending_warnings == {}
+        assert mw._pending_warning_touch_order == OrderedDict()
 
 
 class TestAppendText:

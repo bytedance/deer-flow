@@ -61,6 +61,7 @@ _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
 _DEFAULT_TOOL_FREQ_WARN = 30  # warn after 30 calls to the same tool type
 _DEFAULT_TOOL_FREQ_HARD_LIMIT = 50  # force-stop after 50 calls to the same tool type
+_MAX_PENDING_WARNINGS_PER_RUN = 4
 
 
 def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
@@ -222,6 +223,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # Populated by ``after_model`` (detection) and drained by
         # ``wrap_model_call`` (injection); see module docstring.
         self._pending_warnings: dict[tuple[str, str], list[str]] = defaultdict(list)
+        self._pending_warning_touch_order: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._max_pending_warning_keys = max(1, self.max_tracked_threads * 2)
 
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
@@ -266,8 +269,49 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._tool_freq_warned.pop(evicted_id, None)
             for key in list(self._pending_warnings):
                 if key[0] == evicted_id:
-                    self._pending_warnings.pop(key, None)
+                    self._drop_pending_warning_key_locked(key)
             logger.debug("Evicted loop tracking for thread %s (LRU)", evicted_id)
+
+    def _drop_pending_warning_key_locked(self, key: tuple[str, str]) -> None:
+        """Drop all pending-warning bookkeeping for one thread/run key.
+
+        Must be called while holding self._lock.
+        """
+        self._pending_warnings.pop(key, None)
+        self._pending_warning_touch_order.pop(key, None)
+
+    def _touch_pending_warning_key_locked(self, key: tuple[str, str]) -> None:
+        """Mark a pending-warning key as recently used.
+
+        Must be called while holding self._lock.
+        """
+        self._pending_warning_touch_order[key] = None
+        self._pending_warning_touch_order.move_to_end(key)
+
+    def _prune_pending_warning_state_locked(self, protected_key: tuple[str, str]) -> None:
+        """Cap pending-warning state across abnormal or concurrent runs.
+
+        Must be called while holding self._lock.
+        """
+        overflow = len(self._pending_warning_touch_order) - self._max_pending_warning_keys
+        if overflow <= 0:
+            return
+
+        candidates = [key for key in self._pending_warning_touch_order if key != protected_key]
+        for key in candidates[:overflow]:
+            self._drop_pending_warning_key_locked(key)
+
+    def _queue_pending_warning(self, runtime: Runtime, warning: str) -> None:
+        """Queue one transient warning for the current thread/run with caps."""
+        pending_key = self._pending_key(runtime)
+        with self._lock:
+            warnings = self._pending_warnings[pending_key]
+            if warning not in warnings:
+                warnings.append(warning)
+            if len(warnings) > _MAX_PENDING_WARNINGS_PER_RUN:
+                del warnings[: len(warnings) - _MAX_PENDING_WARNINGS_PER_RUN]
+            self._touch_pending_warning_key_locked(pending_key)
+            self._prune_pending_warning_state_locked(protected_key=pending_key)
 
     def _track_and_check(self, state: AgentState, runtime: Runtime) -> tuple[str | None, bool]:
         """Track tool calls and check for loops.
@@ -308,6 +352,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             history.append(call_hash)
             if len(history) > self.window_size:
                 history[:] = history[-self.window_size :]
+
+            warned_hashes = self._warned.get(thread_id)
+            if warned_hashes is not None:
+                warned_hashes.intersection_update(history)
+                if not warned_hashes:
+                    self._warned.pop(thread_id, None)
 
             count = history.count(call_hash)
             tool_names = [tc.get("name", "?") for tc in tool_calls]
@@ -440,9 +490,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # (would break OpenAI/Moonshot tool-call pairing because the
             # tools node has not produced ToolMessage responses yet). The
             # warning is delivered via ``wrap_model_call`` below.
-            pending_key = self._pending_key(runtime)
-            with self._lock:
-                self._pending_warnings[pending_key].append(warning)
+            self._queue_pending_warning(runtime, warning)
             return None
 
         return None
@@ -453,13 +501,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             for key in list(self._pending_warnings):
                 if key[0] == thread_id and key[1] != current_run_id:
-                    self._pending_warnings.pop(key, None)
+                    self._drop_pending_warning_key_locked(key)
 
     def _clear_current_run_pending_warnings(self, runtime: Runtime) -> None:
         """Drop pending warnings owned by the current thread/run."""
         pending_key = self._pending_key(runtime)
         with self._lock:
-            self._pending_warnings.pop(pending_key, None)
+            self._drop_pending_warning_key_locked(pending_key)
 
     @staticmethod
     def _format_warning_message(warnings: list[str]) -> str:
@@ -500,6 +548,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         pending_key = self._pending_key(runtime)
         with self._lock:
             warnings = self._pending_warnings.pop(pending_key, [])
+            self._pending_warning_touch_order.pop(pending_key, None)
         return warnings
 
     def _augment_request(self, request: ModelRequest) -> ModelRequest:
@@ -547,10 +596,11 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._tool_freq_warned.pop(thread_id, None)
                 for key in list(self._pending_warnings):
                     if key[0] == thread_id:
-                        self._pending_warnings.pop(key, None)
+                        self._drop_pending_warning_key_locked(key)
             else:
                 self._history.clear()
                 self._warned.clear()
                 self._tool_freq.clear()
                 self._tool_freq_warned.clear()
                 self._pending_warnings.clear()
+                self._pending_warning_touch_order.clear()
