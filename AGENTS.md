@@ -51,7 +51,9 @@ cd backend && uvx ruff format .  # format
 # Frontend
 cd frontend && pnpm test         # Vitest (unit)
 cd frontend && pnpm test:e2e     # Playwright (Chromium)
-cd frontend && pnpm check        # ESLint + TypeScript
+cd frontend && pnpm format       # Prettier format check
+cd frontend && pnpm lint:fix     # ESLint fix
+cd frontend && pnpm typecheck    # TypeScript check
 ```
 
 ## Backend (`backend/`)
