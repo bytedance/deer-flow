@@ -20,6 +20,9 @@ ACTIVE_CONTENT_MIME_TYPES = {
     "image/svg+xml",
 }
 
+MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
+_SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
+
 
 def _build_content_disposition(disposition_type: str, filename: str) -> str:
     """Build an RFC 5987 encoded Content-Disposition header value."""
@@ -44,6 +47,22 @@ def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
         return False
 
 
+def _read_skill_archive_member(zip_ref: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    """Read a .skill archive member while enforcing an uncompressed size cap."""
+    if info.file_size > MAX_SKILL_ARCHIVE_MEMBER_BYTES:
+        raise HTTPException(status_code=413, detail="Skill archive member is too large to preview")
+
+    chunks: list[bytes] = []
+    total_read = 0
+    with zip_ref.open(info, "r") as src:
+        while chunk := src.read(_SKILL_ARCHIVE_READ_CHUNK_SIZE):
+            total_read += len(chunk)
+            if total_read > MAX_SKILL_ARCHIVE_MEMBER_BYTES:
+                raise HTTPException(status_code=413, detail="Skill archive member is too large to preview")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _extract_file_from_skill_archive(zip_path: Path, internal_path: str) -> bytes | None:
     """Extract a file from a .skill ZIP archive.
 
@@ -60,16 +79,16 @@ def _extract_file_from_skill_archive(zip_path: Path, internal_path: str) -> byte
     try:
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             # List all files in the archive
-            namelist = zip_ref.namelist()
+            infos_by_name = {info.filename: info for info in zip_ref.infolist()}
 
             # Try direct path first
-            if internal_path in namelist:
-                return zip_ref.read(internal_path)
+            if internal_path in infos_by_name:
+                return _read_skill_archive_member(zip_ref, infos_by_name[internal_path])
 
             # Try with any top-level directory prefix (e.g., "skill-name/SKILL.md")
-            for name in namelist:
+            for name, info in infos_by_name.items():
                 if name.endswith("/" + internal_path) or name == internal_path:
-                    return zip_ref.read(name)
+                    return _read_skill_archive_member(zip_ref, info)
 
             # Not found
             return None

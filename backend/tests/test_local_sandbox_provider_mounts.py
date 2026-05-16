@@ -639,3 +639,148 @@ class TestLocalSandboxProviderMounts:
             provider = LocalSandboxProvider()
 
         assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills", "/mnt/data"]
+
+
+class TestLocalSandboxProviderResetClearsSingleton:
+    """Regression coverage for issue #2815.
+
+    The module-level LocalSandbox singleton must be cleared whenever the
+    provider is reset or shut down — otherwise stale path mappings and
+    mount policy survive config reloads and test teardown.
+    """
+
+    def _build_config(self, skills_dir, mounts):
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        sandbox_config = SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=mounts,
+        )
+        return SimpleNamespace(
+            skills=SimpleNamespace(
+                container_path="/mnt/skills",
+                get_skills_path=lambda: skills_dir,
+                use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+            ),
+            sandbox=sandbox_config,
+        )
+
+    def test_reset_sandbox_provider_clears_local_singleton(self, tmp_path):
+        from deerflow.config.sandbox_config import VolumeMountConfig
+        from deerflow.sandbox import local as local_module
+        from deerflow.sandbox.local import local_sandbox_provider as lsp_module
+        from deerflow.sandbox.sandbox_provider import (
+            get_sandbox_provider,
+            reset_sandbox_provider,
+        )
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        first_dir = tmp_path / "first"
+        first_dir.mkdir()
+        second_dir = tmp_path / "second"
+        second_dir.mkdir()
+
+        first_cfg = self._build_config(
+            skills_dir,
+            [VolumeMountConfig(host_path=str(first_dir), container_path="/mnt/first", read_only=False)],
+        )
+        second_cfg = self._build_config(
+            skills_dir,
+            [VolumeMountConfig(host_path=str(second_dir), container_path="/mnt/second", read_only=False)],
+        )
+
+        # Make sure no leftover singleton from a prior test interferes.
+        lsp_module._singleton = None
+        reset_sandbox_provider()
+
+        try:
+            with patch("deerflow.sandbox.sandbox_provider.get_app_config", return_value=first_cfg), patch("deerflow.config.get_app_config", return_value=first_cfg):
+                provider = get_sandbox_provider()
+                provider.acquire()
+
+            assert lsp_module._singleton is not None
+            first_container_paths = {m.container_path for m in lsp_module._singleton.path_mappings}
+            assert "/mnt/first" in first_container_paths
+
+            reset_sandbox_provider()
+
+            # The whole point of the regression: reset must drop the cached LocalSandbox.
+            assert lsp_module._singleton is None
+
+            with patch("deerflow.sandbox.sandbox_provider.get_app_config", return_value=second_cfg), patch("deerflow.config.get_app_config", return_value=second_cfg):
+                provider2 = get_sandbox_provider()
+                provider2.acquire()
+
+            assert provider2 is not provider
+            second_container_paths = {m.container_path for m in lsp_module._singleton.path_mappings}
+            assert "/mnt/second" in second_container_paths
+            assert "/mnt/first" not in second_container_paths
+        finally:
+            lsp_module._singleton = None
+            reset_sandbox_provider()
+
+        # Sanity: the local sandbox module still exposes the singleton symbol
+        # at the same module path (guards against accidental rename).
+        assert hasattr(local_module.local_sandbox_provider, "_singleton")
+
+    def test_shutdown_sandbox_provider_clears_local_singleton(self, tmp_path):
+        from deerflow.config.sandbox_config import VolumeMountConfig
+        from deerflow.sandbox.local import local_sandbox_provider as lsp_module
+        from deerflow.sandbox.sandbox_provider import (
+            get_sandbox_provider,
+            reset_sandbox_provider,
+            shutdown_sandbox_provider,
+        )
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+
+        cfg = self._build_config(
+            skills_dir,
+            [VolumeMountConfig(host_path=str(mount_dir), container_path="/mnt/data", read_only=False)],
+        )
+
+        lsp_module._singleton = None
+        reset_sandbox_provider()
+
+        try:
+            with patch("deerflow.sandbox.sandbox_provider.get_app_config", return_value=cfg), patch("deerflow.config.get_app_config", return_value=cfg):
+                provider = get_sandbox_provider()
+                provider.acquire()
+
+            assert lsp_module._singleton is not None
+
+            shutdown_sandbox_provider()
+
+            assert lsp_module._singleton is None
+        finally:
+            lsp_module._singleton = None
+            reset_sandbox_provider()
+
+    def test_provider_reset_method_is_idempotent(self, tmp_path):
+        from deerflow.sandbox.local import local_sandbox_provider as lsp_module
+        from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        cfg = self._build_config(skills_dir, [])
+
+        lsp_module._singleton = None
+
+        try:
+            with patch("deerflow.config.get_app_config", return_value=cfg):
+                provider = LocalSandboxProvider()
+                provider.acquire()
+            assert lsp_module._singleton is not None
+
+            provider.reset()
+            assert lsp_module._singleton is None
+
+            # Calling reset again on an already-cleared singleton is safe.
+            provider.reset()
+            assert lsp_module._singleton is None
+        finally:
+            lsp_module._singleton = None

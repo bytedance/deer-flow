@@ -1,8 +1,12 @@
-"""LangGraph Server auth handler — shares JWT logic with Gateway.
+"""LangGraph compatibility auth handler — shares JWT logic with Gateway.
 
-Loaded by LangGraph Server via langgraph.json ``auth.path``.
-Reuses the same ``decode_token`` / ``get_auth_config`` as Gateway,
-so both modes validate tokens with the same secret and rules.
+The default DeerFlow runtime is embedded in the FastAPI Gateway; scripts and
+Docker deployments do not load this module.  It is retained for LangGraph
+tooling, Studio, or direct LangGraph Server compatibility through
+``langgraph.json``'s ``auth.path``.
+
+When that compatibility path is used, this module reuses the same JWT and CSRF
+rules as Gateway so both modes validate sessions consistently.
 
 Two layers:
   1. @auth.authenticate — validates JWT cookie, extracts user_id,
