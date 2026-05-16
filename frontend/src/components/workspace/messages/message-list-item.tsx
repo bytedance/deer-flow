@@ -1,7 +1,18 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { FileIcon, Loader2Icon } from "lucide-react";
-import { useParams } from "next/navigation";
-import { memo, useMemo, type ImgHTMLAttributes } from "react";
+import {
+  FileIcon,
+  Loader2Icon,
+  ThumbsDownIcon,
+  ThumbsUpIcon,
+} from "lucide-react";
+import {
+  memo,
+  useCallback,
+  useMemo,
+  useState,
+  type AnchorHTMLAttributes,
+  type ImgHTMLAttributes,
+} from "react";
 import rehypeKatex from "rehype-katex";
 
 import { Loader } from "@/components/ai-elements/loader";
@@ -18,6 +29,11 @@ import {
 } from "@/components/ai-elements/reasoning";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
+import {
+  deleteFeedback,
+  upsertFeedback,
+  type FeedbackData,
+} from "@/core/api/feedback";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -35,14 +51,89 @@ import { CopyButton } from "../copy-button";
 
 import { MarkdownContent } from "./markdown-content";
 
+function FeedbackButtons({
+  threadId,
+  runId,
+  initialFeedback,
+}: {
+  threadId: string;
+  runId: string;
+  initialFeedback: FeedbackData | null;
+}) {
+  const [feedback, setFeedback] = useState<FeedbackData | null>(
+    initialFeedback,
+  );
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleClick = useCallback(
+    async (rating: number) => {
+      if (isSubmitting) return;
+      setIsSubmitting(true);
+      try {
+        if (feedback?.rating === rating) {
+          await deleteFeedback(threadId, runId);
+          setFeedback(null);
+        } else {
+          const result = await upsertFeedback(threadId, runId, rating);
+          setFeedback(result);
+        }
+      } catch {
+        // Revert on error — feedback state unchanged on catch
+      } finally {
+        setIsSubmitting(false);
+      }
+    },
+    [threadId, runId, feedback, isSubmitting],
+  );
+
+  return (
+    <div className="flex gap-1">
+      <button
+        type="button"
+        className={cn(
+          "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
+          feedback?.rating === 1 && "text-foreground",
+        )}
+        onClick={() => handleClick(1)}
+        disabled={isSubmitting}
+      >
+        <ThumbsUpIcon
+          className={cn("size-4", feedback?.rating === 1 && "fill-current")}
+        />
+      </button>
+      <button
+        type="button"
+        className={cn(
+          "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
+          feedback?.rating === -1 && "text-foreground",
+        )}
+        onClick={() => handleClick(-1)}
+        disabled={isSubmitting}
+      >
+        <ThumbsDownIcon
+          className={cn("size-4", feedback?.rating === -1 && "fill-current")}
+        />
+      </button>
+    </div>
+  );
+}
+
 export function MessageListItem({
   className,
   message,
   isLoading,
+  feedback,
+  runId,
+  threadId,
+  showCopyButton = true,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
+  threadId: string;
+  feedback?: FeedbackData | null;
+  runId?: string;
+  showCopyButton?: boolean;
 }) {
   const isHuman = message.type === "human";
   return (
@@ -54,15 +145,18 @@ export function MessageListItem({
         className={isHuman ? "w-fit" : "w-full"}
         message={message}
         isLoading={isLoading}
+        threadId={threadId}
       />
-      {!isLoading && (
+      {!isLoading && showCopyButton && (
         <MessageToolbar
           className={cn(
-            isHuman ? "-bottom-9 justify-end" : "-bottom-8",
-            "absolute right-0 left-0 z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100",
+            isHuman
+              ? "absolute right-0 -bottom-9 left-0 justify-end"
+              : "absolute right-0 bottom-0 left-0",
+            "z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100",
           )}
         >
-          <div className="flex gap-1">
+          <div className="pointer-events-auto flex gap-1">
             <CopyButton
               clipboardData={
                 extractContentFromMessage(message) ??
@@ -70,6 +164,13 @@ export function MessageListItem({
                 ""
               }
             />
+            {feedback !== undefined && runId && threadId && (
+              <FeedbackButtons
+                threadId={threadId}
+                runId={runId}
+                initialFeedback={feedback}
+              />
+            )}
           </div>
         </MessageToolbar>
       )}
@@ -111,21 +212,36 @@ function MessageContent_({
   className,
   message,
   isLoading = false,
+  threadId,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
+  threadId: string;
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
-  const { thread_id } = useParams<{ thread_id: string }>();
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
-        <MessageImage {...props} threadId={thread_id} maxWidth="90%" />
+        <MessageImage {...props} threadId={threadId} maxWidth="90%" />
       ),
+      a: ({ href, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) => {
+        if (href?.startsWith("/mnt/")) {
+          const url = resolveArtifactURL(href, threadId);
+          return (
+            <a
+              {...props}
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+            />
+          );
+        }
+        return <a {...props} href={href} />;
+      },
     }),
-    [thread_id],
+    [threadId],
   );
 
   const rawContent = extractContentFromMessage(message);
@@ -151,8 +267,8 @@ function MessageContent_({
   }, [rawContent, isHuman]);
 
   const filesList =
-    files && files.length > 0 && thread_id ? (
-      <RichFilesList files={files} threadId={thread_id} />
+    files && files.length > 0 ? (
+      <RichFilesList files={files} threadId={threadId} />
     ) : null;
 
   // Uploading state: mock AI message shown while files upload
@@ -189,6 +305,7 @@ function MessageContent_({
         remarkPlugins={humanMessagePlugins.remarkPlugins}
         rehypePlugins={humanMessagePlugins.rehypePlugins}
         components={components}
+        parseIncompleteMarkdown={false}
       >
         {contentToDisplay}
       </AIElementMessageResponse>

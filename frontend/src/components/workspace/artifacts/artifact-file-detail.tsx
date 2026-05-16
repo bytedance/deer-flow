@@ -38,7 +38,7 @@ import { checkCodeFile, getFileName } from "@/core/utils/files";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { CitationLink } from "../citations/citation-link";
+import { ArtifactLink } from "../citations/artifact-link";
 import { useThread } from "../messages/context";
 import { Tooltip } from "../tooltip";
 
@@ -81,8 +81,8 @@ export function ArtifactFileDetail({
     return checkCodeFile(filepath);
   }, [filepath, isWriteFile, isSkillFile]);
   const isSupportPreview = useMemo(() => {
-    return (language === "html" && !isWriteFile) || language === "markdown";
-  }, [isWriteFile, language]);
+    return language === "html" || language === "markdown";
+  }, [language]);
   const { content } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
@@ -188,13 +188,19 @@ export function ArtifactFileDetail({
               </Tooltip>
             )}
             {!isWriteFile && (
-              <a href={urlOfArtifact({ filepath, threadId })} target="_blank">
-                <ArtifactAction
-                  icon={SquareArrowOutUpRightIcon}
-                  label={t.common.openInNewWindow}
-                  tooltip={t.common.openInNewWindow}
-                />
-              </a>
+              <ArtifactAction
+                icon={SquareArrowOutUpRightIcon}
+                label={t.common.openInNewWindow}
+                tooltip={t.common.openInNewWindow}
+                onClick={() => {
+                  const w = window.open(
+                    urlOfArtifact({ filepath, threadId, isMock }),
+                    "_blank",
+                    "noopener,noreferrer",
+                  );
+                  if (w) w.opener = null;
+                }}
+              />
             )}
             {isCodeFile && (
               <ArtifactAction
@@ -214,16 +220,24 @@ export function ArtifactFileDetail({
               />
             )}
             {!isWriteFile && (
-              <a
-                href={urlOfArtifact({ filepath, threadId, download: true })}
-                target="_blank"
-              >
-                <ArtifactAction
-                  icon={DownloadIcon}
-                  label={t.common.download}
-                  tooltip={t.common.download}
-                />
-              </a>
+              <ArtifactAction
+                icon={DownloadIcon}
+                label={t.common.download}
+                tooltip={t.common.download}
+                onClick={() => {
+                  const w = window.open(
+                    urlOfArtifact({
+                      filepath,
+                      threadId,
+                      download: true,
+                      isMock,
+                    }),
+                    "_blank",
+                    "noopener,noreferrer",
+                  );
+                  if (w) w.opener = null;
+                }}
+              />
             )}
             <ArtifactAction
               icon={XIcon}
@@ -239,8 +253,6 @@ export function ArtifactFileDetail({
           viewMode === "preview" &&
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
-              filepath={filepath}
-              threadId={threadId}
               content={displayContent}
               language={language ?? "text"}
             />
@@ -264,24 +276,36 @@ export function ArtifactFileDetail({
 }
 
 export function ArtifactFilePreview({
-  filepath,
-  threadId,
   content,
   language,
 }: {
-  filepath: string;
-  threadId: string;
   content: string;
   language: string;
 }) {
-  const { isMock } = useThread();
+  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+
+  useEffect(() => {
+    if (language !== "html") {
+      setHtmlPreviewUrl(undefined);
+      return;
+    }
+
+    const blob = new Blob([content ?? ""], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    setHtmlPreviewUrl(url);
+
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [content, language]);
+
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
         <Streamdown
           className="size-full"
           {...streamdownPlugins}
-          components={{ a: CitationLink }}
+          components={{ a: ArtifactLink }}
         >
           {content ?? ""}
         </Streamdown>
@@ -292,7 +316,9 @@ export function ArtifactFilePreview({
     return (
       <iframe
         className="size-full"
-        src={urlOfArtifact({ filepath, threadId, isMock })}
+        title="Artifact preview"
+        sandbox="allow-scripts allow-forms"
+        src={htmlPreviewUrl}
       />
     );
   }

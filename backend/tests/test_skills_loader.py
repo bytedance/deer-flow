@@ -1,8 +1,10 @@
 """Tests for recursive skills loading."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
-from src.skills.loader import load_skills
+from deerflow.config.skills_config import SkillsConfig
+from deerflow.skills.storage import get_or_new_skill_storage
 
 
 def _write_skill(skill_dir: Path, name: str, description: str) -> None:
@@ -10,6 +12,28 @@ def _write_skill(skill_dir: Path, name: str, description: str) -> None:
     skill_dir.mkdir(parents=True, exist_ok=True)
     content = f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+
+def test_get_skills_root_path_points_to_current_project_skills(tmp_path: Path, monkeypatch):
+    """get_skills_root_path() should point to the caller project skills directory."""
+    monkeypatch.delenv("DEER_FLOW_SKILLS_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "skills").mkdir()
+
+    app_config = SimpleNamespace(skills=SkillsConfig())
+    path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
+    assert path == tmp_path / "skills"
+
+
+def test_get_skills_root_path_honors_env_override(tmp_path: Path, monkeypatch):
+    """DEER_FLOW_SKILLS_PATH should override the caller project skills directory."""
+    skills_root = tmp_path / "team-skills"
+    monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", str(skills_root))
+
+    app_config = SimpleNamespace(skills=SkillsConfig())
+    path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
+    assert path == skills_root
 
 
 def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: Path):
@@ -20,7 +44,7 @@ def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: 
     _write_skill(skills_root / "public" / "parent" / "child-skill", "child-skill", "Child skill")
     _write_skill(skills_root / "custom" / "team" / "helper", "team-helper", "Team helper")
 
-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
     by_name = {skill.name: skill for skill in skills}
 
     assert {"root-skill", "child-skill", "team-helper"} <= set(by_name)
@@ -50,8 +74,20 @@ def test_load_skills_skips_hidden_directories(tmp_path: Path):
         "Hidden skill",
     )
 
-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
     names = {skill.name for skill in skills}
 
     assert "ok-skill" in names
     assert "secret-skill" not in names
+
+
+def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public" / "shared-skill", "shared-skill", "Public version")
+    _write_skill(skills_root / "custom" / "shared-skill", "shared-skill", "Custom version")
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+    shared = next(skill for skill in skills if skill.name == "shared-skill")
+
+    assert shared.category == "custom"
+    assert shared.description == "Custom version"

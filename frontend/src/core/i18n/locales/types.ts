@@ -11,12 +11,14 @@ export interface Translations {
     home: string;
     settings: string;
     delete: string;
+    edit: string;
     rename: string;
     share: string;
     openInNewWindow: string;
     close: string;
     more: string;
     search: string;
+    loadMore: string;
     download: string;
     thinking: string;
     artifacts: string;
@@ -32,6 +34,16 @@ export interface Translations {
     save: string;
     install: string;
     create: string;
+    import: string;
+    export: string;
+    exportAsMarkdown: string;
+    exportAsJSON: string;
+    exportSuccess: string;
+  };
+
+  home: {
+    docs: string;
+    blog: string;
   };
 
   // Welcome
@@ -76,6 +88,11 @@ export interface Translations {
     searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
+    followupLoading: string;
+    followupConfirmTitle: string;
+    followupConfirmDescription: string;
+    followupConfirmAppend: string;
+    followupConfirmReplace: string;
     suggestions: {
       suggestion: string;
       prompt: string;
@@ -122,8 +139,17 @@ export interface Translations {
     nameStepContinue: string;
     nameStepInvalidError: string;
     nameStepAlreadyExistsError: string;
+    nameStepNetworkError: string;
     nameStepCheckError: string;
+    nameStepApiDisabledError: string;
     nameStepBootstrapMessage: string;
+    save: string;
+    saving: string;
+    saveRequested: string;
+    saveHint: string;
+    saveCommandMessage: string;
+    agentCreatedPendingRefresh: string;
+    more: string;
     agentCreated: string;
     startChatting: string;
     backToGallery: string;
@@ -144,6 +170,7 @@ export interface Translations {
     reportIssue: string;
     contactUs: string;
     about: string;
+    logout: string;
   };
 
   // Conversation
@@ -202,11 +229,56 @@ export interface Translations {
     failed: string;
   };
 
+  // Token Usage
+  tokenUsage: {
+    title: string;
+    label: string;
+    input: string;
+    output: string;
+    total: string;
+    view: string;
+    unavailable: string;
+    unavailableShort: string;
+    note: string;
+    presets: {
+      off: string;
+      summary: string;
+      perTurn: string;
+      debug: string;
+    };
+    presetDescriptions: {
+      off: string;
+      summary: string;
+      perTurn: string;
+      debug: string;
+    };
+    finalAnswer: string;
+    stepTotal: string;
+    sharedAttribution: string;
+    subagent: (description: string) => string;
+    startTodo: (content: string) => string;
+    completeTodo: (content: string) => string;
+    updateTodo: (content: string) => string;
+    removeTodo: (content: string) => string;
+  };
+
+  // Shortcuts
+  shortcuts: {
+    searchActions: string;
+    noResults: string;
+    actions: string;
+    keyboardShortcuts: string;
+    keyboardShortcutsDescription: string;
+    openCommandPalette: string;
+    toggleSidebar: string;
+  };
+
   // Settings
   settings: {
     title: string;
     description: string;
     sections: {
+      account: string;
       appearance: string;
       memory: string;
       tools: string;
@@ -219,6 +291,45 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
+      exportButton: string;
+      exportSuccess: string;
+      importButton: string;
+      importConfirmTitle: string;
+      importConfirmDescription: string;
+      importFileLabel: string;
+      importInvalidFile: string;
+      importSuccess: string;
+      manualFactSource: string;
+      addFact: string;
+      addFactTitle: string;
+      editFactTitle: string;
+      addFactSuccess: string;
+      editFactSuccess: string;
+      clearAll: string;
+      clearAllConfirmTitle: string;
+      clearAllConfirmDescription: string;
+      clearAllSuccess: string;
+      factDeleteConfirmTitle: string;
+      factDeleteConfirmDescription: string;
+      factDeleteSuccess: string;
+      factContentLabel: string;
+      factCategoryLabel: string;
+      factConfidenceLabel: string;
+      factContentPlaceholder: string;
+      factCategoryPlaceholder: string;
+      factConfidenceHint: string;
+      factSave: string;
+      factValidationContent: string;
+      factValidationConfidence: string;
+      noFacts: string;
+      summaryReadOnly: string;
+      memoryFullyEmpty: string;
+      factPreviewLabel: string;
+      searchPlaceholder: string;
+      filterAll: string;
+      filterFacts: string;
+      filterSummaries: string;
+      noMatches: string;
       markdown: {
         overview: string;
         userContext: string;
@@ -282,6 +393,23 @@ export interface Translations {
       testBody: string;
       notSupported: string;
       disableNotification: string;
+    };
+    account: {
+      profileTitle: string;
+      email: string;
+      role: string;
+      changePasswordTitle: string;
+      changePasswordDescription: string;
+      currentPassword: string;
+      newPassword: string;
+      confirmNewPassword: string;
+      passwordMismatch: string;
+      passwordTooShort: string;
+      passwordChangedSuccess: string;
+      networkError: string;
+      updating: string;
+      updatePassword: string;
+      signOut: string;
     };
     acknowledge: {
       emptyTitle: string;

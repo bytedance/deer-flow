@@ -46,12 +46,12 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    All services will start with hot-reload enabled:
    - Frontend changes are automatically reloaded
    - Backend changes trigger automatic restart
-   - LangGraph server supports hot-reload
+   - Gateway-hosted LangGraph-compatible runtime supports hot-reload
 
 4. **Access the application**:
    - Web Interface: http://localhost:2026
    - API Gateway: http://localhost:2026/api/*
-   - LangGraph: http://localhost:2026/api/langgraph/*
+   - LangGraph-compatible API: http://localhost:2026/api/langgraph/*
 
 #### Docker Commands
 
@@ -70,6 +70,59 @@ make docker-logs-frontend
 make docker-logs-gateway
 ```
 
+If Docker builds are slow in your network, you can override the default package registries before running `make docker-init` or `make docker-start`:
+
+```bash
+export UV_INDEX_URL=https://pypi.org/simple
+export NPM_REGISTRY=https://registry.npmjs.org
+```
+
+#### Recommended host resources
+
+Use these as practical starting points for development and review environments:
+
+| Scenario | Starting point | Recommended | Notes |
+|---------|-----------|------------|-------|
+| `make dev` on one machine | 4 vCPU, 8 GB RAM | 8 vCPU, 16 GB RAM | Best when DeerFlow uses hosted model APIs. |
+| `make docker-start` review environment | 4 vCPU, 8 GB RAM | 8 vCPU, 16 GB RAM | Docker image builds and sandbox containers need extra headroom. |
+| Shared Linux test server | 8 vCPU, 16 GB RAM | 16 vCPU, 32 GB RAM | Prefer this for heavier multi-agent runs or multiple reviewers. |
+
+`2 vCPU / 4 GB` environments often fail to start reliably or become unresponsive under normal DeerFlow workloads.
+
+#### Linux: Docker daemon permission denied
+
+If `make docker-init`, `make docker-start`, or `make docker-stop` fails on Linux with an error like below, your current user likely does not have permission to access the Docker daemon socket:
+
+```text
+unable to get image 'deer-flow-gateway': permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
+```
+
+Recommended fix: add your current user to the `docker` group so Docker commands work without `sudo`.
+
+1. Confirm the `docker` group exists:
+   ```bash
+   getent group docker
+   ```
+2. Add your current user to the `docker` group:
+   ```bash
+   sudo usermod -aG docker $USER
+   ```
+3. Apply the new group membership. The most reliable option is to log out completely and then log back in. If you want to refresh the current shell session instead, run:
+   ```bash
+   newgrp docker
+   ```
+4. Verify Docker access:
+   ```bash
+   docker ps
+   ```
+5. Retry the DeerFlow command:
+   ```bash
+   make docker-stop
+   make docker-start
+   ```
+
+If `docker ps` still reports a permission error after `usermod`, fully log out and log back in before retrying.
+
 #### Docker Architecture
 
 ```
@@ -78,9 +131,8 @@ Host Machine
 Docker Compose (deer-flow-dev)
   ├→ nginx (port 2026) ← Reverse proxy
   ├→ web (port 3000) ← Frontend with hot-reload
-  ├→ api (port 8001) ← Gateway API with hot-reload
-   ├→ langgraph (port 2024) ← LangGraph server with hot-reload
-   └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
+  ├→ gateway (port 8001) ← Gateway API + LangGraph-compatible runtime with hot-reload
+  └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
 ```
 
 **Benefits of Docker Development**:
@@ -113,7 +165,7 @@ Required tools:
 
 1. **Configure the application** (same as Docker setup above)
 
-2. **Install dependencies**:
+2. **Install dependencies** (this also sets up pre-commit hooks):
    ```bash
    make install
    ```
@@ -131,17 +183,13 @@ Required tools:
 
 If you need to start services individually:
 
-1. **Start backend services**:
+1. **Start backend service**:
    ```bash
-   # Terminal 1: Start LangGraph Server (port 2024)
+   # Terminal 1: Start Gateway API + embedded agent runtime (port 8001)
    cd backend
    make dev
 
-   # Terminal 2: Start Gateway API (port 8001)
-   cd backend
-   make gateway
-
-   # Terminal 3: Start Frontend (port 3000)
+   # Terminal 2: Start Frontend (port 3000)
    cd frontend
    pnpm dev
    ```
@@ -159,10 +207,10 @@ If you need to start services individually:
 
 The nginx configuration provides:
 - Unified entry point on port 2026
-- Routes `/api/langgraph/*` to LangGraph Server (2024)
+- Rewrites `/api/langgraph/*` to Gateway's LangGraph-compatible API (8001)
 - Routes other `/api/*` endpoints to Gateway API (8001)
 - Routes non-API requests to Frontend (3000)
-- Centralized CORS handling
+- Same-origin API routing; split-origin or port-forwarded browser clients should use the Gateway `GATEWAY_CORS_ORIGINS` allowlist
 - SSE/streaming support for real-time agent responses
 - Optimized timeouts for long-running operations
 
@@ -182,8 +230,8 @@ deer-flow/
 │       └── nginx.local.conf # Nginx config for local dev
 ├── backend/                 # Backend application
 │   ├── src/
-│   │   ├── gateway/        # Gateway API (port 8001)
-│   │   ├── agents/         # LangGraph agents (port 2024)
+│   │   ├── gateway/        # Gateway API and LangGraph-compatible runtime (port 8001)
+│   │   ├── agents/         # LangGraph agent runtime used by Gateway
 │   │   ├── mcp/            # Model Context Protocol integration
 │   │   ├── skills/         # Skills system
 │   │   └── sandbox/        # Sandbox execution
@@ -203,8 +251,7 @@ Browser
   ↓
 Nginx (port 2026) ← Unified entry point
   ├→ Frontend (port 3000) ← / (non-API requests)
-  ├→ Gateway API (port 8001) ← /api/models, /api/mcp, /api/skills, /api/threads/*/artifacts
-  └→ LangGraph Server (port 2024) ← /api/langgraph/* (agent interactions)
+  └→ Gateway API (port 8001) ← /api/* and /api/langgraph/* (LangGraph-compatible agent interactions)
 ```
 
 ## Development Workflow
@@ -216,15 +263,26 @@ Nginx (port 2026) ← Unified entry point
 
 2. **Make your changes** with hot-reload enabled
 
-3. **Test your changes** thoroughly
+3. **Format and lint your code** (CI will reject unformatted code):
+   ```bash
+   # Backend
+   cd backend
+   make format   # ruff check --fix + ruff format
 
-4. **Commit your changes**:
+   # Frontend
+   cd frontend
+   pnpm format:write   # Prettier
+   ```
+
+4. **Test your changes** thoroughly
+
+5. **Commit your changes**:
    ```bash
    git add .
    git commit -m "feat: description of your changes"
    ```
 
-5. **Push and create a Pull Request**:
+6. **Push and create a Pull Request**:
    ```bash
    git push origin feature/your-feature-name
    ```
@@ -234,30 +292,36 @@ Nginx (port 2026) ← Unified entry point
 ```bash
 # Backend tests
 cd backend
-uv run pytest
+make test
 
-# Frontend tests
+# Frontend unit tests
 cd frontend
-pnpm test
+make test
+
+# Frontend E2E tests (requires Chromium; builds and auto-starts the Next.js production server)
+cd frontend
+make test-e2e
 ```
 
 ### PR Regression Checks
 
-Every pull request runs the backend regression workflow at [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml), including:
+Every pull request triggers the following CI workflows:
 
-- `tests/test_provisioner_kubeconfig.py`
-- `tests/test_docker_sandbox_mode_detection.py`
+- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
+- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
+- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
 
 ## Code Style
 
-- **Backend (Python)**: We use `ruff` for linting and formatting
-- **Frontend (TypeScript)**: We use ESLint and Prettier
+- **Backend (Python)**: We use `ruff` for linting and formatting. Run `make format` before committing.
+- **Frontend (TypeScript)**: We use ESLint and Prettier. Run `pnpm format:write` before committing.
+- CI enforces formatting — PRs with unformatted code will fail the lint check.
 
 ## Documentation
 
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture
-- [MCP Setup Guide](MCP_SETUP.md) - Model Context Protocol configuration
+- [MCP Setup Guide](backend/docs/MCP_SERVER.md) - Model Context Protocol configuration
 
 ## Need Help?
 

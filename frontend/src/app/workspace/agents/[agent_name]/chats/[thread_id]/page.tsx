@@ -2,31 +2,37 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
+import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
-import { MessageList } from "@/components/workspace/messages";
+import {
+  MessageList,
+  MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
+} from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
+import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
-import { useLocalSettings } from "@/core/settings";
-import { useThreadStream } from "@/core/threads/hooks";
+import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
+import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export default function AgentChatPage() {
   const { t } = useI18n();
-  const [settings, setSettings] = useLocalSettings();
   const router = useRouter();
 
   const { agent_name } = useParams<{
@@ -35,18 +41,50 @@ export default function AgentChatPage() {
 
   const { agent } = useAgent(agent_name);
 
-  const { threadId, isNewThread, setIsNewThread } = useThreadChat();
+  const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
+    useThreadChat();
+  // `isNewThread` gates history/token-usage fetches until the backend creates
+  // the thread. `isWelcomeMode` controls only the centered welcome layout, so
+  // it can flip immediately on submit without triggering eager history loads.
+  const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
+  const [settings, setSettings] = useThreadSettings(threadId);
+  const [localSettings, setLocalSettings] = useLocalSettings();
+  const { tokenUsageEnabled } = useModels();
+  const threadTokenUsage = useThreadTokenUsage(
+    isNewThread || isMock ? undefined : threadId,
+    { enabled: tokenUsageEnabled && !isMock },
+  );
+  const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
 
   const { showNotification } = useNotification();
-  const [thread, sendMessage] = useThreadStream({
+
+  useEffect(() => {
+    setIsWelcomeMode(isNewThread);
+  }, [isNewThread]);
+
+  const {
+    thread,
+    pendingUsageMessages,
+    sendMessage,
+    isUploading,
+    isHistoryLoading,
+    hasMoreHistory,
+    loadMoreHistory,
+  } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: { ...settings.context, agent_name: agent_name },
-    onStart: () => {
+    isMock,
+    onSend: () => {
+      setIsWelcomeMode(false);
+    },
+    onStart: (createdThreadId) => {
+      setThreadId(createdThreadId);
       setIsNewThread(false);
+      // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(
         null,
         "",
-        `/workspace/agents/${agent_name}/chats/${threadId}`,
+        `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
       );
     },
     onFinish: (state) => {
@@ -69,7 +107,11 @@ export default function AgentChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      void sendMessage(threadId, message, { agent_name });
+      const sendPromise = sendMessage(threadId, message, { agent_name });
+      if (message.files.length > 0) {
+        return sendPromise;
+      }
+      void sendPromise;
     },
     [sendMessage, threadId, agent_name],
   );
@@ -78,6 +120,11 @@ export default function AgentChatPage() {
     await thread.stop();
   }, [thread]);
 
+  const tokenUsageInlineMode = tokenUsageEnabled
+    ? localSettings.tokenUsage.inlineMode
+    : "off";
+  const hasTodos = (thread.values.todos?.length ?? 0) > 0;
+
   return (
     <ThreadContext.Provider value={{ thread }}>
       <ChatBox threadId={threadId}>
@@ -85,7 +132,7 @@ export default function AgentChatPage() {
           <header
             className={cn(
               "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-4",
-              isNewThread
+              isWelcomeMode
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
@@ -113,53 +160,98 @@ export default function AgentChatPage() {
                   <PlusSquare /> {t.agents.newChat}
                 </Button>
               </Tooltip>
+              <TokenUsageIndicator
+                threadId={isNewThread ? undefined : threadId}
+                backendUsage={backendTokenUsage}
+                enabled={tokenUsageEnabled}
+                messages={thread.messages}
+                pendingMessages={pendingUsageMessages}
+                preferences={localSettings.tokenUsage}
+                onPreferencesChange={(preferences) =>
+                  setLocalSettings("tokenUsage", preferences)
+                }
+              />
+              <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
           </header>
 
           <main className="flex min-h-0 max-w-full grow flex-col">
-            <div className="flex size-full justify-center">
+            <div className="flex min-h-0 flex-1 justify-center">
               <MessageList
-                className={cn("size-full", !isNewThread && "pt-10")}
+                className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
+                hasMoreHistory={hasMoreHistory}
+                loadMoreHistory={loadMoreHistory}
+                isHistoryLoading={isHistoryLoading}
+                tokenUsageInlineMode={tokenUsageInlineMode}
               />
             </div>
 
-            <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">
+            <div
+              className={cn(
+                "right-0 bottom-0 left-0 z-30 flex justify-center px-4",
+                isWelcomeMode ? "absolute" : "relative shrink-0 pb-4",
+              )}
+            >
               <div
                 className={cn(
                   "relative w-full",
-                  isNewThread && "-translate-y-[calc(50vh-96px)]",
-                  isNewThread
+                  isWelcomeMode && "-translate-y-[calc(50vh-96px)]",
+                  isWelcomeMode
                     ? "max-w-(--container-width-sm)"
                     : "max-w-(--container-width-md)",
                 )}
               >
-                <div className="absolute -top-4 right-0 left-0 z-0">
-                  <div className="absolute right-0 bottom-0 left-0">
-                    <TodoList
-                      className="bg-background/5"
-                      todos={thread.values.todos ?? []}
-                      hidden={
-                        !thread.values.todos || thread.values.todos.length === 0
-                      }
-                    />
+                {hasTodos && (
+                  <div
+                    className={cn(
+                      "right-0 left-0 z-0",
+                      isWelcomeMode ? "absolute -top-4" : "relative",
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "right-0 bottom-0 left-0",
+                        isWelcomeMode ? "absolute" : "relative",
+                      )}
+                    >
+                      <TodoList
+                        className="bg-background/5"
+                        todos={thread.values.todos ?? []}
+                        hidden={false}
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <InputBox
-                  className={cn("bg-background/5 w-full -translate-y-4")}
-                  isNewThread={isNewThread}
-                  autoFocus={isNewThread}
-                  status={thread.isLoading ? "streaming" : "ready"}
+                  className={cn(
+                    "bg-background/5 w-full",
+                    isWelcomeMode && "-translate-y-4",
+                  )}
+                  isWelcomeMode={isWelcomeMode}
+                  threadId={threadId}
+                  autoFocus={isWelcomeMode}
+                  status={
+                    thread.error
+                      ? "error"
+                      : thread.isLoading
+                        ? "streaming"
+                        : "ready"
+                  }
                   context={settings.context}
                   extraHeader={
-                    isNewThread && (
+                    isWelcomeMode && (
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }
-                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  disabled={
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                    isUploading
+                  }
                   onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}
                   onStop={handleStop}

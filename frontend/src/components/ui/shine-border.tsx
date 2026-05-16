@@ -1,25 +1,25 @@
-"use client"
+"use client";
 
-import * as React from "react"
+import * as React from "react";
 
-import { cn } from "@/lib/utils"
+import { cn } from "@/lib/utils";
 
 interface ShineBorderProps extends React.HTMLAttributes<HTMLDivElement> {
   /**
    * Width of the border in pixels
    * @default 1
    */
-  borderWidth?: number
+  borderWidth?: number;
   /**
    * Duration of the animation in seconds
    * @default 14
    */
-  duration?: number
+  duration?: number;
   /**
    * Color of the border, can be a single color or an array of colors
    * @default "#000000"
    */
-  shineColor?: string | string[]
+  shineColor?: string | string[];
 }
 
 /**
@@ -55,9 +55,9 @@ export function ShineBorder({
       }
       className={cn(
         "motion-safe:animate-shine pointer-events-none absolute inset-0 size-full rounded-[inherit] will-change-[background-position]",
-        className
+        className,
       )}
       {...props}
     />
-  )
+  );
 }

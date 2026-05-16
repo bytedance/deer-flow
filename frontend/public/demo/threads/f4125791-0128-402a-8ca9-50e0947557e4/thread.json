@@ -113,9 +113,7 @@
           {
             "name": "present_files",
             "args": {
-              "filepaths": [
-                "/mnt/user-data/outputs/index.html"
-              ]
+              "filepaths": ["/mnt/user-data/outputs/index.html"]
             },
             "id": "present_files:2",
             "type": "tool_call"
@@ -159,9 +157,7 @@
     },
     "uploaded_files": [],
     "title": "Interactive 3D Weather Forecast Interface",
-    "artifacts": [
-      "/mnt/user-data/outputs/index.html"
-    ]
+    "artifacts": ["/mnt/user-data/outputs/index.html"]
   },
   "next": [],
   "tasks": [],

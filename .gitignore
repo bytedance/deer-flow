@@ -1,5 +1,7 @@
 # DeerFlow docker image cache
 docker/.cache/
+# oh-my-claudecode state
+.omc/
 # OS generated files
 .DS_Store
 *.local
@@ -38,6 +40,7 @@ coverage/
 skills/custom/*
 logs/
 log/
+debug.log
 
 # Local git hooks (keep only on this machine, do not push)
 .githooks/
@@ -52,3 +55,11 @@ web/
 
 # uv
 uv.lock
+# Deployment artifacts
+backend/Dockerfile.langgraph
+config.yaml.bak
+.playwright-mcp
+/frontend/test-results/
+/frontend/playwright-report/
+.gstack/
+.worktrees

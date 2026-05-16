@@ -4,33 +4,33 @@
 
 ### 1. 核心实现文件
 
-#### [`src/agents/thread_state.py`](../src/agents/thread_state.py)
+#### [`packages/harness/deerflow/agents/thread_state.py`](../packages/harness/deerflow/agents/thread_state.py)
 - ✅ 添加 `title: str | None = None` 字段到 `ThreadState`
 
-#### [`src/config/title_config.py`](../src/config/title_config.py) (新建)
+#### [`packages/harness/deerflow/config/title_config.py`](../packages/harness/deerflow/config/title_config.py) (新建)
 - ✅ 创建 `TitleConfig` 配置类
 - ✅ 支持配置：enabled, max_words, max_chars, model_name, prompt_template
 - ✅ 提供 `get_title_config()` 和 `set_title_config()` 函数
 - ✅ 提供 `load_title_config_from_dict()` 从配置文件加载
 
-#### [`src/agents/title_middleware.py`](../src/agents/title_middleware.py) (新建)
+#### [`packages/harness/deerflow/agents/middlewares/title_middleware.py`](../packages/harness/deerflow/agents/middlewares/title_middleware.py) (新建)
 - ✅ 创建 `TitleMiddleware` 类
 - ✅ 实现 `_should_generate_title()` 检查是否需要生成
 - ✅ 实现 `_generate_title()` 调用 LLM 生成标题
 - ✅ 实现 `after_agent()` 钩子，在首次对话后自动触发
 - ✅ 包含 fallback 策略（LLM 失败时使用用户消息前几个词）
 
-#### [`src/config/app_config.py`](../src/config/app_config.py)
+#### [`packages/harness/deerflow/config/app_config.py`](../packages/harness/deerflow/config/app_config.py)
 - ✅ 导入 `load_title_config_from_dict`
 - ✅ 在 `from_file()` 中加载 title 配置
 
-#### [`src/agents/lead_agent/agent.py`](../src/agents/lead_agent/agent.py)
+#### [`packages/harness/deerflow/agents/lead_agent/agent.py`](../packages/harness/deerflow/agents/lead_agent/agent.py)
 - ✅ 导入 `TitleMiddleware`
 - ✅ 注册到 `middleware` 列表：`[SandboxMiddleware(), TitleMiddleware()]`
 
 ### 2. 配置文件
 
-#### [`config.yaml`](../config.yaml)
+#### [`config.yaml`](../../config.example.yaml)
 - ✅ 添加 title 配置段：
 ```yaml
 title:
@@ -51,7 +51,7 @@ title:
 - ✅ 故障排查指南
 - ✅ State vs Metadata 对比
 
-#### [`BACKEND_TODO.md`](../BACKEND_TODO.md)
+#### [`TODO.md`](TODO.md)
 - ✅ 添加功能完成记录
 
 ### 4. 测试
@@ -124,14 +124,14 @@ title:
 # checkpointer.py
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-checkpointer = SqliteSaver.from_conn_string("checkpoints.db")
+checkpointer = SqliteSaver.from_conn_string("deerflow.db")
 ```
 
 ```json
 // langgraph.json
 {
   "graphs": {
-    "lead_agent": "src.agents:lead_agent"
+    "lead_agent": "deerflow.agents:lead_agent"
   },
   "checkpointer": "checkpointer:checkpointer"
 }

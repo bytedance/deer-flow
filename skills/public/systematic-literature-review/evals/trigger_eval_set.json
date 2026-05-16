@@ -1,0 +1,102 @@
+[
+  {
+    "query": "Survey transformer attention variants published in the last 2 years on arXiv cs.CL",
+    "should_trigger": true,
+    "rationale": "Explicit survey request with scope and category"
+  },
+  {
+    "query": "What methods do recent papers use for few-shot learning in vision-and-language? Give me 15 papers in BibTeX.",
+    "should_trigger": true,
+    "rationale": "Multi-paper synthesis with count and format spec"
+  },
+  {
+    "query": "Review the literature on retrieval-augmented generation — key findings, limitations, and open questions",
+    "should_trigger": true,
+    "rationale": "Classic SLR phrasing with explicit synthesis structure"
+  },
+  {
+    "query": "Compare evaluation frameworks used across LLM hallucination detection papers",
+    "should_trigger": true,
+    "rationale": "Cross-paper comparison implies multi-paper synthesis"
+  },
+  {
+    "query": "Summarize recent work on Monte Carlo methods for mortgage risk — last 3 years",
+    "should_trigger": true,
+    "rationale": "Domain-specific SLR with time window"
+  },
+  {
+    "query": "Annotated bibliography on agentic tool use, 20 papers, IEEE format",
+    "should_trigger": true,
+    "rationale": "Annotated bibliography is an SLR variant"
+  },
+  {
+    "query": "What does the literature say about RLHF?",
+    "should_trigger": true,
+    "rationale": "No 'systematic' keyword but 'the literature' clearly implies multi-paper synthesis"
+  },
+  {
+    "query": "Give me an overview of diffusion model papers since 2022",
+    "should_trigger": true,
+    "rationale": "Time range + 'papers' implies breadth-first survey"
+  },
+  {
+    "query": "Are there papers comparing RAG and fine-tuning?",
+    "should_trigger": true,
+    "rationale": "Comparison query across papers implies synthesis"
+  },
+  {
+    "query": "Do a systematic literature review on graph neural networks for drug discovery, APA format",
+    "should_trigger": true,
+    "rationale": "Explicit SLR request with format"
+  },
+  {
+    "query": "Review this paper: https://arxiv.org/abs/2310.06825",
+    "should_trigger": false,
+    "rationale": "Single paper URL -> should route to academic-paper-review"
+  },
+  {
+    "query": "What is attention in transformers?",
+    "should_trigger": false,
+    "rationale": "Factual question, no multi-paper synthesis needed"
+  },
+  {
+    "query": "Search for news about AI regulation",
+    "should_trigger": false,
+    "rationale": "General web search, not academic literature review"
+  },
+  {
+    "query": "Summarize this PDF [attached]",
+    "should_trigger": false,
+    "rationale": "Single document summary, not literature review"
+  },
+  {
+    "query": "Write me a Python function to parse BibTeX files",
+    "should_trigger": false,
+    "rationale": "Coding task, not research"
+  },
+  {
+    "query": "What is the capital of France?",
+    "should_trigger": false,
+    "rationale": "Factual question, no research needed"
+  },
+  {
+    "query": "Help me debug this error in my React app",
+    "should_trigger": false,
+    "rationale": "Debugging task, not literature review"
+  },
+  {
+    "query": "Translate this paragraph to Chinese",
+    "should_trigger": false,
+    "rationale": "Translation task"
+  },
+  {
+    "query": "Explain the difference between CNN and RNN",
+    "should_trigger": false,
+    "rationale": "Conceptual explanation, not multi-paper synthesis"
+  },
+  {
+    "query": "Find me the best paper on reinforcement learning",
+    "should_trigger": false,
+    "rationale": "Singular 'best paper' implies one result, not a survey across many"
+  }
+]

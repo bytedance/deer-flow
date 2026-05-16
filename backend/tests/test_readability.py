@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from src.utils.readability import ReadabilityExtractor
+from deerflow.utils.readability import ReadabilityExtractor
 
 
 def test_extract_article_falls_back_when_readability_js_fails(monkeypatch):
@@ -23,7 +23,7 @@ def test_extract_article_falls_back_when_readability_js_fails(monkeypatch):
         return {"title": "Fallback Title", "content": "<p>Fallback Content</p>"}
 
     monkeypatch.setattr(
-        "src.utils.readability.simple_json_from_html_string",
+        "deerflow.utils.readability.simple_json_from_html_string",
         _fake_simple_json_from_html_string,
     )
 
@@ -46,7 +46,7 @@ def test_extract_article_re_raises_unexpected_exception(monkeypatch):
         return {"title": "Should Not Reach Fallback", "content": "<p>Fallback</p>"}
 
     monkeypatch.setattr(
-        "src.utils.readability.simple_json_from_html_string",
+        "deerflow.utils.readability.simple_json_from_html_string",
         _fake_simple_json_from_html_string,
     )
 

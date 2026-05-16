@@ -22,12 +22,14 @@ export const enUS: Translations = {
     home: "Home",
     settings: "Settings",
     delete: "Delete",
+    edit: "Edit",
     rename: "Rename",
     share: "Share",
     openInNewWindow: "Open in new window",
     close: "Close",
     more: "More",
     search: "Search",
+    loadMore: "Load more",
     download: "Download",
     thinking: "Thinking",
     artifacts: "Artifacts",
@@ -43,6 +45,17 @@ export const enUS: Translations = {
     save: "Save",
     install: "Install",
     create: "Create",
+    import: "Import",
+    export: "Export",
+    exportAsMarkdown: "Export as Markdown",
+    exportAsJSON: "Export as JSON",
+    exportSuccess: "Conversation exported",
+  },
+
+  // Home
+  home: {
+    docs: "Docs",
+    blog: "Blog",
   },
 
   // Welcome
@@ -96,6 +109,12 @@ export const enUS: Translations = {
     searchModels: "Search models...",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
+    followupLoading: "Generating follow-up questions...",
+    followupConfirmTitle: "Send suggestion?",
+    followupConfirmDescription:
+      "You already have text in the input. Choose how to send it.",
+    followupConfirmAppend: "Append & send",
+    followupConfirmReplace: "Replace & send",
     suggestions: [
       {
         suggestion: "Write",
@@ -182,9 +201,24 @@ export const enUS: Translations = {
     nameStepInvalidError:
       "Invalid name — use only letters, digits, and hyphens",
     nameStepAlreadyExistsError: "An agent with this name already exists",
+    nameStepNetworkError:
+      "Network request failed — check your network or backend connection",
     nameStepCheckError: "Could not verify name availability — please try again",
+    nameStepApiDisabledError:
+      "Custom agent management is not enabled on this server. Please contact your administrator.",
     nameStepBootstrapMessage:
-      "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
+      "The new custom agent name is {name}. Help me design its purpose, behavior, and SOUL.md before saving it.",
+    save: "Save agent",
+    saving: "Saving agent...",
+    saveRequested:
+      "Save requested. DeerFlow is generating and saving an initial version now.",
+    saveHint:
+      "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
+    saveCommandMessage:
+      "Please save this custom agent now based on everything we have discussed so far. Treat this as my explicit confirmation to save. If some details are still missing, make reasonable assumptions, generate a concise first SOUL.md in English, and call setup_agent immediately without asking me for more confirmation.",
+    agentCreatedPendingRefresh:
+      "The agent was created, but DeerFlow could not load it yet. Please refresh this page in a moment.",
+    more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",
@@ -205,6 +239,7 @@ export const enUS: Translations = {
     reportIssue: "Report a issue",
     contactUs: "Contact us",
     about: "About DeerFlow",
+    logout: "Log out",
   },
 
   // Conversation
@@ -264,11 +299,59 @@ export const enUS: Translations = {
     failed: "Subtask failed",
   },
 
+  // Token Usage
+  tokenUsage: {
+    title: "Token Usage",
+    label: "Tokens",
+    input: "Input",
+    output: "Output",
+    total: "Total",
+    view: "Display",
+    unavailable:
+      "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
+    unavailableShort: "No usage returned",
+    note: "Header totals use persisted thread usage, plus visible in-flight usage while a run is still streaming. Per-turn and debug usage come from currently visible messages only. Totals may differ from provider billing pages.",
+    presets: {
+      off: "Off",
+      summary: "Summary",
+      perTurn: "Per turn",
+      debug: "Debug",
+    },
+    presetDescriptions: {
+      off: "Hide token usage in the header and conversation.",
+      summary: "Show only the current conversation total in the header.",
+      perTurn:
+        "Show the header total and one token summary per assistant turn.",
+      debug: "Show the header total and step-level token debugging details.",
+    },
+    finalAnswer: "Final answer",
+    stepTotal: "Step total",
+    sharedAttribution: "Shared across multiple actions in this step",
+    subagent: (description: string) => `Subagent: ${description}`,
+    startTodo: (content: string) => `Start To-do: ${content}`,
+    completeTodo: (content: string) => `Complete To-do: ${content}`,
+    updateTodo: (content: string) => `Update To-do: ${content}`,
+    removeTodo: (content: string) => `Remove To-do: ${content}`,
+  },
+
+  // Shortcuts
+  shortcuts: {
+    searchActions: "Search actions...",
+    noResults: "No results found.",
+    actions: "Actions",
+    keyboardShortcuts: "Keyboard Shortcuts",
+    keyboardShortcutsDescription:
+      "Navigate DeerFlow faster with keyboard shortcuts.",
+    openCommandPalette: "Open Command Palette",
+    toggleSidebar: "Toggle Sidebar",
+  },
+
   // Settings
   settings: {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     sections: {
+      account: "Account",
       appearance: "Appearance",
       memory: "Memory",
       tools: "Tools",
@@ -282,6 +365,50 @@ export const enUS: Translations = {
         "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
+      exportButton: "Export memory",
+      exportSuccess: "Memory exported",
+      importButton: "Import memory",
+      importConfirmTitle: "Import memory?",
+      importConfirmDescription:
+        "This will overwrite your current memory with the selected JSON backup.",
+      importFileLabel: "Selected file",
+      importInvalidFile:
+        "Failed to read the selected memory file. Please choose a valid JSON export.",
+      importSuccess: "Memory imported",
+      manualFactSource: "Manual",
+      addFact: "Add fact",
+      addFactTitle: "Add memory fact",
+      editFactTitle: "Edit memory fact",
+      addFactSuccess: "Fact created",
+      editFactSuccess: "Fact updated",
+      clearAll: "Clear all memory",
+      clearAllConfirmTitle: "Clear all memory?",
+      clearAllConfirmDescription:
+        "This will remove all saved summaries and facts. This action cannot be undone.",
+      clearAllSuccess: "All memory cleared",
+      factDeleteConfirmTitle: "Delete this fact?",
+      factDeleteConfirmDescription:
+        "This fact will be removed from memory immediately. This action cannot be undone.",
+      factDeleteSuccess: "Fact deleted",
+      factContentLabel: "Content",
+      factCategoryLabel: "Category",
+      factConfidenceLabel: "Confidence",
+      factContentPlaceholder: "Describe the memory fact you want to save",
+      factCategoryPlaceholder: "context",
+      factConfidenceHint: "Use a number between 0 and 1.",
+      factSave: "Save fact",
+      factValidationContent: "Fact content cannot be empty.",
+      factValidationConfidence: "Confidence must be a number between 0 and 1.",
+      noFacts: "No saved facts yet.",
+      summaryReadOnly:
+        "Summary sections are read-only for now. You can currently add, edit, or delete individual facts, or clear all memory.",
+      memoryFullyEmpty: "No memory saved yet.",
+      factPreviewLabel: "Fact to delete",
+      searchPlaceholder: "Search memory",
+      filterAll: "All",
+      filterFacts: "Facts",
+      filterSummaries: "Summaries",
+      noMatches: "No matching memory found.",
       markdown: {
         overview: "Overview",
         userContext: "User context",
@@ -350,6 +477,23 @@ export const enUS: Translations = {
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
+    },
+    account: {
+      profileTitle: "Profile",
+      email: "Email",
+      role: "Role",
+      changePasswordTitle: "Change Password",
+      changePasswordDescription: "Update your account password.",
+      currentPassword: "Current password",
+      newPassword: "New password",
+      confirmNewPassword: "Confirm new password",
+      passwordMismatch: "New passwords do not match",
+      passwordTooShort: "Password must be at least 8 characters",
+      passwordChangedSuccess: "Password changed successfully",
+      networkError: "Network error. Please try again.",
+      updating: "Updating...",
+      updatePassword: "Update Password",
+      signOut: "Sign Out",
     },
     acknowledge: {
       emptyTitle: "Acknowledgements",

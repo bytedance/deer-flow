@@ -1,4 +1,5 @@
 import { FilesIcon, XIcon } from "lucide-react";
+import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { GroupImperativeHandle } from "react-resizable-panels";
 
@@ -27,19 +28,38 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   threadId,
 }) => {
   const { thread } = useThread();
+  const pathname = usePathname();
+  const threadIdRef = useRef(threadId);
   const layoutRef = useRef<GroupImperativeHandle>(null);
+
   const {
     artifacts,
     open: artifactsOpen,
     setOpen: setArtifactsOpen,
     setArtifacts,
     select: selectArtifact,
+    deselect,
     selectedArtifact,
   } = useArtifacts();
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   useEffect(() => {
+    if (threadIdRef.current !== threadId) {
+      threadIdRef.current = threadId;
+      deselect();
+    }
+
+    // Update artifacts from the current thread
     setArtifacts(thread.values.artifacts);
+
+    // DO NOT automatically deselect the artifact when switching threads, because the artifacts auto discovering is not work now.
+    // if (
+    //   selectedArtifact &&
+    //   !thread.values.artifacts?.includes(selectedArtifact)
+    // ) {
+    //   deselect();
+    // }
+
     if (
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
       autoSelectFirstArtifact
@@ -50,8 +70,11 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       }
     }
   }, [
+    threadId,
     autoSelectFirstArtifact,
+    deselect,
     selectArtifact,
+    selectedArtifact,
     setArtifacts,
     thread.values.artifacts,
   ]);
@@ -62,6 +85,10 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     }
     return artifactsOpen;
   }, [artifactsOpen, artifacts]);
+
+  const resizableIdBase = useMemo(() => {
+    return pathname.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  }, [pathname]);
 
   useEffect(() => {
     if (layoutRef.current) {
@@ -75,6 +102,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
 
   return (
     <ResizablePanelGroup
+      id={`${resizableIdBase}-panels`}
       orientation="horizontal"
       defaultLayout={{ chat: 100, artifacts: 0 }}
       groupRef={layoutRef}
@@ -83,6 +111,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
         {children}
       </ResizablePanel>
       <ResizableHandle
+        id={`${resizableIdBase}-separator`}
         className={cn(
           "opacity-33 hover:opacity-100",
           !artifactPanelOpen && "pointer-events-none opacity-0",

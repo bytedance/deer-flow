@@ -1,3 +1,24 @@
+export interface MemoryFact {
+  id: string;
+  content: string;
+  category: string;
+  confidence: number;
+  createdAt: string;
+  source: string;
+}
+
+export interface MemoryFactInput {
+  content: string;
+  category: string;
+  confidence: number;
+}
+
+export interface MemoryFactPatchInput {
+  content?: string;
+  category?: string;
+  confidence?: number;
+}
+
 export interface UserMemory {
   version: string;
   lastUpdated: string;
@@ -29,12 +50,5 @@ export interface UserMemory {
       updatedAt: string;
     };
   };
-  facts: {
-    id: string;
-    content: string;
-    category: string;
-    confidence: number;
-    createdAt: string;
-    source: string;
-  }[];
+  facts: MemoryFact[];
 }

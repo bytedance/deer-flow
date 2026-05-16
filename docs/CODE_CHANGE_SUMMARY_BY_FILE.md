@@ -23,7 +23,7 @@
 
 ---
 
-### 2. `backend/src/agents/lead_agent/prompt.py`
+### 2. `backend/packages/harness/deerflow/agents/lead_agent/prompt.py`
 
 ```diff
 @@ -240,34 +240,8 @@ You have access to skills that provide optimized workflows for specific tasks. E
@@ -76,7 +76,7 @@
 
 ---
 
-### 3. `backend/src/gateway/routers/artifacts.py`
+### 3. `backend/app/gateway/routers/artifacts.py`
 
 ```diff
 @@ -1,12 +1,10 @@
@@ -92,7 +92,7 @@
 +from fastapi import APIRouter, HTTPException, Request
 +from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
  
- from src.gateway.path_utils import resolve_thread_virtual_path
+ from app.gateway.path_utils import resolve_thread_virtual_path
 ```
 
 - **第 1 行**：删除 `import json`。
@@ -176,7 +176,7 @@
 
 ---
 
-### 4. `backend/src/subagents/builtins/general_purpose.py`
+### 4. `backend/packages/harness/deerflow/subagents/builtins/general_purpose.py`
 
 ```diff
 @@ -24,21 +24,10 @@ Do NOT use for simple, single-step operations.""",

@@ -19,7 +19,7 @@ Plan mode is controlled via **runtime configuration** through the `is_plan_mode`
 
 ```python
 from langchain_core.runnables import RunnableConfig
-from src.agents.lead_agent.agent import make_lead_agent
+from deerflow.agents.lead_agent.agent import make_lead_agent
 
 # Enable plan mode via runtime configuration
 config = RunnableConfig(
@@ -72,7 +72,7 @@ The agent will skip using the todo list for:
 
 ```python
 from langchain_core.runnables import RunnableConfig
-from src.agents.lead_agent.agent import make_lead_agent
+from deerflow.agents.lead_agent.agent import make_lead_agent
 
 # Create agent with plan mode ENABLED
 config_with_plan_mode = RunnableConfig(
@@ -101,7 +101,7 @@ You can enable/disable plan mode dynamically for different conversations or task
 
 ```python
 from langchain_core.runnables import RunnableConfig
-from src.agents.lead_agent.agent import make_lead_agent
+from deerflow.agents.lead_agent.agent import make_lead_agent
 
 def create_agent_for_task(task_complexity: str):
     """Create agent with plan mode based on task complexity."""
@@ -154,7 +154,7 @@ make_lead_agent(config)
 ## Implementation Details
 
 ### Agent Module
-- **Location**: `src/agents/lead_agent/agent.py`
+- **Location**: `packages/harness/deerflow/agents/lead_agent/agent.py`
 - **Function**: `_create_todo_list_middleware(is_plan_mode: bool)` - Creates TodoListMiddleware if plan mode is enabled
 - **Function**: `_build_middlewares(config: RunnableConfig)` - Builds middleware chain based on runtime config
 - **Function**: `make_lead_agent(config: RunnableConfig)` - Creates agent with appropriate middlewares
@@ -194,7 +194,7 @@ DeerFlow uses custom `system_prompt` and `tool_description` for the TodoListMidd
 - Comprehensive best practices section
 - Task completion requirements to prevent premature marking
 
-The custom prompts are defined in `_create_todo_list_middleware()` in `/Users/hetao/workspace/deer-flow/backend/src/agents/lead_agent/agent.py:57`.
+The custom prompts are defined in `_create_todo_list_middleware()` in `/Users/hetao/workspace/deer-flow/backend/packages/harness/deerflow/agents/lead_agent/agent.py:57`.
 
 ## Notes
 

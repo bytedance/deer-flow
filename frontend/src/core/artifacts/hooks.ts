@@ -34,5 +34,10 @@ export function useArtifactContent({
     // Cache artifact content for 5 minutes to avoid repeated fetches (especially for .skill ZIP extraction)
     staleTime: 5 * 60 * 1000,
   });
-  return { content: isWriteFile ? content : data, isLoading, error };
+  return {
+    content: isWriteFile ? content : data?.content,
+    url: isWriteFile ? undefined : data?.url,
+    isLoading,
+    error,
+  };
 }

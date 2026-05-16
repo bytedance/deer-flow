@@ -18,15 +18,17 @@ export function ThreadTitle({
   const { t } = useI18n();
   const { isNewThread } = useThreadChat();
   useEffect(() => {
-    const pageTitle = isNewThread
-      ? t.pages.newChat
-      : thread.values?.title && thread.values.title !== "Untitled"
-        ? thread.values.title
-        : t.pages.untitled;
+    let _title = t.pages.untitled;
+
+    if (thread.values?.title) {
+      _title = thread.values.title;
+    } else if (isNewThread) {
+      _title = t.pages.newChat;
+    }
     if (thread.isThreadLoading) {
       document.title = `Loading... - ${t.pages.appName}`;
     } else {
-      document.title = `${pageTitle} - ${t.pages.appName}`;
+      document.title = `${_title} - ${t.pages.appName}`;
     }
   }, [
     isNewThread,

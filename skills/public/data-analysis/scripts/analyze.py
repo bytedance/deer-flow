@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
@@ -21,13 +22,13 @@ try:
     import duckdb
 except ImportError:
     logger.error("duckdb is not installed. Installing...")
-    os.system(f"{sys.executable} -m pip install duckdb openpyxl -q")
+    subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "openpyxl", "-q"], check=True)
     import duckdb
 
 try:
     import openpyxl  # noqa: F401
 except ImportError:
-    os.system(f"{sys.executable} -m pip install openpyxl -q")
+    subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
 
 # Cache directory for persistent DuckDB databases
 CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
@@ -214,14 +215,14 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         non_null_sql = f'SELECT {", ".join(non_null_parts)} FROM "{table_name}"'
         try:
             non_null_counts = con.execute(non_null_sql).fetchone()
-            output_parts.append(f"\nNon-null counts:")
+            output_parts.append("\nNon-null counts:")
             for i, c in enumerate(col_names):
                 output_parts.append(f"  {c}: {non_null_counts[i]} / {row_count}")
         except Exception:
             pass
 
         # Sample data (first 5 rows)
-        output_parts.append(f"\nSample data (first 5 rows):")
+        output_parts.append("\nSample data (first 5 rows):")
         try:
             sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 5').fetchdf()
             output_parts.append(sample.to_string(index=False))
@@ -464,7 +465,7 @@ def action_summary(
                     LIMIT 5
                 """).fetchall()
                 if top_vals:
-                    output_parts.append(f"  top values:")
+                    output_parts.append("  top values:")
                     for val, freq in top_vals:
                         pct = (freq / row_count * 100) if row_count > 0 else 0
                         output_parts.append(f"    {val}: {freq} ({pct:.1f}%)")

@@ -1,11 +1,11 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
+import { Children, type ComponentProps } from "react";
+
 import { Button } from "@/components/ui/button";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { Icon } from "@radix-ui/react-select";
-import type { LucideIcon } from "lucide-react";
-import { Children, type ComponentProps } from "react";
 
 const STAGGER_DELAY_MS = 60;
 const STAGGER_DELAY_MS_OFFSET = 250;
@@ -17,12 +17,15 @@ export const Suggestions = ({
   children,
   ...props
 }: SuggestionsProps) => (
-  <ScrollArea className="overflow-x-auto whitespace-nowrap" {...props}>
-    <div className={cn("flex w-max flex-nowrap items-center gap-2", className)}>
+  <ScrollArea className="overflow-x-auto whitespace-normal" {...props}>
+    <div
+      className={cn("flex w-full flex-wrap items-center gap-2", className)}
+      data-slot="suggestions-list"
+    >
       {Children.map(children, (child, index) =>
         child != null ? (
           <span
-            className="animate-fade-in-up inline-block opacity-0"
+            className="animate-fade-in-up max-w-full opacity-0"
             style={{
               animationDelay: `${STAGGER_DELAY_MS_OFFSET + index * STAGGER_DELAY_MS}ms`,
             }}
@@ -61,7 +64,7 @@ export const Suggestion = ({
   return (
     <Button
       className={cn(
-        "text-muted-foreground cursor-pointer rounded-full px-4 text-xs font-normal",
+        "text-muted-foreground dark:bg-background h-auto max-w-full cursor-pointer rounded-full px-4 py-2 text-center text-xs font-normal whitespace-normal",
         className,
       )}
       onClick={handleClick}
@@ -71,7 +74,7 @@ export const Suggestion = ({
       {...props}
     >
       {Icon && <Icon className="size-4" />}
-      {children || suggestion}
+      {children ?? suggestion}
     </Button>
   );
 };

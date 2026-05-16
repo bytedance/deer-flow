@@ -1,46 +1,59 @@
-import { useCallback, useLayoutEffect, useState } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 
 import {
   DEFAULT_LOCAL_SETTINGS,
-  getLocalSettings,
-  saveLocalSettings,
+  applyThreadModelOverride,
   type LocalSettings,
 } from "./local";
+import {
+  getBaseSettingsSnapshot,
+  getThreadModelSnapshot,
+  subscribe,
+  updateLocalSettings,
+  updateThreadSettings,
+  type LocalSettingsSetter,
+} from "./store";
 
-export function useLocalSettings(): [
-  LocalSettings,
-  (
-    key: keyof LocalSettings,
-    value: Partial<LocalSettings[keyof LocalSettings]>,
-  ) => void,
-] {
-  const [mounted, setMounted] = useState(false);
-  const [state, setState] = useState<LocalSettings>(DEFAULT_LOCAL_SETTINGS);
-  useLayoutEffect(() => {
-    if (!mounted) {
-      setState(getLocalSettings());
-    }
-    setMounted(true);
-  }, [mounted]);
-  const setter = useCallback(
-    (
-      key: keyof LocalSettings,
-      value: Partial<LocalSettings[keyof LocalSettings]>,
-    ) => {
-      if (!mounted) return;
-      setState((prev) => {
-        const newState = {
-          ...prev,
-          [key]: {
-            ...prev[key],
-            ...value,
-          },
-        };
-        saveLocalSettings(newState);
-        return newState;
-      });
-    },
-    [mounted],
+export function useLocalSettings(): [LocalSettings, LocalSettingsSetter] {
+  const settings = useSyncExternalStore(
+    subscribe,
+    getBaseSettingsSnapshot,
+    () => DEFAULT_LOCAL_SETTINGS,
   );
-  return [state, setter];
+
+  const setSettings = useCallback<LocalSettingsSetter>((key, value) => {
+    updateLocalSettings(key, value);
+  }, []);
+
+  return [settings, setSettings];
+}
+
+export function useThreadSettings(
+  threadId: string,
+): [LocalSettings, LocalSettingsSetter] {
+  const baseSettings = useSyncExternalStore(
+    subscribe,
+    getBaseSettingsSnapshot,
+    () => DEFAULT_LOCAL_SETTINGS,
+  );
+
+  const threadModelName = useSyncExternalStore(
+    subscribe,
+    () => getThreadModelSnapshot(threadId),
+    () => undefined,
+  );
+
+  const settings = useMemo(
+    () => applyThreadModelOverride(baseSettings, threadModelName),
+    [baseSettings, threadModelName],
+  );
+
+  const setSettings = useCallback<LocalSettingsSetter>(
+    (key, value) => {
+      updateThreadSettings(threadId, key, value);
+    },
+    [threadId],
+  );
+
+  return [settings, setSettings];
 }

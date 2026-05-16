@@ -1,6 +1,30 @@
+import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import type { Agent, CreateAgentRequest, UpdateAgentRequest } from "./types";
+
+const BACKEND_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
+
+export class AgentNameCheckError extends Error {
+  constructor(
+    message: string,
+    public readonly reason: "backend_unreachable" | "request_failed",
+  ) {
+    super(message);
+    this.name = "AgentNameCheckError";
+  }
+}
+
+export class AgentsApiDisabledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentsApiDisabledError";
+  }
+}
+
+function isAgentsApiDisabledDetail(detail: string | undefined): boolean {
+  return typeof detail === "string" && detail.includes("agents_api.enabled");
+}
 
 export async function listAgents(): Promise<Agent[]> {
   const res = await fetch(`${getBackendBaseURL()}/api/agents`);
@@ -23,6 +47,9 @@ export async function createAgent(request: CreateAgentRequest): Promise<Agent> {
   });
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    if (isAgentsApiDisabledDetail(err.detail)) {
+      throw new AgentsApiDisabledError(err.detail!);
+    }
     throw new Error(err.detail ?? `Failed to create agent: ${res.statusText}`);
   }
   return res.json() as Promise<Agent>;
@@ -54,13 +81,32 @@ export async function deleteAgent(name: string): Promise<void> {
 export async function checkAgentName(
   name: string,
 ): Promise<{ available: boolean; name: string }> {
-  const res = await fetch(
-    `${getBackendBaseURL()}/api/agents/check?name=${encodeURIComponent(name)}`,
-  );
+  let res: Response;
+  try {
+    res = await fetch(
+      `${getBackendBaseURL()}/api/agents/check?name=${encodeURIComponent(name)}`,
+    );
+  } catch {
+    throw new AgentNameCheckError(
+      "Could not reach the DeerFlow backend.",
+      "backend_unreachable",
+    );
+  }
+
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as { detail?: string };
-    throw new Error(
+    if (isAgentsApiDisabledDetail(err.detail)) {
+      throw new AgentsApiDisabledError(err.detail!);
+    }
+    if (BACKEND_UNAVAILABLE_STATUSES.has(res.status)) {
+      throw new AgentNameCheckError(
+        "Could not reach the DeerFlow backend.",
+        "backend_unreachable",
+      );
+    }
+    throw new AgentNameCheckError(
       err.detail ?? `Failed to check agent name: ${res.statusText}`,
+      "request_failed",
     );
   }
   return res.json() as Promise<{ available: boolean; name: string }>;

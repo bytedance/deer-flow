@@ -9,13 +9,13 @@ import {
 } from "@/components/ui/hover-card";
 import { cn } from "@/lib/utils";
 
-export function CitationLink({ 
-  href, 
+export function CitationLink({
+  href,
   children,
-  ...props 
+  ...props
 }: ComponentProps<"a">) {
   const domain = extractDomain(href ?? "");
-  
+
   // Priority: children > domain
   const childrenText =
     typeof children === "string"
@@ -48,12 +48,12 @@ export function CitationLink({
         <div className="p-3">
           <div className="space-y-1">
             {displayText && (
-              <h4 className="truncate font-medium text-sm leading-tight">
+              <h4 className="truncate text-sm leading-tight font-medium">
                 {displayText}
               </h4>
             )}
             {href && (
-              <p className="truncate break-all text-muted-foreground text-xs">
+              <p className="text-muted-foreground truncate text-xs break-all">
                 {href}
               </p>
             )}

@@ -5,22 +5,37 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from pathlib import Path
+from shutil import which
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "docker.sh"
+BASH_CANDIDATES = [
+    Path(r"C:\Program Files\Git\bin\bash.exe"),
+    Path(which("bash")) if which("bash") else None,
+]
+BASH_EXECUTABLE = next(
+    (str(path) for path in BASH_CANDIDATES if path is not None and path.exists() and "WindowsApps" not in str(path)),
+    None,
+)
+
+if BASH_EXECUTABLE is None:
+    pytestmark = pytest.mark.skip(reason="bash is required for docker.sh detection tests")
 
 
 def _detect_mode_with_config(config_content: str) -> str:
     """Write config content into a temp project root and execute detect_sandbox_mode."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_root = Path(tmpdir)
-        (tmp_root / "config.yaml").write_text(config_content)
+        (tmp_root / "config.yaml").write_text(config_content, encoding="utf-8")
 
         command = f"source '{SCRIPT_PATH}' && PROJECT_ROOT='{tmp_root}' && detect_sandbox_mode"
 
         output = subprocess.check_output(
-            ["bash", "-lc", command],
+            [BASH_EXECUTABLE, "-lc", command],
             text=True,
+            encoding="utf-8",
         ).strip()
 
         return output
@@ -30,7 +45,11 @@ def test_detect_mode_defaults_to_local_when_config_missing():
     """No config file should default to local mode."""
     with tempfile.TemporaryDirectory() as tmpdir:
         command = f"source '{SCRIPT_PATH}' && PROJECT_ROOT='{tmpdir}' && detect_sandbox_mode"
-        output = subprocess.check_output(["bash", "-lc", command], text=True).strip()
+        output = subprocess.check_output(
+            [BASH_EXECUTABLE, "-lc", command],
+            text=True,
+            encoding="utf-8",
+        ).strip()
 
     assert output == "local"
 
@@ -39,7 +58,7 @@ def test_detect_mode_local_provider():
     """Local sandbox provider should map to local mode."""
     config = """
 sandbox:
-  use: src.sandbox.local:LocalSandboxProvider
+  use: deerflow.sandbox.local:LocalSandboxProvider
 """.strip()
 
     assert _detect_mode_with_config(config) == "local"
@@ -49,7 +68,7 @@ def test_detect_mode_aio_without_provisioner_url():
     """AIO sandbox without provisioner_url should map to aio mode."""
     config = """
 sandbox:
-  use: src.community.aio_sandbox:AioSandboxProvider
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
 """.strip()
 
     assert _detect_mode_with_config(config) == "aio"
@@ -59,7 +78,7 @@ def test_detect_mode_provisioner_with_url():
     """AIO sandbox with provisioner_url should map to provisioner mode."""
     config = """
 sandbox:
-  use: src.community.aio_sandbox:AioSandboxProvider
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
   provisioner_url: http://provisioner:8002
 """.strip()
 
@@ -70,7 +89,7 @@ def test_detect_mode_ignores_commented_provisioner_url():
     """Commented provisioner_url should not activate provisioner mode."""
     config = """
 sandbox:
-  use: src.community.aio_sandbox:AioSandboxProvider
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
   # provisioner_url: http://provisioner:8002
 """.strip()
 
