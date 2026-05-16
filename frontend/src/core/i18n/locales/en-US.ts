@@ -29,6 +29,7 @@ export const enUS: Translations = {
     close: "Close",
     more: "More",
     search: "Search",
+    loadMore: "Load more",
     download: "Download",
     thinking: "Thinking",
     artifacts: "Artifacts",
@@ -203,8 +204,10 @@ export const enUS: Translations = {
     nameStepNetworkError:
       "Network request failed — check your network or backend connection",
     nameStepCheckError: "Could not verify name availability — please try again",
+    nameStepApiDisabledError:
+      "Custom agent management is not enabled on this server. Please contact your administrator.",
     nameStepBootstrapMessage:
-      "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
+      "The new custom agent name is {name}. Help me design its purpose, behavior, and SOUL.md before saving it.",
     save: "Save agent",
     saving: "Saving agent...",
     saveRequested:
@@ -236,6 +239,7 @@ export const enUS: Translations = {
     reportIssue: "Report a issue",
     contactUs: "Contact us",
     about: "About DeerFlow",
+    logout: "Log out",
   },
 
   // Conversation
@@ -302,9 +306,32 @@ export const enUS: Translations = {
     input: "Input",
     output: "Output",
     total: "Total",
+    view: "Display",
     unavailable:
       "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
     unavailableShort: "No usage returned",
+    note: "Header totals use persisted thread usage, plus visible in-flight usage while a run is still streaming. Per-turn and debug usage come from currently visible messages only. Totals may differ from provider billing pages.",
+    presets: {
+      off: "Off",
+      summary: "Summary",
+      perTurn: "Per turn",
+      debug: "Debug",
+    },
+    presetDescriptions: {
+      off: "Hide token usage in the header and conversation.",
+      summary: "Show only the current conversation total in the header.",
+      perTurn:
+        "Show the header total and one token summary per assistant turn.",
+      debug: "Show the header total and step-level token debugging details.",
+    },
+    finalAnswer: "Final answer",
+    stepTotal: "Step total",
+    sharedAttribution: "Shared across multiple actions in this step",
+    subagent: (description: string) => `Subagent: ${description}`,
+    startTodo: (content: string) => `Start To-do: ${content}`,
+    completeTodo: (content: string) => `Complete To-do: ${content}`,
+    updateTodo: (content: string) => `Update To-do: ${content}`,
+    removeTodo: (content: string) => `Remove To-do: ${content}`,
   },
 
   // Shortcuts
@@ -324,6 +351,7 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     sections: {
+      account: "Account",
       appearance: "Appearance",
       memory: "Memory",
       tools: "Tools",
@@ -449,6 +477,23 @@ export const enUS: Translations = {
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
+    },
+    account: {
+      profileTitle: "Profile",
+      email: "Email",
+      role: "Role",
+      changePasswordTitle: "Change Password",
+      changePasswordDescription: "Update your account password.",
+      currentPassword: "Current password",
+      newPassword: "New password",
+      confirmNewPassword: "Confirm new password",
+      passwordMismatch: "New passwords do not match",
+      passwordTooShort: "Password must be at least 8 characters",
+      passwordChangedSuccess: "Password changed successfully",
+      networkError: "Network error. Please try again.",
+      updating: "Updating...",
+      updatePassword: "Update Password",
+      signOut: "Sign Out",
     },
     acknowledge: {
       emptyTitle: "Acknowledgements",

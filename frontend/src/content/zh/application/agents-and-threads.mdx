@@ -1,0 +1,123 @@
+---
+title: Agent 与线程
+description: 了解 DeerFlow 中 Agent 与线程的关系，以及如何管理自定义 Agent 和对话线程。
+---
+
+import { Callout, Cards, Steps } from "nextra/components";
+
+# Agent 与线程
+
+<Callout type="info" emoji="🤖">
+  Agent
+  是配置单元——它们定义了一组能力。线程是对话实例，带有持久化状态和历史记录。
+</Callout>
+
+## 自定义 Agent
+
+DeerFlow 允许你创建多个具有不同专业领域的自定义 Agent。每个 Agent 使用 DeerFlow Harness 相同的 Lead Agent 运行时，但具有不同的：
+
+- 模型（例如为一个 Agent 使用 GPT-4o，为另一个使用 Claude）
+- 系统提示和指令
+- 技能（例如专注于数据分析的 Agent 只加载数据分析技能）
+- 工具访问（通过工具组）
+
+### 创建自定义 Agent
+
+<Steps>
+
+#### 通过界面
+
+1. 打开 DeerFlow 应用。
+2. 点击侧边栏中的 **Agents**（Agent 管理）。
+3. 点击 **New Agent**（新建 Agent）。
+4. 填写名称、描述和配置。
+5. 保存——Agent 立即可用，无需重启。
+
+#### 通过 API
+
+```bash
+curl -X POST http://localhost:8001/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "display_name": "数据分析师",
+    "description": "专业的数据分析和可视化",
+    "skills": ["data-analysis", "chart-visualization"]
+  }'
+```
+
+</Steps>
+
+### Agent 名称和 Slug
+
+创建 Agent 时，`display_name` 对用户显示，系统内部使用自动派生的 ASCII `slug`（`name` 字段）来标识 Agent。
+
+- `display_name`：对用户显示的任意字符串（例如 "数据分析师"）
+- `name`（slug）：用于 API 和文件路径的 ASCII 标识符（例如 `data-analyst`）
+
+如果派生的 slug 与现有 Agent 冲突，`/api/agents/check` 端点会建议一个唯一的替代名称。
+
+### Agent 存储
+
+自定义 Agent 配置存储在 `backend/agents/{name}/config.yaml` 中。你可以直接编辑这些文件——更改在下次 Agent 调用时自动加载。
+
+## 线程生命周期
+
+线程是对话及其所有相关状态的完整封装：消息历史、产出物、待办列表和检查点数据。
+
+### 创建
+
+线程在你发送第一条消息时创建。线程 ID 是自动生成的 UUID（由前端生成），用于标识所有后续请求中的对话。
+
+### 执行
+
+每次你发送消息，LangGraph 从最新检查点恢复线程状态，运行 Lead Agent，并更新状态。流式事件在 Agent 工作时发送到浏览器。
+
+### 检查点和持久化
+
+DeerFlow 在每次 Agent 轮次后自动保存线程状态（如果配置了检查点器）。这允许：
+
+- 在服务器重启后恢复线程。
+- 在长时间间隔后继续对话。
+- 在出现问题时重放或从特定时间点恢复。
+
+配置检查点器：
+
+```yaml
+checkpointer:
+  type: sqlite
+  connection_string: .deer-flow/checkpoints.db
+```
+
+对于生产高负载环境使用 Redis：
+
+```yaml
+checkpointer:
+  type: redis
+  connection_string: redis://localhost:6379/0
+```
+
+### 线程数据目录
+
+每个线程在 `.deer-flow/threads/{thread_id}/` 下有一个专用目录：
+
+```
+.deer-flow/threads/{thread_id}/
+  user-data/
+    uploads/     ← 用户上传的文件
+    outputs/     ← Agent 生成的产出物
+    workspace/   ← 会话工作文件
+```
+
+删除线程会移除其检查点数据，但用户数据目录会单独管理（取决于删除配置）。
+
+### 恢复线程
+
+线程以其持久化状态自动恢复。从侧边栏选择任何过往线程即可从停止处继续——Agent 会记住所有消息和产出物。
+
+<Cards num={2}>
+  <Cards.Card title="工作区使用" href="/docs/application/workspace-usage" />
+  <Cards.Card
+    title="运维与排障"
+    href="/docs/application/operations-and-troubleshooting"
+  />
+</Cards>
