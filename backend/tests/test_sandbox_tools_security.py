@@ -346,6 +346,104 @@ def test_validate_local_bash_command_paths_blocks_traversal_in_skills() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat ../uploads/secret.txt",
+        "cat subdir/../../secret.txt",
+        "python script.py --input=../secret.txt",
+        "echo ok > ../outputs/result.txt",
+    ],
+)
+def test_validate_local_bash_command_paths_blocks_relative_dotdot_segments(command: str) -> None:
+    with pytest.raises(PermissionError, match="path traversal"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_cd_root_escape() -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory"):
+        validate_local_bash_command_paths("cd / && cat etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_cd_parent_escape() -> None:
+    with pytest.raises(PermissionError, match="path traversal"):
+        validate_local_bash_command_paths("cd .. && cat etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_cd_env_var_escape() -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory"):
+        validate_local_bash_command_paths("cd $HOME && cat .ssh/id_rsa", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_multiline_cd_escape() -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory"):
+        validate_local_bash_command_paths("echo ok\ncd $HOME && cat .ssh/id_rsa", _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "command cd / && cat etc/passwd",
+        "builtin cd $HOME && cat .ssh/id_rsa",
+        "if cd $HOME; then cat .ssh/id_rsa; fi",
+        "{ cd /; cat etc/passwd; }",
+        'echo "$(cd $HOME && cat .ssh/id_rsa)"',
+    ],
+)
+def test_validate_local_bash_command_paths_blocks_complex_cd_escapes(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls /",
+        "ln -s / root && cat root/etc/passwd",
+        "command ls /",
+    ],
+)
+def test_validate_local_bash_command_paths_blocks_bare_root_path(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo cd /",
+        "printf '%s\\n' pushd /",
+    ],
+)
+def test_validate_local_bash_command_paths_allows_cd_words_as_arguments(command: str) -> None:
+    validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_allows_workspace_relative_paths() -> None:
+    validate_local_bash_command_paths(
+        "mkdir -p reports && python script.py data/input.csv > reports/out.txt",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_allows_cd_virtual_workspace_with_relative_paths() -> None:
+    validate_local_bash_command_paths(
+        "cd /mnt/user-data/workspace && cat data/input.csv > reports/out.txt",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_allows_http_url_dotdot_segments() -> None:
+    validate_local_bash_command_paths(
+        "curl https://example.com/packages/../archive.tar.gz -o /mnt/user-data/workspace/archive.tar.gz",
+        _THREAD_DATA,
+    )
+    validate_local_bash_command_paths(
+        "curl http://example.com/packages/../archive.tar.gz -o /mnt/user-data/workspace/archive.tar.gz",
+        _THREAD_DATA,
+    )
+
+
 def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> None:
     runtime = SimpleNamespace(
         state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
@@ -365,6 +463,28 @@ def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> 
     )
 
     assert "Host bash execution is disabled" in result
+
+
+def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("unsafe command should not execute")),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    result = bash_tool.func(
+        runtime=runtime,
+        description="run command",
+        command="cat ../uploads/secret.txt",
+    )
+
+    assert "path traversal" in result
 
 
 # ---------- Skills path tests ----------
@@ -1018,3 +1138,39 @@ def test_str_replace_and_append_on_same_path_should_preserve_both_updates(monkey
 
     assert failures == []
     assert sandbox.content == "ALPHA\ntail\n"
+
+
+def test_file_operation_lock_memory_cleanup() -> None:
+    """Verify that released locks are eventually cleaned up by WeakValueDictionary.
+
+    This ensures that the sandbox component doesn't leak memory over time when
+    operating on many unique file paths.
+    """
+    import gc
+
+    from deerflow.sandbox.file_operation_lock import _FILE_OPERATION_LOCKS, get_file_operation_lock
+
+    class MockSandbox:
+        id = "test_cleanup_sandbox"
+
+    test_path = "/tmp/deer-flow/memory_leak_test_file.txt"
+    lock_key = (MockSandbox.id, test_path)
+
+    # 确保测试开始前 key 不存在
+    assert lock_key not in _FILE_OPERATION_LOCKS
+
+    def _use_lock_and_release() -> None:
+        # Create and acquire the lock within this scope
+        lock = get_file_operation_lock(MockSandbox(), test_path)
+        with lock:
+            pass
+        # As soon as this function returns, the local 'lock' variable is destroyed.
+        # Its reference count goes to zero, triggering WeakValueDictionary cleanup.
+
+    _use_lock_and_release()
+
+    # Force a garbage collection to be absolutely sure
+    gc.collect()
+
+    # 检查特定 key 是否被清理（而不是检查总长度）
+    assert lock_key not in _FILE_OPERATION_LOCKS

@@ -3,6 +3,7 @@
 import asyncio
 import re
 
+import anyio
 import pytest
 
 from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, make_stream_bridge
@@ -44,7 +45,7 @@ async def test_publish_subscribe(bridge: MemoryStreamBridge):
 async def test_heartbeat(bridge: MemoryStreamBridge):
     """When no events arrive within the heartbeat interval, yield a heartbeat."""
     run_id = "run-heartbeat"
-    bridge._get_or_create_queue(run_id)  # ensure queue exists
+    bridge._get_or_create_stream(run_id)  # ensure stream exists
 
     received = []
 
@@ -61,37 +62,35 @@ async def test_heartbeat(bridge: MemoryStreamBridge):
 
 @pytest.mark.anyio
 async def test_cleanup(bridge: MemoryStreamBridge):
-    """After cleanup, the run's queue is removed."""
+    """After cleanup, the run's stream/event log is removed."""
     run_id = "run-cleanup"
     await bridge.publish(run_id, "test", {})
-    assert run_id in bridge._queues
+    assert run_id in bridge._streams
 
     await bridge.cleanup(run_id)
-    assert run_id not in bridge._queues
+    assert run_id not in bridge._streams
     assert run_id not in bridge._counters
 
 
 @pytest.mark.anyio
-async def test_backpressure():
-    """With maxsize=1, publish should not block forever."""
+async def test_history_is_bounded():
+    """Retained history should be bounded by queue_maxsize."""
     bridge = MemoryStreamBridge(queue_maxsize=1)
     run_id = "run-bp"
 
     await bridge.publish(run_id, "first", {})
+    await bridge.publish(run_id, "second", {})
+    await bridge.publish_end(run_id)
 
-    # Second publish should either succeed after queue drains or warn+drop
-    # It should not hang indefinitely
-    async def publish_second():
-        await bridge.publish(run_id, "second", {})
+    received = []
+    async for entry in bridge.subscribe(run_id, heartbeat_interval=1.0):
+        received.append(entry)
+        if entry is END_SENTINEL:
+            break
 
-    # Give it a generous timeout — the publish timeout is 30s but we don't
-    # want to wait that long in tests.  Instead, drain the queue first.
-    async def drain():
-        await asyncio.sleep(0.05)
-        bridge._queues[run_id].get_nowait()
-
-    await asyncio.gather(publish_second(), drain())
-    assert bridge._queues[run_id].qsize() == 1
+    assert len(received) == 2
+    assert received[0].event == "second"
+    assert received[1] is END_SENTINEL
 
 
 @pytest.mark.anyio
@@ -140,54 +139,116 @@ async def test_event_id_format(bridge: MemoryStreamBridge):
     assert re.match(r"^\d+-\d+$", event.id), f"Expected timestamp-seq format, got {event.id}"
 
 
+@pytest.mark.anyio
+async def test_subscribe_replays_after_last_event_id(bridge: MemoryStreamBridge):
+    """Reconnect should replay buffered events after the provided Last-Event-ID."""
+    run_id = "run-replay"
+    await bridge.publish(run_id, "metadata", {"run_id": run_id})
+    await bridge.publish(run_id, "values", {"step": 1})
+    await bridge.publish(run_id, "updates", {"step": 2})
+    await bridge.publish_end(run_id)
+
+    first_pass = []
+    async for entry in bridge.subscribe(run_id, heartbeat_interval=1.0):
+        first_pass.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    received = []
+    async for entry in bridge.subscribe(
+        run_id,
+        last_event_id=first_pass[0].id,
+        heartbeat_interval=1.0,
+    ):
+        received.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    assert [entry.event for entry in received[:-1]] == ["values", "updates"]
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_slow_subscriber_does_not_skip_after_buffer_trim():
+    """A slow subscriber should continue from the correct absolute offset."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-slow-subscriber"
+    await bridge.publish(run_id, "e1", {"step": 1})
+    await bridge.publish(run_id, "e2", {"step": 2})
+
+    stream = bridge._streams[run_id]
+    e1_id = stream.events[0].id
+    assert stream.start_offset == 0
+
+    await bridge.publish(run_id, "e3", {"step": 3})  # trims e1
+    assert stream.start_offset == 1
+    assert [entry.event for entry in stream.events] == ["e2", "e3"]
+
+    resumed_after_e1 = []
+    async for entry in bridge.subscribe(
+        run_id,
+        last_event_id=e1_id,
+        heartbeat_interval=1.0,
+    ):
+        resumed_after_e1.append(entry)
+        if len(resumed_after_e1) == 2:
+            break
+
+    assert [entry.event for entry in resumed_after_e1] == ["e2", "e3"]
+    e2_id = resumed_after_e1[0].id
+
+    await bridge.publish_end(run_id)
+
+    received = []
+    async for entry in bridge.subscribe(
+        run_id,
+        last_event_id=e2_id,
+        heartbeat_interval=1.0,
+    ):
+        received.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    assert [entry.event for entry in received[:-1]] == ["e3"]
+    assert received[-1] is END_SENTINEL
+
+
 # ---------------------------------------------------------------------------
-# END sentinel guarantee tests
+# Stream termination tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_end_sentinel_delivered_when_queue_full():
-    """END sentinel must always be delivered, even when the queue is completely full.
-
-    This is the critical regression test for the bug where publish_end()
-    would silently drop the END sentinel when the queue was full, causing
-    subscribe() to hang forever and leaking resources.
-    """
+async def test_publish_end_terminates_even_when_history_is_full():
+    """publish_end() should terminate subscribers without mutating retained history."""
     bridge = MemoryStreamBridge(queue_maxsize=2)
-    run_id = "run-end-full"
+    run_id = "run-end-history-full"
 
-    # Fill the queue to capacity
     await bridge.publish(run_id, "event-1", {"n": 1})
     await bridge.publish(run_id, "event-2", {"n": 2})
-    assert bridge._queues[run_id].full()
+    stream = bridge._streams[run_id]
+    assert [entry.event for entry in stream.events] == ["event-1", "event-2"]
 
-    # publish_end should succeed by evicting old events
     await bridge.publish_end(run_id)
+    assert [entry.event for entry in stream.events] == ["event-1", "event-2"]
 
-    # Subscriber must receive END_SENTINEL
     events = []
     async for entry in bridge.subscribe(run_id, heartbeat_interval=0.1):
         events.append(entry)
         if entry is END_SENTINEL:
             break
 
-    assert any(e is END_SENTINEL for e in events), "END sentinel was not delivered"
+    assert [entry.event for entry in events[:-1]] == ["event-1", "event-2"]
+    assert events[-1] is END_SENTINEL
 
 
 @pytest.mark.anyio
-async def test_end_sentinel_evicts_oldest_events():
-    """When queue is full, publish_end evicts the oldest events to make room."""
-    bridge = MemoryStreamBridge(queue_maxsize=1)
-    run_id = "run-evict"
-
-    # Fill queue with one event
-    await bridge.publish(run_id, "will-be-evicted", {})
-    assert bridge._queues[run_id].full()
-
-    # publish_end must succeed
+async def test_publish_end_without_history_yields_end_immediately():
+    """Subscribers should still receive END when a run completes without events."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-end-empty"
     await bridge.publish_end(run_id)
 
-    # The only event we should get is END_SENTINEL (the regular event was evicted)
     events = []
     async for entry in bridge.subscribe(run_id, heartbeat_interval=0.1):
         events.append(entry)
@@ -199,8 +260,8 @@ async def test_end_sentinel_evicts_oldest_events():
 
 
 @pytest.mark.anyio
-async def test_end_sentinel_no_eviction_when_space_available():
-    """When queue has space, publish_end should not evict anything."""
+async def test_publish_end_preserves_history_when_space_available():
+    """When history has spare capacity, publish_end should preserve prior events."""
     bridge = MemoryStreamBridge(queue_maxsize=10)
     run_id = "run-no-evict"
 
@@ -244,87 +305,23 @@ async def test_concurrent_tasks_end_sentinel():
                 return events
         return events  # pragma: no cover
 
-    # Run producers and consumers concurrently
     run_ids = [f"concurrent-{i}" for i in range(num_runs)]
-    producers = [producer(rid) for rid in run_ids]
-    consumers = [consumer(rid) for rid in run_ids]
+    results: dict[str, list] = {}
 
-    # Start consumers first, then producers
-    consumer_tasks = [asyncio.create_task(c) for c in consumers]
-    await asyncio.gather(*producers)
+    async def consume_into(run_id: str) -> None:
+        results[run_id] = await consumer(run_id)
 
-    results = await asyncio.wait_for(
-        asyncio.gather(*consumer_tasks),
-        timeout=10.0,
-    )
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as task_group:
+            for run_id in run_ids:
+                task_group.start_soon(consume_into, run_id)
+            await anyio.sleep(0)
+            for run_id in run_ids:
+                task_group.start_soon(producer, run_id)
 
-    for i, events in enumerate(results):
-        assert events[-1] is END_SENTINEL, f"Run {run_ids[i]} did not receive END sentinel"
-
-
-# ---------------------------------------------------------------------------
-# Drop counter tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.anyio
-async def test_dropped_count_tracking():
-    """Dropped events should be tracked per run_id."""
-    bridge = MemoryStreamBridge(queue_maxsize=1)
-    run_id = "run-drop-count"
-
-    # Fill the queue
-    await bridge.publish(run_id, "first", {})
-
-    # This publish will time out and be dropped (we patch timeout to be instant)
-    # Instead, we verify the counter after publish_end eviction
-    await bridge.publish_end(run_id)
-
-    # dropped_count tracks publish() drops, not publish_end evictions
-    assert bridge.dropped_count(run_id) == 0
-
-    # cleanup should also clear the counter
-    await bridge.cleanup(run_id)
-    assert bridge.dropped_count(run_id) == 0
-
-
-@pytest.mark.anyio
-async def test_dropped_total():
-    """dropped_total should sum across all runs."""
-    bridge = MemoryStreamBridge(queue_maxsize=256)
-
-    # No drops yet
-    assert bridge.dropped_total == 0
-
-    # Manually set some counts to verify the property
-    bridge._dropped_counts["run-a"] = 3
-    bridge._dropped_counts["run-b"] = 7
-    assert bridge.dropped_total == 10
-
-
-@pytest.mark.anyio
-async def test_cleanup_clears_dropped_counts():
-    """cleanup() should clear the dropped counter for the run."""
-    bridge = MemoryStreamBridge(queue_maxsize=256)
-    run_id = "run-cleanup-drops"
-
-    bridge._get_or_create_queue(run_id)
-    bridge._dropped_counts[run_id] = 5
-
-    await bridge.cleanup(run_id)
-    assert run_id not in bridge._dropped_counts
-
-
-@pytest.mark.anyio
-async def test_close_clears_dropped_counts():
-    """close() should clear all dropped counters."""
-    bridge = MemoryStreamBridge(queue_maxsize=256)
-    bridge._dropped_counts["run-x"] = 10
-    bridge._dropped_counts["run-y"] = 20
-
-    await bridge.close()
-    assert bridge.dropped_total == 0
-    assert len(bridge._dropped_counts) == 0
+    for run_id in run_ids:
+        events = results[run_id]
+        assert events[-1] is END_SENTINEL, f"Run {run_id} did not receive END sentinel"
 
 
 # ---------------------------------------------------------------------------

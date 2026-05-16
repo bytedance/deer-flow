@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 
 const BACKEND_BASE_URL =
-  process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "http://127.0.0.1:8010";
+  process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "http://127.0.0.1:8001";
 
 function buildBackendUrl(pathname: string) {
   return new URL(pathname, BACKEND_BASE_URL);

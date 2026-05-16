@@ -137,6 +137,8 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | Container image for sandbox Pods |
 | `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
+| `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
+| `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: threads/{thread_id}/user-data` |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
@@ -309,7 +311,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 ## Security Considerations
 
-1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods. Ensure these paths contain only trusted data.
+1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods by default. Ensure these paths contain only trusted data. For production, prefer PVC-based volumes (set `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME`) to avoid node-specific data loss risks.
 
 2. **Resource Limits**: Each sandbox Pod has CPU, memory, and storage limits to prevent resource exhaustion.
 
@@ -322,7 +324,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 ## Future Enhancements
 
 - [ ] Support for custom resource requests/limits per sandbox
-- [ ] PersistentVolume support for larger data requirements
+- [x] PersistentVolume support for larger data requirements
 - [ ] Automatic cleanup of stale sandboxes (timeout-based)
 - [ ] Metrics and monitoring (Prometheus integration)
 - [ ] Multi-cluster support (route to different K8s clusters)

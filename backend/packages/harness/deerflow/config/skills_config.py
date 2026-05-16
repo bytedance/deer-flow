@@ -1,19 +1,28 @@
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from deerflow.config.runtime_paths import project_root, resolve_path
 
-def _default_repo_root() -> Path:
-    """Resolve the repo root without relying on the current working directory."""
-    return Path(__file__).resolve().parents[5]
+
+def _legacy_skills_candidates() -> tuple[Path, ...]:
+    """Return source-tree skills locations for monorepo compatibility."""
+    backend_dir = Path(__file__).resolve().parents[4]
+    repo_root = backend_dir.parent
+    return (repo_root / "skills",)
 
 
 class SkillsConfig(BaseModel):
     """Configuration for skills system"""
 
+    use: str = Field(
+        default="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        description="Class path of the SkillStorage implementation.",
+    )
     path: str | None = Field(
         default=None,
-        description="Path to skills directory. If not specified, defaults to ../skills relative to backend directory",
+        description=("Path to skills directory. If not specified, defaults to `skills` under the caller project root, falling back to the legacy repo-root location for monorepo compatibility."),
     )
     container_path: str = Field(
         default="/mnt/skills",
@@ -24,21 +33,30 @@ class SkillsConfig(BaseModel):
         """
         Get the resolved skills directory path.
 
-        Returns:
-            Path to the skills directory
+        Resolution order:
+            1. Explicit ``path`` field
+            2. ``DEER_FLOW_SKILLS_PATH`` environment variable
+            3. ``skills`` under the caller project root (``project_root()``)
+            4. Legacy repo-root candidates for monorepo compatibility (``_legacy_skills_candidates``)
+
+        When none of (3) or (4) exist on disk, the project-root default is returned so callers
+        can still surface a stable "no skills" location without raising.
         """
         if self.path:
-            # Use configured path (can be absolute or relative)
-            path = Path(self.path)
-            if not path.is_absolute():
-                # If relative, resolve from the repo root for deterministic behavior.
-                path = _default_repo_root() / path
-            return path.resolve()
-        else:
-            # Default: ../skills relative to backend directory
-            from deerflow.skills.loader import get_skills_root_path
+            # Use configured path (can be absolute or relative to project root)
+            return resolve_path(self.path)
+        if env_path := os.getenv("DEER_FLOW_SKILLS_PATH"):
+            return resolve_path(env_path)
 
-            return get_skills_root_path()
+        project_default = project_root() / "skills"
+        if project_default.is_dir():
+            return project_default
+
+        for candidate in _legacy_skills_candidates():
+            if candidate.is_dir():
+                return candidate
+
+        return project_default
 
     def get_skill_container_path(self, skill_name: str, category: str = "public") -> str:
         """

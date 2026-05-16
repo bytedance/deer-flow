@@ -1,22 +1,19 @@
 """Middleware for injecting image details into conversation before LLM call."""
 
 import logging
-from typing import NotRequired, override
+from typing import override
 
-from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
-from deerflow.agents.thread_state import ViewedImageData
+from deerflow.agents.thread_state import ThreadState
 
 logger = logging.getLogger(__name__)
 
 
-class ViewImageMiddlewareState(AgentState):
-    """Compatible with the `ThreadState` schema."""
-
-    viewed_images: NotRequired[dict[str, ViewedImageData] | None]
+class ViewImageMiddlewareState(ThreadState):
+    """Reuse the thread state so reducer-backed keys keep their annotations."""
 
 
 class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):

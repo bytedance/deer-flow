@@ -96,3 +96,19 @@ class SandboxBackend(ABC):
             SandboxInfo if found and healthy, None otherwise.
         """
         ...
+
+    def list_running(self) -> list[SandboxInfo]:
+        """Enumerate all running sandboxes managed by this backend.
+
+        Used for startup reconciliation: when the process restarts, it needs
+        to discover containers started by previous processes so they can be
+        adopted into the warm pool or destroyed if idle too long.
+
+        The default implementation returns an empty list, which is correct
+        for backends that don't manage local containers (e.g., RemoteSandboxBackend
+        delegates lifecycle to the provisioner which handles its own cleanup).
+
+        Returns:
+            A list of SandboxInfo for all currently running sandboxes.
+        """
+        return []

@@ -22,6 +22,18 @@ const meta: MetaRecord = {
   workspace: {
     type: "page",
   },
+  blog: {
+    type: "page",
+  },
+  posts: {
+    type: "page",
+  },
+  login: {
+    type: "page",
+  },
+  setup: {
+    type: "page",
+  },
 };
 
 export default meta;

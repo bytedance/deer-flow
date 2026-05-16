@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.tools.tools import get_available_tools
 
 
@@ -79,3 +80,8 @@ def test_get_available_tools_keeps_bash_for_aio_sandbox(monkeypatch):
 
     assert "bash" in names
     assert "ls" in names
+
+
+def test_is_host_bash_allowed_defaults_false_when_sandbox_missing():
+    assert is_host_bash_allowed(SimpleNamespace()) is False
+    assert is_host_bash_allowed(SimpleNamespace(sandbox=None)) is False

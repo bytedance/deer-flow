@@ -34,7 +34,9 @@ def _runtime(thread_id: str | None = THREAD_ID) -> MagicMock:
 
 
 def _uploads_dir(tmp_path: Path, thread_id: str = THREAD_ID) -> Path:
-    d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id)
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -256,8 +258,10 @@ class TestBeforeAgent:
 
         assert result is not None
         updated_msg = result["messages"][-1]
-        assert "<uploaded_files>" in updated_msg.content
-        assert "analyse this" in updated_msg.content
+        assert isinstance(updated_msg.content, list)
+        combined_text = "\n".join(block.get("text", "") for block in updated_msg.content if isinstance(block, dict))
+        assert "<uploaded_files>" in combined_text
+        assert "analyse this" in combined_text
 
     def test_preserves_additional_kwargs_on_updated_message(self, tmp_path):
         mw = _middleware(tmp_path)

@@ -11,6 +11,8 @@ _singleton: LocalSandbox | None = None
 
 
 class LocalSandboxProvider(SandboxProvider):
+    uses_thread_data_mounts = True
+
     def __init__(self):
         """Initialize the local sandbox provider with path mappings."""
         self._path_mappings = self._setup_path_mappings()
@@ -117,3 +119,13 @@ class LocalSandboxProvider(SandboxProvider):
         # For Docker-based providers (e.g., AioSandboxProvider), cleanup
         # happens at application shutdown via the shutdown() method.
         pass
+
+    def reset(self) -> None:
+        # reset_sandbox_provider() must also clear the module singleton.
+        global _singleton
+        _singleton = None
+
+    def shutdown(self) -> None:
+        # LocalSandboxProvider has no extra resources beyond the shared
+        # singleton, so shutdown uses the same cleanup path as reset.
+        self.reset()

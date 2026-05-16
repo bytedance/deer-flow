@@ -50,11 +50,19 @@ class TestSubagentOverrideConfig:
         override = SubagentOverrideConfig()
         assert override.timeout_seconds is None
         assert override.max_turns is None
+        assert override.model is None
 
     def test_explicit_value(self):
-        override = SubagentOverrideConfig(timeout_seconds=300, max_turns=42)
+        override = SubagentOverrideConfig(timeout_seconds=300, max_turns=42, model="gpt-5.4")
         assert override.timeout_seconds == 300
         assert override.max_turns == 42
+        assert override.model == "gpt-5.4"
+
+    def test_model_accepts_any_non_empty_string(self):
+        """Model name is a free-form non-empty string; cross-reference validation
+        against the `models:` section happens at registry lookup time."""
+        override = SubagentOverrideConfig(model="any-arbitrary-model-name")
+        assert override.model == "any-arbitrary-model-name"
 
     def test_rejects_zero(self):
         with pytest.raises(ValueError):
@@ -67,6 +75,13 @@ class TestSubagentOverrideConfig:
             SubagentOverrideConfig(timeout_seconds=-1)
         with pytest.raises(ValueError):
             SubagentOverrideConfig(max_turns=-1)
+
+    def test_rejects_empty_model(self):
+        """Empty-string model would silently bypass the `is not None` check and
+        reach `create_chat_model(name="")` as a runtime error. Reject at load time
+        instead, symmetric with the `ge=1` guard on timeout_seconds / max_turns."""
+        with pytest.raises(ValueError):
+            SubagentOverrideConfig(model="")
 
     def test_minimum_valid_value(self):
         override = SubagentOverrideConfig(timeout_seconds=1, max_turns=1)
@@ -165,6 +180,42 @@ class TestRuntimeResolution:
         assert config.get_max_turns_for("general-purpose", 100) == 200
         assert config.get_max_turns_for("bash", 60) == 80
 
+    def test_get_model_for_returns_none_when_no_override(self):
+        """No per-agent model override -> returns None so callers fall back to builtin/parent."""
+        config = SubagentsAppConfig(timeout_seconds=900)
+        assert config.get_model_for("general-purpose") is None
+        assert config.get_model_for("bash") is None
+        assert config.get_model_for("unknown-agent") is None
+
+    def test_get_model_for_returns_override_when_set(self):
+        config = SubagentsAppConfig(
+            timeout_seconds=900,
+            agents={
+                "general-purpose": SubagentOverrideConfig(model="qwen3.5-35b-a3b"),
+                "bash": SubagentOverrideConfig(model="gpt-5.4"),
+            },
+        )
+        assert config.get_model_for("general-purpose") == "qwen3.5-35b-a3b"
+        assert config.get_model_for("bash") == "gpt-5.4"
+
+    def test_get_model_for_returns_none_for_omitted_agent(self):
+        """An agent not listed in overrides returns None even when other agents have model overrides."""
+        config = SubagentsAppConfig(
+            timeout_seconds=900,
+            agents={"bash": SubagentOverrideConfig(model="gpt-5.4")},
+        )
+        assert config.get_model_for("general-purpose") is None
+
+    def test_get_model_for_handles_explicit_none(self):
+        """Explicit model=None in the override is equivalent to no override."""
+        config = SubagentsAppConfig(
+            timeout_seconds=900,
+            agents={"bash": SubagentOverrideConfig(timeout_seconds=300, model=None)},
+        )
+        assert config.get_model_for("bash") is None
+        # Timeout override is still applied even when model is None.
+        assert config.get_timeout_for("bash") == 300
+
 
 # ---------------------------------------------------------------------------
 # load_subagents_config_from_dict / get_subagents_app_config singleton
@@ -210,6 +261,22 @@ class TestLoadSubagentsConfig:
         assert cfg.get_timeout_for("bash") == 120
         assert cfg.get_max_turns_for("general-purpose", 100) == 100
         assert cfg.get_max_turns_for("bash", 60) == 70
+
+    def test_load_with_model_overrides(self):
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {
+                    "general-purpose": {"model": "qwen3.5-35b-a3b"},
+                    "bash": {"model": "gpt-5.4", "timeout_seconds": 300},
+                },
+            }
+        )
+        cfg = get_subagents_app_config()
+        assert cfg.get_model_for("general-purpose") == "qwen3.5-35b-a3b"
+        assert cfg.get_model_for("bash") == "gpt-5.4"
+        # Other override fields on the same agent must still load correctly.
+        assert cfg.get_timeout_for("bash") == 300
 
     def test_load_empty_dict_uses_defaults(self):
         load_subagents_config_from_dict({})
@@ -295,6 +362,97 @@ class TestRegistryGetSubagentConfig:
         gp_config = get_subagent_config("general-purpose")
         assert gp_config.timeout_seconds == 900
         assert gp_config.max_turns == 120
+
+    def test_per_agent_model_override_applied(self):
+        from deerflow.subagents.registry import get_subagent_config
+
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {"bash": {"model": "gpt-5.4-mini"}},
+            }
+        )
+        bash_config = get_subagent_config("bash")
+        assert bash_config.model == "gpt-5.4-mini"
+
+    def test_omitted_model_keeps_builtin_value(self):
+        """When config.yaml has no `model` field for an agent, the builtin default must be preserved."""
+        from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+        from deerflow.subagents.registry import get_subagent_config
+
+        builtin_bash_model = BUILTIN_SUBAGENTS["bash"].model
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {"bash": {"timeout_seconds": 300}},
+            }
+        )
+        bash_config = get_subagent_config("bash")
+        assert bash_config.model == builtin_bash_model
+
+    def test_explicit_null_model_keeps_builtin_value(self):
+        """An explicit `model: null` in config.yaml is equivalent to omission — builtin wins."""
+        from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+        from deerflow.subagents.registry import get_subagent_config
+
+        builtin_bash_model = BUILTIN_SUBAGENTS["bash"].model
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {"bash": {"model": None}},
+            }
+        )
+        bash_config = get_subagent_config("bash")
+        assert bash_config.model == builtin_bash_model
+
+    def test_model_override_does_not_affect_other_agents(self):
+        from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+        from deerflow.subagents.registry import get_subagent_config
+
+        builtin_gp_model = BUILTIN_SUBAGENTS["general-purpose"].model
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {"bash": {"model": "gpt-5.4"}},
+            }
+        )
+        gp_config = get_subagent_config("general-purpose")
+        assert gp_config.model == builtin_gp_model
+
+    def test_model_override_preserves_other_fields(self):
+        """Applying a model override must leave timeout_seconds / max_turns / name intact."""
+        from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+        from deerflow.subagents.registry import get_subagent_config
+
+        original = BUILTIN_SUBAGENTS["bash"]
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {"bash": {"model": "gpt-5.4-mini"}},
+            }
+        )
+        overridden = get_subagent_config("bash")
+        assert overridden.model == "gpt-5.4-mini"
+        assert overridden.name == original.name
+        assert overridden.description == original.description
+        # No timeout / max_turns override was set, so they use global default / builtin.
+        assert overridden.timeout_seconds == 900
+        assert overridden.max_turns == original.max_turns
+
+    def test_model_override_does_not_mutate_builtin(self):
+        """Registry must return a new object, leaving the builtin default intact."""
+        from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+        from deerflow.subagents.registry import get_subagent_config
+
+        original_bash_model = BUILTIN_SUBAGENTS["bash"].model
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 900,
+                "agents": {"bash": {"model": "gpt-5.4-mini"}},
+            }
+        )
+        _ = get_subagent_config("bash")
+        assert BUILTIN_SUBAGENTS["bash"].model == original_bash_model
 
     def test_builtin_config_object_is_not_mutated(self):
         """Registry must return a new object, leaving the builtin default intact."""

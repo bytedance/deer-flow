@@ -74,5 +74,10 @@ class SandboxConfig(BaseModel):
         ge=0,
         description="Maximum characters to keep from read_file tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
     )
+    ls_output_max_chars: int = Field(
+        default=20000,
+        ge=0,
+        description="Maximum characters to keep from ls tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
+    )
 
     model_config = ConfigDict(extra="allow")

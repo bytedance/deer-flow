@@ -6,7 +6,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from typing import Optional
+from pathlib import Path
 
 
 def configure_stdio() -> None:
@@ -20,7 +20,7 @@ def configure_stdio() -> None:
                 continue
 
 
-def run_command(command: list[str]) -> Optional[str]:
+def run_command(command: list[str]) -> str | None:
     """Run a command and return trimmed stdout, or None on failure."""
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True, shell=False)
@@ -29,19 +29,25 @@ def run_command(command: list[str]) -> Optional[str]:
     return result.stdout.strip() or result.stderr.strip()
 
 
-def find_pnpm_command() -> Optional[list[str]]:
+def find_pnpm_command() -> list[str] | None:
     """Return a pnpm-compatible command that exists on this machine."""
-    candidates = [["pnpm"], ["pnpm.cmd"]]
-    if shutil.which("corepack"):
-        candidates.append(["corepack", "pnpm"])
+    pnpm_path = shutil.which("pnpm")
+    if pnpm_path:
+        return [str(Path(pnpm_path))]
 
-    for command in candidates:
-        if shutil.which(command[0]):
-            return command
+    pnpm_cmd_path = shutil.which("pnpm.cmd")
+    if pnpm_cmd_path:
+        return [str(Path(pnpm_cmd_path))]
+
+    corepack_path = shutil.which("corepack")
+    if not corepack_path:
+        corepack_path = shutil.which("corepack.cmd")
+    if corepack_path:
+        return [str(Path(corepack_path)), "pnpm"]
     return None
 
 
-def parse_node_major(version_text: str) -> Optional[int]:
+def parse_node_major(version_text: str) -> int | None:
     version = version_text.strip()
     if version.startswith("v"):
         version = version[1:]
@@ -89,7 +95,7 @@ def main() -> int:
     if pnpm_command:
         pnpm_version = run_command([*pnpm_command, "-v"])
         if pnpm_version:
-            if pnpm_command[0] == "corepack":
+            if Path(pnpm_command[0]).stem.lower() == "corepack":
                 print(f"  OK pnpm {pnpm_version} (via Corepack)")
             else:
                 print(f"  OK pnpm {pnpm_version}")
@@ -145,7 +151,9 @@ def main() -> int:
         print()
         print("You can now run:")
         print("  make install  - Install project dependencies")
-        print("  make config   - Generate local config files")
+        print("  make setup    - Create a minimal working config (recommended)")
+        print("  make config   - Copy the full config template (manual setup)")
+        print("  make doctor   - Verify config and dependency health")
         print("  make dev      - Start development server")
         print("  make start    - Start production server")
         return 0

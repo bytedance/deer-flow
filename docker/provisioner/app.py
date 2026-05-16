@@ -60,6 +60,8 @@ SANDBOX_IMAGE = os.environ.get(
 )
 SKILLS_HOST_PATH = os.environ.get("SKILLS_HOST_PATH", "/skills")
 THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
+SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
+USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
 SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 
 # Path to the kubeconfig *inside* the provisioner container.
@@ -243,6 +245,64 @@ def _sandbox_url(node_port: int) -> str:
     return f"http://{NODE_HOST}:{node_port}"
 
 
+def _build_volumes(thread_id: str) -> list[k8s_client.V1Volume]:
+    """Build volume list: PVC when configured, otherwise hostPath."""
+    if SKILLS_PVC_NAME:
+        skills_vol = k8s_client.V1Volume(
+            name="skills",
+            persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
+                claim_name=SKILLS_PVC_NAME,
+                read_only=True,
+            ),
+        )
+    else:
+        skills_vol = k8s_client.V1Volume(
+            name="skills",
+            host_path=k8s_client.V1HostPathVolumeSource(
+                path=SKILLS_HOST_PATH,
+                type="Directory",
+            ),
+        )
+
+    if USERDATA_PVC_NAME:
+        userdata_vol = k8s_client.V1Volume(
+            name="user-data",
+            persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
+                claim_name=USERDATA_PVC_NAME,
+            ),
+        )
+    else:
+        userdata_vol = k8s_client.V1Volume(
+            name="user-data",
+            host_path=k8s_client.V1HostPathVolumeSource(
+                path=join_host_path(THREADS_HOST_PATH, thread_id, "user-data"),
+                type="DirectoryOrCreate",
+            ),
+        )
+
+    return [skills_vol, userdata_vol]
+
+
+def _build_volume_mounts(thread_id: str) -> list[k8s_client.V1VolumeMount]:
+    """Build volume mount list, using subPath for PVC user-data."""
+    userdata_mount = k8s_client.V1VolumeMount(
+        name="user-data",
+        mount_path="/mnt/user-data",
+        read_only=False,
+    )
+    if USERDATA_PVC_NAME:
+        userdata_mount.sub_path = f"threads/{thread_id}/user-data"
+
+    return [
+        k8s_client.V1VolumeMount(
+            name="skills",
+            mount_path="/mnt/skills",
+            read_only=True,
+        ),
+        userdata_mount,
+    ]
+
+
 def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     thread_id = _validate_thread_id(thread_id)
@@ -302,40 +362,14 @@ def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
                             "ephemeral-storage": "500Mi",
                         },
                     ),
-                    volume_mounts=[
-                        k8s_client.V1VolumeMount(
-                            name="skills",
-                            mount_path="/mnt/skills",
-                            read_only=True,
-                        ),
-                        k8s_client.V1VolumeMount(
-                            name="user-data",
-                            mount_path="/mnt/user-data",
-                            read_only=False,
-                        ),
-                    ],
+                    volume_mounts=_build_volume_mounts(thread_id),
                     security_context=k8s_client.V1SecurityContext(
                         privileged=False,
                         allow_privilege_escalation=True,
                     ),
                 )
             ],
-            volumes=[
-                k8s_client.V1Volume(
-                    name="skills",
-                    host_path=k8s_client.V1HostPathVolumeSource(
-                        path=SKILLS_HOST_PATH,
-                        type="Directory",
-                    ),
-                ),
-                k8s_client.V1Volume(
-                    name="user-data",
-                    host_path=k8s_client.V1HostPathVolumeSource(
-                        path=join_host_path(THREADS_HOST_PATH, thread_id, "user-data"),
-                        type="DirectoryOrCreate",
-                    ),
-                ),
-            ],
+            volumes=_build_volumes(thread_id),
             restart_policy="Always",
         ),
     )

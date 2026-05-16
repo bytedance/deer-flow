@@ -9,6 +9,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from deerflow.config.agents_api_config import AgentsApiConfig, get_agents_api_config, set_agents_api_config
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -387,13 +389,38 @@ def _make_test_app(tmp_path: Path):
 @pytest.fixture()
 def agent_client(tmp_path):
     """TestClient with agents router, using tmp_path as base_dir."""
-    paths_instance = _make_paths(tmp_path)
+    import app.gateway.routers.agents as agents_router
 
-    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch("app.gateway.routers.agents.get_paths", return_value=paths_instance):
-        app = _make_test_app(tmp_path)
-        with TestClient(app) as client:
-            client._tmp_path = tmp_path  # type: ignore[attr-defined]
-            yield client
+    paths_instance = _make_paths(tmp_path)
+    previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
+
+    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+        set_agents_api_config(AgentsApiConfig(enabled=True))
+        try:
+            app = _make_test_app(tmp_path)
+            with TestClient(app) as client:
+                client._tmp_path = tmp_path  # type: ignore[attr-defined]
+                yield client
+        finally:
+            set_agents_api_config(previous_config)
+
+
+@pytest.fixture()
+def disabled_agent_client(tmp_path):
+    """TestClient with agents router while the management API is disabled."""
+    import app.gateway.routers.agents as agents_router
+
+    paths_instance = _make_paths(tmp_path)
+    previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
+
+    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+        set_agents_api_config(AgentsApiConfig(enabled=False))
+        try:
+            app = _make_test_app(tmp_path)
+            with TestClient(app) as client:
+                yield client
+        finally:
+            set_agents_api_config(previous_config)
 
 
 class TestAgentsAPI:
@@ -510,7 +537,10 @@ class TestAgentsAPI:
     def test_create_persists_files_on_disk(self, agent_client, tmp_path):
         agent_client.post("/api/agents", json={"name": "disk-check", "soul": "disk soul"})
 
-        agent_dir = tmp_path / "agents" / "disk-check"
+        # tests/conftest.py installs an autouse fixture that sets the
+        # contextvar to "test-user-autouse", so the agent is persisted under
+        # users/test-user-autouse/agents/ rather than the legacy shared dir.
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "disk-check"
         assert agent_dir.exists()
         assert (agent_dir / "config.yaml").exists()
         assert (agent_dir / "SOUL.md").exists()
@@ -518,11 +548,22 @@ class TestAgentsAPI:
 
     def test_delete_removes_files_from_disk(self, agent_client, tmp_path):
         agent_client.post("/api/agents", json={"name": "remove-me", "soul": "bye"})
-        agent_dir = tmp_path / "agents" / "remove-me"
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "remove-me"
         assert agent_dir.exists()
 
         agent_client.delete("/api/agents/remove-me")
         assert not agent_dir.exists()
+
+    def test_create_rejects_legacy_name_collision(self, agent_client, tmp_path):
+        """An unmigrated legacy agent must still block name collision so that
+        running the migration script later won't shadow the legacy entry."""
+        legacy_dir = tmp_path / "agents" / "legacy-agent"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: legacy-agent\n", encoding="utf-8")
+        (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
+
+        response = agent_client.post("/api/agents", json={"name": "legacy-agent", "soul": "x"})
+        assert response.status_code == 409
 
 
 # ===========================================================================
@@ -559,3 +600,37 @@ class TestUserProfileAPI:
         response = agent_client.put("/api/user-profile", json={"content": ""})
         assert response.status_code == 200
         assert response.json()["content"] is None
+
+
+class TestAgentsApiDisabled:
+    def test_agents_list_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents")
+        assert response.status_code == 403
+        assert "agents_api.enabled=true" in response.json()["detail"]
+
+    def test_agent_get_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents/example-agent")
+        assert response.status_code == 403
+
+    def test_agent_name_check_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents/check", params={"name": "example-agent"})
+        assert response.status_code == 403
+
+    def test_agent_create_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.post("/api/agents", json={"name": "example-agent", "soul": "blocked"})
+        assert response.status_code == 403
+
+    def test_agent_update_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.put("/api/agents/example-agent", json={"description": "blocked"})
+        assert response.status_code == 403
+
+    def test_agent_delete_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.delete("/api/agents/example-agent")
+        assert response.status_code == 403
+
+    def test_user_profile_routes_return_403(self, disabled_agent_client):
+        get_response = disabled_agent_client.get("/api/user-profile")
+        put_response = disabled_agent_client.put("/api/user-profile", json={"content": "blocked"})
+
+        assert get_response.status_code == 403
+        assert put_response.status_code == 403

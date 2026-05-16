@@ -7,3 +7,12 @@ export interface Model {
   supports_thinking?: boolean;
   supports_reasoning_effort?: boolean;
 }
+
+export interface TokenUsageSettings {
+  enabled: boolean;
+}
+
+export interface ModelsResponse {
+  models: Model[];
+  token_usage: TokenUsageSettings;
+}

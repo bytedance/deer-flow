@@ -31,6 +31,10 @@ class Channel(ABC):
     def is_running(self) -> bool:
         return self._running
 
+    @property
+    def supports_streaming(self) -> bool:
+        return False
+
     # -- lifecycle ---------------------------------------------------------
 
     @abstractmethod
@@ -106,3 +110,21 @@ class Channel(ABC):
                         logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
                 except Exception:
                     logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
+
+    async def receive_file(self, msg: InboundMessage, thread_id: str) -> InboundMessage:
+        """
+        Optionally process and materialize inbound file attachments for this channel.
+
+        By default, this method does nothing and simply returns the original message.
+        Subclasses (e.g. FeishuChannel) may override this to download files (images, documents, etc)
+        referenced in msg.files, save them to the sandbox, and update msg.text to include
+        the sandbox file paths for downstream model consumption.
+
+        Args:
+            msg: The inbound message, possibly containing file metadata in msg.files.
+            thread_id: The resolved DeerFlow thread ID for sandbox path context.
+
+        Returns:
+            The (possibly modified) InboundMessage, with text and/or files updated as needed.
+        """
+        return msg

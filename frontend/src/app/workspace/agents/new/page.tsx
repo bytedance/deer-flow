@@ -31,7 +31,12 @@ import { ArtifactsProvider } from "@/components/workspace/artifacts";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
-import { checkAgentName, getAgent } from "@/core/agents/api";
+import {
+  AgentNameCheckError,
+  AgentsApiDisabledError,
+  checkAgentName,
+  getAgent,
+} from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
@@ -81,8 +86,8 @@ export default function NewAgentPage() {
 
   const threadId = useMemo(() => uuid(), []);
 
-  const [thread, sendMessage] = useThreadStream({
-    threadId: step === "chat" ? threadId : undefined,
+  const { thread, sendMessage } = useThreadStream({
+    threadId: undefined,
     context: {
       mode: "flash",
       is_bootstrap: true,
@@ -134,7 +139,12 @@ export default function NewAgentPage() {
         return;
       }
     } catch (err) {
-      if (err instanceof TypeError && err.message === "Failed to fetch") {
+      if (err instanceof AgentsApiDisabledError) {
+        setNameError(t.agents.nameStepApiDisabledError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "backend_unreachable"
+      ) {
         setNameError(t.agents.nameStepNetworkError);
       } else {
         setNameError(t.agents.nameStepCheckError);
@@ -146,14 +156,19 @@ export default function NewAgentPage() {
 
     setAgentName(trimmed);
     setStep("chat");
-    await sendMessage(threadId, {
-      text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
-      files: [],
-    });
+    await sendMessage(
+      threadId,
+      {
+        text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
+        files: [],
+      },
+      { agent_name: trimmed },
+    );
   }, [
     nameInput,
     sendMessage,
     t.agents.nameStepAlreadyExistsError,
+    t.agents.nameStepApiDisabledError,
     t.agents.nameStepNetworkError,
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
@@ -239,9 +254,11 @@ export default function NewAgentPage() {
           <DropdownMenuContent align="end">
             <DropdownMenuItem
               onSelect={() => void handleSaveAgent()}
-              disabled={
-                !!agent || thread.isLoading || setupAgentStatus !== "idle"
-              }
+              disabled={[
+                Boolean(agent),
+                thread.isLoading,
+                setupAgentStatus !== "idle",
+              ].some(Boolean)}
             >
               <SaveIcon className="h-4 w-4" />
               {setupAgentStatus === "requested"
