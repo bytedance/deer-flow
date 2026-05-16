@@ -294,7 +294,7 @@ class TestAgentConstruction:
         assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
 
     @pytest.mark.anyio
-    async def test_load_skill_messages_uses_explicit_app_config_for_skill_storage(
+    async def test_build_skill_section_uses_explicit_app_config_for_skill_storage(
         self,
         classes,
         base_config,
@@ -304,16 +304,23 @@ class TestAgentConstruction:
         """Explicit app_config must be threaded into subagent skill storage lookup."""
         SubagentExecutor = classes["SubagentExecutor"]
 
-        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
+        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")], skills=SimpleNamespace(container_path="/mnt/skills"))
         skill_dir = tmp_path / "demo-skill"
         skill_dir.mkdir()
         skill_file = skill_dir / "SKILL.md"
         skill_file.write_text("Use demo skill", encoding="utf-8")
         captured: dict[str, object] = {}
 
+        mock_skill = SimpleNamespace(
+            name="demo-skill",
+            description="A demo skill for testing",
+            category="custom",
+            get_container_file_path=lambda container_path: f"{container_path}/custom/demo-skill/SKILL.md",
+        )
+
         def fake_get_or_new_skill_storage(*, app_config=None):
             captured["app_config"] = app_config
-            return SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="demo-skill", skill_file=skill_file)])
+            return SimpleNamespace(load_skills=lambda *, enabled_only: [mock_skill])
 
         monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_skill_storage", fake_get_or_new_skill_storage)
 
@@ -325,11 +332,14 @@ class TestAgentConstruction:
         )
 
         skills = await executor._load_skills()
-        messages = await executor._load_skill_messages(skills)
+        section = executor._build_skill_section(skills)
 
         assert captured["app_config"] is app_config
-        assert len(messages) == 1
-        assert "Use demo skill" in messages[0].content
+        assert "demo-skill" in section
+        assert "Progressive Loading Pattern" in section
+        assert "/mnt/skills/custom/demo-skill/SKILL.md" in section
+        # Full skill content should NOT be in the progressive loading section
+        assert "Use demo skill" not in section
 
     @pytest.mark.anyio
     async def test_build_initial_state_consolidates_system_prompt_and_skills(
@@ -339,7 +349,7 @@ class TestAgentConstruction:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path,
     ):
-        """_build_initial_state merges system_prompt and skills into one SystemMessage."""
+        """_build_initial_state merges system_prompt and progressive-loading skills section into one SystemMessage."""
         SubagentExecutor = classes["SubagentExecutor"]
 
         skill_dir = tmp_path / "my-skill"
@@ -347,10 +357,18 @@ class TestAgentConstruction:
         skill_file = skill_dir / "SKILL.md"
         skill_file.write_text("Skill instructions here", encoding="utf-8")
 
+        mock_skill = SimpleNamespace(
+            name="my-skill",
+            description="A test skill",
+            category="public",
+            allowed_tools=None,
+            get_container_file_path=lambda container_path: f"{container_path}/public/my-skill/SKILL.md",
+        )
+
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [mock_skill]),
         )
 
         executor = SubagentExecutor(
@@ -369,9 +387,13 @@ class TestAgentConstruction:
 
         assert isinstance(messages[0], SystemMessage)
         assert isinstance(messages[1], HumanMessage)
-        # SystemMessage should contain both the system_prompt and skill content
+        # SystemMessage should contain system_prompt and progressive-loading skill metadata
         assert base_config.system_prompt in messages[0].content
-        assert "Skill instructions here" in messages[0].content
+        assert "my-skill" in messages[0].content
+        assert "Progressive Loading Pattern" in messages[0].content
+        assert "read_file" in messages[0].content
+        # Full skill content should NOT be in the system prompt (progressive loading)
+        assert "Skill instructions here" not in messages[0].content
         # HumanMessage should be the task
         assert messages[1].content == "Do the task"
 
@@ -430,10 +452,18 @@ class TestAgentConstruction:
         skill_file = skill_dir / "SKILL.md"
         skill_file.write_text("Skill content", encoding="utf-8")
 
+        mock_skill = SimpleNamespace(
+            name="my-skill",
+            description="A test skill",
+            category="public",
+            allowed_tools=None,
+            get_container_file_path=lambda container_path: f"{container_path}/public/my-skill/SKILL.md",
+        )
+
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [mock_skill]),
         )
 
         SubagentExecutor = classes["SubagentExecutor"]
@@ -446,7 +476,10 @@ class TestAgentConstruction:
 
         assert len(messages) == 2
         assert isinstance(messages[0], SystemMessage)
-        assert "Skill content" in messages[0].content
+        # Progressive loading: skill metadata should be present, not full content
+        assert "my-skill" in messages[0].content
+        assert "Progressive Loading" in messages[0].content
+        assert "Skill content" not in messages[0].content
         assert isinstance(messages[1], HumanMessage)
 
 
@@ -653,16 +686,24 @@ class TestAsyncExecutionPath:
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 
-        # Set up a skill so both system_prompt AND skill content are present,
+        # Set up a skill so both system_prompt AND skill section are present,
         # maximising the chance of catching a double-SystemMessage regression.
         skill_dir = tmp_path / "regression-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("Skill instruction text", encoding="utf-8")
 
+        mock_skill = SimpleNamespace(
+            name="regression-skill",
+            description="Regression test skill",
+            category="public",
+            allowed_tools=None,
+            get_container_file_path=lambda container_path: f"{container_path}/public/regression-skill/SKILL.md",
+        )
+
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md", allowed_tools=None)]),
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [mock_skill]),
         )
 
         captured_states: list[dict] = []
@@ -691,10 +732,12 @@ class TestAsyncExecutionPath:
         assert len(system_messages) <= 1, f"Expected at most 1 SystemMessage but got {len(system_messages)}: {system_messages}"
         if system_messages:
             assert initial_messages[0] is system_messages[0], "SystemMessage must be the first message in the conversation"
-            # The consolidated SystemMessage must carry both the system_prompt
-            # and all skill content — nothing should be split across two messages.
+            # The consolidated SystemMessage must carry the system_prompt
+            # and skill metadata (progressive loading), not full skill content.
             assert base_config.system_prompt in system_messages[0].content
-            assert "Skill instruction text" in system_messages[0].content
+            assert "regression-skill" in system_messages[0].content
+            assert "Progressive Loading" in system_messages[0].content
+            assert "Skill instruction text" not in system_messages[0].content
 
 
 class TestSkillAllowedTools:
