@@ -9,6 +9,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
 
@@ -61,6 +62,10 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         return ""
 
+    @staticmethod
+    def _is_user_message_for_title(message: object) -> bool:
+        return getattr(message, "type", None) == "human" and not is_dynamic_context_reminder(message)
+
     def _should_generate_title(self, state: TitleMiddlewareState) -> bool:
         """Check if we should generate a title for this thread."""
         config = self._get_title_config()
@@ -77,7 +82,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             return False
 
         # Count user and assistant messages
-        user_messages = [m for m in messages if m.type == "human"]
+        user_messages = [m for m in messages if self._is_user_message_for_title(m)]
         assistant_messages = [m for m in messages if m.type == "ai"]
 
         # Generate title after first complete exchange
@@ -91,7 +96,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config = self._get_title_config()
         messages = state.get("messages", [])
 
-        user_msg_content = next((m.content for m in messages if m.type == "human"), "")
+        user_msg_content = next((m.content for m in messages if self._is_user_message_for_title(m)), "")
         assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
 
         user_msg = self._normalize_content(user_msg_content)

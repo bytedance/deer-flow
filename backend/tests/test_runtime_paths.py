@@ -7,6 +7,7 @@ import yaml
 
 from deerflow.config import app_config as app_config_module
 from deerflow.config import extensions_config as extensions_config_module
+from deerflow.config import skills_config as skills_config_module
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import Paths
@@ -35,6 +36,7 @@ def test_default_runtime_paths_resolve_from_current_project(tmp_path: Path, monk
         encoding="utf-8",
     )
     (tmp_path / "extensions_config.json").write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    (tmp_path / "skills").mkdir()
 
     assert AppConfig.resolve_config_path() == tmp_path / "config.yaml"
     assert ExtensionsConfig.resolve_config_path() == tmp_path / "extensions_config.json"
@@ -119,6 +121,40 @@ def test_app_config_falls_back_to_legacy_when_project_root_lacks_config(tmp_path
     )
 
     assert AppConfig.resolve_config_path() == legacy_backend_config
+
+
+def test_skills_config_falls_back_to_legacy_when_project_root_lacks_skills(tmp_path: Path, monkeypatch):
+    """When DEER_FLOW_PROJECT_ROOT is unset and cwd has no `skills/`, the legacy
+    repo-root candidate must be used so monorepo runs (cwd=backend/) keep finding
+    `<repo>/skills` instead of `<repo>/backend/skills` (regression test for #2694)."""
+    _clear_path_env(monkeypatch)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    legacy_skills = tmp_path / "legacy-repo" / "skills"
+    legacy_skills.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        skills_config_module,
+        "_legacy_skills_candidates",
+        lambda: (legacy_skills,),
+    )
+
+    assert SkillsConfig().get_skills_path() == legacy_skills
+
+
+def test_skills_config_returns_project_default_when_neither_exists(tmp_path: Path, monkeypatch):
+    """When nothing exists, fall back to the project-root default path so callers
+    surface a stable empty location instead of silently picking a stale legacy dir."""
+    _clear_path_env(monkeypatch)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    monkeypatch.setattr(skills_config_module, "_legacy_skills_candidates", lambda: ())
+
+    assert SkillsConfig().get_skills_path() == cwd / "skills"
 
 
 def test_extensions_config_falls_back_to_legacy_when_project_root_lacks_file(tmp_path: Path, monkeypatch):

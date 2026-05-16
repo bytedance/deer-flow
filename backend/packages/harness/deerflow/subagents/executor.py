@@ -23,7 +23,10 @@ from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadSt
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.token_collector import SubagentTokenCollector
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,8 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
+    token_usage_records: list[dict[str, int | str]] = field(default_factory=list)
+    usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -297,16 +302,16 @@ class SubagentExecutor:
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
 
-        # Filter tools based on config
-        self.tools = _filter_tools(
+        self._base_tools = _filter_tools(
             tools,
             config.tools,
             config.disallowed_tools,
         )
+        self.tools = self._base_tools
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
-    def _create_agent(self):
+    def _create_agent(self, tools: list[BaseTool] | None = None):
         """Create the agent instance."""
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
@@ -318,28 +323,18 @@ class SubagentExecutor:
         # Reuse shared middleware composition with lead agent.
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True)
 
+        # system_prompt is included in initial state messages (see _build_initial_state)
+        # to avoid multiple SystemMessages which some LLM APIs don't support.
         return create_agent(
             model=model,
-            tools=self.tools,
+            tools=tools if tools is not None else self.tools,
             middleware=middlewares,
-            system_prompt=self.config.system_prompt,
+            system_prompt=None,
             state_schema=ThreadState,
         )
 
-    async def _load_skill_messages(self) -> list[SystemMessage]:
-        """Load skill content as conversation items based on config.skills.
-
-        Aligned with Codex's pattern: each subagent loads its own skills
-        per-session and injects them as conversation items (developer messages),
-        not as system prompt text. The config.skills whitelist controls which
-        skills are loaded:
-        - None: load all enabled skills
-        - []: no skills
-        - ["skill-a", "skill-b"]: only these skills
-
-        Returns:
-            List of SystemMessages containing skill content.
-        """
+    async def _load_skills(self) -> list[Skill]:
+        """Load enabled skill metadata based on config.skills."""
         if self.config.skills is not None and len(self.config.skills) == 0:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading")
             return []
@@ -353,8 +348,8 @@ class SubagentExecutor:
             all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
         except Exception:
-            logger.warning(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}", exc_info=True)
-            return []
+            logger.exception(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}")
+            raise
 
         if not all_skills:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found")
@@ -363,10 +358,26 @@ class SubagentExecutor:
         # Filter by config.skills whitelist
         if self.config.skills is not None:
             allowed = set(self.config.skills)
-            skills = [s for s in all_skills if s.name in allowed]
-        else:
-            skills = all_skills
+            return [s for s in all_skills if s.name in allowed]
+        return all_skills
 
+    def _apply_skill_allowed_tools(self, skills: list[Skill]) -> list[BaseTool]:
+        return filter_tools_by_skill_allowed_tools(self._base_tools, skills)
+
+    async def _load_skill_messages(self, skills: list[Skill]) -> list[SystemMessage]:
+        """Load skill content as conversation items based on config.skills.
+
+        Aligned with Codex's pattern: each subagent loads its own skills
+        per-session and injects them as conversation items (developer messages),
+        not as system prompt text. The config.skills whitelist controls which
+        skills are loaded:
+        - None: load all enabled skills
+        - []: no skills
+        - ["skill-a", "skill-b"]: only these skills
+
+        Returns:
+            List of SystemMessages containing skill content.
+        """
         if not skills:
             return []
 
@@ -384,21 +395,34 @@ class SubagentExecutor:
 
         return messages
 
-    async def _build_initial_state(self, task: str) -> dict[str, Any]:
+    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool]]:
         """Build the initial state for agent execution.
 
         Args:
             task: The task description.
 
         Returns:
-            Initial state dictionary.
+            Initial state dictionary and tools filtered by loaded skill metadata.
         """
-        # Load skills as conversation items (Codex pattern)
-        skill_messages = await self._load_skill_messages()
 
-        messages: list = []
-        # Skill content injected as developer/system messages before the task
-        messages.extend(skill_messages)
+        # Load skills as conversation items (Codex pattern)
+        skills = await self._load_skills()
+        filtered_tools = self._apply_skill_allowed_tools(skills)
+        skill_messages = await self._load_skill_messages(skills)
+
+        # Combine system_prompt and skills into a single SystemMessage.
+        # Some LLM APIs reject multiple SystemMessages with
+        # "System message must be at the beginning."
+        system_parts: list[str] = []
+        if self.config.system_prompt:
+            system_parts.append(self.config.system_prompt)
+        for skill_msg in skill_messages:
+            system_parts.append(skill_msg.content)
+
+        messages: list[Any] = []
+        if system_parts:
+            messages.append(SystemMessage(content="\n\n".join(system_parts)))
+
         # Then the actual task
         messages.append(HumanMessage(content=task))
 
@@ -412,7 +436,7 @@ class SubagentExecutor:
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
 
-        return state
+        return state, filtered_tools
 
     async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -441,13 +465,20 @@ class SubagentExecutor:
             ai_messages = []
             result.ai_messages = ai_messages
 
+        collector: SubagentTokenCollector | None = None
         try:
-            agent = self._create_agent()
-            state = await self._build_initial_state(task)
+            state, filtered_tools = await self._build_initial_state(task)
+            agent = self._create_agent(filtered_tools)
+
+            # Token collector for subagent LLM calls
+            collector_caller = f"subagent:{self.config.name}"
+            collector = SubagentTokenCollector(caller=collector_caller)
 
             # Build config with thread_id for sandbox access and recursion limit
             run_config: RunnableConfig = {
                 "recursion_limit": self.config.max_turns,
+                "callbacks": [collector],
+                "tags": [collector_caller],
             }
             context: dict[str, Any] = {}
             if self.thread_id:
@@ -466,6 +497,8 @@ class SubagentExecutor:
             if result.cancel_event.is_set():
                 logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming")
                 result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
+                if collector is not None:
+                    result.token_usage_records = collector.snapshot_records()
                 return result
 
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
@@ -476,6 +509,8 @@ class SubagentExecutor:
                 if result.cancel_event.is_set():
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
                     result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
+                    if collector is not None:
+                        result.token_usage_records = collector.snapshot_records()
                     return result
 
                 final_state = chunk
@@ -502,6 +537,7 @@ class SubagentExecutor:
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
+            result.token_usage_records = collector.snapshot_records()
 
             if final_state is None:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no final state")
@@ -577,6 +613,8 @@ class SubagentExecutor:
 
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
+            if collector is not None:
+                result.token_usage_records = collector.snapshot_records()
             result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
 
         return result

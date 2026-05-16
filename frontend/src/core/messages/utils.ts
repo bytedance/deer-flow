@@ -18,7 +18,7 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
-type MessageGroup =
+export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
@@ -26,10 +26,14 @@ type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
-export function groupMessages<T>(
-  messages: Message[],
-  mapper: (group: MessageGroup) => T,
-): T[] {
+const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
+  "summary",
+  "loop_warning",
+  "todo_reminder",
+  "todo_completion_reminder",
+]);
+
+export function getMessageGroups(messages: Message[]): MessageGroup[] {
   if (messages.length === 0) {
     return [];
   }
@@ -53,10 +57,6 @@ export function groupMessages<T>(
 
   for (const message of messages) {
     if (isHiddenFromUIMessage(message)) {
-      continue;
-    }
-
-    if (message.name === "todo_reminder") {
       continue;
     }
 
@@ -124,9 +124,50 @@ export function groupMessages<T>(
     }
   }
 
-  return groups
+  return groups;
+}
+
+export function groupMessages<T>(
+  messages: Message[],
+  mapper: (group: MessageGroup) => T,
+): T[] {
+  return getMessageGroups(messages)
     .map(mapper)
     .filter((result) => result !== undefined && result !== null) as T[];
+}
+
+export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
+  const usageMessagesByGroupIndex: Array<Message[] | null> = Array.from(
+    { length: groups.length },
+    () => null,
+  );
+
+  let turnStartIndex: number | null = null;
+
+  for (const [index, group] of groups.entries()) {
+    if (group.type === "human") {
+      turnStartIndex = null;
+      continue;
+    }
+
+    turnStartIndex ??= index;
+
+    const nextGroup = groups[index + 1];
+    const isTurnEnd = !nextGroup || nextGroup.type === "human";
+
+    if (!isTurnEnd) {
+      continue;
+    }
+
+    usageMessagesByGroupIndex[index] = groups
+      .slice(turnStartIndex, index + 1)
+      .flatMap((currentGroup) => currentGroup.messages)
+      .filter((message) => message.type === "ai");
+
+    turnStartIndex = null;
+  }
+
+  return usageMessagesByGroupIndex;
 }
 
 export function extractTextFromMessage(message: Message) {
@@ -330,8 +371,8 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 export function isHiddenFromUIMessage(message: Message) {
   return (
     message.additional_kwargs?.hide_from_ui === true ||
-    message.name === "summary" ||
-    message.name === "loop_warning"
+    (typeof message.name === "string" &&
+      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name))
   );
 }
 

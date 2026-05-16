@@ -437,6 +437,85 @@ class TestStream:
         call_kwargs = agent.stream.call_args.kwargs
         assert "messages" in call_kwargs["stream_mode"]
 
+    def test_stream_emits_additional_kwargs_updates_for_streamed_ai_messages(self, client):
+        """stream() emits a follow-up AI event when attribution metadata arrives via values."""
+        assembled = AIMessage(
+            content="Hello!",
+            id="ai-1",
+            additional_kwargs={
+                "token_usage_attribution": {
+                    "version": 1,
+                    "kind": "final_answer",
+                    "shared_attribution": False,
+                    "actions": [],
+                }
+            },
+        )
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("messages", (AIMessageChunk(content="Hello!", id="ai-1"), {})),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), assembled]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-kwargs"))
+
+        ai_events = [event for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai" and event.data.get("id") == "ai-1"]
+        assert any(event.data.get("content") == "Hello!" for event in ai_events)
+        assert any(event.data.get("additional_kwargs", {}).get("token_usage_attribution", {}).get("kind") == "final_answer" for event in ai_events)
+
+    def test_stream_emits_new_additional_kwargs_after_prior_metadata(self, client):
+        """stream() emits later attribution metadata even after earlier kwargs for the same id."""
+        attribution = {
+            "version": 1,
+            "kind": "final_answer",
+            "shared_attribution": False,
+            "actions": [],
+        }
+        assembled = AIMessage(
+            content="Hello!",
+            id="ai-1",
+            additional_kwargs={
+                "reasoning_content": "Thinking first.",
+                "token_usage_attribution": attribution,
+            },
+        )
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="Hello!",
+                            id="ai-1",
+                            additional_kwargs={"reasoning_content": "Thinking first."},
+                        ),
+                        {},
+                    ),
+                ),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), assembled]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-kwargs-delta"))
+
+        ai_events = [event for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai" and event.data.get("id") == "ai-1"]
+        metadata_events = [event for event in ai_events if event.data.get("additional_kwargs")]
+
+        assert metadata_events[0].data["additional_kwargs"] == {"reasoning_content": "Thinking first."}
+        assert metadata_events[1].data["content"] == ""
+        assert metadata_events[1].data["additional_kwargs"] == {"token_usage_attribution": attribution}
+
     def test_chat_accumulates_streamed_deltas(self, client):
         """chat() concatenates per-id deltas from messages mode."""
         agent = MagicMock()

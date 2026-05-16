@@ -64,6 +64,12 @@ Dynamically configures the current agent session. Used during the bootstrap flow
 
 ---
 
+### update_agent
+
+Persists updates to the current custom agent's `SOUL.md` and `config.yaml`. Bound to the lead agent only when a custom agent is active (`agent_name` is set in the runtime context). Use this when the user asks the agent to refine its own description, personality, skill whitelist, tool-group whitelist, or default model — it writes directly into the per-user layout `{base_dir}/users/{user_id}/agents/{agent_name}/`, so the change is picked up automatically on the next user turn. Only the fields you explicitly pass are updated; omit a field to preserve its existing value. Pass `skills=[]` to disable all skills, or omit `skills` to keep the existing whitelist.
+
+---
+
 ### invoke_acp_agent
 
 Invokes an external agent using the [Agent Connect Protocol (ACP)](https://agentconnectprotocol.org/). Requires `acp_agents:` configuration in `config.yaml`. See the [Subagents](/docs/harness/subagents) page for ACP configuration.

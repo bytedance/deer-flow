@@ -17,10 +17,13 @@ import asyncio
 import sys
 import threading
 from datetime import datetime
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from deerflow.skills.types import Skill
 
 # Module names that need to be mocked to break circular imports
 _MOCKED_MODULE_NAMES = [
@@ -32,14 +35,15 @@ _MOCKED_MODULE_NAMES = [
     "deerflow.sandbox.middleware",
     "deerflow.sandbox.security",
     "deerflow.models",
+    "deerflow.skills.storage",
 ]
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(autouse=True)
 def _setup_executor_classes():
     """Set up mocked modules and import real executor classes.
 
-    This fixture runs once per session and yields the executor classes.
+    This fixture runs once per test and yields the executor classes.
     It handles module cleanup to avoid affecting other test files.
     """
     # Save original modules
@@ -53,6 +57,9 @@ def _setup_executor_classes():
     # Set up mocks
     for name in _MOCKED_MODULE_NAMES:
         sys.modules[name] = MagicMock()
+    storage_module = ModuleType("deerflow.skills.storage")
+    storage_module.get_or_new_skill_storage = lambda **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
+    sys.modules["deerflow.skills.storage"] = storage_module
 
     # Import real classes inside fixture
     from langchain_core.messages import AIMessage, HumanMessage
@@ -115,6 +122,26 @@ class MockAIMessage:
         if self._msg_id:
             msg.id = self._msg_id
         return msg
+
+
+class NamedTool:
+    def __init__(self, name: str):
+        self.name = name
+
+
+def _skill(name: str, allowed_tools: list[str] | None) -> Skill:
+    skill_dir = Path(f"/tmp/{name}")
+    return Skill(
+        name=name,
+        description=f"{name} skill",
+        license=None,
+        skill_dir=skill_dir,
+        skill_file=skill_dir / "SKILL.md",
+        relative_path=Path(name),
+        category="custom",
+        allowed_tools=allowed_tools,
+        enabled=True,
+    )
 
 
 async def async_iterator(items):
@@ -264,7 +291,7 @@ class TestAgentConstruction:
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
         assert captured["agent"]["tools"] == []
-        assert captured["agent"]["system_prompt"] == base_config.system_prompt
+        assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
 
     @pytest.mark.anyio
     async def test_load_skill_messages_uses_explicit_app_config_for_skill_storage(
@@ -288,7 +315,7 @@ class TestAgentConstruction:
             captured["app_config"] = app_config
             return SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="demo-skill", skill_file=skill_file)])
 
-        monkeypatch.setattr("deerflow.skills.storage.get_or_new_skill_storage", fake_get_or_new_skill_storage)
+        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_skill_storage", fake_get_or_new_skill_storage)
 
         executor = SubagentExecutor(
             config=base_config,
@@ -297,11 +324,130 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        messages = await executor._load_skill_messages()
+        skills = await executor._load_skills()
+        messages = await executor._load_skill_messages(skills)
 
         assert captured["app_config"] is app_config
         assert len(messages) == 1
         assert "Use demo skill" in messages[0].content
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_consolidates_system_prompt_and_skills(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """_build_initial_state merges system_prompt and skills into one SystemMessage."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("Skill instructions here", encoding="utf-8")
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        state, _filtered_tools = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        # Should have exactly 2 messages: one combined SystemMessage + one HumanMessage
+        assert len(messages) == 2
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        assert isinstance(messages[0], SystemMessage)
+        assert isinstance(messages[1], HumanMessage)
+        # SystemMessage should contain both the system_prompt and skill content
+        assert base_config.system_prompt in messages[0].content
+        assert "Skill instructions here" in messages[0].content
+        # HumanMessage should be the task
+        assert messages[1].content == "Do the task"
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_no_skills_only_system_prompt(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """_build_initial_state works when there are no skills."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        state, _filtered_tools = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        assert len(messages) == 2
+        assert isinstance(messages[0], SystemMessage)
+        assert base_config.system_prompt in messages[0].content
+        assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_no_system_prompt_with_skills(
+        self,
+        classes,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """_build_initial_state works when there is no system_prompt but there are skills."""
+        SubagentConfig = classes["SubagentConfig"]
+
+        config = SubagentConfig(
+            name="test-agent",
+            description="Test agent",
+            system_prompt=None,
+            max_turns=10,
+            timeout_seconds=60,
+        )
+
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("Skill content", encoding="utf-8")
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+        )
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
+
+        state, _filtered_tools = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        assert len(messages) == 2
+        assert isinstance(messages[0], SystemMessage)
+        assert "Skill content" in messages[0].content
+        assert isinstance(messages[1], HumanMessage)
 
 
 # -----------------------------------------------------------------------------
@@ -485,6 +631,179 @@ class TestAsyncExecutionPath:
         # Should fallback to string representation of last message
         assert result.status == SubagentStatus.COMPLETED
         assert "Task" in result.result
+
+    @pytest.mark.anyio
+    async def test_aexecute_passes_at_most_one_system_message_to_agent(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """Regression: messages sent to agent.astream must contain at most one
+        SystemMessage and it must be the first message.
+
+        This catches any regression where system_prompt would be re-injected
+        via create_agent() (e.g. system_prompt not passed as None) and appear
+        as a second SystemMessage, which providers like vLLM and Xinference
+        reject with "System message must be at the beginning."
+        """
+        from langchain_core.messages import AIMessage, SystemMessage
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        # Set up a skill so both system_prompt AND skill content are present,
+        # maximising the chance of catching a double-SystemMessage regression.
+        skill_dir = tmp_path / "regression-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("Skill instruction text", encoding="utf-8")
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md", allowed_tools=None)]),
+        )
+
+        captured_states: list[dict] = []
+
+        async def capturing_astream(state, **kwargs):
+            captured_states.append(state)
+            yield {"messages": [AIMessage(content="Done", id="msg-1")]}
+
+        mock_agent = MagicMock()
+        mock_agent.astream = capturing_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert len(captured_states) == 1, "astream should be called exactly once"
+        initial_messages = captured_states[0]["messages"]
+
+        system_messages = [m for m in initial_messages if isinstance(m, SystemMessage)]
+        assert len(system_messages) <= 1, f"Expected at most 1 SystemMessage but got {len(system_messages)}: {system_messages}"
+        if system_messages:
+            assert initial_messages[0] is system_messages[0], "SystemMessage must be the first message in the conversation"
+            # The consolidated SystemMessage must carry both the system_prompt
+            # and all skill content — nothing should be split across two messages.
+            assert base_config.system_prompt in system_messages[0].content
+            assert "Skill instruction text" in system_messages[0].content
+
+
+class TestSkillAllowedTools:
+    @pytest.mark.anyio
+    async def test_skill_allowed_tools_union_filters_agent_tools(self, classes, base_config, mock_agent, msg):
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        final_state = {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        tools = [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")]
+        executor = SubagentExecutor(config=base_config, tools=tools, thread_id="test-thread")
+
+        async def load_skills():
+            return [_skill("a", ["bash"]), _skill("b", ["read_file"])]
+
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
+            await executor._aexecute("Task")
+
+        create_agent_mock.assert_called_once()
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["bash", "read_file"]
+        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
+
+    @pytest.mark.anyio
+    async def test_all_missing_allowed_tools_preserves_legacy_allow_all(self, classes, base_config, mock_agent, msg):
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        final_state = {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        tools = [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")]
+        executor = SubagentExecutor(config=base_config, tools=tools, thread_id="test-thread")
+
+        async def load_skills():
+            return [_skill("legacy-a", None), _skill("legacy-b", None)]
+
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
+            await executor._aexecute("Task")
+
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["bash", "read_file", "web_search"]
+        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
+
+    @pytest.mark.anyio
+    async def test_mixed_missing_allowed_tools_does_not_disable_explicit_restrictions(self, classes, base_config, mock_agent, msg):
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        final_state = {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        tools = [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")]
+        executor = SubagentExecutor(config=base_config, tools=tools, thread_id="test-thread")
+
+        async def load_skills():
+            return [_skill("legacy", None), _skill("restricted", ["bash"])]
+
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
+            await executor._aexecute("Task")
+
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["bash"]
+        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
+
+    @pytest.mark.anyio
+    async def test_mixed_missing_allowed_tools_order_does_not_disable_explicit_restrictions(self, classes, base_config, mock_agent, msg):
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        final_state = {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        tools = [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")]
+        executor = SubagentExecutor(config=base_config, tools=tools, thread_id="test-thread")
+
+        async def load_skills():
+            return [_skill("restricted", ["bash"]), _skill("legacy", None)]
+
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
+            await executor._aexecute("Task")
+
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["bash"]
+        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
+
+    @pytest.mark.anyio
+    async def test_empty_allowed_tools_contributes_no_tools(self, classes, base_config, mock_agent, msg, caplog):
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        final_state = {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        tools = [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")]
+        executor = SubagentExecutor(config=base_config, tools=tools, thread_id="test-thread")
+
+        async def load_skills():
+            return [_skill("empty", []), _skill("reader", ["read_file"])]
+
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock, caplog.at_level("INFO"):
+            await executor._aexecute("Task")
+
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["read_file"]
+        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
+        assert "declared empty allowed-tools" in caplog.text
+
+    @pytest.mark.anyio
+    async def test_skill_load_failure_fails_without_creating_agent(self, classes, base_config, mock_agent):
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[NamedTool("bash")], thread_id="test-thread")
+
+        async def load_skills():
+            raise RuntimeError("skill storage unavailable")
+
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
+            result = await executor._aexecute("Task")
+
+        assert result.status == classes["SubagentStatus"].FAILED
+        assert result.error == "skill storage unavailable"
+        create_agent_mock.assert_not_called()
 
 
 # -----------------------------------------------------------------------------
