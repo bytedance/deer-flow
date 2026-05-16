@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.gateway.authz import require_permission
 from deerflow.agents.memory.updater import (
     clear_memory_data,
     create_memory_fact,
@@ -114,6 +115,7 @@ class MemoryStatusResponse(BaseModel):
     summary="Get Memory Data",
     description="Retrieve the current global memory data including user context, history, and facts.",
 )
+@require_permission("memory", "read")
 async def get_memory() -> MemoryResponse:
     """Get the current global memory data.
 
@@ -159,6 +161,7 @@ async def get_memory() -> MemoryResponse:
     summary="Reload Memory Data",
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
 )
+@require_permission("memory", "write")
 async def reload_memory() -> MemoryResponse:
     """Reload memory data from file.
 
@@ -179,6 +182,7 @@ async def reload_memory() -> MemoryResponse:
     summary="Clear All Memory Data",
     description="Delete all saved memory data and reset the memory structure to an empty state.",
 )
+@require_permission("memory", "write")
 async def clear_memory() -> MemoryResponse:
     """Clear all persisted memory data."""
     try:
@@ -196,6 +200,7 @@ async def clear_memory() -> MemoryResponse:
     summary="Create Memory Fact",
     description="Create a single saved memory fact manually.",
 )
+@require_permission("memory", "write")
 async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryResponse:
     """Create a single fact manually."""
     try:
@@ -220,6 +225,7 @@ async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryRespo
     summary="Delete Memory Fact",
     description="Delete a single saved memory fact by its fact id.",
 )
+@require_permission("memory", "write")
 async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
     try:
@@ -239,6 +245,7 @@ async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
     summary="Patch Memory Fact",
     description="Partially update a single saved memory fact by its fact id while preserving omitted fields.",
 )
+@require_permission("memory", "write")
 async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -> MemoryResponse:
     """Partially update a single fact manually."""
     try:
@@ -266,6 +273,7 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
     summary="Export Memory Data",
     description="Export the current global memory data as JSON for backup or transfer.",
 )
+@require_permission("memory", "read")
 async def export_memory() -> MemoryResponse:
     """Export the current memory data."""
     memory_data = get_memory_data(user_id=get_effective_user_id())
@@ -279,6 +287,7 @@ async def export_memory() -> MemoryResponse:
     summary="Import Memory Data",
     description="Import and overwrite the current global memory data from a JSON payload.",
 )
+@require_permission("memory", "write")
 async def import_memory(request: MemoryResponse) -> MemoryResponse:
     """Import and persist memory data."""
     try:
@@ -295,6 +304,7 @@ async def import_memory(request: MemoryResponse) -> MemoryResponse:
     summary="Get Memory Configuration",
     description="Retrieve the current memory system configuration.",
 )
+@require_permission("memory", "read")
 async def get_memory_config_endpoint() -> MemoryConfigResponse:
     """Get the memory system configuration.
 
@@ -333,6 +343,7 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     summary="Get Memory Status",
     description="Retrieve both memory configuration and current data in a single request.",
 )
+@require_permission("memory", "read")
 async def get_memory_status() -> MemoryStatusResponse:
     """Get the memory system status including configuration and data.
 
