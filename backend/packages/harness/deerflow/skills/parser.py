@@ -4,24 +4,47 @@ from pathlib import Path
 
 import yaml
 
-from .types import Skill
+from .types import SKILL_MD_FILE, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
 
 
-def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None = None) -> Skill | None:
+def parse_allowed_tools(raw: object, skill_file: Path) -> list[str] | None:
+    """Parse the optional allowed-tools frontmatter field.
+
+    Returns None when the field is omitted. Returns a list when the field is a
+    YAML sequence of strings, including an empty list for explicit no-tool
+    skills. Raises ValueError for malformed values.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError(f"allowed-tools in {skill_file} must be a list of strings")
+
+    allowed_tools: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise ValueError(f"allowed-tools in {skill_file} must contain only strings")
+        tool_name = item.strip()
+        if not tool_name:
+            raise ValueError(f"allowed-tools in {skill_file} cannot contain empty tool names")
+        allowed_tools.append(tool_name)
+    return allowed_tools
+
+
+def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
     """Parse a SKILL.md file and extract metadata.
 
     Args:
         skill_file: Path to the SKILL.md file.
-        category: Category of the skill ('public' or 'custom').
+        category: Category of the skill.
         relative_path: Relative path from the category root to the skill
             directory.  Defaults to the skill directory name when omitted.
 
     Returns:
         Skill object if parsing succeeds, None otherwise.
     """
-    if not skill_file.exists() or skill_file.name != "SKILL.md":
+    if not skill_file.exists() or skill_file.name != SKILL_MD_FILE:
         return None
 
     try:
@@ -64,6 +87,12 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
         if license_text is not None:
             license_text = str(license_text).strip() or None
 
+        try:
+            allowed_tools = parse_allowed_tools(metadata.get("allowed-tools"), skill_file)
+        except ValueError as exc:
+            logger.error("Invalid allowed-tools in %s: %s", skill_file, exc)
+            return None
+
         return Skill(
             name=name,
             description=description,
@@ -72,6 +101,7 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
             skill_file=skill_file,
             relative_path=relative_path or Path(skill_file.parent.name),
             category=category,
+            allowed_tools=allowed_tools,
             enabled=True,  # Actual state comes from the extensions config file.
         )
 

@@ -1,0 +1,122 @@
+---
+title: 记忆系统
+description: 记忆是 DeerFlow Harness 的一个运行时功能。它不是简单的对话日志，而是跨多个独立会话持久化、在未来对话中影响 Agent 行为的结构化事实和上下文摘要存储。
+---
+
+import { Callout, Cards } from "nextra/components";
+
+# 记忆系统
+
+<Callout type="info" emoji="💾">
+  记忆让 DeerFlow 在多个会话中保留有用信息。Agent
+  记住用户偏好、项目背景和反复出现的事实，这样它可以在不每次从零开始的情况下给出更好的响应。
+</Callout>
+
+记忆是 DeerFlow Harness 的一个运行时功能。它不是简单的对话日志，而是跨多个独立会话持久化、在未来对话中影响 Agent 行为的结构化事实和上下文摘要存储。
+
+## 记忆存储什么
+
+记忆存储包含几类信息：
+
+- **工作上下文**：用户正在进行的项目摘要、目标和反复出现的话题。
+- **个人上下文**：Agent 学到的偏好、沟通风格和其他用户特定细节。
+- **近期关注**：最近的关注领域和活跃任务。
+- **历史**：近几个月的上下文、早期背景和长期事实。
+- **事实**：Agent 从对话中提取的离散具体事实（例如偏好的工具、团队名称、项目约束）。
+
+每个类别随着 Agent 从持续对话中学习而随时间更新。
+
+## 工作原理
+
+记忆由 `MemoryMiddleware` 管理，在每次 Lead Agent 轮次上运行：
+
+1. **注入**：每次对话开始时，Agent 当前记忆以受控的 token 预算（`max_injection_tokens`）注入到系统提示中。
+2. **学习**：对话结束后，后台任务提取新事实并更新相关记忆类别。更新通过 `debounce_seconds` 防抖以批量处理快速变化。
+3. **按 Agent 记忆**：当自定义 Agent 激活时，其记忆独立于全局记忆存储。这保持不同 Agent 的知识隔离。
+
+## 配置
+
+```yaml
+memory:
+  enabled: true
+
+  # 全局记忆文件的存储路径。
+  # 默认：{base_dir}/memory.json（解析为 backend/.deer-flow/memory.json）
+  # 绝对路径按原样使用，相对路径相对于 base_dir 解析。
+  storage_path: memory.json
+
+  # 存储类（默认：基于文件的 JSON 存储）
+  storage_class: deerflow.agents.memory.storage.FileMemoryStorage
+
+  # 处理排队记忆更新前等待的秒数（防抖）
+  debounce_seconds: 30
+
+  # 记忆更新提取使用的模型（null = 使用默认模型）
+  model_name: null
+
+  # 要存储的最大事实数
+  max_facts: 100
+
+  # 存储事实所需的最低置信度分数（0.0–1.0）
+  fact_confidence_threshold: 0.7
+
+  # 是否将记忆注入到系统提示中
+  injection_enabled: true
+
+  # 注入到系统提示的最大 token 数
+  max_injection_tokens: 2000
+```
+
+## 全局记忆与按 Agent 记忆
+
+DeerFlow 支持两级记忆：
+
+- **全局记忆**：存储在 `{base_dir}/memory.json`。在没有特定 Agent 激活或 Agent 没有按 Agent 记忆文件时使用。
+- **按 Agent 记忆**：存储在 `{base_dir}/agents/{agent_name}/memory.json`。当自定义 Agent 激活时使用，使该 Agent 学到的知识保持独立。
+
+`MemoryMiddleware` 根据请求配置中的活跃 `agent_name` 自动选择正确的记忆文件。
+
+用于记忆存储的 Agent 名称通过 `AGENT_NAME_PATTERN` 验证，以确保文件系统安全。
+
+## 存储位置
+
+默认情况下，记忆文件存储在后端基础目录下：
+
+- 基础目录：`backend/.deer-flow/`
+- 全局记忆：`backend/.deer-flow/memory.json`
+- 按 Agent 记忆：`backend/.deer-flow/agents/{agent_name}/memory.json`
+
+你可以用 `storage_path` 字段更改存储路径。相对路径相对于基础目录解析；使用绝对路径可以将记忆存储在自定义位置。
+
+## 自定义存储后端
+
+`storage_class` 字段允许你用自定义实现替换默认的基于文件的存储。任何继承 `MemoryStorage` 并实现 `load()`、`reload()` 和 `save()` 方法的类都可以使用：
+
+```yaml
+memory:
+  storage_class: mypackage.storage.RedisMemoryStorage
+```
+
+如果配置的类无法加载，系统回退到默认的 `FileMemoryStorage` 并记录错误。
+
+## 禁用记忆
+
+完全禁用记忆：
+
+```yaml
+memory:
+  enabled: false
+```
+
+保留记忆存储但阻止注入到系统提示：
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: false
+```
+
+<Cards num={2}>
+  <Cards.Card title="配置" href="/docs/harness/configuration" />
+  <Cards.Card title="中间件" href="/docs/harness/middlewares" />
+</Cards>
