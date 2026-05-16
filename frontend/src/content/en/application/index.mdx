@@ -25,11 +25,11 @@ DeerFlow App is the reference implementation of what a production DeerFlow exper
 | **Streaming responses** | Real-time token streaming with thinking steps and tool call visibility                               |
 | **Artifact viewer**     | In-browser preview and download of files and outputs produced by the agent                           |
 | **Extensions UI**       | Enable/disable MCP servers and skills without editing config files                                   |
-| **Gateway API**         | FastAPI-based REST API that bridges the frontend and the LangGraph runtime                           |
+| **Gateway API**         | FastAPI-based REST API with the embedded LangGraph-compatible agent runtime                          |
 
 ## Architecture
 
-The DeerFlow App runs as four services behind a single nginx reverse proxy:
+The DeerFlow App runs behind a single nginx reverse proxy:
 
 ```
                 ┌──────────────────┐
@@ -42,19 +42,11 @@ The DeerFlow App runs as four services behind a single nginx reverse proxy:
 │  Frontend :3000  │       │  Gateway API :8001    │
 │  (Next.js)       │       │  (FastAPI)            │
 └──────────────────┘       └──────────────────────┘
-                                      │
-                            ┌─────────┘
-                            ▼
-                  ┌──────────────────────┐
-                  │  LangGraph :2024     │
-                  │  (DeerFlow Harness)  │
-                  └──────────────────────┘
 ```
 
-- **nginx**: routes requests — `/api/*` to the Gateway, LangGraph streaming endpoints to LangGraph directly, and everything else to the frontend.
-- **Frontend** (Next.js + React): the browser UI. Communicates with both the Gateway and LangGraph.
-- **Gateway** (FastAPI): handles API operations — model listing, agent CRUD, memory, extensions management, file uploads.
-- **LangGraph**: the DeerFlow Harness runtime. Manages thread state, agent execution, and streaming.
+- **nginx**: routes requests — `/api/*` and `/api/langgraph/*` to Gateway, and everything else to the frontend.
+- **Frontend** (Next.js + React): the browser UI. Communicates with Gateway.
+- **Gateway** (FastAPI): handles API operations and the embedded LangGraph-compatible runtime for thread state, agent execution, and streaming.
 
 ## Technology stack
 
@@ -64,7 +56,7 @@ The DeerFlow App runs as four services behind a single nginx reverse proxy:
 | Gateway           | FastAPI, Python 3.12, uvicorn                                        |
 | Agent runtime     | LangGraph, LangChain, DeerFlow Harness                               |
 | Reverse proxy     | nginx                                                                |
-| State persistence | LangGraph Server (default) + optional SQLite/PostgreSQL checkpointer |
+| State persistence | Gateway runtime + optional SQLite/PostgreSQL checkpointer             |
 
 <Cards num={2}>
   <Cards.Card title="Quick Start" href="/docs/application/quick-start" />
