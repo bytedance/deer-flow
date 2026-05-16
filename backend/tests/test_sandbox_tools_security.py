@@ -500,7 +500,7 @@ def test_is_skills_path_recognises_default_prefix() -> None:
 
 
 def test_validate_local_tool_path_allows_skills_read_only() -> None:
-    """read_file / ls should be able to access /mnt/skills paths."""
+    """Local read-only path validation still permits dedicated skill tooling."""
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
         # Should not raise
         validate_local_tool_path(
@@ -508,6 +508,51 @@ def test_validate_local_tool_path_allows_skills_read_only() -> None:
             _THREAD_DATA,
             read_only=True,
         )
+
+
+def test_read_file_tool_blocks_direct_skills_reads() -> None:
+    from deerflow.sandbox.tools import read_file_tool
+
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
+        result = read_file_tool.func(
+            runtime=None,
+            description="read skill",
+            path="/mnt/skills/public/bootstrap/SKILL.md",
+        )
+
+    assert result == "Error: Direct reads from skills paths are blocked: /mnt/skills/public/bootstrap/SKILL.md. Use the skill_load tool instead."
+
+
+def test_read_file_tool_blocks_custom_skills_container_direct_reads() -> None:
+    from deerflow.sandbox.tools import read_file_tool
+
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/custom/skills"):
+        result = read_file_tool.func(
+            runtime=None,
+            description="read skill",
+            path="/custom/skills/public/bootstrap/SKILL.md",
+            start_line=1,
+            end_line=2,
+        )
+
+    assert result == "Error: Direct reads from skills paths are blocked: /custom/skills/public/bootstrap/SKILL.md. Use the skill_load tool instead."
+
+
+def test_read_file_tool_does_not_block_skills_prefix_sibling() -> None:
+    from deerflow.sandbox.tools import read_file_tool
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools.ensure_sandbox_initialized") as ensure_sandbox,
+    ):
+        ensure_sandbox.side_effect = AssertionError("non-skills path should continue to normal read_file flow")
+        result = read_file_tool.func(
+            runtime=None,
+            description="read sibling",
+            path="/mnt/skills-extra/public/bootstrap/SKILL.md",
+        )
+
+    assert "non-skills path should continue to normal read_file flow" in result
 
 
 def test_validate_local_tool_path_blocks_skills_write() -> None:

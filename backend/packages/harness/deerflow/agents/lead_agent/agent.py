@@ -463,7 +463,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
-            tools=filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy),
+            tools=filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy, always_allowed_tool_names={"skill_load"}),
             middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -481,7 +481,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
-        tools=filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy),
+        tools=filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names={"skill_load"}),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,

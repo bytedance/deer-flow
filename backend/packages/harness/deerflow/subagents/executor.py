@@ -370,7 +370,11 @@ class SubagentExecutor:
         return all_skills
 
     def _apply_skill_allowed_tools(self, skills: list[Skill]) -> list[BaseTool]:
-        return filter_tools_by_skill_allowed_tools(self._base_tools, skills)
+        return filter_tools_by_skill_allowed_tools(
+            self._base_tools,
+            skills,
+            always_allowed_tool_names={"skill_load"},
+        )
 
     async def _load_skill_messages(self, skills: list[Skill]) -> list[SystemMessage]:
         """Load skill content as conversation items based on config.skills.
