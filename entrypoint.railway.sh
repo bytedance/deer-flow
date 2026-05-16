@@ -40,7 +40,7 @@ done
 
 # ── Start gateway ─────────────────────────────────────────────────────────────
 echo "[entrypoint] Starting gateway on port ${GATEWAY_PORT} …"
-.venv/bin/python -m uvicorn src.server:app \
+.venv/bin/python -m uvicorn app.gateway.app:app \
   --host 0.0.0.0 \
   --port "${GATEWAY_PORT}" \
   &
