@@ -1,14 +1,23 @@
-"""Process-local authentication for Gateway internal callers."""
+"""Authentication for Gateway internal callers.
+
+The internal token defaults to a freshly-generated process-local secret so
+same-process callers (e.g. background workers in this gateway) authenticate
+out of the box. When ``DEERFLOW_INTERNAL_TOKEN`` is set in the environment,
+it is used instead — letting trusted external services (e.g. the AlphaFRS
+backend dispatching research jobs) present the same shared secret over the
+network.
+"""
 
 from __future__ import annotations
 
+import os
 import secrets
 from types import SimpleNamespace
 
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 INTERNAL_AUTH_HEADER_NAME = "X-DeerFlow-Internal-Token"
-_INTERNAL_AUTH_TOKEN = secrets.token_urlsafe(32)
+_INTERNAL_AUTH_TOKEN = os.environ.get("DEERFLOW_INTERNAL_TOKEN") or secrets.token_urlsafe(32)
 
 
 def create_internal_auth_headers() -> dict[str, str]:
