@@ -91,7 +91,7 @@ services:
       target: dev
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
-        NPM_REGISTRY: ${NPM_REGISTRY:-}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     container_name: deer-flow-frontend
     command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
     volumes:
@@ -121,9 +121,9 @@ services:
       target: dev
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-gateway
       args:
-        APT_MIRROR: ${APT_MIRROR:-}
+        APT_MIRROR: ${APT_MIRROR:-mirrors.aliyun.com}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
-        UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
+        UV_INDEX_URL: ${UV_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
     container_name: deer-flow-gateway
     # Startup logic lives in docker/dev-entrypoint.sh — UV_EXTRAS validation,
     # `uv sync --all-packages`, .venv self-heal, and uvicorn handoff. Keeps
@@ -191,4 +191,4 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 192.168.200.0/24
+        - subnet: 172.28.100.0/24

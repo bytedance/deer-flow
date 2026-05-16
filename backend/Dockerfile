@@ -61,8 +61,9 @@ ENV PYTHONIOENCODING=utf-8
 # source distributions in development containers.
 FROM builder AS dev
 
-# Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
-COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
+# Docker CLI is optional in dev mode — only needed for AioSandboxProvider (DooD).
+# If you need it, uncomment the line below:
+# COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
 EXPOSE 8001 2024
 
