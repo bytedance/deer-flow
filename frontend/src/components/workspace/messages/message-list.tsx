@@ -656,7 +656,7 @@ export function MessageList({
           if (group.type === "human" || group.type === "assistant") {
             renderedGroup = (
               <div
-                key={`${group.type}-${group.id}`}
+                key={`${group.type}-${groupIndex}-${group.id ?? groupIndex}`}
                 className={cn(
                   "w-full",
                   group.type === "assistant" && "group/assistant-turn",
@@ -688,7 +688,7 @@ export function MessageList({
             const message = group.messages[0];
             if (message && hasContent(message)) {
               renderedGroup = (
-                <div key={`clarification-${group.id}`} className="w-full">
+                <div key={`${groupIndex}-clarification-${group.id}`} className="w-full">
                   <MarkdownContent
                     content={extractContentFromMessage(message)}
                     isLoading={thread.isLoading}
@@ -710,7 +710,7 @@ export function MessageList({
               }
             }
             return (
-              <div className="w-full" key={`present-files-${group.id}`}>
+              <div className="w-full" key={`${groupIndex}-present-files-${group.id}`}>
                 {group.messages[0] && hasContent(group.messages[0]) && (
                   <MarkdownContent
                     content={extractContentFromMessage(group.messages[0])}
@@ -824,7 +824,7 @@ export function MessageList({
             }
             renderedGroup = (
               <div
-                key={"subtask-group-" + group.id}
+                key={`${groupIndex}-subtask-group-${group.id}`}
                 className="relative z-1 flex flex-col gap-2"
               >
                 {results}
@@ -841,7 +841,7 @@ export function MessageList({
               resolvedBlockHistory.blockIdsByMessageKey,
             );
             renderedGroup = (
-              <div key={`processing-${group.id}`} className="w-full">
+              <div key={`${groupIndex}-processing-${group.id}`} className="w-full">
                 <MessageGroup
                   messages={group.messages}
                   isLoading={thread.isLoading}
@@ -886,7 +886,7 @@ export function MessageList({
 
           if (anchoredBlockIds && anchoredBlockIds.length > 0) {
             return (
-              <Fragment key={`group-${group.id ?? groupIndex}`}>
+              <Fragment key={`${groupIndex}-group-${group.id ?? groupIndex}`}>
                 {renderedGroup}
                 <GenUIBlockList
                   threadId={threadId}
