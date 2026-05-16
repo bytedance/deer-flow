@@ -1,0 +1,29 @@
+# DeerFlow — Railway deployment config
+# Repo: chrishughes25/deer-flow (fork)
+# Deploys gateway + langgraph as a single service behind an entrypoint script.
+#
+# After PR merge to bytedance/deer-flow master, switch Railway's repo source
+# from the fork to upstream — no config changes needed.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.railway"
+watchPatterns = ["backend/**", "config.example.yaml", "skills/**"]
+
+[deploy]
+startCommand = ""
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+numReplicas = 1
+
+# ── Staging ──────────────────────────────────────────────────────────────────
+
+[environments.staging.deploy]
+numReplicas = 1
+
+# ── Production ───────────────────────────────────────────────────────────────
+
+[environments.production.deploy]
+numReplicas = 1

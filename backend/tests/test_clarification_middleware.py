@@ -1,18 +1,51 @@
-"""Tests for ClarificationMiddleware, focusing on options type coercion."""
+"""Tests for ClarificationMiddleware.
+
+Covers:
+- Options type coercion (JSON string normalization)
+- clarification_enabled flag (interrupt vs auto-respond)
+"""
 
 import json
-from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 from langgraph.graph.message import add_messages
 
-from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.clarification_middleware import (
+    _AUTO_RESPONSE,
+    ClarificationMiddleware,
+)
+from types import SimpleNamespace
 
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 @pytest.fixture
 def middleware():
     return ClarificationMiddleware()
 
+
+def _make_request(tool_name: str = "ask_clarification", question: str = "Which stock?") -> MagicMock:
+    """Build a mock ToolCallRequest."""
+    req = MagicMock()
+    req.tool_call = {
+        "name": tool_name,
+        "id": "call_abc123",
+        "args": {
+            "question": question,
+            "clarification_type": "missing_info",
+        },
+    }
+    return req
+
+
+# ---------------------------------------------------------------------------
+# Options type coercion tests
+# ---------------------------------------------------------------------------
 
 class TestFormatClarificationMessage:
     """Tests for _format_clarification_message options handling."""
@@ -122,6 +155,112 @@ class TestFormatClarificationMessage:
         assert "4. None" in result
 
 
+# ---------------------------------------------------------------------------
+# clarification_enabled flag tests
+# ---------------------------------------------------------------------------
+
+class TestClarificationMiddlewareEnabled:
+    """Tests with clarification_enabled=True (default / interactive mode)."""
+
+    def test_default_is_enabled(self):
+        mw = ClarificationMiddleware()
+        assert mw.enabled is True
+
+    def test_interrupt_returns_command(self):
+        mw = ClarificationMiddleware(enabled=True)
+        handler = MagicMock()
+        result = mw.wrap_tool_call(_make_request(), handler)
+
+        assert isinstance(result, Command)
+        handler.assert_not_called()
+
+    def test_interrupt_command_goes_to_end(self):
+        mw = ClarificationMiddleware(enabled=True)
+        result = mw.wrap_tool_call(_make_request(), MagicMock())
+
+        assert result.goto == "__end__"
+
+    def test_interrupt_includes_tool_message(self):
+        mw = ClarificationMiddleware(enabled=True)
+        result = mw.wrap_tool_call(_make_request(question="Which ticker?"), MagicMock())
+
+        messages = result.update["messages"]
+        assert len(messages) == 1
+        assert isinstance(messages[0], ToolMessage)
+        assert "Which ticker?" in messages[0].content
+
+    def test_non_clarification_tool_passes_through(self):
+        mw = ClarificationMiddleware(enabled=True)
+        handler = MagicMock(return_value=ToolMessage(content="ok", tool_call_id="x", name="web_search"))
+        req = _make_request(tool_name="web_search")
+
+        result = mw.wrap_tool_call(req, handler)
+
+        handler.assert_called_once_with(req)
+        assert isinstance(result, ToolMessage)
+        assert result.content == "ok"
+
+
+class TestClarificationMiddlewareDisabled:
+    """Tests with clarification_enabled=False (headless / API mode)."""
+
+    def test_auto_responds_with_tool_message(self):
+        mw = ClarificationMiddleware(enabled=False)
+        handler = MagicMock()
+        result = mw.wrap_tool_call(_make_request(), handler)
+
+        assert isinstance(result, ToolMessage)
+        assert not isinstance(result, Command)
+        handler.assert_not_called()
+
+    def test_auto_response_content(self):
+        mw = ClarificationMiddleware(enabled=False)
+        result = mw.wrap_tool_call(_make_request(), MagicMock())
+
+        assert result.content == _AUTO_RESPONSE
+        assert "best judgment" in result.content
+
+    def test_auto_response_preserves_tool_call_id(self):
+        mw = ClarificationMiddleware(enabled=False)
+        result = mw.wrap_tool_call(_make_request(), MagicMock())
+
+        assert result.tool_call_id == "call_abc123"
+        assert result.name == "ask_clarification"
+
+    def test_non_clarification_tool_still_passes_through(self):
+        mw = ClarificationMiddleware(enabled=False)
+        handler = MagicMock(return_value=ToolMessage(content="ok", tool_call_id="x", name="bash"))
+        req = _make_request(tool_name="bash")
+
+        mw.wrap_tool_call(req, handler)
+
+        handler.assert_called_once_with(req)
+
+
+class TestClarificationMiddlewareAsync:
+    """Verify async wrappers match sync behaviour."""
+
+    def test_enabled_interrupts_async(self):
+        import asyncio
+
+        async def _run():
+            mw = ClarificationMiddleware(enabled=True)
+            return await mw.awrap_tool_call(_make_request(), MagicMock())
+
+        result = asyncio.run(_run())
+        assert isinstance(result, Command)
+        assert result.goto == "__end__"
+
+    def test_disabled_auto_responds_async(self):
+        import asyncio
+
+        async def _run():
+            mw = ClarificationMiddleware(enabled=False)
+            return await mw.awrap_tool_call(_make_request(), MagicMock())
+
+        result = asyncio.run(_run())
+        assert isinstance(result, ToolMessage)
+        assert result.content == _AUTO_RESPONSE
 class TestClarificationCommandIdempotency:
     """Clarification tool-call retries should not duplicate messages in state."""
 
