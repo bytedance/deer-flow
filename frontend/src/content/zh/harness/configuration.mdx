@@ -1,0 +1,160 @@
+---
+title: 配置
+description: DeerFlow 的配置系统围绕一个目标设计：每一个有意义的行为都应该可以在配置文件中表达，而不是硬编码在应用程序中。这使部署可重现、可审计，并且易于按环境定制。
+---
+
+import { Callout, Cards } from "nextra/components";
+
+# 配置
+
+<Callout type="info" emoji="⚙️">
+  所有 DeerFlow Harness 行为都由 <code>config.yaml</code>{" "}
+  驱动。一个文件控制哪些模型可用、沙箱如何运行、加载哪些工具，以及每个子系统的行为。
+</Callout>
+
+DeerFlow 的配置系统围绕一个目标设计：每一个有意义的行为都应该可以在配置文件中表达，而不是硬编码在应用程序中。这使部署可重现、可审计，并且易于按环境定制。
+
+## 配置文件位置
+
+DeerFlow 使用以下优先级顺序解析 `config.yaml`：
+
+1. 显式传递给 `AppConfig.from_file(config_path)` 的路径。
+2. `DEER_FLOW_CONFIG_PATH` 环境变量。
+3. `backend/config.yaml`（相对于后端目录）。
+4. 仓库根目录中的 `config.yaml`。
+
+如果这些路径都不存在，应用程序在启动时会报错。
+
+要使用自定义位置：
+
+```bash
+export DEER_FLOW_CONFIG_PATH=/path/to/my-config.yaml
+```
+
+## 环境变量插值
+
+任何字段值都可以使用 `$VAR_NAME` 语法引用环境变量：
+
+```yaml
+models:
+  - name: gpt-4o
+    api_key: $OPENAI_API_KEY
+```
+
+这使密钥不出现在配置文件本身中，变量在运行时从进程环境解析。
+
+## `use` 字段
+
+许多配置条目使用 `use:` 字段来指定要实例化的 Python 类或对象，格式为：
+
+```
+package.subpackage.module:ClassName
+```
+
+或对于模块级对象：
+
+```
+package.subpackage.module:variable_name
+```
+
+示例：
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.tavily.tools:web_search_tool
+    api_key: $TAVILY_API_KEY
+```
+
+这是 DeerFlow 实现可插拔性而不硬编码类引用的方式。
+
+## 额外字段透传
+
+对于模型配置，`ModelConfig` 使用 `pydantic ConfigDict(extra="allow")`。这意味着你在模型条目下添加的任何额外字段都直接传递给模型构造函数。这允许提供商特定选项（如 `extra_body`、`reasoning` 或自定义超时键）无需修改 Harness 即可工作：
+
+```yaml
+models:
+  - name: my-model
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    some_provider_specific_option: value # 传递给 ChatOpenAI 构造函数
+```
+
+## 配置版本
+
+`config.yaml` 包含追踪 schema 版本的 `config_version` 字段：
+
+```yaml
+config_version: 6
+```
+
+当 schema 更改（新字段、重命名章节）时，此数字增加。如果你本地的 `config.yaml` 落后于当前版本，运行：
+
+```bash
+make config-upgrade
+```
+
+这将 `config.example.yaml` 中的新字段合并到你现有的 `config.yaml` 中，而不覆盖你的自定义内容。
+
+## 模块配置速查表
+
+下表将 `config.yaml` 中的每个顶层章节映射到其文档页面：
+
+| 章节              | 描述                                         | 文档                                                 |
+| ----------------- | -------------------------------------------- | ---------------------------------------------------- |
+| `log_level`       | 日志级别（`debug`/`info`/`warning`/`error`） | —                                                    |
+| `models`          | 可用的 LLM 模型                              | [Lead Agent](/docs/harness/lead-agent)               |
+| `token_usage`     | 每次模型调用的 token 追踪                    | [中间件](/docs/harness/middlewares)                  |
+| `tools`           | 可用的 Agent 工具                            | [工具](/docs/harness/tools)                          |
+| `tool_groups`     | 工具的命名分组                               | [工具](/docs/harness/tools)                          |
+| `tool_search`     | 延迟/按需工具加载                            | [工具](/docs/harness/tools)                          |
+| `sandbox`         | 沙箱提供者和选项                             | [沙箱](/docs/harness/sandbox)                        |
+| `skills`          | 技能目录和容器路径                           | [技能](/docs/harness/skills)                         |
+| `skill_evolution` | Agent 管理的技能创建                         | [技能](/docs/harness/skills)                         |
+| `subagents`       | 子 Agent 超时和最大轮次                      | [子 Agent](/docs/harness/subagents)                  |
+| `acp_agents`      | 外部 ACP Agent 集成                          | [子 Agent](/docs/harness/subagents)                  |
+| `memory`          | 跨会话记忆存储                               | [记忆系统](/docs/harness/memory)                     |
+| `summarization`   | 对话摘要压缩                                 | [中间件](/docs/harness/middlewares)                  |
+| `title`           | 自动生成线程标题                             | [中间件](/docs/harness/middlewares)                  |
+| `checkpointer`    | 线程状态持久化                               | [Agent 与线程](/docs/application/agents-and-threads) |
+| `guardrails`      | 工具调用授权                                 | —                                                    |
+| `uploads`         | 文件上传设置（PDF 转换器）                   | —                                                    |
+| `channels`        | IM 频道集成（飞书、Slack 等）                | —                                                    |
+
+## 最小配置示例
+
+最小有效的 `config.yaml` 至少需要一个模型和一个沙箱：
+
+```yaml
+config_version: 6
+
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+从仓库根目录的 `config.example.yaml` 开始，取消注释你需要的章节。
+
+<Cards num={2}>
+  <Cards.Card title="部署指南" href="/docs/application/deployment-guide" />
+  <Cards.Card title="应用配置" href="/docs/application/configuration" />
+</Cards>
