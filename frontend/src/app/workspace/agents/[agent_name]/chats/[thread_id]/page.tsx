@@ -66,6 +66,7 @@ export default function AgentChatPage() {
     thread,
     pendingUsageMessages,
     sendMessage,
+    isUploading,
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
@@ -106,7 +107,11 @@ export default function AgentChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      void sendMessage(threadId, message, { agent_name });
+      const sendPromise = sendMessage(threadId, message, { agent_name });
+      if (message.files.length > 0) {
+        return sendPromise;
+      }
+      void sendPromise;
     },
     [sendMessage, threadId, agent_name],
   );
@@ -243,7 +248,10 @@ export default function AgentChatPage() {
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }
-                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  disabled={
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                    isUploading
+                  }
                   onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
