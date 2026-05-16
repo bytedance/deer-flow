@@ -33,11 +33,12 @@ def _get_work_dir(thread_id: str | None) -> str:
         An absolute physical filesystem path to use as the working directory.
     """
     from deerflow.config.paths import get_paths
+    from deerflow.runtime.user_context import get_effective_user_id
 
     paths = get_paths()
     if thread_id:
         try:
-            work_dir = paths.acp_workspace_dir(thread_id)
+            work_dir = paths.acp_workspace_dir(thread_id, user_id=get_effective_user_id())
         except ValueError:
             logger.warning("Invalid thread_id %r for ACP workspace, falling back to global", thread_id)
             work_dir = paths.base_dir / "acp-workspace"

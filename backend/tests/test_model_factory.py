@@ -597,6 +597,99 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
     assert captured.get("api_key") == "test-key"
     assert captured.get("temperature") == 1.0
     assert captured.get("max_tokens") == 4096
+    assert captured.get("stream_usage") is True
+
+
+def test_openai_compatible_provider_respects_explicit_stream_usage(monkeypatch):
+    """Explicit stream_usage should not be overwritten by the factory default."""
+    model = ModelConfig(
+        name="minimax-m2.5",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        stream_usage=False,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="minimax-m2.5")
+
+    assert captured.get("stream_usage") is False
+
+
+def test_openai_compatible_provider_enables_stream_usage_for_openai_api_base(monkeypatch):
+    """openai_api_base should trigger stream_usage default for ChatOpenAI."""
+    model = ModelConfig(
+        name="openai-compatible",
+        display_name="OpenAI-Compatible",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="example-model",
+        openai_api_base="https://example.com/v1",
+        api_key="test-key",
+        supports_vision=False,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="openai-compatible")
+
+    assert captured.get("openai_api_base") == "https://example.com/v1"
+    assert captured.get("stream_usage") is True
+
+
+def test_non_openai_provider_does_not_receive_stream_usage_default(monkeypatch):
+    """Non-OpenAI providers with base_url should not receive stream_usage by default."""
+    model = ModelConfig(
+        name="ollama-local",
+        display_name="Ollama Local",
+        description=None,
+        use="langchain_ollama:ChatOllama",
+        model="qwen2.5",
+        base_url="http://127.0.0.1:11434",
+        supports_vision=False,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="ollama-local")
+
+    assert captured.get("base_url") == "http://127.0.0.1:11434"
+    assert "stream_usage" not in captured
 
 
 def test_openai_compatible_provider_multiple_models(monkeypatch):
@@ -791,6 +884,84 @@ def test_thinking_disabled_vllm_enable_thinking_format(monkeypatch):
         "chat_template_kwargs": {"enable_thinking": False},
     }
     assert captured.get("reasoning_effort") is None
+
+
+# ---------------------------------------------------------------------------
+# stream_usage injection
+# ---------------------------------------------------------------------------
+
+
+class _FakeWithStreamUsage(FakeChatModel):
+    """Fake model that declares stream_usage in model_fields (like BaseChatOpenAI)."""
+
+    stream_usage: bool | None = None
+
+
+def test_stream_usage_injected_for_openai_compatible_model(monkeypatch):
+    """Factory should set stream_usage=True for models with stream_usage field."""
+    cfg = _make_app_config([_make_model("deepseek", use="langchain_deepseek:ChatDeepSeek")])
+    _patch_factory(monkeypatch, cfg, model_class=_FakeWithStreamUsage)
+
+    captured: dict = {}
+
+    class CapturingModel(_FakeWithStreamUsage):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="deepseek")
+
+    assert captured.get("stream_usage") is True
+
+
+def test_stream_usage_not_injected_for_non_openai_model(monkeypatch):
+    """Factory should NOT inject stream_usage for models without the field."""
+    cfg = _make_app_config([_make_model("claude", use="langchain_anthropic:ChatAnthropic")])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="claude")
+
+    assert "stream_usage" not in captured
+
+
+def test_stream_usage_not_overridden_when_explicitly_set_in_config(monkeypatch):
+    """If config dumps stream_usage=False, factory should respect it."""
+    cfg = _make_app_config([_make_model("deepseek", use="langchain_deepseek:ChatDeepSeek")])
+    _patch_factory(monkeypatch, cfg, model_class=_FakeWithStreamUsage)
+
+    captured: dict = {}
+
+    class CapturingModel(_FakeWithStreamUsage):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    # Simulate config having stream_usage explicitly set by patching model_dump
+    original_get_model_config = cfg.get_model_config
+
+    def patched_get_model_config(name):
+        mc = original_get_model_config(name)
+        mc.stream_usage = False  # type: ignore[attr-defined]
+        return mc
+
+    monkeypatch.setattr(cfg, "get_model_config", patched_get_model_config)
+
+    factory_module.create_chat_model(name="deepseek")
+
+    assert captured.get("stream_usage") is False
 
 
 def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):

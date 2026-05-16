@@ -34,14 +34,14 @@ export default async function DocLayout({ children, params }) {
     <Layout
       navbar={
         <Header
-          className="relative max-w-full px-10"
+          className="sticky max-w-full px-10"
           homeURL="/"
           locale={locale}
         />
       }
       pageMap={pageMap}
       docsRepositoryBase="https://github.com/bytedance/deerflow/tree/main/frontend/src/content"
-      footer={<Footer />}
+      footer={<Footer className="mt-0" />}
       i18n={i18n}
       // ... Your additional layout options
     >
