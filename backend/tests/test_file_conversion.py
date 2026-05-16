@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -15,6 +16,7 @@ from deerflow.utils.file_conversion import (
     _MIN_CHARS_PER_PAGE,
     MAX_OUTLINE_ENTRIES,
     LegacyDocConversionError,
+    _convert_legacy_doc_to_docx,
     _do_convert,
     _find_legacy_doc_converter,
     _get_pdf_converter,
@@ -501,7 +503,8 @@ def test_convert_file_to_markdown_uses_soffice_for_legacy_doc(tmp_path):
 
     fake_module = SimpleNamespace(MarkItDown=FakeMarkItDown)
 
-    def fake_run(cmd, check, capture_output, text):
+    def fake_run(cmd, check, capture_output, text, timeout):
+        assert timeout == 60
         outdir = Path(cmd[cmd.index("--outdir") + 1])
         (outdir / "legacy.docx").write_bytes(b"docx-bytes")
         return SimpleNamespace(stdout="", stderr="")
@@ -515,6 +518,22 @@ def test_convert_file_to_markdown_uses_soffice_for_legacy_doc(tmp_path):
 
     assert md_path == source.with_suffix(".md")
     assert md_path.read_text(encoding="utf-8") == "converted legacy doc"
+
+
+def test_convert_legacy_doc_timeout_raises_conversion_error(tmp_path):
+    source = tmp_path / "legacy.doc"
+    source.write_bytes(b"fake-doc")
+    output_dir = tmp_path / "out"
+
+    with (
+        patch("deerflow.utils.file_conversion._find_legacy_doc_converter", return_value=("soffice", "soffice")),
+        patch(
+            "deerflow.utils.file_conversion.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="soffice", timeout=60),
+        ),
+    ):
+        with pytest.raises(LegacyDocConversionError, match="Timed out converting legacy Word file"):
+            _convert_legacy_doc_to_docx(source, output_dir)
 
 
 def test_find_legacy_doc_converter_prefers_soffice_exe_on_windows():

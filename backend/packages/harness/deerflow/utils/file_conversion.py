@@ -54,6 +54,7 @@ _ASYNC_THRESHOLD_BYTES = 1 * 1024 * 1024  # 1 MB
 # yield close to 0. 50 chars/page gives a wide safety margin.
 # Falls back to absolute 200-char check when page count is unavailable.
 _MIN_CHARS_PER_PAGE = 50
+_LEGACY_DOC_CONVERSION_TIMEOUT_SECONDS = 60
 
 
 def _pymupdf_output_too_sparse(text: str, file_path: Path) -> bool:
@@ -219,6 +220,7 @@ def _convert_legacy_doc_to_docx(file_path: Path, output_dir: Path) -> Path:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=_LEGACY_DOC_CONVERSION_TIMEOUT_SECONDS,
             )
         else:
             subprocess.run(
@@ -233,7 +235,10 @@ def _convert_legacy_doc_to_docx(file_path: Path, output_dir: Path) -> Path:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=_LEGACY_DOC_CONVERSION_TIMEOUT_SECONDS,
             )
+    except subprocess.TimeoutExpired as exc:
+        raise LegacyDocConversionError(f"Timed out converting legacy Word file '{file_path.name}' to .docx.") from exc
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or exc.stdout or "").strip()
         detail = f": {stderr}" if stderr else ""

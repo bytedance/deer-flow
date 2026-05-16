@@ -18,6 +18,7 @@ export interface Translations {
     close: string;
     more: string;
     search: string;
+    loadMore: string;
     download: string;
     thinking: string;
     artifacts: string;
@@ -140,6 +141,7 @@ export interface Translations {
     nameStepAlreadyExistsError: string;
     nameStepNetworkError: string;
     nameStepCheckError: string;
+    nameStepApiDisabledError: string;
     nameStepBootstrapMessage: string;
     save: string;
     saving: string;
@@ -168,6 +170,7 @@ export interface Translations {
     reportIssue: string;
     contactUs: string;
     about: string;
+    logout: string;
   };
 
   // Conversation
@@ -233,8 +236,30 @@ export interface Translations {
     input: string;
     output: string;
     total: string;
+    view: string;
     unavailable: string;
     unavailableShort: string;
+    note: string;
+    presets: {
+      off: string;
+      summary: string;
+      perTurn: string;
+      debug: string;
+    };
+    presetDescriptions: {
+      off: string;
+      summary: string;
+      perTurn: string;
+      debug: string;
+    };
+    finalAnswer: string;
+    stepTotal: string;
+    sharedAttribution: string;
+    subagent: (description: string) => string;
+    startTodo: (content: string) => string;
+    completeTodo: (content: string) => string;
+    updateTodo: (content: string) => string;
+    removeTodo: (content: string) => string;
   };
 
   // Shortcuts
@@ -253,6 +278,7 @@ export interface Translations {
     title: string;
     description: string;
     sections: {
+      account: string;
       appearance: string;
       memory: string;
       tools: string;
@@ -367,6 +393,23 @@ export interface Translations {
       testBody: string;
       notSupported: string;
       disableNotification: string;
+    };
+    account: {
+      profileTitle: string;
+      email: string;
+      role: string;
+      changePasswordTitle: string;
+      changePasswordDescription: string;
+      currentPassword: string;
+      newPassword: string;
+      confirmNewPassword: string;
+      passwordMismatch: string;
+      passwordTooShort: string;
+      passwordChangedSuccess: string;
+      networkError: string;
+      updating: string;
+      updatePassword: string;
+      signOut: string;
     };
     acknowledge: {
       emptyTitle: string;

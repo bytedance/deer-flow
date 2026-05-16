@@ -5,6 +5,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.sandbox import Sandbox
@@ -18,6 +19,11 @@ class PathMapping:
     container_path: str
     local_path: str
     read_only: bool = False
+
+
+class ResolvedPath(NamedTuple):
+    path: str
+    mapping: PathMapping | None
 
 
 class LocalSandbox(Sandbox):
@@ -35,6 +41,13 @@ class LocalSandbox(Sandbox):
     def _is_cmd_shell(shell: str) -> bool:
         """Return whether the selected shell is cmd.exe."""
         return LocalSandbox._shell_name(shell) in {"cmd", "cmd.exe"}
+
+    @staticmethod
+    def _is_msys_shell(shell: str) -> bool:
+        """Return whether the selected shell is a Git Bash/MSYS shell."""
+        normalized = shell.replace("\\", "/").lower()
+        shell_name = LocalSandbox._shell_name(shell)
+        return shell_name in {"sh.exe", "bash.exe"} and any(part in normalized for part in ("/git/", "/mingw", "/msys"))
 
     @staticmethod
     def _find_first_available_shell(candidates: tuple[str, ...]) -> str | None:
@@ -91,7 +104,23 @@ class LocalSandbox(Sandbox):
 
         return best_mapping.read_only
 
-    def _resolve_path(self, path: str) -> str:
+    def _find_path_mapping(self, path: str) -> tuple[PathMapping, str] | None:
+        path_str = str(path)
+
+        for mapping in sorted(self.path_mappings, key=lambda m: len(m.container_path.rstrip("/") or "/"), reverse=True):
+            container_path = mapping.container_path.rstrip("/") or "/"
+            if container_path == "/":
+                if path_str.startswith("/"):
+                    return mapping, path_str.lstrip("/")
+                continue
+
+            if path_str == container_path or path_str.startswith(container_path + "/"):
+                relative = path_str[len(container_path) :].lstrip("/")
+                return mapping, relative
+
+        return None
+
+    def _resolve_path_with_mapping(self, path: str) -> ResolvedPath:
         """
         Resolve container path to actual local path using mappings.
 
@@ -99,22 +128,30 @@ class LocalSandbox(Sandbox):
             path: Path that might be a container path
 
         Returns:
-            Resolved local path
+            Resolved local path and the matched mapping, if any
         """
         path_str = str(path)
 
-        # Try each mapping (longest prefix first for more specific matches)
-        for mapping in sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True):
-            container_path = mapping.container_path
-            local_path = mapping.local_path
-            if path_str == container_path or path_str.startswith(container_path + "/"):
-                # Replace the container path prefix with local path
-                relative = path_str[len(container_path) :].lstrip("/")
-                resolved = str(Path(local_path) / relative) if relative else local_path
-                return resolved
+        mapping_match = self._find_path_mapping(path_str)
+        if mapping_match is None:
+            return ResolvedPath(path_str, None)
 
-        # No mapping found, return original path
-        return path_str
+        mapping, relative = mapping_match
+        local_root = Path(mapping.local_path).resolve()
+        resolved_path = (local_root / relative).resolve() if relative else local_root
+
+        try:
+            resolved_path.relative_to(local_root)
+        except ValueError as exc:
+            raise PermissionError(errno.EACCES, "Access denied: path escapes mounted directory", path_str) from exc
+
+        return ResolvedPath(str(resolved_path), mapping)
+
+    def _resolve_path(self, path: str) -> str:
+        return self._resolve_path_with_mapping(path).path
+
+    def _is_resolved_path_read_only(self, resolved: ResolvedPath) -> bool:
+        return bool(resolved.mapping and resolved.mapping.read_only) or self._is_read_only_path(resolved.path)
 
     def _reverse_resolve_path(self, path: str) -> str:
         """
@@ -273,12 +310,19 @@ class LocalSandbox(Sandbox):
         shell = self._get_shell()
 
         if os.name == "nt":
+            env = None
             if self._is_powershell(shell):
                 args = [shell, "-NoProfile", "-Command", resolved_command]
             elif self._is_cmd_shell(shell):
                 args = [shell, "/c", resolved_command]
             else:
                 args = [shell, "-c", resolved_command]
+                if self._is_msys_shell(shell):
+                    env = {
+                        **os.environ,
+                        "MSYS_NO_PATHCONV": "1",
+                        "MSYS2_ARG_CONV_EXCL": "*",
+                    }
 
             result = subprocess.run(
                 args,
@@ -286,12 +330,13 @@ class LocalSandbox(Sandbox):
                 capture_output=True,
                 text=True,
                 timeout=600,
+                env=env,
             )
         else:
+            args = [shell, "-c", resolved_command]
             result = subprocess.run(
-                resolved_command,
-                executable=shell,
-                shell=True,
+                args,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=600,
@@ -309,8 +354,14 @@ class LocalSandbox(Sandbox):
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         resolved_path = self._resolve_path(path)
         entries = list_dir(resolved_path, max_depth)
-        # Reverse resolve local paths back to container paths in output
-        return [self._reverse_resolve_paths_in_output(entry) for entry in entries]
+        # Reverse resolve local paths back to container paths and preserve
+        # list_dir's trailing "/" marker for directories.
+        result: list[str] = []
+        for entry in entries:
+            is_dir = entry.endswith(("/", "\\"))
+            reversed_entry = self._reverse_resolve_path(entry.rstrip("/\\")) if is_dir else self._reverse_resolve_path(entry)
+            result.append(f"{reversed_entry}/" if is_dir and not reversed_entry.endswith("/") else reversed_entry)
+        return result
 
     def read_file(self, path: str) -> str:
         resolved_path = self._resolve_path(path)
@@ -329,8 +380,9 @@ class LocalSandbox(Sandbox):
             raise type(e)(e.errno, e.strerror, path) from None
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
-        resolved_path = self._resolve_path(path)
-        if self._is_read_only_path(resolved_path):
+        resolved = self._resolve_path_with_mapping(path)
+        resolved_path = resolved.path
+        if self._is_resolved_path_read_only(resolved):
             raise OSError(errno.EROFS, "Read-only file system", path)
         try:
             dir_path = os.path.dirname(resolved_path)
@@ -384,8 +436,9 @@ class LocalSandbox(Sandbox):
         ], truncated
 
     def update_file(self, path: str, content: bytes) -> None:
-        resolved_path = self._resolve_path(path)
-        if self._is_read_only_path(resolved_path):
+        resolved = self._resolve_path_with_mapping(path)
+        resolved_path = resolved.path
+        if self._is_resolved_path_read_only(resolved):
             raise OSError(errno.EROFS, "Read-only file system", path)
         try:
             dir_path = os.path.dirname(resolved_path)
