@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import threading
 from functools import lru_cache
@@ -154,6 +155,10 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None) -> list[S
 
 def _skill_mutability_label(category: SkillCategory | str) -> str:
     return "[custom, editable]" if category == SkillCategory.CUSTOM else "[built-in]"
+
+
+def _escape_xml(value: str) -> str:
+    return html.escape(str(value), quote=True)
 
 
 def clear_skills_system_prompt_cache() -> None:
@@ -602,7 +607,11 @@ def _get_cached_skills_prompt_section(
     skills_list = ""
     if filtered:
         skill_items = "\n".join(
-            f'    <skill path="{location}" category="{category}">\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>\n    </skill>'
+            f'    <skill path="{_escape_xml(location)}" category="{_escape_xml(category)}">\n'
+            f"        <name>{_escape_xml(name)}</name>\n"
+            f"        <description>{_escape_xml(description)} {_skill_mutability_label(category)}</description>\n"
+            f"        <location>{_escape_xml(location)}</location>\n"
+            "    </skill>"
             for name, description, category, location in filtered
         )
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
