@@ -79,3 +79,16 @@ async def test_transcript_deduplicates_submitted_message_after_checkpoint_assign
     transcript = await get_thread_transcript(store, "thread-1")
 
     assert [message["content"] for message in transcript] == ["same question"]
+    assert [message["id"] for message in transcript] == ["human-1"]
+
+
+@pytest.mark.anyio
+async def test_transcript_preserves_repeated_identical_user_messages_without_ids() -> None:
+    store = FakeStore()
+
+    await append_thread_transcript_messages(store, "thread-1", [HumanMessage(content="same question")])
+    await append_thread_transcript_messages(store, "thread-1", [HumanMessage(content="same question")])
+
+    transcript = await get_thread_transcript(store, "thread-1")
+
+    assert [message["content"] for message in transcript] == ["same question", "same question"]

@@ -14,12 +14,26 @@ def _ai_with_tool_calls(tool_calls):
     return AIMessage(content="", tool_calls=tool_calls)
 
 
+def _ai_with_invalid_tool_calls(invalid_tool_calls):
+    return AIMessage(content="", tool_calls=[], invalid_tool_calls=invalid_tool_calls)
+
+
 def _tool_msg(tool_call_id, name="test_tool"):
     return ToolMessage(content="result", tool_call_id=tool_call_id, name=name)
 
 
 def _tc(name="bash", tc_id="call_1"):
     return {"name": name, "id": tc_id, "args": {}}
+
+
+def _invalid_tc(name="write_file", tc_id="write_file:36", error="Failed to parse tool arguments: malformed JSON"):
+    return {
+        "type": "invalid_tool_call",
+        "name": name,
+        "id": tc_id,
+        "args": '{"description":"write report","path":"/mnt/user-data/outputs/report.md","content":"bad {"json"}"}',
+        "error": error,
+    }
 
 
 class TestBuildPatchedMessagesNoPatch:
@@ -143,6 +157,124 @@ class TestBuildPatchedMessagesPatching:
         assert patched[1].tool_call_id == "call_1"
         assert patched[1].name == "bash"
         assert patched[1].status == "error"
+
+    def test_non_adjacent_tool_result_is_moved_next_to_tool_call(self):
+        middleware = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1")]),
+            HumanMessage(content="interruption"),
+            _tool_msg("call_1", "bash"),
+        ]
+        patched = middleware._build_patched_messages(msgs)
+        assert patched is not None
+        assert isinstance(patched[0], AIMessage)
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "call_1"
+        assert isinstance(patched[2], HumanMessage)
+
+    def test_multiple_tool_results_stay_grouped_after_ai_tool_call(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1"), _tc("read", "call_2")]),
+            HumanMessage(content="interruption"),
+            _tool_msg("call_2", "read"),
+            _tool_msg("call_1", "bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert isinstance(patched[0], AIMessage)
+        assert isinstance(patched[1], ToolMessage)
+        assert isinstance(patched[2], ToolMessage)
+        assert [patched[1].tool_call_id, patched[2].tool_call_id] == ["call_1", "call_2"]
+        assert isinstance(patched[3], HumanMessage)
+
+    def test_valid_adjacent_tool_results_are_unchanged(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1")]),
+            _tool_msg("call_1", "bash"),
+            HumanMessage(content="next"),
+        ]
+
+        assert mw._build_patched_messages(msgs) is None
+
+    def test_tool_results_are_grouped_with_their_own_ai_turn_across_multiple_ai_messages(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1")]),
+            HumanMessage(content="interruption"),
+            _ai_with_tool_calls([_tc("read", "call_2")]),
+            _tool_msg("call_1", "bash"),
+            _tool_msg("call_2", "read"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert isinstance(patched[0], AIMessage)
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "call_1"
+        assert isinstance(patched[2], HumanMessage)
+        assert isinstance(patched[3], AIMessage)
+        assert isinstance(patched[4], ToolMessage)
+        assert patched[4].tool_call_id == "call_2"
+
+    def test_orphan_tool_message_is_preserved_during_grouping(self):
+        mw = DanglingToolCallMiddleware()
+        orphan = _tool_msg("orphan_call", "orphan")
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1")]),
+            orphan,
+            HumanMessage(content="interruption"),
+            _tool_msg("call_1", "bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert isinstance(patched[0], AIMessage)
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "call_1"
+        assert orphan in patched
+        assert patched.count(orphan) == 1
+
+    def test_invalid_tool_call_is_patched(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [_ai_with_invalid_tool_calls([_invalid_tc()])]
+        patched = mw._build_patched_messages(msgs)
+        assert patched is not None
+        assert len(patched) == 2
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "write_file:36"
+        assert patched[1].name == "write_file"
+        assert patched[1].status == "error"
+        assert "arguments were invalid" in patched[1].content
+        assert "Failed to parse tool arguments" in patched[1].content
+
+    def test_valid_and_invalid_tool_calls_are_both_patched(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[_tc("bash", "call_1")],
+                invalid_tool_calls=[_invalid_tc()],
+            )
+        ]
+        patched = mw._build_patched_messages(msgs)
+        assert patched is not None
+        tool_msgs = [m for m in patched if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 2
+        assert {tm.tool_call_id for tm in tool_msgs} == {"call_1", "write_file:36"}
+
+    def test_invalid_tool_call_already_responded_is_not_patched(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_invalid_tool_calls([_invalid_tc()]),
+            _tool_msg("write_file:36", "write_file"),
+        ]
+        assert mw._build_patched_messages(msgs) is None
 
 
 class TestWrapModelCall:

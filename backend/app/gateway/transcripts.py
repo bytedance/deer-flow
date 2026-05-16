@@ -96,7 +96,7 @@ async def append_thread_transcript_messages(
 
     existing = await get_thread_transcript(store, thread_id)
     seen_ids = {str(message["id"]) for message in existing if isinstance(message, dict) and message.get("id")}
-    seen_fingerprints = {_message_fingerprint(message) for message in existing if isinstance(message, dict)}
+    unidentified_by_fingerprint = {_message_fingerprint(message): index for index, message in enumerate(existing) if isinstance(message, dict) and not message.get("id")}
     changed = False
 
     for message in incoming:
@@ -104,11 +104,19 @@ async def append_thread_transcript_messages(
         fingerprint = _message_fingerprint(message)
         if message_id and str(message_id) in seen_ids:
             continue
-        if fingerprint in seen_fingerprints:
+
+        unidentified_index = unidentified_by_fingerprint.get(fingerprint)
+        if message_id and unidentified_index is not None:
+            existing[unidentified_index] = message
+            seen_ids.add(str(message_id))
+            del unidentified_by_fingerprint[fingerprint]
+            changed = True
             continue
+
         if message_id:
             seen_ids.add(str(message_id))
-        seen_fingerprints.add(fingerprint)
+        else:
+            unidentified_by_fingerprint.setdefault(fingerprint, len(existing))
         existing.append(message)
         changed = True
 

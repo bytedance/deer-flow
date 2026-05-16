@@ -81,6 +81,28 @@ async def test_crawl_network_error(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_crawl_transient_failure_logs_without_traceback(jina_client, monkeypatch, caplog):
+    """Transient network failures must log at WARNING without a traceback and include the exception type."""
+
+    async def mock_post(self, url, **kwargs):
+        raise httpx.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.jina_ai.jina_client"):
+        result = await jina_client.crawl("https://example.com")
+
+    jina_records = [r for r in caplog.records if r.name == "deerflow.community.jina_ai.jina_client"]
+    assert len(jina_records) == 1, f"expected exactly one log record, got {len(jina_records)}"
+    record = jina_records[0]
+    assert record.levelno == logging.WARNING, f"expected WARNING, got {record.levelname}"
+    assert record.exc_info is None, "transient failures must not attach a traceback"
+    assert "ConnectTimeout" in record.getMessage()
+    assert result.startswith("Error:")
+    assert "ConnectTimeout" in result
+
+
+@pytest.mark.anyio
 async def test_crawl_passes_headers(jina_client, monkeypatch):
     """Test that correct headers are sent."""
     captured_headers = {}

@@ -178,9 +178,50 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  // The URL carries a query string (e.g. `?limit=10&offset=0`), which Playwright
+  // glob `*` does NOT cross, so we match with a regex anchored to `/runs`
+  // followed by `?` or end-of-string.  This must NOT match `/runs/stream`.
+  void page.route(/\/api\/langgraph\/threads\/[^/]+\/runs(\?|$)/, (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      });
+    }
+    return route.fallback();
+  });
+
   // Run stream — returns a minimal SSE response with an AI message
   void page.route("**/api/langgraph/runs/stream", handleRunStream);
   void page.route("**/api/langgraph/threads/*/runs/stream", handleRunStream);
+
+  // Models list — model picker dropdown
+  void page.route("**/api/models", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          models: [],
+          token_usage: { enabled: false },
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Follow-up suggestions — input box auto-suggest after AI response
+  void page.route("**/api/threads/*/suggestions", (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ suggestions: [] }),
+      });
+    }
+    return route.fallback();
+  });
 
   // Agents list — sidebar & gallery page
   void page.route("**/api/agents", (route) => {
