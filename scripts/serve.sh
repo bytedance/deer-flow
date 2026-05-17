@@ -71,6 +71,11 @@ _kill_port() {
     fi
 }
 
+_is_port_listening() {
+    local port=$1
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1
+}
+
 stop_all() {
     echo "Stopping all services..."
     pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
@@ -79,10 +84,11 @@ stop_all() {
     pkill -f "next-server" 2>/dev/null || true
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
-    pkill -9 nginx 2>/dev/null || true
+    pkill -9 -f "nginx.*nginx.local.conf.*$REPO_ROOT" 2>/dev/null || true
     # Force-kill any survivors still holding the service ports
     _kill_port 8001
     _kill_port 3000
+    _kill_port 2026
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -216,10 +222,11 @@ echo ""
 # ── Cleanup handler ──────────────────────────────────────────────────────────
 
 cleanup() {
+    local status="${1:-0}"
     trap - INT TERM
     echo ""
     stop_all
-    exit 0
+    exit "$status"
 }
 
 trap cleanup INT TERM
@@ -230,6 +237,12 @@ trap cleanup INT TERM
 # In daemon mode, wraps with nohup. Waits for port to be ready.
 run_service() {
     local name="$1" cmd="$2" port="$3" timeout="$4"
+
+    if _is_port_listening "$port"; then
+        echo "✗ $name cannot start because port $port is already in use."
+        echo "  Run 'make stop' to clean up stale DeerFlow services, or free the port manually."
+        cleanup 1
+    fi
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
@@ -242,7 +255,7 @@ run_service() {
         local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
-        cleanup
+        cleanup 1
     }
     echo "✓ $name started on localhost:$port"
 }
