@@ -83,6 +83,7 @@ async def test_list_by_thread(manager: RunManager):
 
     runs = await manager.list_by_thread("thread-1")
     assert len(runs) == 2
+    # list_by_thread returns oldest-first (ascending created_at).
     assert runs[0].run_id == r1.run_id
     assert runs[1].run_id == r2.run_id
 
@@ -192,3 +193,160 @@ async def test_model_name_default_is_none():
 
     stored = await store.get(record.run_id)
     assert stored["model_name"] is None
+
+
+# ---------------------------------------------------------------------------
+# Store fallback tests (simulates gateway restart scenario)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def manager_with_store() -> RunManager:
+    """RunManager backed by a MemoryRunStore."""
+    return RunManager(store=MemoryRunStore())
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_returns_store_records_after_restart(manager_with_store: RunManager):
+    """After in-memory state is cleared (simulating restart), list_by_thread
+    should still return runs from the persistent store."""
+    mgr = manager_with_store
+    r1 = await mgr.create("thread-1", "agent-1")
+    await mgr.set_status(r1.run_id, RunStatus.success)
+    r2 = await mgr.create("thread-1", "agent-2")
+    await mgr.set_status(r2.run_id, RunStatus.error, error="boom")
+
+    # Clear in-memory dict to simulate a restart
+    mgr._runs.clear()
+
+    runs = await mgr.list_by_thread("thread-1")
+    assert len(runs) == 2
+    statuses = {r.run_id: r.status for r in runs}
+    assert statuses[r1.run_id] == RunStatus.success
+    assert statuses[r2.run_id] == RunStatus.error
+    # Verify other fields survive the round-trip
+    for r in runs:
+        assert r.thread_id == "thread-1"
+        assert ISO_RE.match(r.created_at)
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_merges_in_memory_and_store(manager_with_store: RunManager):
+    """In-memory runs should be included alongside store-only records."""
+    mgr = manager_with_store
+
+    # Create a run and let it complete (will be in both memory and store)
+    r1 = await mgr.create("thread-1")
+    await mgr.set_status(r1.run_id, RunStatus.success)
+
+    # Simulate restart: clear memory, then create a new in-memory run
+    mgr._runs.clear()
+    r2 = await mgr.create("thread-1")
+
+    runs = await mgr.list_by_thread("thread-1")
+    assert len(runs) == 2
+    run_ids = {r.run_id for r in runs}
+    assert r1.run_id in run_ids
+    assert r2.run_id in run_ids
+
+    # r2 should be the in-memory record (has live state)
+    r2_record = next(r for r in runs if r.run_id == r2.run_id)
+    assert r2_record is r2  # same object reference
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_no_store():
+    """Without a store, list_by_thread should only return in-memory runs."""
+    mgr = RunManager()
+    await mgr.create("thread-1")
+
+    mgr._runs.clear()
+    runs = await mgr.list_by_thread("thread-1")
+    assert runs == []
+
+
+@pytest.mark.anyio
+async def test_aget_returns_in_memory_record(manager_with_store: RunManager):
+    """aget should return the in-memory record when available."""
+    mgr = manager_with_store
+    r1 = await mgr.create("thread-1", "agent-1")
+
+    result = await mgr.aget(r1.run_id)
+    assert result is r1  # same object
+
+
+@pytest.mark.anyio
+async def test_aget_falls_back_to_store(manager_with_store: RunManager):
+    """aget should return a record from the store when not in memory."""
+    mgr = manager_with_store
+    r1 = await mgr.create("thread-1", "agent-1")
+    await mgr.set_status(r1.run_id, RunStatus.success)
+
+    mgr._runs.clear()
+
+    result = await mgr.aget(r1.run_id)
+    assert result is not None
+    assert result.run_id == r1.run_id
+    assert result.status == RunStatus.success
+    assert result.thread_id == "thread-1"
+    assert result.assistant_id == "agent-1"
+
+
+@pytest.mark.anyio
+async def test_aget_falls_back_to_store_with_user_filter():
+    """aget should honor user_id when reading store-only records."""
+    store = MemoryRunStore()
+    await store.put("run-1", thread_id="thread-1", user_id="user-1", status="success")
+    mgr = RunManager(store=store)
+
+    allowed = await mgr.aget("run-1", user_id="user-1")
+    denied = await mgr.aget("run-1", user_id="user-2")
+    assert allowed is not None
+    assert denied is None
+
+
+@pytest.mark.anyio
+async def test_aget_returns_none_for_unknown(manager_with_store: RunManager):
+    """aget should return None for a run ID that doesn't exist anywhere."""
+    result = await manager_with_store.aget("nonexistent-run-id")
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_aget_store_failure_is_graceful():
+    """If the store raises, aget should return None instead of propagating."""
+    from unittest.mock import AsyncMock
+
+    store = MemoryRunStore()
+    store.get = AsyncMock(side_effect=RuntimeError("db down"))
+    mgr = RunManager(store=store)
+
+    result = await mgr.aget("some-id")
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_store_failure_is_graceful():
+    """If the store raises, list_by_thread should return only in-memory runs."""
+    from unittest.mock import AsyncMock
+
+    store = MemoryRunStore()
+    store.list_by_thread = AsyncMock(side_effect=RuntimeError("db down"))
+    mgr = RunManager(store=store)
+
+    r1 = await mgr.create("thread-1")
+    runs = await mgr.list_by_thread("thread-1")
+    assert len(runs) == 1
+    assert runs[0].run_id == r1.run_id
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_falls_back_to_store_with_user_filter():
+    """list_by_thread should return only the requesting user's store records."""
+    store = MemoryRunStore()
+    await store.put("run-1", thread_id="thread-1", user_id="user-1", status="success")
+    await store.put("run-2", thread_id="thread-1", user_id="user-2", status="success")
+    mgr = RunManager(store=store)
+
+    runs = await mgr.list_by_thread("thread-1", user_id="user-1")
+    assert [r.run_id for r in runs] == ["run-1"]

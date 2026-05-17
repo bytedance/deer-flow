@@ -34,7 +34,12 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def get(self, run_id: str) -> dict[str, Any] | None:
+    async def get(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
         pass
 
     @abc.abstractmethod
