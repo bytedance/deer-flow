@@ -21,7 +21,7 @@ The fix has three coordinated layers:
    ``MemoryMiddleware``) read via ``resolve_runtime_user_id(runtime)`` which
    prefers ``runtime.context["user_id"]`` and falls back to the ContextVar.
 
-See ``docs/bug_feishu_default_user_id.md``.
+See issue https://github.com/bytedance/deer-flow/issues/2947 for context.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ class TestChannelClientCarriesActingUser:
 
         import asyncio
 
-        asyncio.new_event_loop().run_until_complete(manager._fetch_gateway("/api/models", "models", acting_user_id="ou_alice"))
+        asyncio.run(manager._fetch_gateway("/api/models", "models", acting_user_id="ou_alice"))
 
         assert captured["headers"]["X-DeerFlow-Acting-User"] == "ou_alice"
 
@@ -223,6 +223,45 @@ class TestFeishuFileDownloadUsesExplicitUserId:
 
         sig = inspect.signature(FeishuChannel._receive_single_file)
         assert "user_id" in sig.parameters
+
+
+class TestInboundUploadsHonourActingUser:
+    """Inbound file ingestion must land in the platform user's bucket.
+
+    ``_ingest_inbound_files`` runs on the channel worker's asyncio task,
+    not inside any Gateway HTTP request, so the ``_current_user``
+    ContextVar is unset. Without an explicit ``user_id``,
+    ``ensure_uploads_dir`` would collapse to ``users/default/`` and
+    cross-contaminate platform users — re-introducing exactly the bug we
+    fixed elsewhere. Regression test for that path.
+    """
+
+    def test_get_uploads_dir_honours_explicit_user_id(self, tmp_path, monkeypatch):
+        from deerflow.config.paths import Paths
+        from deerflow.uploads.manager import get_uploads_dir
+
+        monkeypatch.setattr("deerflow.uploads.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+        uploads_dir = get_uploads_dir("t-1", user_id="ou_alice")
+
+        path = str(uploads_dir).replace("\\", "/")
+        assert "/users/ou_alice/threads/t-1/" in path
+        assert "/users/default/" not in path
+
+    def test_get_uploads_dir_falls_back_to_contextvar_when_user_id_omitted(self, tmp_path, monkeypatch):
+        """Backwards-compat: Gateway routers and other authenticated callers
+        rely on the ContextVar; the new optional ``user_id`` must not break
+        them."""
+        from deerflow.config.paths import Paths
+        from deerflow.uploads.manager import get_uploads_dir
+
+        monkeypatch.setattr("deerflow.uploads.manager.get_paths", lambda: Paths(str(tmp_path)))
+        # No user_id passed → falls back to ContextVar (set by conftest autouse).
+        uploads_dir = get_uploads_dir("t-1")
+
+        path = str(uploads_dir).replace("\\", "/")
+        # The autouse conftest sets a ``test-user-autouse`` user.
+        assert "/users/test-user-autouse/threads/t-1/" in path
 
 
 class TestActingUserEndToEndIsolation:

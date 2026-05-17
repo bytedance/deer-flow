@@ -445,7 +445,10 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
         write_upload_file_no_symlink,
     )
 
-    uploads_dir = ensure_uploads_dir(thread_id)
+    # Explicit ``user_id``: channel worker runs outside any HTTP request task,
+    # so the ContextVar is unset; without this the directory would collapse to
+    # ``users/default/uploads/...`` and cross-contaminate platform users.
+    uploads_dir = ensure_uploads_dir(thread_id, user_id=msg.user_id)
     seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
 
     created: list[dict[str, Any]] = []

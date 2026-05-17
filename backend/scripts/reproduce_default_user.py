@@ -5,8 +5,8 @@ Demonstrates that get_effective_user_id() returns "default" when called
 outside an HTTP request context (which is exactly the scenario for
 Feishu channel workers running on background threads).
 
-Run:
-    cd backend && PYTHONPATH=. uv run python reproduce_default_user.py
+Run from the ``backend/`` directory:
+    PYTHONPATH=. uv run python scripts/reproduce_default_user.py
 """
 
 import threading
