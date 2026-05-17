@@ -19,6 +19,8 @@ import threading
 import time
 import uuid
 
+import requests
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback
@@ -45,6 +47,7 @@ DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
 DEFAULT_IDLE_TIMEOUT = 600  # 10 minutes in seconds
 DEFAULT_REPLICAS = 3  # Maximum concurrent sandbox containers
+DEFAULT_HEALTH_CHECK_INTERVAL = 1.0  # Throttle cached health probes on hot paths
 IDLE_CHECK_INTERVAL = 60  # Check every 60 seconds
 
 
@@ -97,6 +100,7 @@ class AioSandboxProvider(SandboxProvider):
         self._thread_sandboxes: dict[str, str] = {}  # thread_id -> sandbox_id
         self._thread_locks: dict[str, threading.Lock] = {}  # thread_id -> in-process lock
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
+        self._health_check_cache: dict[str, tuple[float, bool, str]] = {}  # sandbox_id -> (checked_at, healthy, sandbox_url)
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
         # Containers here can be reclaimed quickly (no cold-start) or destroyed
@@ -616,9 +620,72 @@ class AioSandboxProvider(SandboxProvider):
         """
         with self._lock:
             sandbox = self._sandboxes.get(sandbox_id)
+        if sandbox is None:
+            return None
+
+        # Cached AIO sandboxes can outlive the underlying container/URL.
+        # Probe before returning so callers do not execute against a dead endpoint.
+        if isinstance(sandbox, AioSandbox) and not self._sandbox_url_is_healthy(sandbox_id, sandbox.base_url):
+            logger.warning(f"Sandbox {sandbox_id} at {sandbox.base_url} is unreachable, attempting rediscovery")
+            return self._recover_stale_sandbox(sandbox_id)
+
+        with self._lock:
+            sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is not None:
                 self._last_activity[sandbox_id] = time.time()
             return sandbox
+
+    def _sandbox_url_is_healthy(self, sandbox_id: str, sandbox_url: str) -> bool:
+        """Return whether the sandbox HTTP endpoint is reachable.
+
+        Successful checks are briefly cached to avoid probing the same sandbox
+        on every hot-path ``get()`` call.
+        """
+        now = time.time()
+        with self._lock:
+            cached = self._health_check_cache.get(sandbox_id)
+            if cached is not None:
+                checked_at, healthy, cached_url = cached
+                if cached_url == sandbox_url and (now - checked_at) < DEFAULT_HEALTH_CHECK_INTERVAL:
+                    return healthy
+
+        try:
+            response = requests.get(f"{sandbox_url}/v1/sandbox", timeout=2)
+            healthy = response.status_code == 200
+        except requests.exceptions.RequestException:
+            healthy = False
+
+        with self._lock:
+            self._health_check_cache[sandbox_id] = (now, healthy, sandbox_url)
+        return healthy
+
+    def _recover_stale_sandbox(self, sandbox_id: str) -> Sandbox | None:
+        """Drop a stale cached sandbox and rediscover the current live endpoint."""
+        discovered = self._backend.discover(sandbox_id)
+
+        with self._lock:
+            self._sandboxes.pop(sandbox_id, None)
+            self._sandbox_infos.pop(sandbox_id, None)
+            self._last_activity.pop(sandbox_id, None)
+            self._health_check_cache.pop(sandbox_id, None)
+            thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
+            for tid in thread_ids_to_remove:
+                del self._thread_sandboxes[tid]
+
+            if discovered is None:
+                logger.warning(f"Sandbox {sandbox_id} could not be rediscovered after health-check failure")
+                return None
+
+            sandbox = AioSandbox(id=discovered.sandbox_id, base_url=discovered.sandbox_url)
+            self._sandboxes[discovered.sandbox_id] = sandbox
+            self._sandbox_infos[discovered.sandbox_id] = discovered
+            self._last_activity[discovered.sandbox_id] = time.time()
+            self._health_check_cache[discovered.sandbox_id] = (time.time(), True, discovered.sandbox_url)
+            for tid in thread_ids_to_remove:
+                self._thread_sandboxes[tid] = discovered.sandbox_id
+
+        logger.info(f"Recovered sandbox {sandbox_id} at {discovered.sandbox_url}")
+        return sandbox
 
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox from active use into the warm pool.
@@ -640,6 +707,7 @@ class AioSandboxProvider(SandboxProvider):
             for tid in thread_ids_to_remove:
                 del self._thread_sandboxes[tid]
             self._last_activity.pop(sandbox_id, None)
+            self._health_check_cache.pop(sandbox_id, None)
             # Park in warm pool — container keeps running
             if info and sandbox_id not in self._warm_pool:
                 self._warm_pool[sandbox_id] = (info, time.time())
@@ -665,6 +733,7 @@ class AioSandboxProvider(SandboxProvider):
             for tid in thread_ids_to_remove:
                 del self._thread_sandboxes[tid]
             self._last_activity.pop(sandbox_id, None)
+            self._health_check_cache.pop(sandbox_id, None)
             # Also pull from warm pool if it was parked there
             if info is None and sandbox_id in self._warm_pool:
                 info, _ = self._warm_pool.pop(sandbox_id)
