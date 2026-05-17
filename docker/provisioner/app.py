@@ -97,22 +97,6 @@ def join_host_path(base: str, *parts: str) -> str:
     return str(result)
 
 
-def _validate_thread_id(thread_id: str) -> str:
-    if not re.match(SAFE_THREAD_ID_PATTERN, thread_id):
-        raise ValueError(
-            "Invalid thread_id: only alphanumeric characters, hyphens, and underscores are allowed."
-        )
-    return thread_id
-
-
-def _validate_user_id(user_id: str) -> str:
-    if not re.match(SAFE_USER_ID_PATTERN, user_id):
-        raise ValueError(
-            "Invalid user_id: only alphanumeric characters, hyphens, and underscores are allowed."
-        )
-    return user_id
-
-
 # ── K8s client setup ────────────────────────────────────────────────────
 
 core_v1: k8s_client.CoreV1Api | None = None
@@ -296,15 +280,13 @@ def _build_volumes(thread_id: str) -> list[k8s_client.V1Volume]:
 
 def _build_volume_mounts(thread_id: str, user_id: str = DEFAULT_USER_ID) -> list[k8s_client.V1VolumeMount]:
     """Build volume mount list, using subPath for PVC user-data."""
-    thread_id = _validate_thread_id(thread_id)
-    user_id = _validate_user_id(user_id)
     userdata_mount = k8s_client.V1VolumeMount(
         name="user-data",
         mount_path="/mnt/user-data",
         read_only=False,
     )
     if USERDATA_PVC_NAME:
-        userdata_mount.sub_path = f"./deer-flow/users/{user_id}/threads/{thread_id}/user-data"
+        userdata_mount.sub_path = f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
 
     return [
         k8s_client.V1VolumeMount(
@@ -318,8 +300,6 @@ def _build_volume_mounts(thread_id: str, user_id: str = DEFAULT_USER_ID) -> list
 
 def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
-    thread_id = _validate_thread_id(thread_id)
-    user_id = _validate_user_id(user_id)
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
@@ -462,7 +442,10 @@ async def create_sandbox(req: CreateSandboxRequest):
     user_id = req.user_id
 
     logger.info(
-        f"Received request to create sandbox '{sandbox_id}' for thread '{thread_id}' user '{user_id}'"
+        "Received request to create sandbox '%s' for thread '%s' user '%s'",
+        sandbox_id,
+        thread_id,
+        user_id,
     )
 
     # ── Fast path: sandbox already exists ────────────────────────────

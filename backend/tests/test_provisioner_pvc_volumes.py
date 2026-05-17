@@ -97,14 +97,14 @@ class TestBuildVolumeMounts:
         provisioner_module.USERDATA_PVC_NAME = "my-pvc"
         mounts = provisioner_module._build_volume_mounts("thread-42", user_id="user-7")
         userdata_mount = mounts[1]
-        assert userdata_mount.sub_path == "./deer-flow/users/user-7/threads/thread-42/user-data"
+        assert userdata_mount.sub_path == "deer-flow/users/user-7/threads/thread-42/user-data"
 
     def test_pvc_defaults_to_default_user_subpath(self, provisioner_module):
         """Older callers should still land under a stable default user namespace."""
         provisioner_module.USERDATA_PVC_NAME = "my-pvc"
         mounts = provisioner_module._build_volume_mounts("thread-42")
         userdata_mount = mounts[1]
-        assert userdata_mount.sub_path == "./deer-flow/users/default/threads/thread-42/user-data"
+        assert userdata_mount.sub_path == "deer-flow/users/default/threads/thread-42/user-data"
 
     def test_skills_mount_read_only(self, provisioner_module):
         """Skills mount should always be read-only."""
@@ -161,4 +161,4 @@ class TestBuildPodVolumes:
         assert pod.spec.volumes[0].persistent_volume_claim is not None
         assert pod.spec.volumes[1].persistent_volume_claim is not None
         userdata_mount = pod.spec.containers[0].volume_mounts[1]
-        assert userdata_mount.sub_path == "./deer-flow/users/user-7/threads/thread-1/user-data"
+        assert userdata_mount.sub_path == "deer-flow/users/user-7/threads/thread-1/user-data"
