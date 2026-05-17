@@ -1,17 +1,46 @@
+import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
+import {
+  DEERFLOW_REQUEST_PATHNAME_HEADER,
+  DEERFLOW_REQUEST_SEARCH_HEADER,
+} from "@/core/request-headers";
 
 import { WorkspaceContent } from "./workspace-content";
 
 export const dynamic = "force-dynamic";
 
+function isPublicMockChatRequest(pathname: string | null, search: string | null) {
+  if (!pathname?.startsWith("/workspace/chats/")) {
+    return false;
+  }
+  if (pathname === "/workspace/chats/new") {
+    return false;
+  }
+  return new URLSearchParams(search ?? "").get("mock") === "true";
+}
+
 export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  const requestHeaders = await headers();
+  if (
+    isPublicMockChatRequest(
+      requestHeaders.get(DEERFLOW_REQUEST_PATHNAME_HEADER),
+      requestHeaders.get(DEERFLOW_REQUEST_SEARCH_HEADER),
+    )
+  ) {
+    return (
+      <AuthProvider initialUser={null}>
+        <WorkspaceContent>{children}</WorkspaceContent>
+      </AuthProvider>
+    );
+  }
+
   const result = await getServerSideUser();
 
   switch (result.tag) {
