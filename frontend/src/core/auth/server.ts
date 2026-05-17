@@ -101,7 +101,15 @@ export async function getServerSideUser(): Promise<AuthResult> {
           if (setCookieHdr) {
             const parsed = parseSetCookie(setCookieHdr);
             if (parsed) {
-              cookieStore.set(parsed.name, parsed.value, parsed.options);
+              // cookies().set() throws in Server Component context (Next.js 16).
+              // The middleware (src/middleware.ts) relays Set-Cookie on the
+              // forward-auth response — this best-effort set here covers the
+              // Route-Handler / Server-Action callers.
+              try {
+                cookieStore.set(parsed.name, parsed.value, parsed.options);
+              } catch {
+                // Server Component context — middleware handles cookie relay.
+              }
             }
           }
           const userParsed = userSchema.safeParse(await ssoRes.json());
@@ -115,10 +123,12 @@ export async function getServerSideUser(): Promise<AuthResult> {
             "[SSR auth] Malformed /auth/me trust response:",
             userParsed.error,
           );
+        } else {
+          console.error(`[SSR auth] trust /auth/me responded ${ssoRes.status}`);
         }
-      } catch {
+      } catch (err) {
         clearTimeout(ssoTimeout);
-        // Trust path unreachable — fall through to native unauthenticated flow.
+        console.error("[SSR auth] trust path failed:", err);
       }
     }
 
