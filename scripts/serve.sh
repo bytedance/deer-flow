@@ -62,12 +62,46 @@ done
 
 # ── Stop helper ──────────────────────────────────────────────────────────────
 
-_kill_port() {
+_is_repo_pid() {
+    local pid=$1
+    lsof -p "$pid" 2>/dev/null | grep -F "$REPO_ROOT" >/dev/null
+}
+
+_kill_repo_processes() {
+    local pattern=$1
+    local pid
+    local pids=""
+
+    while IFS= read -r pid; do
+        if [ -n "$pid" ] && _is_repo_pid "$pid"; then
+            case " $pids " in
+                *" $pid "*) ;;
+                *) pids="$pids $pid" ;;
+            esac
+        fi
+    done < <(pgrep -f "$pattern" 2>/dev/null || true)
+
+    if [ -n "$pids" ]; then
+        kill $pids 2>/dev/null || true
+    fi
+}
+
+_kill_repo_port() {
     local port=$1
     local pid
-    pid=$(lsof -ti :"$port" 2>/dev/null) || true
-    if [ -n "$pid" ]; then
-        kill -9 $pid 2>/dev/null || true
+    local pids=""
+
+    while IFS= read -r pid; do
+        if [ -n "$pid" ] && _is_repo_pid "$pid"; then
+            case " $pids " in
+                *" $pid "*) ;;
+                *) pids="$pids $pid" ;;
+            esac
+        fi
+    done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+
+    if [ -n "$pids" ]; then
+        kill -9 $pids 2>/dev/null || true
     fi
 }
 
@@ -76,19 +110,62 @@ _is_port_listening() {
     lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1
 }
 
+_is_repo_nginx_pid() {
+    local pid=$1
+    local command
+    local args
+
+    command=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
+    case "$command" in
+        nginx|*/nginx) ;;
+        *) return 1 ;;
+    esac
+
+    args=$(ps -p "$pid" -o args= 2>/dev/null) || return 1
+    case "$args" in
+        *"$REPO_ROOT/docker/nginx/nginx.local.conf"*|*"$REPO_ROOT"*) return 0 ;;
+    esac
+
+    _is_repo_pid "$pid"
+}
+
+_kill_repo_nginx() {
+    local pid
+    local pids=""
+
+    if [ -f "$REPO_ROOT/logs/nginx.pid" ]; then
+        read -r pid < "$REPO_ROOT/logs/nginx.pid" || true
+        if [ -n "$pid" ] && _is_repo_nginx_pid "$pid"; then
+            pids="$pids $pid"
+        fi
+    fi
+
+    while IFS= read -r pid; do
+        if [ -n "$pid" ] && _is_repo_nginx_pid "$pid"; then
+            case " $pids " in
+                *" $pid "*) ;;
+                *) pids="$pids $pid" ;;
+            esac
+        fi
+    done < <(pgrep -f nginx 2>/dev/null || true)
+
+    if [ -n "$pids" ]; then
+        kill -9 $pids 2>/dev/null || true
+    fi
+}
+
 stop_all() {
     echo "Stopping all services..."
-    pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
-    pkill -f "next dev" 2>/dev/null || true
-    pkill -f "next start" 2>/dev/null || true
-    pkill -f "next-server" 2>/dev/null || true
+    _kill_repo_processes "uvicorn app.gateway.app:app"
+    _kill_repo_processes "next dev"
+    _kill_repo_processes "next start"
+    _kill_repo_processes "next-server"
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
-    pkill -9 -f "nginx.*nginx.local.conf.*$REPO_ROOT" 2>/dev/null || true
+    _kill_repo_nginx
     # Force-kill any survivors still holding the service ports
-    _kill_port 8001
-    _kill_port 3000
-    _kill_port 2026
+    _kill_repo_port 8001
+    _kill_repo_port 3000
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -229,7 +306,8 @@ cleanup() {
     exit "$status"
 }
 
-trap cleanup INT TERM
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
 # ── Helper: start a service ──────────────────────────────────────────────────
 
