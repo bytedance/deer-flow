@@ -15,9 +15,6 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
-import { GithubIcon } from "./github-icon";
-import { Tooltip } from "./tooltip";
-
 export function WorkspaceContainer({
   className,
   children,
@@ -89,18 +86,6 @@ export function WorkspaceHeader({
             )}
           </BreadcrumbList>
         </Breadcrumb>
-      </div>
-      <div className="pr-4">
-        <Tooltip content={t.workspace.githubTooltip}>
-          <a
-            href="https://github.com/bytedance/deer-flow"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="opacity-75 transition hover:opacity-100"
-          >
-            <GithubIcon className="size-6" />
-          </a>
-        </Tooltip>
       </div>
     </header>
   );

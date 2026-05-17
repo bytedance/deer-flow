@@ -8,12 +8,12 @@ test.describe("Landing page", () => {
 
     // Header brand name
     await expect(
-      page.locator("header h1", { hasText: "DeerFlow" }),
+      page.locator("header h1", { hasText: "EHM AI 工作台" }),
     ).toBeVisible();
 
-    // "Get Started" call-to-action button in hero
+    // "进入工作台" call-to-action link in hero
     await expect(
-      page.getByRole("link", { name: /get started/i }),
+      page.getByRole("link", { name: /进入工作台/ }).first(),
     ).toBeVisible();
   });
 
@@ -22,7 +22,7 @@ test.describe("Landing page", () => {
 
     await page.goto("/");
 
-    const getStarted = page.getByRole("link", { name: /get started/i });
+    const getStarted = page.getByRole("link", { name: /进入工作台/ }).first();
     await getStarted.click();
 
     // Should redirect to /workspace/chats/new

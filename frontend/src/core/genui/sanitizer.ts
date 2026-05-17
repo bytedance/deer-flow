@@ -34,6 +34,20 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   markdown: new Set([
     "content", "title",
   ]),
+  // EHM industrial primitives.
+  gauge: new Set([
+    "value", "min", "max", "unit", "label", "thresholds", "precision",
+  ]),
+  alarm: new Set([
+    "title", "items",
+  ]),
+  metric: new Set([
+    "tag", "label", "value", "unit", "precision", "setpoint", "range",
+    "delta", "status",
+  ]),
+  status: new Set([
+    "status", "tag", "label",
+  ]),
 };
 
 function sanitizeValue(value: unknown, depth = 0): unknown {

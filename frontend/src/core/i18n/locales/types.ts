@@ -469,9 +469,13 @@ export interface Translations {
       system: string;
       light: string;
       dark: string;
+      industrialLight: string;
+      industrialDark: string;
       systemDescription: string;
       lightDescription: string;
       darkDescription: string;
+      industrialLightDescription: string;
+      industrialDarkDescription: string;
       languageTitle: string;
       languageDescription: string;
     };

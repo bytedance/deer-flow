@@ -16,6 +16,11 @@ const COMPONENT_REGISTRY: Record<string, () => Promise<{ default: LazyComponent 
   layout: () => import("@/components/genui/LayoutBlock") as any,
   markdown: () => import("@/components/genui/MarkdownBlock") as any,
   image: () => import("@/components/genui/ImageBlock") as any,
+  // EHM industrial primitives — generic blocks any skill can emit.
+  gauge: () => import("@/components/genui/GaugeBlock") as any,
+  alarm: () => import("@/components/genui/AlarmBlock") as any,
+  metric: () => import("@/components/genui/MetricBlock") as any,
+  status: () => import("@/components/genui/StatusBlock") as any,
 };
 /* eslint-enable @typescript-eslint/no-explicit-any */
 

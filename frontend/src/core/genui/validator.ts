@@ -147,6 +147,86 @@ const imagePropsSchema = z.object({
   fallback: z.string().max(200).optional(),
 });
 
+// ─── EHM industrial primitives ──────────────────────────────────────
+
+const gaugeThresholdsSchema = z.object({
+  warn: z.number().optional(),
+  error: z.number().optional(),
+  critical: z.number().optional(),
+});
+
+const gaugePropsSchema = z.object({
+  value: z.number(),
+  min: z.number().optional(),
+  max: z.number().optional(),
+  unit: z.string().max(50).optional(),
+  label: z.string().max(200).optional(),
+  thresholds: gaugeThresholdsSchema.optional(),
+  precision: z.number().min(0).max(8).optional(),
+});
+
+const alarmLevelSchema = z.enum([
+  "critical",
+  "high",
+  "medium",
+  "low",
+  "journal",
+]);
+
+const alarmItemSchema = z.object({
+  level: alarmLevelSchema,
+  message: z.string().max(2000),
+  tag: z.string().max(100).optional(),
+  time: z.string().max(64).optional(),
+  source: z.string().max(200).optional(),
+  acked: z.boolean().optional(),
+});
+
+const alarmPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  items: z.array(alarmItemSchema).max(500),
+});
+
+const statusKindSchema = z.enum([
+  "running",
+  "stopped",
+  "maint",
+  "standby",
+  "fault",
+  "comm-loss",
+]);
+
+const metricRangeSchema = z.object({
+  ll: z.number().optional(),
+  l: z.number().optional(),
+  h: z.number().optional(),
+  hh: z.number().optional(),
+});
+
+const metricDeltaSchema = z.object({
+  value: z.union([z.number(), z.string().max(50)]),
+  direction: z.enum(["up", "down", "flat"]).optional(),
+  vs: z.string().max(50).optional(),
+});
+
+const metricPropsSchema = z.object({
+  tag: z.string().max(100).optional(),
+  label: z.string().max(200).optional(),
+  value: z.union([z.number(), z.string().max(100)]),
+  unit: z.string().max(50).optional(),
+  precision: z.number().min(0).max(8).optional(),
+  setpoint: z.number().optional(),
+  range: metricRangeSchema.optional(),
+  delta: metricDeltaSchema.optional(),
+  status: statusKindSchema.optional(),
+});
+
+const statusPropsSchema = z.object({
+  status: statusKindSchema,
+  tag: z.string().max(100).optional(),
+  label: z.string().max(200).optional(),
+});
+
 const propsSchemas: Record<string, z.ZodType> = {
   chart: chartPropsSchema,
   echart: echartPropsSchema,
@@ -159,6 +239,10 @@ const propsSchemas: Record<string, z.ZodType> = {
   layout: layoutPropsSchema,
   markdown: markdownPropsSchema,
   image: imagePropsSchema,
+  gauge: gaugePropsSchema,
+  alarm: alarmPropsSchema,
+  metric: metricPropsSchema,
+  status: statusPropsSchema,
 };
 
 export function validateProps(

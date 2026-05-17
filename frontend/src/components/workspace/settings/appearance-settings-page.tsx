@@ -1,6 +1,12 @@
 "use client";
 
-import { MonitorSmartphoneIcon, MoonIcon, SunIcon } from "lucide-react";
+import {
+  FactoryIcon,
+  GaugeIcon,
+  MonitorSmartphoneIcon,
+  MoonIcon,
+  SunIcon,
+} from "lucide-react";
 import { useTheme } from "next-themes";
 import { useMemo, type ComponentType, type SVGProps } from "react";
 
@@ -23,27 +29,46 @@ const languageOptions: { value: Locale; label: string }[] = [
   { value: "zh-CN", label: zhCN.locale.localName },
 ];
 
+type ThemeId =
+  | "system"
+  | "light"
+  | "dark"
+  | "industrial-light"
+  | "industrial-dark";
+
 export function AppearanceSettingsPage() {
   const { t, locale, changeLocale } = useI18n();
   const { theme, setTheme, systemTheme } = useTheme();
-  const currentTheme = (theme ?? "system") as "system" | "light" | "dark";
+  const currentTheme = (theme ?? "industrial-dark") as ThemeId;
 
   const themeOptions = useMemo(
     () => [
       {
-        id: "system",
+        id: "industrial-dark" as const,
+        label: t.settings.appearance.industrialDark,
+        description: t.settings.appearance.industrialDarkDescription,
+        icon: FactoryIcon,
+      },
+      {
+        id: "industrial-light" as const,
+        label: t.settings.appearance.industrialLight,
+        description: t.settings.appearance.industrialLightDescription,
+        icon: GaugeIcon,
+      },
+      {
+        id: "system" as const,
         label: t.settings.appearance.system,
         description: t.settings.appearance.systemDescription,
         icon: MonitorSmartphoneIcon,
       },
       {
-        id: "light",
+        id: "light" as const,
         label: t.settings.appearance.light,
         description: t.settings.appearance.lightDescription,
         icon: SunIcon,
       },
       {
-        id: "dark",
+        id: "dark" as const,
         label: t.settings.appearance.dark,
         description: t.settings.appearance.darkDescription,
         icon: MoonIcon,
@@ -52,6 +77,10 @@ export function AppearanceSettingsPage() {
     [
       t.settings.appearance.dark,
       t.settings.appearance.darkDescription,
+      t.settings.appearance.industrialDark,
+      t.settings.appearance.industrialDarkDescription,
+      t.settings.appearance.industrialLight,
+      t.settings.appearance.industrialLightDescription,
       t.settings.appearance.light,
       t.settings.appearance.lightDescription,
       t.settings.appearance.system,
@@ -73,7 +102,7 @@ export function AppearanceSettingsPage() {
               label={option.label}
               description={option.description}
               active={currentTheme === option.id}
-              mode={option.id as "system" | "light" | "dark"}
+              mode={option.id}
               systemTheme={systemTheme}
               onSelect={(value) => setTheme(value)}
             />
@@ -124,12 +153,28 @@ function ThemePreviewCard({
   label: string;
   description: string;
   active: boolean;
-  mode: "system" | "light" | "dark";
+  mode: ThemeId;
   systemTheme?: string;
-  onSelect: (mode: "system" | "light" | "dark") => void;
+  onSelect: (mode: ThemeId) => void;
 }) {
-  const previewMode =
-    mode === "system" ? (systemTheme === "dark" ? "dark" : "light") : mode;
+  const isDarkPreview =
+    mode === "dark" ||
+    mode === "industrial-dark" ||
+    (mode === "system" && systemTheme === "dark");
+  const isIndustrial =
+    mode === "industrial-light" || mode === "industrial-dark";
+  const previewBg = isIndustrial
+    ? isDarkPreview
+      ? "border-neutral-700 bg-neutral-800 text-neutral-100"
+      : "border-neutral-300 bg-neutral-100 text-neutral-900"
+    : isDarkPreview
+      ? "border-neutral-800 bg-neutral-900 text-neutral-200"
+      : "border-slate-200 bg-white text-slate-900";
+  const previewAccent = isIndustrial
+    ? "bg-sky-500"
+    : isDarkPreview
+      ? "bg-emerald-400"
+      : "bg-emerald-500";
   return (
     <button
       type="button"
@@ -155,18 +200,11 @@ function ThemePreviewCard({
       <div
         className={cn(
           "relative overflow-hidden rounded-md border text-xs transition-colors",
-          previewMode === "dark"
-            ? "border-neutral-800 bg-neutral-900 text-neutral-200"
-            : "border-slate-200 bg-white text-slate-900",
+          previewBg,
         )}
       >
         <div className="border-border/50 flex items-center gap-2 border-b px-3 py-2">
-          <div
-            className={cn(
-              "h-2 w-2 rounded-full",
-              previewMode === "dark" ? "bg-emerald-400" : "bg-emerald-500",
-            )}
-          />
+          <div className={cn("h-2 w-2 rounded-full", previewAccent)} />
           <div className="h-2 w-10 rounded-full bg-current/20" />
           <div className="h-2 w-6 rounded-full bg-current/15" />
         </div>

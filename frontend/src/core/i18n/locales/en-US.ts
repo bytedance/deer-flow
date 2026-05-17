@@ -62,11 +62,11 @@ export const enUS: Translations = {
   welcome: {
     greeting: "Hello, again!",
     description:
-      "Welcome to EHM, an open source super agent. With built-in and custom skills, EHM helps you search on the web, analyze data, and generate artifacts like slides, web pages and do almost anything.",
+      "Welcome to the EHM AI Workspace.\nDescribe the equipment or tag you want to look at, and the system will invoke the right skills for monitoring, diagnosis, and reporting.",
 
     createYourOwnSkill: "Create Your Own Skill",
     createYourOwnSkillDescription:
-      "Create your own skill to release the power of EHM. With customized skills,\nEHM can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.",
+      "Create your own Agent Skill to bring industry know-how into the EHM AI Workspace.\nCustom skills can query data, generate reports, and back almost any analysis workflow.",
   },
 
   // Clipboard
@@ -79,7 +79,8 @@ export const enUS: Translations = {
 
   // Input Box
   inputBox: {
-    placeholder: "How can I assist you today?",
+    placeholder:
+      "Describe an equipment problem (with tag), e.g. trend of P-101A vibration…",
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
@@ -106,16 +107,17 @@ export const enUS: Translations = {
       "This browser doesn't support microphone speech recognition. Switch back to text input.",
     mode: "Mode",
     flashMode: "Flash",
-    flashModeDescription: "Fast and efficient, but may not be accurate",
+    flashModeDescription:
+      "Realtime lookup: single-point status and current readings",
     reasoningMode: "Reasoning",
     reasoningModeDescription:
-      "Reasoning before action, balance between time and accuracy",
+      "Diagnostic reasoning: fault detection and degradation trends",
     proMode: "Pro",
     proModeDescription:
-      "Reasoning, planning and executing, get more accurate results, may take more time",
+      "Deep analysis: multi-tag correlation, root cause, SOP recommendations",
     ultraMode: "Ultra",
     ultraModeDescription:
-      "Pro mode with subagents to divide work; best for complex multi-step tasks",
+      "Multi-agent: complex cross-unit diagnosis and batched daily reports",
     reasoningEffort: "Reasoning Effort",
     reasoningEffortMinimal: "Minimal",
     reasoningEffortMinimalDescription: "Retrieval + Direct Output",
@@ -139,41 +141,46 @@ export const enUS: Translations = {
     knowledgeBase: "Knowledge Base",
     suggestions: [
       {
-        suggestion: "Write",
-        prompt: "Write a blog post about the latest trends on [topic]",
-        icon: PenLineIcon,
-      },
-      {
-        suggestion: "Research",
+        suggestion: "Trend",
         prompt:
-          "Conduct a deep dive research on [topic], and summarize the findings.",
-        icon: MicroscopeIcon,
-      },
-      {
-        suggestion: "Collect",
-        prompt: "Collect data from [source] and create a report.",
+          "Show the last 24-hour trend of [tag] and call out any anomalies.",
         icon: ShapesIcon,
       },
       {
-        suggestion: "Learn",
-        prompt: "Learn about [topic] and create a tutorial.",
+        suggestion: "Diagnose",
+        prompt:
+          "Diagnose the current fault on [tag] and recommend remediation steps.",
+        icon: MicroscopeIcon,
+      },
+      {
+        suggestion: "Spectrum",
+        prompt:
+          "Inspect the spectrum and waveform features of [tag] and flag abnormal bands.",
         icon: GraduationCapIcon,
+      },
+      {
+        suggestion: "Daily Report",
+        prompt:
+          "Generate a daily report for [unit] on [date], including KPIs, incidents, and suggestions.",
+        icon: PenLineIcon,
       },
     ],
     suggestionsCreate: [
       {
-        suggestion: "Webpage",
-        prompt: "Create a webpage about [topic]",
+        suggestion: "Work Order",
+        prompt: "Draft a maintenance work order for [tag] addressing [issue].",
         icon: CompassIcon,
       },
       {
-        suggestion: "Image",
-        prompt: "Create an image about [topic]",
+        suggestion: "SOP",
+        prompt:
+          "Look up the SOP for [equipment type] under [operating condition].",
         icon: ImageIcon,
       },
       {
-        suggestion: "Video",
-        prompt: "Create a video about [topic]",
+        suggestion: "Compare",
+        prompt:
+          "Compare the trends of [tag A] and [tag B] over [time range].",
         icon: VideoIcon,
       },
       {
@@ -234,13 +241,13 @@ export const enUS: Translations = {
     save: "Save agent",
     saving: "Saving agent...",
     saveRequested:
-      "Save requested. DeerFlow is generating and saving an initial version now.",
+      "Save requested. The system is generating and saving an initial version now.",
     saveHint:
       "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
     saveCommandMessage:
       "Please save this custom agent now based on everything we have discussed so far. Treat this as my explicit confirmation to save. If some details are still missing, make reasonable assumptions, generate a concise first SOUL.md in English, and call setup_agent immediately without asking me for more confirmation.",
     agentCreatedPendingRefresh:
-      "The agent was created, but DeerFlow could not load it yet. Please refresh this page in a moment.",
+      "The agent was created, but the system could not load it yet. Please refresh this page in a moment.",
     more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
@@ -344,13 +351,13 @@ export const enUS: Translations = {
 
   // Workspace
   workspace: {
-    officialWebsite: "DeerFlow's official website",
-    githubTooltip: "DeerFlow on Github",
+    officialWebsite: "Official website",
+    githubTooltip: "Source repository",
     settingsAndMore: "Settings and more",
-    visitGithub: "DeerFlow on GitHub",
-    reportIssue: "Report a issue",
+    visitGithub: "Source repository",
+    reportIssue: "Report an issue",
     contactUs: "Contact us",
-    about: "About DeerFlow",
+    about: "About",
     logout: "Log out",
   },
 
@@ -393,7 +400,7 @@ export const enUS: Translations = {
     writeFile: "Write file",
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
-    skillInstallTooltip: "Install skill and make it available to DeerFlow",
+    skillInstallTooltip: "Install skill and make it available in the workspace",
     generationProcess: "Generation Process",
     generationProcessSteps: (count: number) => `${count} steps`,
   },
@@ -455,7 +462,7 @@ export const enUS: Translations = {
     actions: "Actions",
     keyboardShortcuts: "Keyboard Shortcuts",
     keyboardShortcutsDescription:
-      "Navigate DeerFlow faster with keyboard shortcuts.",
+      "Navigate the workspace faster with keyboard shortcuts.",
     openCommandPalette: "Open Command Palette",
     toggleSidebar: "Toggle Sidebar",
   },
@@ -463,7 +470,7 @@ export const enUS: Translations = {
   // Settings
   settings: {
     title: "Settings",
-    description: "Adjust how DeerFlow looks and behaves for you.",
+    description: "Adjust how the workspace looks and behaves for you.",
     sections: {
       account: "Account",
       appearance: "Appearance",
@@ -477,7 +484,7 @@ export const enUS: Translations = {
     memory: {
       title: "Memory",
       description:
-        "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
+        "The system automatically learns from your conversations in the background. These memories help the system understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
       exportButton: "Export memory",
@@ -560,9 +567,15 @@ export const enUS: Translations = {
       system: "System",
       light: "Light",
       dark: "Dark",
+      industrialLight: "Industrial Light",
+      industrialDark: "Industrial Dark",
       systemDescription: "Match the operating system preference automatically.",
       lightDescription: "Bright palette with higher contrast for daytime.",
       darkDescription: "Dim palette that reduces glare for focus.",
+      industrialLightDescription:
+        "ISA-101 neutral gray on light background with industrial blue accent — for office use.",
+      industrialDarkDescription:
+        "ISA-101 neutral gray on dark background with industrial blue accent — preferred for control rooms.",
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
     },
@@ -577,18 +590,18 @@ export const enUS: Translations = {
       createSkill: "Create skill",
       emptyTitle: "No agent skill yet",
       emptyDescription:
-        "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",
+        "Put your agent skill folders under the `/skills/custom` folder under the root folder of the project.",
       emptyButton: "Create Your First Skill",
     },
     notification: {
       title: "Notification",
       description:
-        "DeerFlow only sends a completion notification when the window is not active. This is especially useful for long-running tasks so you can switch to other work and get notified when done.",
+        "The system only sends a completion notification when the window is not active. This is especially useful for long-running tasks so you can switch to other work and get notified when done.",
       requestPermission: "Request notification permission",
       deniedHint:
         "Notification permission was denied. You can enable it in your browser's site settings to receive completion alerts.",
       testButton: "Send test notification",
-      testTitle: "DeerFlow",
+      testTitle: "EHM AI Workspace",
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",

@@ -15,15 +15,17 @@ export function Footer({ className }: FooterProps) {
         className,
       )}
     >
-      <hr className="from-border/0 to-border/0 m-0 h-px w-full border-none bg-linear-to-r via-white/20" />
-      <div className="text-muted-foreground container flex h-20 flex-col items-center justify-center text-sm">
-        <p className="text-center font-serif text-lg md:text-xl">
-          &quot;Originated from Open Source, give back to Open Source.&quot;
+      <hr className="from-border/0 via-border/40 to-border/0 m-0 h-px w-full border-none bg-linear-to-r" />
+      <div className="text-muted-foreground container mb-8 mt-6 flex flex-col items-center justify-center gap-1 text-xs">
+        <p>&copy; {year} 沈阳因思科技有限公司</p>
+        <p>
+          <a
+            href="mailto:support@inscphm.com"
+            className="hover:text-foreground transition-colors"
+          >
+            support@inscphm.com
+          </a>
         </p>
-      </div>
-      <div className="text-muted-foreground container mb-8 flex flex-col items-center justify-center text-xs">
-        <p>Licensed under MIT License</p>
-        <p>&copy; {year} DeerFlow</p>
       </div>
     </footer>
   );

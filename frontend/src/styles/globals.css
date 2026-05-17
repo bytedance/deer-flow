@@ -68,22 +68,16 @@
 @source inline("bg-{background,muted,primary,secondary,accent}");
 @source inline("border-{border,input}");
 
-@custom-variant dark (&:is(.dark *));
+@custom-variant dark (&:is(.dark *, .industrial-dark *));
 
 @theme {
   --font-sans:
-    ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
-    "Segoe UI Symbol", "Noto Color Emoji";
-
-  --animate-fade-in: fade-in 1.1s;
-  @keyframes fade-in {
-    0% {
-      opacity: 0;
-    }
-    100% {
-      opacity: 1;
-    }
-  }
+    var(--font-sans-latin), var(--font-sans-cjk), ui-sans-serif, system-ui,
+    sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol",
+    "Noto Color Emoji";
+  --font-mono:
+    var(--font-mono), ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
 
   --animate-fade-in-up: fade-in-up 0.15s ease-in-out forwards;
   @keyframes fade-in-up {
@@ -93,14 +87,6 @@
     }
     100% {
       opacity: 1;
-    }
-  }
-
-  --animate-bouncing: bouncing 0.5s infinite alternate;
-  @keyframes bouncing {
-    to {
-      opacity: 0.1;
-      transform: translateY(-8px);
     }
   }
 
@@ -125,23 +111,6 @@
     100% {
       opacity: 1;
       transform: translateY(0);
-    }
-  }
-
-  --animate-wave: wave 0.6s ease-in-out 2;
-  @keyframes wave {
-    0%,
-    100% {
-      transform: rotate(0deg);
-    }
-    25% {
-      transform: rotate(20deg);
-    }
-    50% {
-      transform: rotate(0deg);
-    }
-    75% {
-      transform: rotate(20deg);
     }
   }
 }
@@ -185,41 +154,23 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --animate-aurora: aurora 8s ease-in-out infinite alternate;
-  @keyframes aurora {
-    0% {
-      background-position: 0% 50%;
-      transform: rotate(-5deg) scale(0.9);
-    }
-    25% {
-      background-position: 50% 100%;
-      transform: rotate(5deg) scale(1.1);
-    }
-    50% {
-      background-position: 100% 50%;
-      transform: rotate(-3deg) scale(0.95);
-    }
-    75% {
-      background-position: 50% 0%;
-      transform: rotate(3deg) scale(1.05);
-    }
-    100% {
-      background-position: 0% 50%;
-      transform: rotate(-5deg) scale(0.9);
-    }
-  }
-  --animate-shine: shine var(--duration) infinite linear;
-  @keyframes shine {
-    0% {
-      background-position: 0% 0%;
-    }
-    50% {
-      background-position: 100% 100%;
-    }
-    to {
-      background-position: 0% 0%;
-    }
-  }
+
+  /* Alarm priority colors — used by bg-alarm-*, text-alarm-* utilities. */
+  --color-alarm-critical: var(--alarm-critical);
+  --color-alarm-high: var(--alarm-high);
+  --color-alarm-medium: var(--alarm-medium);
+  --color-alarm-low: var(--alarm-low);
+  --color-alarm-journal: var(--alarm-journal);
+  --color-alarm-foreground: var(--alarm-foreground);
+
+  /* Equipment operating-state colors — used by bg-status-*, text-status-* utilities. */
+  --color-status-running: var(--status-running);
+  --color-status-stopped: var(--status-stopped);
+  --color-status-maint: var(--status-maint);
+  --color-status-standby: var(--status-standby);
+  --color-status-fault: var(--status-fault);
+  --color-status-comm-loss: var(--status-comm-loss);
+  --color-status-foreground: var(--status-foreground);
 }
 
 :root {
@@ -241,7 +192,7 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0.0098 87.47);
   --input: oklch(0.88 0.0098 87.47);
-  --ring: transparent;
+  --ring: oklch(0.55 0.15 230);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -255,6 +206,23 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0.0098 87.47);
   --sidebar-ring: oklch(0.708 0 0);
+
+  /* Alarm priority palette (IEC 62682 / ISA-18.2 — five levels). */
+  --alarm-critical: oklch(0.45 0.20 320);
+  --alarm-high: oklch(0.60 0.22 25);
+  --alarm-medium: oklch(0.78 0.18 90);
+  --alarm-low: oklch(0.65 0.20 350);
+  --alarm-journal: oklch(0.65 0.15 230);
+  --alarm-foreground: oklch(0.985 0 0);
+
+  /* Equipment operating-state palette (six states). */
+  --status-running: oklch(0.55 0.10 145);
+  --status-stopped: oklch(0.55 0.00 0);
+  --status-maint: oklch(0.65 0.15 60);
+  --status-standby: oklch(0.65 0.10 230);
+  --status-fault: oklch(0.55 0.22 25);
+  --status-comm-loss: oklch(0.50 0.05 260);
+  --status-foreground: oklch(0.985 0 0);
 }
 
 .dark {
@@ -275,7 +243,7 @@
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: transparent;
+  --ring: oklch(0.7 0.15 230);
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
@@ -290,6 +258,100 @@
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
   font-weight: 300;
+
+  /* Alarm priority palette tuned for dark surfaces. */
+  --alarm-critical: oklch(0.55 0.22 320);
+  --alarm-high: oklch(0.65 0.24 25);
+  --alarm-medium: oklch(0.82 0.18 90);
+  --alarm-low: oklch(0.70 0.22 350);
+  --alarm-journal: oklch(0.70 0.16 230);
+  --alarm-foreground: oklch(0.985 0 0);
+
+  /* Equipment operating-state palette tuned for dark surfaces. */
+  --status-running: oklch(0.62 0.12 145);
+  --status-stopped: oklch(0.65 0.00 0);
+  --status-maint: oklch(0.70 0.16 60);
+  --status-standby: oklch(0.70 0.12 230);
+  --status-fault: oklch(0.62 0.24 25);
+  --status-comm-loss: oklch(0.55 0.06 260);
+  --status-foreground: oklch(0.985 0 0);
+}
+
+/*
+ * Industrial themes (ISA-101 neutral grayscale + industrial blue + EHM
+ * semantic alarm/status palette). They are applied on top of `.dark` /
+ * `.light` so shadcn `dark:` utilities and existing component styles keep
+ * working — these blocks only override design tokens, not selectors.
+ */
+.industrial-dark {
+  --radius: 0.375rem;
+  --background: oklch(0.22 0 0);
+  --foreground: oklch(0.92 0 0);
+  --card: oklch(0.27 0 0);
+  --card-foreground: oklch(0.92 0 0);
+  --popover: oklch(0.27 0 0);
+  --popover-foreground: oklch(0.92 0 0);
+  --primary: oklch(0.62 0.15 230);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.30 0 0);
+  --secondary-foreground: oklch(0.92 0 0);
+  --muted: oklch(0.30 0 0);
+  --muted-foreground: oklch(0.68 0 0);
+  --accent: oklch(0.32 0 0);
+  --accent-foreground: oklch(0.92 0 0);
+  --destructive: oklch(0.62 0.24 25);
+  --border: oklch(0.35 0 0);
+  --input: oklch(0.32 0 0);
+  --ring: oklch(0.62 0.15 230);
+  --chart-1: oklch(0.62 0.15 230);
+  --chart-2: oklch(0.65 0.14 180);
+  --chart-3: oklch(0.70 0.15 90);
+  --chart-4: oklch(0.65 0.18 30);
+  --chart-5: oklch(0.60 0.12 310);
+  --sidebar: oklch(0.20 0 0);
+  --sidebar-foreground: oklch(0.92 0 0);
+  --sidebar-primary: oklch(0.62 0.15 230);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.27 0 0);
+  --sidebar-accent-foreground: oklch(0.92 0 0);
+  --sidebar-border: oklch(0.35 0 0);
+  --sidebar-ring: oklch(0.62 0.15 230);
+  font-weight: 400;
+}
+
+.industrial-light {
+  --radius: 0.375rem;
+  --background: oklch(0.93 0 0);
+  --foreground: oklch(0.20 0 0);
+  --card: oklch(0.97 0 0);
+  --card-foreground: oklch(0.20 0 0);
+  --popover: oklch(0.97 0 0);
+  --popover-foreground: oklch(0.20 0 0);
+  --primary: oklch(0.45 0.15 230);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.88 0 0);
+  --secondary-foreground: oklch(0.20 0 0);
+  --muted: oklch(0.88 0 0);
+  --muted-foreground: oklch(0.45 0 0);
+  --accent: oklch(0.85 0 0);
+  --accent-foreground: oklch(0.20 0 0);
+  --destructive: oklch(0.55 0.22 25);
+  --border: oklch(0.78 0 0);
+  --input: oklch(0.85 0 0);
+  --ring: oklch(0.45 0.15 230);
+  --chart-1: oklch(0.45 0.15 230);
+  --chart-2: oklch(0.50 0.14 180);
+  --chart-3: oklch(0.55 0.15 90);
+  --chart-4: oklch(0.50 0.18 30);
+  --chart-5: oklch(0.45 0.12 310);
+  --sidebar: oklch(0.90 0 0);
+  --sidebar-foreground: oklch(0.20 0 0);
+  --sidebar-primary: oklch(0.45 0.15 230);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.85 0 0);
+  --sidebar-accent-foreground: oklch(0.20 0 0);
+  --sidebar-border: oklch(0.78 0 0);
+  --sidebar-ring: oklch(0.45 0.15 230);
 }
 
 @layer base {
@@ -298,16 +360,20 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-variant-numeric: tabular-nums;
+  }
+  .proportional-nums {
+    font-variant-numeric: proportional-nums;
   }
 
   /* Daily Report Typography */
   .daily-report {
-    font-family: "Source Sans 3", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+    font-family: var(--font-sans);
     line-height: 1.75;
   }
 
   .daily-report h1 {
-    font-family: "DM Sans", "Source Sans 3", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+    font-family: var(--font-sans);
     font-size: 1.5rem;
     font-weight: 700;
     line-height: 1.3;
@@ -318,7 +384,7 @@
   }
 
   .daily-report h2 {
-    font-family: "DM Sans", "Source Sans 3", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+    font-family: var(--font-sans);
     font-size: 1.125rem;
     font-weight: 600;
     line-height: 1.4;
@@ -329,7 +395,7 @@
   .daily-report table {
     width: 100%;
     border-collapse: collapse;
-    font-family: "DM Sans", "Source Sans 3", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+    font-family: var(--font-sans);
     font-size: 0.875rem;
   }
 
@@ -346,7 +412,7 @@
   }
 
   .daily-report code {
-    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-family: var(--font-mono);
     font-size: 0.8125rem;
   }
 
@@ -375,72 +441,16 @@
       max-width: 80rem;
     }
   }
+}
 
-  .ambilight {
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 1s ease-in-out;
-  }
-
-  .ambilight:before,
-  .ambilight:after {
-    content: "";
-    pointer-events: none;
-    position: absolute;
-    left: 0;
-    top: 0;
-    background: linear-gradient(
-      45deg,
-      #fb0094,
-      #0000ff,
-      #00ff00,
-      #ffff00,
-      #ff0000,
-      #fb0094,
-      #0000ff,
-      #00ff00,
-      #ffff00,
-      #ff0000
-    );
-    background-size: 400%;
-    width: 100%;
-    height: 100%;
-    border-radius: 10px;
-    z-index: -1;
-    animation: ambilight 40s ease-in-out infinite;
-  }
-
-  .ambilight.enabled {
-    opacity: 1;
-  }
-
-  .dark .ambilight:before,
-  .dark .ambilight:after {
-    opacity: 0.85;
-  }
-
-  @keyframes ambilight {
-    0% {
-      background-position: 0 0;
-    }
-    50% {
-      background-position: 400% 0;
-    }
-    100% {
-      background-position: 0 0;
-    }
-  }
-
-  .ambilight:after {
-    filter: blur(60px);
-  }
-
-  .golden-text {
-    background: linear-gradient(135deg, #d19e1d 0%, #e9c665 50%, #e3a812 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    text-fill-color: transparent;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

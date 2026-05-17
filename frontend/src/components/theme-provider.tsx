@@ -11,7 +11,7 @@ export function ThemeProvider({
   return (
     <NextThemesProvider
       {...props}
-      forcedTheme={pathname === "/" ? "dark" : undefined}
+      forcedTheme={pathname === "/" ? "industrial-dark" : undefined}
     >
       {children}
     </NextThemesProvider>
