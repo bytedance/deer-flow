@@ -1,3 +1,6 @@
+import fs from "fs";
+import path from "path";
+
 import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -5,6 +8,7 @@ import { redirect } from "next/navigation";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
+import { getPublicMockChatThreadId } from "@/core/public-mock-chat";
 import {
   DEERFLOW_REQUEST_PATHNAME_HEADER,
   DEERFLOW_REQUEST_SEARCH_HEADER,
@@ -14,29 +18,28 @@ import { WorkspaceContent } from "./workspace-content";
 
 export const dynamic = "force-dynamic";
 
-function isPublicMockChatRequest(
-  pathname: string | null,
-  search: string | null,
-) {
-  if (!pathname?.startsWith("/workspace/chats/")) {
-    return false;
-  }
-  if (pathname === "/workspace/chats/new") {
-    return false;
-  }
-  return new URLSearchParams(search ?? "").get("mock") === "true";
+function hasPublicDemoThread(threadId: string) {
+  return fs.existsSync(
+    path.join(
+      process.cwd(),
+      "public",
+      "demo",
+      "threads",
+      threadId,
+      "thread.json",
+    ),
+  );
 }
 
 export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   const requestHeaders = await headers();
-  if (
-    isPublicMockChatRequest(
-      requestHeaders.get(DEERFLOW_REQUEST_PATHNAME_HEADER),
-      requestHeaders.get(DEERFLOW_REQUEST_SEARCH_HEADER),
-    )
-  ) {
+  const publicMockThreadId = getPublicMockChatThreadId(
+    requestHeaders.get(DEERFLOW_REQUEST_PATHNAME_HEADER),
+    requestHeaders.get(DEERFLOW_REQUEST_SEARCH_HEADER),
+  );
+  if (publicMockThreadId && hasPublicDemoThread(publicMockThreadId)) {
     return (
       <AuthProvider initialUser={null}>
         <WorkspaceContent>{children}</WorkspaceContent>

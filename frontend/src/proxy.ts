@@ -5,7 +5,7 @@ import {
   DEERFLOW_REQUEST_SEARCH_HEADER,
 } from "@/core/request-headers";
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set(
     DEERFLOW_REQUEST_PATHNAME_HEADER,
