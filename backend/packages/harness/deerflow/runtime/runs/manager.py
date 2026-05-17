@@ -134,7 +134,7 @@ class RunManager:
             run_id=d["run_id"],
             thread_id=d["thread_id"],
             assistant_id=d.get("assistant_id"),
-            status=RunStatus(d.get("status", "success")),
+            status=RunStatus(d.get("status", RunStatus.error.value)),
             on_disconnect=DisconnectMode.cancel,
             multitask_strategy=d.get("multitask_strategy", "reject"),
             metadata=d.get("metadata", {}),
@@ -161,7 +161,11 @@ class RunManager:
             except Exception:
                 logger.warning("Failed to query store for thread %s runs", thread_id, exc_info=True)
 
-        return in_memory + store_records
+        return sorted(
+            in_memory + store_records,
+            key=lambda record: record.created_at or "",
+            reverse=True,
+        )
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
