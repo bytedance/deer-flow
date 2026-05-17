@@ -21,6 +21,8 @@ import logging
 
 import requests
 
+from deerflow.runtime.user_context import get_effective_user_id
+
 from .backend import SandboxBackend
 from .sandbox_info import SandboxInfo
 
@@ -138,6 +140,7 @@ class RemoteSandboxBackend(SandboxBackend):
                 json={
                     "sandbox_id": sandbox_id,
                     "thread_id": thread_id,
+                    "user_id": get_effective_user_id(),
                 },
                 timeout=30,
             )

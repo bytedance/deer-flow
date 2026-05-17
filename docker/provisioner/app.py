@@ -63,6 +63,8 @@ THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
 SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
 USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
 SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
+SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
+DEFAULT_USER_ID = "default"
 
 # Path to the kubeconfig *inside* the provisioner container.
 # Typically the host's ~/.kube/config is mounted here.
@@ -93,14 +95,6 @@ def join_host_path(base: str, *parts: str) -> str:
     for part in parts:
         result /= part
     return str(result)
-
-
-def _validate_thread_id(thread_id: str) -> str:
-    if not re.match(SAFE_THREAD_ID_PATTERN, thread_id):
-        raise ValueError(
-            "Invalid thread_id: only alphanumeric characters, hyphens, and underscores are allowed."
-        )
-    return thread_id
 
 
 # ── K8s client setup ────────────────────────────────────────────────────
@@ -221,6 +215,7 @@ app = FastAPI(title="DeerFlow Sandbox Provisioner", lifespan=lifespan)
 class CreateSandboxRequest(BaseModel):
     sandbox_id: str
     thread_id: str = Field(pattern=SAFE_THREAD_ID_PATTERN)
+    user_id: str = Field(default=DEFAULT_USER_ID, pattern=SAFE_USER_ID_PATTERN)
 
 
 class SandboxResponse(BaseModel):
@@ -283,7 +278,7 @@ def _build_volumes(thread_id: str) -> list[k8s_client.V1Volume]:
     return [skills_vol, userdata_vol]
 
 
-def _build_volume_mounts(thread_id: str) -> list[k8s_client.V1VolumeMount]:
+def _build_volume_mounts(thread_id: str, user_id: str = DEFAULT_USER_ID) -> list[k8s_client.V1VolumeMount]:
     """Build volume mount list, using subPath for PVC user-data."""
     userdata_mount = k8s_client.V1VolumeMount(
         name="user-data",
@@ -291,7 +286,7 @@ def _build_volume_mounts(thread_id: str) -> list[k8s_client.V1VolumeMount]:
         read_only=False,
     )
     if USERDATA_PVC_NAME:
-        userdata_mount.sub_path = f"threads/{thread_id}/user-data"
+        userdata_mount.sub_path = f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
 
     return [
         k8s_client.V1VolumeMount(
@@ -303,9 +298,8 @@ def _build_volume_mounts(thread_id: str) -> list[k8s_client.V1VolumeMount]:
     ]
 
 
-def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
+def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
-    thread_id = _validate_thread_id(thread_id)
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
@@ -362,7 +356,7 @@ def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
                             "ephemeral-storage": "500Mi",
                         },
                     ),
-                    volume_mounts=_build_volume_mounts(thread_id),
+                    volume_mounts=_build_volume_mounts(thread_id, user_id=user_id),
                     security_context=k8s_client.V1SecurityContext(
                         privileged=False,
                         allow_privilege_escalation=True,
@@ -445,9 +439,13 @@ async def create_sandbox(req: CreateSandboxRequest):
     """
     sandbox_id = req.sandbox_id
     thread_id = req.thread_id
+    user_id = req.user_id
 
     logger.info(
-        f"Received request to create sandbox '{sandbox_id}' for thread '{thread_id}'"
+        "Received request to create sandbox '%s' for thread '%s' user '%s'",
+        sandbox_id,
+        thread_id,
+        user_id,
     )
 
     # ── Fast path: sandbox already exists ────────────────────────────
@@ -461,7 +459,7 @@ async def create_sandbox(req: CreateSandboxRequest):
 
     # ── Create Pod ───────────────────────────────────────────────────
     try:
-        core_v1.create_namespaced_pod(K8S_NAMESPACE, _build_pod(sandbox_id, thread_id))
+        core_v1.create_namespaced_pod(K8S_NAMESPACE, _build_pod(sandbox_id, thread_id, user_id=user_id))
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:  # 409 = AlreadyExists

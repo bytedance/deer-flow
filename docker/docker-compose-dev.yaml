@@ -37,7 +37,7 @@ services:
       - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
       # Production: use PVC instead of hostPath to avoid data loss on node failure.
       # When set, hostPath vars above are ignored for the corresponding volume.
-      # USERDATA_PVC_NAME uses subPath (threads/{thread_id}/user-data) automatically.
+      # USERDATA_PVC_NAME uses subPath (deer-flow/users/{user_id}/threads/{thread_id}/user-data) automatically.
       # - SKILLS_PVC_NAME=deer-flow-skills-pvc
       # - USERDATA_PVC_NAME=deer-flow-userdata-pvc
       - KUBECONFIG_PATH=/root/.kube/config
