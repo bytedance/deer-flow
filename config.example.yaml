@@ -814,7 +814,7 @@ memory:
   model_name: null # Use default model
   max_facts: 100 # Maximum number of facts to store
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
-  injection_enabled: true # Whether to inject memory into system prompt
+  injection_enabled: true # App-level permission for memory injection; each run can opt out with context.memory_enabled=false
   max_injection_tokens: 2000 # Maximum tokens for memory injection
 
 # ============================================================================

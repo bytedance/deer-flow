@@ -11,6 +11,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   },
   context: {
     model_name: undefined,
+    memory_enabled: false,
     mode: undefined,
     reasoning_effort: undefined,
   },

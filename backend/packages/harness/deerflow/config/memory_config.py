@@ -52,7 +52,7 @@ class MemoryConfig(BaseModel):
     )
     injection_enabled: bool = Field(
         default=True,
-        description="Whether to inject memory into system prompt",
+        description="App-level permission for memory injection; each run can opt out with context.memory_enabled=false",
     )
     max_injection_tokens: int = Field(
         default=2000,

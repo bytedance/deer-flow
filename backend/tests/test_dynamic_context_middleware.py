@@ -21,8 +21,8 @@ def _make_middleware(**kwargs) -> DynamicContextMiddleware:
     return DynamicContextMiddleware(**kwargs)
 
 
-def _fake_runtime():
-    return SimpleNamespace(context={})
+def _fake_runtime(context=None):
+    return SimpleNamespace(context=context or {})
 
 
 def _reminder_msg(content: str, msg_id: str) -> HumanMessage:
@@ -65,7 +65,7 @@ def test_injects_system_reminder_into_first_human_message():
     assert user_msg.content == "Hello"
 
 
-def test_memory_included_when_present():
+def test_memory_included_by_default_when_present():
     mw = _make_middleware()
     state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
 
@@ -84,6 +84,27 @@ def test_memory_included_when_present():
     assert "User prefers Python." in reminder_content
     assert "<current_date>2026-05-08, Friday</current_date>" in reminder_content
     assert result["messages"][1].content == "Hi"
+
+
+def test_memory_skipped_when_runtime_context_explicitly_disables_it():
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            return_value="<memory>\nUser prefers Python.\n</memory>",
+        ) as get_memory_context,
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime({"memory_enabled": False}))
+
+    reminder_content = result["messages"][0].content
+    assert "User prefers Python." not in reminder_content
+    assert "<memory>" not in reminder_content
+    assert "<current_date>2026-05-08, Friday</current_date>" in reminder_content
+    get_memory_context.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

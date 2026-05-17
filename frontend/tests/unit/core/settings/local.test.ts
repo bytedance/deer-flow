@@ -8,3 +8,7 @@ test("defaults token usage to header total plus per-turn breakdown", () => {
     inlineMode: "per_turn",
   });
 });
+
+test("defaults runtime memory context to disabled", () => {
+  expect(DEFAULT_LOCAL_SETTINGS.context.memory_enabled).toBe(false);
+});
