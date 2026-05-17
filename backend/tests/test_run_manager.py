@@ -298,14 +298,12 @@ async def test_aget_falls_back_to_store_with_user_filter(manager_with_store: Run
     from unittest.mock import AsyncMock
 
     mgr = manager_with_store
-    r1 = await mgr.create("thread-1", "agent-1")
-    await mgr.set_status(r1.run_id, RunStatus.success)
-    mgr._runs.clear()
-    mgr._store.get = AsyncMock(return_value={"run_id": r1.run_id, "thread_id": "thread-1", "status": "success"})
+    run_id = "run-1"
+    mgr._store.get = AsyncMock(return_value={"run_id": run_id, "thread_id": "thread-1", "status": "success", "user_id": "user-1"})
 
-    result = await mgr.aget(r1.run_id, user_id="user-1")
+    result = await mgr.aget(run_id, user_id="user-1")
     assert result is not None
-    mgr._store.get.assert_awaited_once_with(r1.run_id, user_id="user-1")
+    mgr._store.get.assert_awaited_once_with(run_id, user_id="user-1")
 
 
 @pytest.mark.anyio
