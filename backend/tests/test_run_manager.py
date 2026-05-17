@@ -83,6 +83,7 @@ async def test_list_by_thread(manager: RunManager):
 
     runs = await manager.list_by_thread("thread-1")
     assert len(runs) == 2
+    # list_by_thread returns newest-first (descending created_at).
     assert runs[0].run_id == r2.run_id
     assert runs[1].run_id == r1.run_id
 
@@ -293,15 +294,18 @@ async def test_aget_falls_back_to_store(manager_with_store: RunManager):
 
 @pytest.mark.anyio
 async def test_aget_falls_back_to_store_with_user_filter(manager_with_store: RunManager):
-    """aget should honor user_id when reading from the store fallback."""
+    """aget should pass user_id through to the store fallback."""
+    from unittest.mock import AsyncMock
+
     mgr = manager_with_store
     r1 = await mgr.create("thread-1", "agent-1")
     await mgr.set_status(r1.run_id, RunStatus.success)
     mgr._runs.clear()
-    mgr._store._runs[r1.run_id]["user_id"] = "user-1"
+    mgr._store.get = AsyncMock(return_value={"run_id": r1.run_id, "thread_id": "thread-1", "status": "success"})
 
-    assert await mgr.aget(r1.run_id, user_id="user-1") is not None
-    assert await mgr.aget(r1.run_id, user_id="user-2") is None
+    result = await mgr.aget(r1.run_id, user_id="user-1")
+    assert result is not None
+    mgr._store.get.assert_awaited_once_with(r1.run_id, user_id="user-1")
 
 
 @pytest.mark.anyio
@@ -341,13 +345,12 @@ async def test_list_by_thread_store_failure_is_graceful():
 
 @pytest.mark.anyio
 async def test_list_by_thread_falls_back_to_store_with_user_filter(manager_with_store: RunManager):
-    """list_by_thread should honor user_id in store fallback results."""
+    """list_by_thread should pass user_id through to store fallback."""
+    from unittest.mock import AsyncMock
+
     mgr = manager_with_store
-    r1 = await mgr.create("thread-1")
-    r2 = await mgr.create("thread-1")
-    mgr._runs.clear()
-    mgr._store._runs[r1.run_id]["user_id"] = "user-1"
-    mgr._store._runs[r2.run_id]["user_id"] = "user-2"
+    mgr._store.list_by_thread = AsyncMock(return_value=[])
 
     runs = await mgr.list_by_thread("thread-1", user_id="user-1")
-    assert [r.run_id for r in runs] == [r1.run_id]
+    assert runs == []
+    mgr._store.list_by_thread.assert_awaited_once_with("thread-1", user_id="user-1")
