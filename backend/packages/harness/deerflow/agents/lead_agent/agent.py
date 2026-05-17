@@ -10,6 +10,7 @@ from deerflow.agents.middlewares.clarification_middleware import ClarificationMi
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+from deerflow.agents.middlewares.message_archive_hook import message_archive_hook
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
@@ -95,6 +96,7 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
+    hooks.append(message_archive_hook)
 
     # The logic below relies on two assumptions holding true: this factory is
     # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
