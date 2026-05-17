@@ -243,6 +243,7 @@ def _build_middlewares(
     agent_name: str | None = None,
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
+    available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
 ):
     """Build middleware chain based on runtime configuration.
@@ -263,6 +264,13 @@ def _build_middlewares(
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
     middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+
+    # Deterministically load a full SKILL.md when the user starts the turn with
+    # /skill-name. This keeps the base system prompt metadata-only while giving
+    # explicit user activation priority over model-side relevance guessing.
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+    middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config))
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
@@ -416,7 +424,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config),
             tools=filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy),
-            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
+            middleware=_build_middlewares(
+                config,
+                model_name=model_name,
+                available_skills=set(["bootstrap"]),
+                app_config=resolved_app_config,
+            ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
@@ -434,7 +447,13 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config),
         tools=filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
+        middleware=_build_middlewares(
+            config,
+            model_name=model_name,
+            agent_name=agent_name,
+            available_skills=available_skills,
+            app_config=resolved_app_config,
+        ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,

@@ -20,6 +20,8 @@ from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
+from deerflow.skills.storage import get_or_new_skill_storage
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +353,21 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
+
+
+def _is_enabled_slash_skill_command(text: str) -> bool:
+    if parse_slash_skill_reference(text) is None:
+        return False
+    try:
+        storage = get_or_new_skill_storage()
+        return resolve_slash_skill(
+            text,
+            storage.load_skills(enabled_only=True),
+            container_base_path=storage.get_container_root(),
+        ) is not None
+    except Exception:
+        logger.exception("[Manager] failed to resolve slash skill command")
+        return False
 
 
 def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedAttachment]:
@@ -984,8 +1001,15 @@ class ChannelManager:
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
                 "/memory — Show memory status\n"
+                "/<skill-name> <task> — Activate an enabled skill for one turn\n"
                 "/help — Show this help"
             )
+        elif await asyncio.to_thread(_is_enabled_slash_skill_command, text):
+            from dataclasses import replace as _dc_replace
+
+            chat_msg = _dc_replace(msg, msg_type=InboundMessageType.CHAT)
+            await self._handle_chat(chat_msg)
+            return
         else:
             available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
             reply = f"Unknown command: /{command}. Available commands: {available}"

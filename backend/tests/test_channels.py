@@ -1169,6 +1169,45 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_command_slash_skill_routes_to_chat(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr("app.channels.manager._is_enabled_slash_skill_command", lambda text: text.startswith("/data-analysis"))
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/data-analysis analyze uploads/foo.csv",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_called_once()
+            call_args = mock_client.runs.wait.call_args
+            assert call_args[1]["input"]["messages"][0]["content"] == "/data-analysis analyze uploads/foo.csv"
+            assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
     def test_handle_command_new(self):
         from app.channels.manager import ChannelManager
 
