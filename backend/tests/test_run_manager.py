@@ -83,8 +83,8 @@ async def test_list_by_thread(manager: RunManager):
 
     runs = await manager.list_by_thread("thread-1")
     assert len(runs) == 2
-    assert runs[0].run_id == r1.run_id
-    assert runs[1].run_id == r2.run_id
+    assert runs[0].run_id == r2.run_id
+    assert runs[1].run_id == r1.run_id
 
 
 @pytest.mark.anyio
@@ -292,6 +292,19 @@ async def test_aget_falls_back_to_store(manager_with_store: RunManager):
 
 
 @pytest.mark.anyio
+async def test_aget_falls_back_to_store_with_user_filter(manager_with_store: RunManager):
+    """aget should honor user_id when reading from the store fallback."""
+    mgr = manager_with_store
+    r1 = await mgr.create("thread-1", "agent-1")
+    await mgr.set_status(r1.run_id, RunStatus.success)
+    mgr._runs.clear()
+    mgr._store._runs[r1.run_id]["user_id"] = "user-1"
+
+    assert await mgr.aget(r1.run_id, user_id="user-1") is not None
+    assert await mgr.aget(r1.run_id, user_id="user-2") is None
+
+
+@pytest.mark.anyio
 async def test_aget_returns_none_for_unknown(manager_with_store: RunManager):
     """aget should return None for a run ID that doesn't exist anywhere."""
     result = await manager_with_store.aget("nonexistent-run-id")
@@ -324,3 +337,17 @@ async def test_list_by_thread_store_failure_is_graceful():
     runs = await mgr.list_by_thread("thread-1")
     assert len(runs) == 1
     assert runs[0].run_id == r1.run_id
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_falls_back_to_store_with_user_filter(manager_with_store: RunManager):
+    """list_by_thread should honor user_id in store fallback results."""
+    mgr = manager_with_store
+    r1 = await mgr.create("thread-1")
+    r2 = await mgr.create("thread-1")
+    mgr._runs.clear()
+    mgr._store._runs[r1.run_id]["user_id"] = "user-1"
+    mgr._store._runs[r2.run_id]["user_id"] = "user-2"
+
+    runs = await mgr.list_by_thread("thread-1", user_id="user-1")
+    assert [r.run_id for r in runs] == [r1.run_id]

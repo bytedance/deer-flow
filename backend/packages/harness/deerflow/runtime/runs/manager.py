@@ -114,14 +114,14 @@ class RunManager:
         """Return an in-memory run record by ID, or ``None``."""
         return self._runs.get(run_id)
 
-    async def aget(self, run_id: str) -> RunRecord | None:
+    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
         """Return a run record by ID, checking the persistent store as fallback."""
         record = self._runs.get(run_id)
         if record is not None:
             return record
         if self._store is not None:
             try:
-                d = await self._store.get(run_id)
+                d = await self._store.get(run_id, user_id=user_id)
                 if d is not None:
                     return self._store_dict_to_record(d)
             except Exception:
@@ -145,7 +145,7 @@ class RunManager:
             error=d.get("error"),
         )
 
-    async def list_by_thread(self, thread_id: str) -> list[RunRecord]:
+    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None) -> list[RunRecord]:
         """Return all runs for a given thread, newest first."""
         async with self._lock:
             in_memory = [r for r in self._runs.values() if r.thread_id == thread_id]
@@ -154,7 +154,7 @@ class RunManager:
         store_records: list[RunRecord] = []
         if self._store is not None:
             try:
-                store_dicts = await self._store.list_by_thread(thread_id)
+                store_dicts = await self._store.list_by_thread(thread_id, user_id=user_id)
                 for d in store_dicts:
                     if d["run_id"] not in in_memory_ids:
                         store_records.append(self._store_dict_to_record(d))
