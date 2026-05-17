@@ -146,6 +146,15 @@ PYTHONPATH=. uv run python scripts/checkpoint_storage.py report --keep 1 --top 2
 
 Raw thread IDs are hidden by default. Pass `--show-thread-ids` only when you need to map report entries back to specific local threads.
 
+To reclaim local SQLite space after reviewing the report, run the prune command as a dry run first:
+
+```bash
+PYTHONPATH=. uv run python scripts/checkpoint_storage.py prune --keep 1 --dry-run
+PYTHONPATH=. uv run python scripts/checkpoint_storage.py prune --keep 1 --confirm --compact
+```
+
+`--keep 1` keeps the latest checkpoint for each thread namespace, which is enough for ordinary user continuation from the latest state. Use a larger value, or avoid pruning, when developers need historical time-travel debugging across earlier checkpoints.
+
 ## Data backup
 
 Thread data and memory are stored under `backend/.deer-flow/`:

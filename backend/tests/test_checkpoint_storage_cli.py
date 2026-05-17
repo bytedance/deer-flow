@@ -83,6 +83,53 @@ def _create_checkpoint_db(path: Path) -> None:
         conn.close()
 
 
+def _create_checkpoint_db_without_blobs(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE checkpoints (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                type TEXT,
+                checkpoint BLOB,
+                metadata BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+            );
+            CREATE TABLE writes (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                type TEXT,
+                value BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO checkpoints VALUES (?, '', ?, ?, 'msgpack', ?, ?)",
+            [
+                ("thread-a", "0001", None, b"small", b"{}"),
+                ("thread-a", "0002", "0001", b"large", b"{}"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO writes VALUES (?, '', ?, ?, ?, 'messages', 'msgpack', ?)",
+            [
+                ("thread-a", "0001", "task-a", 0, b"old"),
+                ("thread-a", "0002", "task-a", 0, b"new"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _create_app_db(path: Path, thread_ids: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -204,3 +251,109 @@ database:
     assert payload["source"] == "legacy checkpointer"
     assert payload["app_thread_count"] == 2
     assert payload["orphan_checkpoint_thread_count"] == 0
+
+
+def test_prune_dry_run_does_not_delete_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "deerflow.db"
+    _create_checkpoint_db(db_path)
+
+    result = checkpoint_storage.prune_checkpoint_storage(
+        db_path,
+        keep=1,
+        dry_run=True,
+    )
+
+    assert result["dry_run"] is True
+    assert result["removable_checkpoint_rows"] == 1
+    assert result["removable_write_rows"] == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM writes").fetchone()[0] == 3
+    finally:
+        conn.close()
+
+
+def test_prune_confirm_deletes_old_checkpoints_and_writes(tmp_path: Path) -> None:
+    db_path = tmp_path / "deerflow.db"
+    _create_checkpoint_db(db_path)
+
+    result = checkpoint_storage.prune_checkpoint_storage(
+        db_path,
+        keep=1,
+        dry_run=False,
+        compact=True,
+    )
+
+    assert result["dry_run"] is False
+    assert result["compacted"] is True
+    assert result["deleted_checkpoint_rows"] == 1
+    assert result["deleted_write_rows"] == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM writes").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM checkpoint_blobs").fetchone()[0] == 2
+        assert conn.execute("SELECT checkpoint_id FROM checkpoints WHERE thread_id = 'thread-a'").fetchall() == [("0002",)]
+    finally:
+        conn.close()
+
+
+def test_cli_prune_defaults_to_dry_run(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "deerflow.db"
+    _create_checkpoint_db(db_path)
+
+    exit_code = checkpoint_storage.main(["prune", "--db", str(db_path), "--keep", "1", "--json"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["dry_run"] is True
+    assert payload["deleted_checkpoint_rows"] == 0
+
+
+def test_cli_prune_confirm_compact(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "deerflow.db"
+    _create_checkpoint_db(db_path)
+
+    exit_code = checkpoint_storage.main(["prune", "--db", str(db_path), "--keep", "1", "--confirm", "--compact", "--json"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["dry_run"] is False
+    assert payload["compacted"] is True
+    assert payload["deleted_checkpoint_rows"] == 1
+
+
+def test_cli_prune_confirm_compact_with_no_prunable_rows(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "deerflow.db"
+    _create_checkpoint_db(db_path)
+
+    first_exit = checkpoint_storage.main(["prune", "--db", str(db_path), "--keep", "1", "--confirm", "--compact", "--json"])
+    assert first_exit == 0
+    capsys.readouterr()
+
+    second_exit = checkpoint_storage.main(["prune", "--db", str(db_path), "--keep", "1", "--confirm", "--compact", "--json"])
+
+    assert second_exit == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["compacted"] is True
+    assert payload["deleted_checkpoint_rows"] == 0
+
+
+def test_prune_note_mentions_inline_payloads_when_no_checkpoint_blobs(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    _create_checkpoint_db_without_blobs(db_path)
+
+    result = checkpoint_storage.prune_checkpoint_storage(
+        db_path,
+        keep=1,
+        dry_run=True,
+    )
+
+    assert result["removable_checkpoint_rows"] == 1
+    assert "No checkpoint_blobs table was detected" in result["note"]

@@ -1,9 +1,11 @@
-"""Read-only diagnostics for LangGraph checkpoint SQLite storage.
+"""Diagnostics and maintenance for LangGraph checkpoint SQLite storage.
 
 Usage:
     PYTHONPATH=. python scripts/checkpoint_storage.py report
     PYTHONPATH=. python scripts/checkpoint_storage.py report --db .deer-flow/data/deerflow.db
     PYTHONPATH=. python scripts/checkpoint_storage.py report --json --keep 1
+    PYTHONPATH=. python scripts/checkpoint_storage.py prune --keep 1 --dry-run
+    PYTHONPATH=. python scripts/checkpoint_storage.py prune --keep 1 --confirm --compact
 """
 
 from __future__ import annotations
@@ -49,6 +51,14 @@ def _connect_read_only(path: Path) -> sqlite3.Connection:
         raise CheckpointStorageError(f"SQLite database does not exist: {path}")
     uri = path.resolve().as_uri() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _connect_read_write(path: Path) -> sqlite3.Connection:
+    if not path.exists():
+        raise CheckpointStorageError(f"SQLite database does not exist: {path}")
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -283,6 +293,96 @@ def _estimate_retention(conn: sqlite3.Connection, keep: int) -> dict[str, Any] |
     }
 
 
+def _create_prune_table(conn: sqlite3.Connection, keep: int) -> None:
+    conn.execute("DROP TABLE IF EXISTS temp.__checkpoint_storage_prune")
+    conn.execute(
+        """
+        CREATE TEMP TABLE __checkpoint_storage_prune (
+            thread_id TEXT NOT NULL,
+            checkpoint_ns TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL,
+            PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO temp.__checkpoint_storage_prune(thread_id, checkpoint_ns, checkpoint_id)
+        SELECT thread_id, checkpoint_ns, checkpoint_id
+        FROM (
+            SELECT
+                thread_id,
+                checkpoint_ns,
+                checkpoint_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY thread_id, checkpoint_ns
+                    ORDER BY checkpoint_id DESC
+                ) AS rn
+            FROM checkpoints
+        )
+        WHERE rn > ?
+        """,
+        (keep,),
+    )
+
+
+def _count_prunable_writes(conn: sqlite3.Connection) -> int:
+    if not _table_exists(conn, "writes"):
+        return 0
+    return _scalar_int(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM writes w
+        WHERE EXISTS (
+            SELECT 1
+            FROM temp.__checkpoint_storage_prune p
+            WHERE p.thread_id = w.thread_id
+              AND p.checkpoint_ns = w.checkpoint_ns
+              AND p.checkpoint_id = w.checkpoint_id
+        )
+        """,
+    )
+
+
+def _delete_prunable_writes(conn: sqlite3.Connection) -> None:
+    if not _table_exists(conn, "writes"):
+        return
+    conn.execute(
+        """
+        DELETE FROM writes
+        WHERE EXISTS (
+            SELECT 1
+            FROM temp.__checkpoint_storage_prune p
+            WHERE p.thread_id = writes.thread_id
+              AND p.checkpoint_ns = writes.checkpoint_ns
+              AND p.checkpoint_id = writes.checkpoint_id
+        )
+        """
+    )
+
+
+def _delete_prunable_checkpoints(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        DELETE FROM checkpoints
+        WHERE EXISTS (
+            SELECT 1
+            FROM temp.__checkpoint_storage_prune p
+            WHERE p.thread_id = checkpoints.thread_id
+              AND p.checkpoint_ns = checkpoints.checkpoint_ns
+              AND p.checkpoint_id = checkpoints.checkpoint_id
+        )
+        """
+    )
+
+
+def _compact_sqlite(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.execute("VACUUM")
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
 def _runtime_home() -> Path:
     if env_home := os.getenv("DEER_FLOW_HOME"):
         return Path(env_home).expanduser().resolve()
@@ -428,6 +528,79 @@ def inspect_checkpoint_storage(
     return report
 
 
+def prune_checkpoint_storage(
+    checkpoint_db_path: Path,
+    *,
+    keep: int,
+    dry_run: bool = True,
+    compact: bool = False,
+    source: str = "explicit",
+) -> dict[str, Any]:
+    checkpoint_db_path = checkpoint_db_path.expanduser().resolve()
+    before_size = _file_size(checkpoint_db_path)
+    before_wal_size = _file_size(Path(str(checkpoint_db_path) + "-wal"))
+    before_shm_size = _file_size(Path(str(checkpoint_db_path) + "-shm"))
+
+    conn_factory = _connect_read_only if dry_run else _connect_read_write
+    with conn_factory(checkpoint_db_path) as conn:
+        if not _table_exists(conn, "checkpoints"):
+            raise CheckpointStorageError("SQLite database does not contain a checkpoints table")
+        has_checkpoint_blobs = _table_exists(conn, "checkpoint_blobs")
+        _create_prune_table(conn, keep)
+        removable_checkpoint_rows = _scalar_int(conn, "SELECT COUNT(*) FROM temp.__checkpoint_storage_prune")
+        removable_write_rows = _count_prunable_writes(conn)
+        retention = _estimate_retention(conn, keep)
+
+        deleted_checkpoint_rows = 0
+        deleted_write_rows = 0
+        if not dry_run and removable_checkpoint_rows:
+            _delete_prunable_writes(conn)
+            _delete_prunable_checkpoints(conn)
+            deleted_checkpoint_rows = removable_checkpoint_rows
+            deleted_write_rows = removable_write_rows
+
+        compacted = False
+        if not dry_run:
+            conn.commit()
+            conn.execute("DROP TABLE IF EXISTS temp.__checkpoint_storage_prune")
+            conn.commit()
+            if compact:
+                try:
+                    _compact_sqlite(conn)
+                except sqlite3.OperationalError as exc:
+                    raise CheckpointStorageError(f"SQLite compaction failed: {exc}") from exc
+                compacted = True
+
+    after_size = _file_size(checkpoint_db_path)
+    after_wal_size = _file_size(Path(str(checkpoint_db_path) + "-wal"))
+    after_shm_size = _file_size(Path(str(checkpoint_db_path) + "-shm"))
+
+    return {
+        "source": source,
+        "checkpoint_db_path": str(checkpoint_db_path),
+        "keep": keep,
+        "dry_run": dry_run,
+        "compact_requested": compact,
+        "compacted": compacted,
+        "removable_checkpoint_rows": removable_checkpoint_rows,
+        "removable_write_rows": removable_write_rows,
+        "deleted_checkpoint_rows": deleted_checkpoint_rows,
+        "deleted_write_rows": deleted_write_rows,
+        "before_db_size_bytes": before_size,
+        "after_db_size_bytes": after_size,
+        "before_wal_size_bytes": before_wal_size,
+        "after_wal_size_bytes": after_wal_size,
+        "before_shm_size_bytes": before_shm_size,
+        "after_shm_size_bytes": after_shm_size,
+        "approx_removable_payload_bytes": retention["approx_removable_payload_bytes"] if retention is not None else 0,
+        "note": (
+            "checkpoint_blobs are intentionally not pruned because blob versions may be shared by retained checkpoints."
+            if has_checkpoint_blobs
+            else "No checkpoint_blobs table was detected; pruning targets inline checkpoint rows and associated writes."
+        ),
+    }
+
+
 def _print_human_report(report: dict[str, Any]) -> None:
     print("Checkpoint storage report")
     print("=========================")
@@ -476,9 +649,55 @@ def _print_human_report(report: dict[str, Any]) -> None:
         print(f"  - note: {retention['note']}")
 
 
+def _print_human_prune_result(result: dict[str, Any]) -> None:
+    print("Checkpoint prune result")
+    print("=======================")
+    print(f"Source: {result['source']}")
+    print(f"Checkpoint DB: {result['checkpoint_db_path']}")
+    print(f"Mode: {'dry-run' if result['dry_run'] else 'confirmed'}")
+    print(f"Keep latest checkpoints per thread namespace: {result['keep']}")
+    print()
+    print("Rows")
+    print(f"  - removable checkpoint rows: {result['removable_checkpoint_rows']}")
+    print(f"  - removable write rows: {result['removable_write_rows']}")
+    print(f"  - deleted checkpoint rows: {result['deleted_checkpoint_rows']}")
+    print(f"  - deleted write rows: {result['deleted_write_rows']}")
+    print(f"  - approx removable payload: {_format_bytes(result['approx_removable_payload_bytes'])}")
+    print()
+    print("Storage")
+    print(f"  - DB size: {_format_bytes(result['before_db_size_bytes'])} -> {_format_bytes(result['after_db_size_bytes'])}")
+    print(f"  - WAL size: {_format_bytes(result['before_wal_size_bytes'])} -> {_format_bytes(result['after_wal_size_bytes'])}")
+    print(f"  - SHM size: {_format_bytes(result['before_shm_size_bytes'])} -> {_format_bytes(result['after_shm_size_bytes'])}")
+    if result["dry_run"]:
+        print()
+        print("No data was changed. Re-run with --confirm to prune.")
+    elif result["compact_requested"]:
+        print(f"Compacted: {result['compacted']}")
+    print()
+    print(f"Note: {result['note']}")
+
+
+def _add_storage_path_args(parser: argparse.ArgumentParser, *, include_app_db: bool = True) -> None:
+    parser.add_argument(
+        "--config",
+        help="Path to config.yaml. Defaults to DeerFlow config resolution. Ignored when --db is set.",
+    )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        help="Checkpoint SQLite database path. Overrides config resolution.",
+    )
+    if include_app_db:
+        parser.add_argument(
+            "--app-db",
+            type=Path,
+            help="SQLite database path containing threads_meta. Defaults to --db or configured database path.",
+        )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Read-only DeerFlow checkpoint storage diagnostics.",
+        description="DeerFlow checkpoint SQLite diagnostics and maintenance.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -486,20 +705,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "report",
         help="Report SQLite checkpoint storage size, rows, threads, and retention estimates.",
     )
-    report.add_argument(
-        "--config",
-        help="Path to config.yaml. Defaults to DeerFlow config resolution. Ignored when --db is set.",
-    )
-    report.add_argument(
-        "--db",
-        type=Path,
-        help="Checkpoint SQLite database path. Overrides config resolution.",
-    )
-    report.add_argument(
-        "--app-db",
-        type=Path,
-        help="SQLite database path containing threads_meta. Defaults to --db or configured database path.",
-    )
+    _add_storage_path_args(report)
     report.add_argument(
         "--top",
         type=int,
@@ -521,48 +727,103 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit machine-readable JSON.",
     )
+
+    prune = subparsers.add_parser(
+        "prune",
+        help="Prune old SQLite checkpoints by keeping the latest N per thread namespace.",
+    )
+    _add_storage_path_args(prune, include_app_db=False)
+    prune.add_argument(
+        "--keep",
+        type=int,
+        required=True,
+        help="Keep the latest N checkpoints per thread namespace.",
+    )
+    prune.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview prune results without modifying data. This is the default unless --confirm is passed.",
+    )
+    prune.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Actually delete prunable checkpoints and associated writes.",
+    )
+    prune.add_argument(
+        "--compact",
+        action="store_true",
+        help="After confirmed deletion, run WAL checkpoint and VACUUM to reclaim disk space.",
+    )
+    prune.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON.",
+    )
     return parser
+
+
+def _resolve_cli_paths(args: argparse.Namespace) -> tuple[Path | None, Path | None, str]:
+    if args.db is not None:
+        app_db = getattr(args, "app_db", None)
+        return args.db, app_db or args.db, "explicit"
+    checkpoint_db_path, app_db_path, source = _resolve_configured_sqlite_paths(args.config)
+    if getattr(args, "app_db", None) is not None:
+        app_db_path = args.app_db
+    return checkpoint_db_path, app_db_path, source
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.top < 1:
+    if getattr(args, "top", 1) < 1:
         parser.error("--top must be at least 1")
-    if args.keep is not None and args.keep < 1:
+    if getattr(args, "keep", None) is not None and args.keep < 1:
         parser.error("--keep must be at least 1")
+    if args.command == "prune" and args.confirm and args.dry_run:
+        parser.error("--confirm and --dry-run cannot be used together")
+    if args.command == "prune" and args.compact and not args.confirm:
+        parser.error("--compact requires --confirm")
 
     try:
-        if args.db is not None:
-            checkpoint_db_path = args.db
-            app_db_path = args.app_db or args.db
-            source = "explicit"
-        else:
-            checkpoint_db_path, app_db_path, source = _resolve_configured_sqlite_paths(args.config)
-            if args.app_db is not None:
-                app_db_path = args.app_db
-            if checkpoint_db_path is None:
-                print(f"Checkpoint storage report is unavailable: {source}.", file=sys.stderr)
-                return 1
+        checkpoint_db_path, app_db_path, source = _resolve_cli_paths(args)
+        if checkpoint_db_path is None:
+            print(f"Checkpoint storage is unavailable: {source}.", file=sys.stderr)
+            return 1
 
-        report = inspect_checkpoint_storage(
-            checkpoint_db_path,
-            app_db_path=app_db_path,
-            top=args.top,
-            keep=args.keep,
-            include_thread_ids=args.show_thread_ids,
-            source=source,
-        )
+        if args.command == "report":
+            report = inspect_checkpoint_storage(
+                checkpoint_db_path,
+                app_db_path=app_db_path,
+                top=args.top,
+                keep=args.keep,
+                include_thread_ids=args.show_thread_ids,
+                source=source,
+            )
+            if args.json:
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                _print_human_report(report)
+            return 0
+
+        if args.command == "prune":
+            result = prune_checkpoint_storage(
+                checkpoint_db_path,
+                keep=args.keep,
+                dry_run=not args.confirm,
+                compact=args.compact,
+                source=source,
+            )
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                _print_human_prune_result(result)
+            return 0
     except CheckpointStorageError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
-    else:
-        _print_human_report(report)
-    return 0
+    parser.error(f"unknown command: {args.command}")
 
 
 if __name__ == "__main__":

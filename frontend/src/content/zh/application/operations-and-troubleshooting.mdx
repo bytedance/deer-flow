@@ -152,6 +152,15 @@ PYTHONPATH=. uv run python scripts/checkpoint_storage.py report --keep 1 --top 2
 
 默认不输出原始 thread ID。只有需要把报告结果映射回本地线程时，再加 `--show-thread-ids`。
 
+确认报告后，如需回收本地 SQLite 空间，先 dry-run，再显式确认清理：
+
+```bash
+PYTHONPATH=. uv run python scripts/checkpoint_storage.py prune --keep 1 --dry-run
+PYTHONPATH=. uv run python scripts/checkpoint_storage.py prune --keep 1 --confirm --compact
+```
+
+`--keep 1` 会为每个 thread namespace 保留最新 checkpoint，足够普通用户从最新状态续跑。开发者如果需要跨历史 checkpoint 做 time-travel 调试，应使用更大的 keep 值，或不做 prune。
+
 ## 数据备份
 
 DeerFlow 将持久化数据存储在：
