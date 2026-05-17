@@ -14,7 +14,10 @@ import { WorkspaceContent } from "./workspace-content";
 
 export const dynamic = "force-dynamic";
 
-function isPublicMockChatRequest(pathname: string | null, search: string | null) {
+function isPublicMockChatRequest(
+  pathname: string | null,
+  search: string | null,
+) {
   if (!pathname?.startsWith("/workspace/chats/")) {
     return false;
   }
