@@ -2,29 +2,39 @@
 
 import { useState } from "react";
 
+import { Button } from "@/components/ui/button";
+
 export function LogoutResetButton() {
   const [isResetting, setIsResetting] = useState(false);
 
   const handleLogoutReset = async () => {
+    if (isResetting) return;
+
     setIsResetting(true);
     try {
-      await fetch("/api/v1/auth/logout", {
+      const response = await fetch("/logout-reset", {
         method: "POST",
         credentials: "include",
       });
+      if (!response.ok) {
+        console.error("Logout reset request failed:", response.status);
+      }
+    } catch (err) {
+      console.error("Logout reset request failed:", err);
     } finally {
       window.location.href = "/";
     }
   };
 
   return (
-    <button
+    <Button
       type="button"
+      variant="outline"
       disabled={isResetting}
       onClick={handleLogoutReset}
-      className="text-muted-foreground hover:bg-muted rounded-md border px-4 py-2 text-sm disabled:pointer-events-none disabled:opacity-50"
+      className="text-muted-foreground min-w-32"
     >
       {isResetting ? "Resetting..." : "Logout & Reset"}
-    </button>
+    </Button>
   );
 }
