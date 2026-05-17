@@ -119,6 +119,19 @@ async def _ensure_admin_user(app: FastAPI) -> None:
         except Exception:
             logger.exception("LangGraph thread migration failed (non-fatal)")
 
+    # Checkpointer-only legacy thread migration — non-fatal.
+    # This covers upgrades where LangGraph checkpoint data exists but
+    # ``threads_meta`` does not. Without a metadata row these threads are
+    # invisible in /threads/search and cannot pass strict delete owner checks.
+    try:
+        from app.gateway.checkpoint_maintenance import migrate_app_checkpoint_threads_to_thread_meta
+
+        migrated = await migrate_app_checkpoint_threads_to_thread_meta(app, admin_id)
+        if migrated:
+            logger.info("Migrated %d legacy checkpoint thread(s) to admin thread metadata", migrated)
+    except Exception:
+        logger.exception("Legacy checkpoint thread migration failed (non-fatal)")
+
 
 async def _iter_store_items(store, namespace, *, page_size: int = 500):
     """Paginated async iterator over a LangGraph store namespace.

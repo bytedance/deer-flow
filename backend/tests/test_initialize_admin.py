@@ -7,6 +7,7 @@ and public accessibility (no auth cookie required).
 
 import asyncio
 import os
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -73,6 +74,18 @@ def test_initialize_creates_admin_and_sets_cookie(client):
     assert data["email"] == "admin@example.com"
     assert data["system_role"] == "admin"
     assert "access_token" in resp.cookies
+
+
+def test_initialize_migrates_legacy_checkpoint_threads_for_new_admin(client):
+    """First-admin setup should recover legacy checkpoint-only threads immediately."""
+    with patch(
+        "app.gateway.checkpoint_maintenance.migrate_app_checkpoint_threads_to_thread_meta",
+        new=AsyncMock(return_value=2),
+    ) as migrate:
+        resp = client.post("/api/v1/auth/initialize", json=_init_payload())
+
+    assert resp.status_code == 201
+    migrate.assert_awaited_once_with(client.app, resp.json()["id"])
 
 
 def test_initialize_needs_setup_false(client):

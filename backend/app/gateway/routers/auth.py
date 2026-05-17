@@ -455,6 +455,15 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request)
 
+    try:
+        from app.gateway.checkpoint_maintenance import migrate_app_checkpoint_threads_to_thread_meta
+
+        migrated = await migrate_app_checkpoint_threads_to_thread_meta(request.app, str(user.id))
+        if migrated:
+            logger.info("Migrated %d legacy checkpoint thread(s) after first admin setup", migrated)
+    except Exception:
+        logger.exception("Legacy checkpoint thread migration after first admin setup failed (non-fatal)")
+
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role)
 
 
