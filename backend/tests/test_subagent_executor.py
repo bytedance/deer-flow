@@ -1203,10 +1203,23 @@ class TestThreadSafety:
             trace_id="test-trace",
             status=SubagentStatus.RUNNING,
         )
+        token_usage_records = [
+            {
+                "source_run_id": "run-1",
+                "caller": "subagent:test-agent",
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+            }
+        ]
 
         def set_terminal():
             try:
-                assert result.try_set_terminal(SubagentStatus.COMPLETED, result="done")
+                assert result.try_set_terminal(
+                    SubagentStatus.COMPLETED,
+                    result="done",
+                    token_usage_records=token_usage_records,
+                )
             except BaseException as exc:
                 writer_errors.append(exc)
 
@@ -1216,6 +1229,7 @@ class TestThreadSafety:
         assert now_entered.wait(timeout=3), "try_set_terminal did not reach completed_at assignment"
         assert result.completed_at is None
         assert result.status == SubagentStatus.RUNNING
+        assert result.token_usage_records == token_usage_records
 
         release_now.set()
         writer.join(timeout=3)
@@ -1225,6 +1239,7 @@ class TestThreadSafety:
         assert result.completed_at == completed_at
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "done"
+        assert result.token_usage_records == token_usage_records
 
 
 # -----------------------------------------------------------------------------

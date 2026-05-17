@@ -49,7 +49,12 @@ class SubagentStatus(Enum):
 
     @property
     def is_terminal(self) -> bool:
-        return self.value in {"completed", "failed", "cancelled", "timed_out"}
+        return self in {
+            type(self).COMPLETED,
+            type(self).FAILED,
+            type(self).CANCELLED,
+            type(self).TIMED_OUT,
+        }
 
 
 @dataclass
@@ -93,6 +98,7 @@ class SubagentResult:
         error: str | None = None,
         completed_at: datetime | None = None,
         ai_messages: list[dict[str, Any]] | None = None,
+        token_usage_records: list[dict[str, int | str]] | None = None,
     ) -> bool:
         """Set a terminal status exactly once.
 
@@ -113,6 +119,8 @@ class SubagentResult:
                 self.error = error
             if ai_messages is not None:
                 self.ai_messages = ai_messages
+            if token_usage_records is not None:
+                self.token_usage_records = token_usage_records
             self.completed_at = completed_at or datetime.now()
             self.status = status
             return True
@@ -496,9 +504,11 @@ class SubagentExecutor:
             # Pre-check: bail out immediately if already cancelled before streaming starts
             if result.cancel_event.is_set():
                 logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming")
-                result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
-                if collector is not None:
-                    result.token_usage_records = collector.snapshot_records()
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    token_usage_records=collector.snapshot_records(),
+                )
                 return result
 
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
@@ -508,9 +518,11 @@ class SubagentExecutor:
                 # interrupted until the next chunk is yielded.
                 if result.cancel_event.is_set():
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
-                    result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
-                    if collector is not None:
-                        result.token_usage_records = collector.snapshot_records()
+                    result.try_set_terminal(
+                        SubagentStatus.CANCELLED,
+                        error="Cancelled by user",
+                        token_usage_records=collector.snapshot_records(),
+                    )
                     return result
 
                 final_state = chunk
@@ -537,7 +549,8 @@ class SubagentExecutor:
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
-            result.token_usage_records = collector.snapshot_records()
+            token_usage_records = collector.snapshot_records()
+            final_result: str | None = None
 
             if final_state is None:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no final state")
@@ -609,13 +622,22 @@ class SubagentExecutor:
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no messages in final state")
                     final_result = "No response generated"
 
-            result.try_set_terminal(SubagentStatus.COMPLETED, result=final_result)
+            if final_result is None:
+                final_result = "No response generated"
+
+            result.try_set_terminal(
+                SubagentStatus.COMPLETED,
+                result=final_result,
+                token_usage_records=token_usage_records,
+            )
 
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
-            if collector is not None:
-                result.token_usage_records = collector.snapshot_records()
-            result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
+            result.try_set_terminal(
+                SubagentStatus.FAILED,
+                error=str(e),
+                token_usage_records=collector.snapshot_records() if collector is not None else None,
+            )
 
         return result
 
