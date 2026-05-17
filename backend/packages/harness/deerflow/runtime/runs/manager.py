@@ -146,7 +146,7 @@ class RunManager:
         )
 
     async def list_by_thread(self, thread_id: str, *, user_id: str | None = None) -> list[RunRecord]:
-        """Return all runs for a given thread, newest first."""
+        """Return all runs for a given thread, oldest first."""
         async with self._lock:
             in_memory = [r for r in self._runs.values() if r.thread_id == thread_id]
             in_memory_ids = {r.run_id for r in in_memory}
@@ -164,7 +164,6 @@ class RunManager:
         return sorted(
             in_memory + store_records,
             key=lambda record: record.created_at or "",
-            reverse=True,
         )
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
