@@ -1006,8 +1006,9 @@ def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
 def is_local_sandbox(runtime: Runtime | None) -> bool:
     """Check if the current sandbox is a local sandbox.
 
-    Path replacement is only needed for local sandbox since aio sandbox
-    already has /mnt/user-data mounted in the container.
+    Accepts both the legacy generic id ``"local"`` (acquire with no thread
+    context) and the per-thread id format ``"local:{thread_id}"`` produced by
+    :meth:`LocalSandboxProvider.acquire` once a thread is known.
     """
     if runtime is None:
         return False
@@ -1016,7 +1017,10 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
     sandbox_state = runtime.state.get("sandbox")
     if sandbox_state is None:
         return False
-    return sandbox_state.get("sandbox_id") == "local"
+    sandbox_id = sandbox_state.get("sandbox_id")
+    if not isinstance(sandbox_id, str):
+        return False
+    return sandbox_id == "local" or sandbox_id.startswith("local:")
 
 
 def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:

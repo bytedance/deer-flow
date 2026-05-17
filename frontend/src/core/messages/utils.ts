@@ -251,7 +251,7 @@ export function extractReasoningContentFromMessage(message: Message) {
   }
   if (Array.isArray(message.content)) {
     const part = message.content[0];
-    if (part && "thinking" in part) {
+    if (part && typeof part === "object" && "thinking" in part) {
       return part.thinking as string;
     }
   }
