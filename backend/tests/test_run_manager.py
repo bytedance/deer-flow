@@ -293,17 +293,16 @@ async def test_aget_falls_back_to_store(manager_with_store: RunManager):
 
 
 @pytest.mark.anyio
-async def test_aget_falls_back_to_store_with_user_filter(manager_with_store: RunManager):
-    """aget should pass user_id through to the store fallback."""
-    from unittest.mock import AsyncMock
+async def test_aget_falls_back_to_store_with_user_filter():
+    """aget should honor user_id when reading store-only records."""
+    store = MemoryRunStore()
+    await store.put("run-1", thread_id="thread-1", user_id="user-1", status="success")
+    mgr = RunManager(store=store)
 
-    mgr = manager_with_store
-    run_id = "run-1"
-    mgr._store.get = AsyncMock(return_value={"run_id": run_id, "thread_id": "thread-1", "status": "success", "user_id": "user-1"})
-
-    result = await mgr.aget(run_id, user_id="user-1")
-    assert result is not None
-    mgr._store.get.assert_awaited_once_with(run_id, user_id="user-1")
+    allowed = await mgr.aget("run-1", user_id="user-1")
+    denied = await mgr.aget("run-1", user_id="user-2")
+    assert allowed is not None
+    assert denied is None
 
 
 @pytest.mark.anyio
@@ -342,13 +341,12 @@ async def test_list_by_thread_store_failure_is_graceful():
 
 
 @pytest.mark.anyio
-async def test_list_by_thread_falls_back_to_store_with_user_filter(manager_with_store: RunManager):
-    """list_by_thread should pass user_id through to store fallback."""
-    from unittest.mock import AsyncMock
-
-    mgr = manager_with_store
-    mgr._store.list_by_thread = AsyncMock(return_value=[])
+async def test_list_by_thread_falls_back_to_store_with_user_filter():
+    """list_by_thread should return only the requesting user's store records."""
+    store = MemoryRunStore()
+    await store.put("run-1", thread_id="thread-1", user_id="user-1", status="success")
+    await store.put("run-2", thread_id="thread-1", user_id="user-2", status="success")
+    mgr = RunManager(store=store)
 
     runs = await mgr.list_by_thread("thread-1", user_id="user-1")
-    assert runs == []
-    mgr._store.list_by_thread.assert_awaited_once_with("thread-1", user_id="user-1")
+    assert [r.run_id for r in runs] == ["run-1"]
