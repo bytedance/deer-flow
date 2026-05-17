@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Iterator
+from typing import Any
 
 from langgraph.types import Checkpointer
 
@@ -40,6 +41,41 @@ POSTGRES_INSTALL = (
     "langgraph-checkpoint-postgres is required for the PostgreSQL checkpointer. Install the package extra with: pip install 'deerflow-harness[postgres]' (or use: uv sync --all-packages --extra postgres when developing locally)"
 )
 POSTGRES_CONN_REQUIRED = "checkpointer.connection_string is required for the postgres backend"
+
+
+def _storage_target_label(config: Any) -> str:
+    backend = getattr(config, "backend", None)
+    if backend == "sqlite":
+        return f"sqlite:{getattr(config, 'sqlite_path', '<unknown>')}"
+    if backend == "postgres":
+        return "postgres:<configured>"
+    return str(backend or "<unknown>")
+
+
+def _checkpointer_target_label(config: CheckpointerConfig) -> str:
+    if config.type == "sqlite":
+        return f"sqlite:{config.connection_string or 'store.db'}"
+    if config.type == "postgres":
+        return "postgres:<configured>"
+    return config.type
+
+
+def warn_legacy_checkpointer_precedence(app_config: Any) -> None:
+    """Warn when legacy checkpointer config overrides unified database storage."""
+    checkpointer_config = getattr(app_config, "checkpointer", None)
+    database_config = getattr(app_config, "database", None)
+    database_backend = getattr(database_config, "backend", None)
+    if checkpointer_config is None or database_config is None or database_backend in (None, "memory"):
+        return
+
+    logger.warning(
+        "Legacy checkpointer config is present and takes precedence over database config for LangGraph state persistence. "
+        "Checkpoint state will use legacy checkpointer target %s instead of database target %s. "
+        "Remove the legacy checkpointer section to use the unified database config for checkpoint storage.",
+        _checkpointer_target_label(checkpointer_config),
+        _storage_target_label(database_config),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Sync factory
@@ -142,6 +178,9 @@ def get_checkpointer() -> Checkpointer:
         _checkpointer = InMemorySaver()
         return _checkpointer
 
+    if _app_config is not None:
+        warn_legacy_checkpointer_precedence(_app_config)
+
     _checkpointer_ctx = _sync_checkpointer_cm(config)
     _checkpointer = _checkpointer_ctx.__enter__()
 
@@ -189,6 +228,8 @@ def checkpointer_context() -> Iterator[Checkpointer]:
 
         yield InMemorySaver()
         return
+
+    warn_legacy_checkpointer_precedence(config)
 
     with _sync_checkpointer_cm(config.checkpointer) as saver:
         yield saver

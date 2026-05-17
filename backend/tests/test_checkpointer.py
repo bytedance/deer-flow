@@ -1,5 +1,6 @@
 """Unit tests for checkpointer config, packaging metadata, and factories."""
 
+import logging
 import sys
 import tomllib
 from pathlib import Path
@@ -14,6 +15,7 @@ from deerflow.config.checkpointer_config import (
     load_checkpointer_config_from_dict,
     set_checkpointer_config,
 )
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.runtime.checkpointer import get_checkpointer, reset_checkpointer
 from deerflow.runtime.checkpointer.provider import POSTGRES_INSTALL
 from deerflow.runtime.store.provider import POSTGRES_STORE_INSTALL
@@ -78,6 +80,50 @@ class TestCheckpointerConfig:
         assert "Optional for sqlite" in description
         assert "defaults to 'store.db'" in description
         assert "Required for postgres" in description
+
+
+class TestLegacyCheckpointerPrecedenceWarning:
+    def test_warning_includes_legacy_and_database_targets(self, caplog):
+        from deerflow.runtime.checkpointer.provider import warn_legacy_checkpointer_precedence
+
+        app_config = MagicMock()
+        app_config.checkpointer = CheckpointerConfig(type="sqlite", connection_string="checkpoints.db")
+        app_config.database = DatabaseConfig(backend="sqlite", sqlite_dir=".deer-flow/data")
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.checkpointer.provider"):
+            warn_legacy_checkpointer_precedence(app_config)
+
+        assert "Legacy checkpointer config is present" in caplog.text
+        assert "sqlite:checkpoints.db" in caplog.text
+        assert "deerflow.db" in caplog.text
+
+    def test_warning_is_skipped_for_memory_database_backend(self, caplog):
+        from deerflow.runtime.checkpointer.provider import warn_legacy_checkpointer_precedence
+
+        app_config = MagicMock()
+        app_config.checkpointer = CheckpointerConfig(type="memory")
+        app_config.database = DatabaseConfig(backend="memory")
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.checkpointer.provider"):
+            warn_legacy_checkpointer_precedence(app_config)
+
+        assert "Legacy checkpointer config is present" not in caplog.text
+
+    @pytest.mark.anyio
+    async def test_async_make_checkpointer_warns_when_legacy_overrides_database(self, caplog):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+
+        app_config = MagicMock()
+        app_config.checkpointer = CheckpointerConfig(type="memory")
+        app_config.database = DatabaseConfig(backend="sqlite", sqlite_dir=".deer-flow/data")
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.checkpointer.provider"):
+            async with make_checkpointer(app_config) as checkpointer:
+                assert isinstance(checkpointer, InMemorySaver)
+
+        assert "Legacy checkpointer config is present" in caplog.text
 
 
 class TestHarnessPackaging:
