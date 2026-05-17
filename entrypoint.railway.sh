@@ -8,15 +8,9 @@ set -euo pipefail
 # ── Config ───────────────────────────────────────────────────────────────────
 GATEWAY_PORT="${PORT:-8001}"
 LANGGRAPH_PORT=2024
-CONFIG_FILE="/app/config.yaml"
-CONFIG_TEMPLATE="/app/config.template.yaml"
 BACKEND_DIR="/app/backend"
 
-# ── Render config from template ───────────────────────────────────────────────
-if [ ! -f "${CONFIG_FILE}" ]; then
-  echo "[entrypoint] No config.yaml found — copying template to ${CONFIG_FILE}"
-  cp "${CONFIG_TEMPLATE}" "${CONFIG_FILE}"
-fi
+# config.yaml is baked into the image at build time (see Dockerfile.railway).
 
 # ── Start langgraph ───────────────────────────────────────────────────────────
 echo "[entrypoint] Starting langgraph on port ${LANGGRAPH_PORT} …"

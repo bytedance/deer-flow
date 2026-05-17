@@ -44,9 +44,10 @@ RUN mkdir -p /app/skills/custom /app/skills/public
 # Install Python deps
 RUN cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync
 
-# Copy entrypoint + config template
+# Copy entrypoint + production config
+# config.yaml is committed past .gitignore (-f) and is the live Railway config.
 COPY entrypoint.railway.sh /app/entrypoint.sh
-COPY config.example.yaml /app/config.template.yaml
+COPY config.yaml /app/config.yaml
 RUN chmod +x /app/entrypoint.sh
 
 # Railway injects $PORT — gateway listens on it, langgraph on 2024 internally

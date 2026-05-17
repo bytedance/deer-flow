@@ -8,7 +8,7 @@
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile.railway"
-watchPatterns = ["backend/**", "config.example.yaml", "skills/**"]
+watchPatterns = ["backend/**", "config.yaml", "Dockerfile.railway", "entrypoint.railway.sh", "skills/**"]
 
 [deploy]
 startCommand = ""
