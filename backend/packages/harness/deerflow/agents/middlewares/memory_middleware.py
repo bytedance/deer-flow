@@ -11,7 +11,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.config.memory_config import get_memory_config
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import resolve_runtime_user_id
 
 if TYPE_CHECKING:
     from deerflow.config.memory_config import MemoryConfig
@@ -96,7 +96,10 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         # Capture user_id at enqueue time while the request context is still alive.
         # threading.Timer fires on a different thread where ContextVar values are not
         # propagated, so we must store user_id explicitly in ConversationContext.
-        user_id = get_effective_user_id()
+        # Prefer ``runtime.context["user_id"]`` (set by channel dispatch for
+        # IM-initiated runs) so per-user isolation works even when the
+        # ContextVar doesn't survive the Gateway HTTP boundary.
+        user_id = resolve_runtime_user_id(runtime)
         queue = get_memory_queue()
         queue.add(
             thread_id=thread_id,

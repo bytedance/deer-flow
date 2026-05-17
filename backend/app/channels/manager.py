@@ -19,7 +19,6 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 from app.gateway.internal_auth import create_internal_auth_headers
-from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -353,7 +352,7 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
-def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedAttachment]:
+def _resolve_attachments(thread_id: str, artifacts: list[str], user_id: str) -> list[ResolvedAttachment]:
     """Resolve virtual artifact paths to host filesystem paths with metadata.
 
     Only paths under ``/mnt/user-data/outputs/`` are accepted; any other
@@ -362,12 +361,15 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
 
     Skips artifacts that cannot be resolved (missing files, invalid paths)
     and logs warnings for them.
+
+    ``user_id`` must be the platform user id of the inbound message (e.g. the
+    Feishu ``open_id``). It is passed explicitly because channel-side helpers
+    run outside any agent ``runtime`` and so cannot resolve user via context.
     """
     from deerflow.config.paths import get_paths
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
-    user_id = get_effective_user_id()
     outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve()
     for virtual_path in artifacts:
         # Security: only allow files from the agent outputs directory
@@ -407,13 +409,14 @@ def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
+    user_id: str,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response."""
     attachments: list[ResolvedAttachment] = []
     if not artifacts:
         return response_text, attachments
 
-    attachments = _resolve_attachments(thread_id, artifacts)
+    attachments = _resolve_attachments(thread_id, artifacts, user_id)
     resolved_virtuals = {attachment.virtual_path for attachment in attachments}
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
@@ -566,7 +569,12 @@ class ChannelManager:
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
-        self._client = None  # lazy init — langgraph_sdk async client
+        # Cache of langgraph-sdk clients keyed by ``acting_user_id``. Each
+        # entry bakes the per-user ``X-DeerFlow-Acting-User`` header into its
+        # default httpx headers (the SDK does not let us override headers
+        # per call), so one client per platform user lets us share connection
+        # pools while keeping user identity correct.
+        self._clients: dict[str, Any] = {}
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
@@ -631,22 +639,35 @@ class ChannelManager:
 
         return assistant_id, run_config, run_context
 
-    # -- LangGraph SDK client (lazy) ----------------------------------------
+    # -- LangGraph SDK client (per-user, lazy) ------------------------------
 
-    def _get_client(self):
-        """Return the ``langgraph_sdk`` async client, creating it on first use."""
-        if self._client is None:
+    def _get_client(self, acting_user_id: str):
+        """Return a ``langgraph_sdk`` async client that acts on behalf of *acting_user_id*.
+
+        The Gateway auth middleware uses the ``X-DeerFlow-Acting-User`` header
+        (only honoured alongside a valid internal-auth token) to set
+        ``request.state.user`` to the platform user, so downstream runtime
+        context and ContextVar both carry the correct identity instead of
+        the synthetic ``DEFAULT_USER_ID``.
+
+        Clients are cached per user; ``langgraph-sdk`` does not let us
+        override headers per call, but creating one client per platform user
+        is fine in practice (IM users are a bounded set per channel).
+        """
+        client = self._clients.get(acting_user_id)
+        if client is None:
             from langgraph_sdk import get_client
 
-            self._client = get_client(
+            client = get_client(
                 url=self._langgraph_url,
                 headers={
-                    **create_internal_auth_headers(),
+                    **create_internal_auth_headers(acting_user_id=acting_user_id),
                     CSRF_HEADER_NAME: self._csrf_token,
                     "Cookie": f"{CSRF_COOKIE_NAME}={self._csrf_token}",
                 },
             )
-        return self._client
+            self._clients[acting_user_id] = client
+        return client
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -742,7 +763,7 @@ class ChannelManager:
         return thread_id
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
-        client = self._get_client()
+        client = self._get_client(msg.user_id)
 
         # Look up existing DeerFlow thread.
         # topic_id may be None (e.g. Telegram private chats) — the store
@@ -814,7 +835,7 @@ class ChannelManager:
             len(artifacts),
         )
 
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, msg.user_id)
 
         if not response_text:
             if attachments:
@@ -907,7 +928,7 @@ class ChannelManager:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
             artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, msg.user_id)
 
             if not response_text:
                 if attachments:
@@ -958,7 +979,7 @@ class ChannelManager:
 
         if command == "new":
             # Create a new thread through Gateway
-            client = self._get_client()
+            client = self._get_client(msg.user_id)
             thread = await client.threads.create()
             new_thread_id = thread["thread_id"]
             self.store.set_thread_id(
@@ -973,9 +994,9 @@ class ChannelManager:
             thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
         elif command == "models":
-            reply = await self._fetch_gateway("/api/models", "models")
+            reply = await self._fetch_gateway("/api/models", "models", acting_user_id=msg.user_id)
         elif command == "memory":
-            reply = await self._fetch_gateway("/api/memory", "memory")
+            reply = await self._fetch_gateway("/api/memory", "memory", acting_user_id=msg.user_id)
         elif command == "help":
             reply = (
                 "Available commands:\n"
@@ -1000,8 +1021,13 @@ class ChannelManager:
         )
         await self.bus.publish_outbound(outbound)
 
-    async def _fetch_gateway(self, path: str, kind: str) -> str:
-        """Fetch data from the Gateway API for command responses."""
+    async def _fetch_gateway(self, path: str, kind: str, *, acting_user_id: str | None = None) -> str:
+        """Fetch data from the Gateway API for command responses.
+
+        When ``acting_user_id`` is provided, the request is made on behalf of
+        that platform user so user-scoped endpoints (e.g. ``/api/memory``)
+        return data isolated to that user rather than the synthetic default.
+        """
         import httpx
 
         try:
@@ -1009,7 +1035,7 @@ class ChannelManager:
                 resp = await http.get(
                     f"{self._gateway_url}{path}",
                     timeout=10,
-                    headers=create_internal_auth_headers(),
+                    headers=create_internal_auth_headers(acting_user_id=acting_user_id),
                 )
                 resp.raise_for_status()
                 data = resp.json()
