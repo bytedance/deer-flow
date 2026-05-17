@@ -37,7 +37,28 @@ token_usage:
 # ============================================================================
 # Configure available LLM models for the agent to use
 
-models: []
+models:
+  # DeepSeek V4 Pro — primary model for AlphaFRS Railway deployment.
+  # 1M context, 384K max output, supports thinking mode and tool calls.
+  - name: deepseek-v4-pro
+    display_name: DeepSeek V4 Pro
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: deepseek-v4-pro
+    api_key: $DEEPSEEK_API_KEY
+    timeout: 600.0
+    max_retries: 2
+    max_tokens: 8192
+    supports_thinking: true
+    supports_vision: false
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8
