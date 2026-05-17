@@ -360,11 +360,14 @@ def _is_enabled_slash_skill_command(text: str) -> bool:
         return False
     try:
         storage = get_or_new_skill_storage()
-        return resolve_slash_skill(
-            text,
-            storage.load_skills(enabled_only=True),
-            container_base_path=storage.get_container_root(),
-        ) is not None
+        return (
+            resolve_slash_skill(
+                text,
+                storage.load_skills(enabled_only=True),
+                container_base_path=storage.get_container_root(),
+            )
+            is not None
+        )
     except Exception:
         logger.exception("[Manager] failed to resolve slash skill command")
         return False

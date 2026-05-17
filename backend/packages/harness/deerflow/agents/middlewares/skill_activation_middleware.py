@@ -109,10 +109,7 @@ class SkillActivationMiddleware(AgentMiddleware):
 
     @staticmethod
     def _build_activation_reminder(activation: _Activation) -> str:
-        user_request = activation.remaining_text or (
-            "No additional task text was provided after the slash skill command. "
-            "Ask the user what they want to do with this skill if the next step is unclear."
-        )
+        user_request = activation.remaining_text or ("No additional task text was provided after the slash skill command. Ask the user what they want to do with this skill if the next step is unclear.")
         return f"""<slash_skill_activation>
 The user explicitly activated the `{activation.skill_name}` skill for this turn.
 Treat the task text as:
