@@ -8,6 +8,7 @@ and public accessibility (no auth cookie required).
 import asyncio
 import os
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -95,6 +96,49 @@ def test_initialize_rejected_when_admin_exists(client):
     assert body["detail"]["code"] == "system_already_initialized"
 
 
+def test_initialize_concurrent_requests_create_single_admin(client):
+    """Concurrent first-boot initialization requests cannot create two admins."""
+
+    async def _post_concurrently():
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+            return await asyncio.gather(
+                async_client.post(
+                    "/api/v1/auth/initialize",
+                    json=_init_payload(email="admin1@example.com"),
+                ),
+                async_client.post(
+                    "/api/v1/auth/initialize",
+                    json=_init_payload(email="admin2@example.com"),
+                ),
+            )
+
+    responses = asyncio.run(_post_concurrently())
+
+    assert sorted(response.status_code for response in responses) == [201, 409]
+    conflict = next(response for response in responses if response.status_code == 409)
+    assert conflict.json()["detail"]["code"] == "system_already_initialized"
+
+    from app.gateway.deps import get_local_provider
+
+    assert asyncio.run(get_local_provider().count_admin_users()) == 1
+
+
+def test_user_table_rejects_second_admin_directly(client):
+    """The database constraint backs up /initialize against cross-worker races."""
+
+    async def _create_admins():
+        from app.gateway.deps import get_local_provider
+
+        provider = get_local_provider()
+        await provider.create_user(email="admin1@example.com", password="Str0ng!Pass99", system_role="admin")
+        with pytest.raises(ValueError):
+            await provider.create_user(email="admin2@example.com", password="Str0ng!Pass99", system_role="admin")
+        return await provider.count_admin_users()
+
+    assert asyncio.run(_create_admins()) == 1
+
+
 def test_initialize_register_does_not_block_initialization(client):
     """/register creating a user before /initialize doesn't block admin creation."""
     # Register a regular user first
@@ -157,7 +201,7 @@ def test_setup_status_after_initialization(client):
     assert resp.json()["needs_setup"] is False
 
 
-def test_setup_status_false_when_only_regular_user_exists(client):
+def test_setup_status_true_when_only_regular_user_exists(client):
     """setup-status returns needs_setup=True even when regular users exist (no admin)."""
     client.post("/api/v1/auth/register", json={"email": "regular@example.com", "password": "Tr0ub4dor3a"})
     resp = client.get("/api/v1/auth/setup-status")
@@ -174,3 +218,7 @@ def test_setup_status_allows_repeated_checks(client):
     resp2 = client.get("/api/v1/auth/setup-status")
     assert resp2.status_code == 200
     assert resp2.json()["needs_setup"] is True
+
+    resp3 = client.get("/api/v1/auth/setup-status")
+    assert resp3.status_code == 200
+    assert resp3.json()["needs_setup"] is True

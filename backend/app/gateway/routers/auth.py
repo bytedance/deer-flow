@@ -1,5 +1,6 @@
 """Authentication endpoints."""
 
+import asyncio
 import logging
 import os
 import time
@@ -389,6 +390,9 @@ async def setup_status():
     return {"needs_setup": admin_count == 0}
 
 
+_initialize_admin_lock = asyncio.Lock()
+
+
 class InitializeAdminRequest(BaseModel):
     """Request model for first-boot admin account creation."""
 
@@ -408,21 +412,22 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     On success, the admin account is created with ``needs_setup=False`` and
     the session cookie is set.
     """
-    admin_count = await get_local_provider().count_admin_users()
-    if admin_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
+    async with _initialize_admin_lock:
+        admin_count = await get_local_provider().count_admin_users()
+        if admin_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+            )
 
-    try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
-    except ValueError:
-        # DB unique-constraint race: another concurrent request beat us.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
+        try:
+            user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
+        except ValueError:
+            # Duplicate email during first-boot initialization maps to the same public conflict.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+            )
 
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request)

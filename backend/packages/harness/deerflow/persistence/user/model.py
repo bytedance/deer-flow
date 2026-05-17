@@ -55,5 +55,13 @@ class UserRow(Base):
             "oauth_id",
             unique=True,
             sqlite_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
+            postgresql_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_users_single_admin",
+            "system_role",
+            unique=True,
+            sqlite_where=text("system_role = 'admin'"),
+            postgresql_where=text("system_role = 'admin'"),
         ),
     )
