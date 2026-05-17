@@ -1,3 +1,4 @@
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -5,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
@@ -18,6 +20,9 @@ from deerflow.sandbox.tools import (
     _resolve_and_validate_user_data_path,
     _resolve_skills_path,
     bash_tool,
+    glob_tool,
+    grep_tool,
+    ls_tool,
     mask_local_paths_in_output,
     replace_virtual_path,
     replace_virtual_paths_in_command,
@@ -265,6 +270,90 @@ def test_resolve_and_validate_user_data_path_blocks_traversal(tmp_path: Path) ->
     # This path resolves outside the allowed roots
     with pytest.raises(PermissionError):
         _resolve_and_validate_user_data_path("/mnt/user-data/workspace/../../../etc/passwd", thread_data)
+
+
+def test_resolve_and_validate_user_data_path_allows_workspace_symlink(tmp_path: Path) -> None:
+    """Symlinked repos inside the workspace should remain valid tool targets."""
+    workspace = tmp_path / "workspace"
+    uploads = tmp_path / "uploads"
+    outputs = tmp_path / "outputs"
+    external_repo = tmp_path / "repos" / "demo"
+    workspace.mkdir()
+    uploads.mkdir()
+    outputs.mkdir()
+    external_repo.mkdir(parents=True)
+    (external_repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (workspace / "repo").symlink_to(external_repo, target_is_directory=True)
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(uploads),
+        "outputs_path": str(outputs),
+    }
+
+    resolved = _resolve_and_validate_user_data_path("/mnt/user-data/workspace/repo/app.py", thread_data)
+
+    assert resolved == str(workspace / "repo" / "app.py")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
+def test_resolve_and_validate_user_data_path_blocks_uploads_symlink_escape(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    uploads = tmp_path / "uploads"
+    outputs = tmp_path / "outputs"
+    workspace.mkdir()
+    uploads.mkdir()
+    outputs.mkdir()
+
+    outside_file = tmp_path / "outside.png"
+    outside_file.write_text("not really an image")
+    (uploads / "escape.png").symlink_to(outside_file)
+
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(uploads),
+        "outputs_path": str(outputs),
+    }
+
+    with pytest.raises(PermissionError, match="path traversal"):
+        _resolve_and_validate_user_data_path("/mnt/user-data/uploads/escape.png", thread_data)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
+def test_local_search_tools_mask_symlinked_workspace_targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    uploads = tmp_path / "uploads"
+    outputs = tmp_path / "outputs"
+    external_repo = tmp_path / "external-repo"
+    workspace.mkdir()
+    uploads.mkdir()
+    outputs.mkdir()
+    external_repo.mkdir()
+    (external_repo / "app.py").write_text("print('needle')\n")
+    (workspace / "repo").symlink_to(external_repo, target_is_directory=True)
+
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(uploads),
+        "outputs_path": str(outputs),
+    }
+    sandbox = LocalSandbox("local:test")
+    runtime = SimpleNamespace(
+        state={"thread_data": thread_data, "sandbox": {"sandbox_id": "local:test"}},
+        context={"thread_id": "thread-1"},
+        config={},
+    )
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: True)
+
+    ls_output = ls_tool.func(runtime=runtime, description="list symlinked repo", path="/mnt/user-data/workspace/repo")
+    glob_output = glob_tool.func(runtime=runtime, description="glob symlinked repo", path="/mnt/user-data/workspace/repo", pattern="*.py")
+    grep_output = grep_tool.func(runtime=runtime, description="grep symlinked repo", path="/mnt/user-data/workspace/repo", pattern="needle")
+
+    for output in (ls_output, glob_output, grep_output):
+        assert str(external_repo) not in output
+        assert "/mnt/user-data/workspace/repo/app.py" in output
 
 
 # ---------- replace_virtual_paths_in_command ----------
