@@ -643,7 +643,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, {_ACP_WORKSPACE_VIRTUAL_PATH}/, or configured mount paths are allowed")
 
 
-def _is_workspace_user_data_path(path: str) -> bool:
+def _is_virtual_workspace_path(path: str) -> bool:
     workspace_root = f"{VIRTUAL_PATH_PREFIX}/workspace"
     return path == workspace_root or path.startswith(f"{workspace_root}/")
 
@@ -662,6 +662,7 @@ def _validate_resolved_user_data_path(
     to resolve symlinks before validation so uploaded-file escape checks remain
     effective.
     """
+    # abspath normalizes '..' without following symlinks for workspace checks.
     lexical_path = Path(os.path.abspath(str(resolved)))
     resolved_path = lexical_path.resolve()
     allowed_roots = [
@@ -703,7 +704,7 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
     _validate_resolved_user_data_path(
         resolved,
         thread_data,
-        allow_workspace_symlinks=_is_workspace_user_data_path(path),
+        allow_workspace_symlinks=_is_virtual_workspace_path(path),
     )
     return str(resolved)
 

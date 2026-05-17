@@ -296,6 +296,31 @@ def test_resolve_and_validate_user_data_path_allows_workspace_symlink(tmp_path: 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
+def test_workspace_symlink_does_not_allow_dotdot_escape(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    uploads = tmp_path / "uploads"
+    outputs = tmp_path / "outputs"
+    external_repo = tmp_path / "external"
+    workspace.mkdir()
+    uploads.mkdir()
+    outputs.mkdir()
+    external_repo.mkdir()
+    (workspace / "repo").symlink_to(external_repo, target_is_directory=True)
+
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(uploads),
+        "outputs_path": str(outputs),
+    }
+
+    with pytest.raises(PermissionError, match="path traversal"):
+        _resolve_and_validate_user_data_path(
+            "/mnt/user-data/workspace/repo/../../etc/passwd",
+            thread_data,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
 def test_resolve_and_validate_user_data_path_blocks_uploads_symlink_escape(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     uploads = tmp_path / "uploads"
