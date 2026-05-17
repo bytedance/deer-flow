@@ -14,7 +14,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
-from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
+from deerflow.skills.slash import get_original_user_content_text, parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE
 
@@ -156,7 +156,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         if target is None:
             return None
 
-        content = target.content if isinstance(target.content, str) else str(target.content)
+        content = get_original_user_content_text(target.content, target.additional_kwargs)
         activation = self._resolve_activation(content)
         if activation is None:
             return None

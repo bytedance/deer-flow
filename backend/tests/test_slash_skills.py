@@ -9,7 +9,7 @@ from deerflow.agents.middlewares.skill_activation_middleware import (
     SkillActivationMiddleware,
     is_slash_skill_activation_reminder,
 )
-from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
+from deerflow.skills.slash import ORIGINAL_USER_CONTENT_KEY, parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.types import Skill, SkillCategory
 
 
@@ -36,6 +36,14 @@ def test_parse_slash_skill_reference_extracts_name_and_remaining_text():
     assert parsed is not None
     assert parsed.name == "data-analysis"
     assert parsed.remaining_text == "analyze uploads/foo.csv"
+
+
+def test_parse_slash_skill_reference_accepts_cjk_text_without_space():
+    parsed = parse_slash_skill_reference("/data-analysis分析这个文档")
+
+    assert parsed is not None
+    assert parsed.name == "data-analysis"
+    assert parsed.remaining_text == "分析这个文档"
 
 
 def test_parse_slash_skill_reference_rejects_invalid_names():
@@ -76,6 +84,33 @@ def test_skill_activation_middleware_injects_hidden_skill_context(monkeypatch, t
     assert "Use pandas." in activation_msg.content
     assert "<user_request>\nanalyze uploads/foo.csv\n</user_request>" in activation_msg.content
     assert user_msg.content == original.content
+    assert user_msg.additional_kwargs[_SLASH_SKILL_PROCESSED_KEY] is True
+
+
+def test_skill_activation_middleware_uses_original_user_content_when_uploads_are_injected(monkeypatch, tmp_path):
+    skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
+    storage = SimpleNamespace(
+        load_skills=lambda *, enabled_only: [skill],
+        get_container_root=lambda: "/mnt/skills",
+    )
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: storage)
+
+    middleware = SkillActivationMiddleware()
+    original = HumanMessage(
+        content="<uploaded_files>\n- report.pdf\n</uploaded_files>\n\n/data-analysis分析这个文档",
+        id="msg-1",
+        additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "/data-analysis分析这个文档"},
+    )
+
+    update = middleware.before_agent({"messages": [original]}, runtime=None)
+
+    assert update is not None
+    activation_msg, user_msg = update["messages"]
+    assert is_slash_skill_activation_reminder(activation_msg)
+    assert "Use pandas." in activation_msg.content
+    assert "<user_request>\n分析这个文档\n</user_request>" in activation_msg.content
+    assert user_msg.content == original.content
+    assert user_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis分析这个文档"
     assert user_msg.additional_kwargs[_SLASH_SKILL_PROCESSED_KEY] is True
 
 
