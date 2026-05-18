@@ -877,6 +877,28 @@ run-create path.
 - `tests/test_lead_agent_middleware_order.py` — locks the chain order contract (`custom_middlewares` injected immediately before `ClarificationMiddleware`)
 - `tests/enterprise/test_authz_permission_provider.py` — covers no-provider fallback, provider override, provider call-count reverse evidence, `AuthMiddleware`/decorator short-circuit, and the `internal_auth` header branch
 
+**Migration & Operations (M5)**:
+
+- Database migrations: `cd backend && PYTHONPATH=. uv run alembic upgrade head`
+  - Current Alembic revision graph has **two independent heads**:
+    `m1_initial_rbac` (RBAC) and `20260518_m2_audit → 20260518_m3_approval`
+    (audit + approval). A future merge revision will consolidate them; M5
+    intentionally does not.
+- Legacy admin migration: `PYTHONPATH=. uv run python -m scripts.migrate_enterprise [--dry-run] [--config PATH]`
+  - Promotes users with `system_role='admin'` AND empty `roles` to
+    `roles=['admin']`. Users already curated to `roles=['admin', 'auditor']`
+    (or any non-empty list) are **left untouched** — the script is
+    idempotent and operator-edits-safe.
+  - Exits 0 when enterprise.rbac is disabled (nothing to do).
+- Round-trip tests for the three enterprise revisions:
+  `tests/enterprise/integration/test_alembic_round_trip.py`. Run them in
+  CI to catch a downgrade that silently drops cross-revision data:
+  `PYTHONPATH=. uv run pytest tests/enterprise/integration/test_alembic_round_trip.py -v`
+- Config validator smoke tests: `tests/enterprise/test_config_matrix_smoke.py`.
+  Covers the 8 startup combinations (4 legal / 2 fail-fast / 2 warning).
+  Re-asserts the validator from `EnterpriseConfig.model_validator(mode="after")`
+  fires under normal construction, not just unit tests.
+
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
 `DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
