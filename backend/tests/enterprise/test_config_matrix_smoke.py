@@ -30,7 +30,7 @@ them — Tasks 8/9 will.
 
 from __future__ import annotations
 
-import logging  # noqa: F401  -- used by Task 9 warning combinations
+import logging
 
 import pytest
 from pydantic import ValidationError
@@ -118,3 +118,32 @@ def test_approval_without_audit_raises() -> None:
             approval=ApprovalConfig(enabled=True),
         )
     assert "audit" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 9 — degenerate combinations (WARNING)
+# ---------------------------------------------------------------------------
+
+
+def test_oidc_without_rbac_warns(caplog) -> None:
+    """OIDC writes user.roles, but with no RBAC nothing consumes them."""
+    with caplog.at_level(logging.WARNING, logger="deerflow.enterprise.config"):
+        EnterpriseConfig(
+            enabled=True,
+            rbac=RbacConfig(enabled=False),
+            auth=EnterpriseAuthConfig(
+                oidc=OIDCConfig(enabled=True, issuer="https://i", client_id="c", client_secret="s"),
+            ),
+        )
+    assert any("oidc" in r.message.lower() and "rbac" in r.message.lower() for r in caplog.records), "Expected an OIDC-without-RBAC warning"
+
+
+def test_disabled_root_with_submodule_warns(caplog) -> None:
+    """When the master switch is off but a submodule is on, the submodule
+    is silently inert. Loudly warn so operators don't think audit is on."""
+    with caplog.at_level(logging.WARNING, logger="deerflow.enterprise.config"):
+        EnterpriseConfig(
+            enabled=False,
+            audit=AuditConfig(enabled=True, sign_key="x"),
+        )
+    assert any("enabled" in r.message.lower() or "inert" in r.message.lower() for r in caplog.records), "Expected a silent-inertness warning"
