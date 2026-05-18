@@ -128,14 +128,35 @@ def _render_markdown(props: dict[str, Any]) -> list[str]:
 
 def _render_table(props: dict[str, Any]) -> list[str]:
     # Accept either {columns: [...], data: [...]} or [rows...] (object[]).
+    # Also accept the common DSL pattern where ``columns`` is author-supplied
+    # ``[{key, label}]`` and the source resolves to ``rows: [dict, ...]``.
     columns = props.get("columns")
     data = props.get("data")
-    if columns is None and isinstance(props.get("rows"), list):
-        rows = props["rows"]
+    rows = props.get("rows")
+
+    if columns is None and isinstance(rows, list):
+        # Pure rows-only path — infer columns from first row's keys.
         if not rows:
             return ["_(empty table)_"]
         columns = list(rows[0].keys())
         data = [list(r.get(c, "") for c in columns) for r in rows]
+    elif isinstance(columns, list) and data is None and isinstance(rows, list):
+        # Author-supplied columns + rows: project each row into a list using
+        # column ``key`` (when columns is a list of label dicts) or the column
+        # name (when columns is a list of strings).
+        if not rows:
+            return ["_(empty table)_"]
+        column_keys = [
+            c.get("key", c.get("label", "")) if isinstance(c, dict) else str(c)
+            for c in columns
+        ]
+        column_labels = [
+            c.get("label", c.get("key", "")) if isinstance(c, dict) else str(c)
+            for c in columns
+        ]
+        data = [[r.get(k, "") for k in column_keys] for r in rows]
+        columns = column_labels  # use labels for the rendered header
+
     if not isinstance(columns, list) or not isinstance(data, list):
         raise RenderError("table props must contain columns:list and data:list")
     if not columns:

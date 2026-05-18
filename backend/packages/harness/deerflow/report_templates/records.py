@@ -97,6 +97,54 @@ def new_report_run_id() -> str:
     return _gen_ulid_like("rr")
 
 
+def builtin_version_ref(dsl_version: str) -> str:
+    """Build a ``template_version_ref`` string for a builtin template.
+
+    Per design §6.2 the ref must combine the runtime DSL version with a
+    short git SHA so a ReportRun can be replayed against the exact code
+    that produced it. Returns ``"{sha[:8]}-{dsl_version}"`` when the working
+    tree is a git checkout, falling back to ``"builtin-{dsl_version}"``
+    otherwise (CI / installed wheels). Result is cached after the first call.
+    """
+    sha = _resolve_git_sha()
+    if not sha or len(sha) < 8:
+        return f"builtin-{dsl_version}"
+    return f"{sha[:8]}-{dsl_version}"
+
+
+_cached_git_sha: str | None = None
+_git_sha_resolved: bool = False
+
+
+def _resolve_git_sha() -> str | None:
+    global _cached_git_sha, _git_sha_resolved
+    if _git_sha_resolved:
+        return _cached_git_sha
+    import os
+    import subprocess
+    from pathlib import Path
+
+    sha = os.environ.get("DEER_FLOW_GIT_SHA")
+    if not sha:
+        try:
+            cwd = Path(__file__).resolve().parent
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if result.returncode == 0:
+                sha = result.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            sha = None
+    _cached_git_sha = sha
+    _git_sha_resolved = True
+    return _cached_git_sha
+
+
 # ---------------------------------------------------------------------------
 # ReportTemplate — metadata.json
 # ---------------------------------------------------------------------------

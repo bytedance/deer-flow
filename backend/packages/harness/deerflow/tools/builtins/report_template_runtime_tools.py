@@ -31,6 +31,7 @@ from langgraph.config import get_config
 from deerflow.config.paths import get_paths
 from deerflow.report_templates.records import (
     ReportRunRecord,
+    builtin_version_ref,
     new_report_run_id,
     now_iso,
     validate_report_run_id,
@@ -198,7 +199,7 @@ def report_template_prepare_run_tool(
             scope, rec = Scope.builtin(), repo.get_template(Scope.builtin(), template_id)
             # builtin templates expose a current DSL view (no v-number versioning here).
             version_to_record = None
-            version_ref = f"builtin-{rec.dsl_version}"
+            version_ref = builtin_version_ref(rec.dsl_version)
             # builtin DSL location: repository keeps it inline via version 1 if loaded
             # (Phase 2 fork test demonstrates this). For MVP we read v1.
             version = repo.get_version(scope, template_id, 1)

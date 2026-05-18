@@ -104,12 +104,21 @@ def _wrap_props(component: str, value: Any, extra_props: dict | None) -> dict[st
         base["content"] = value
         return base
     if component == "card":
-        if not isinstance(value, dict):
-            raise PayloadBuildError(
-                f"card source must be an object, got {type(value).__name__}"
-            )
-        base.update(value)
-        return base
+        # Standard form: card source resolves to {title, value, ...} dict.
+        if isinstance(value, dict):
+            base.update(value)
+            return base
+        # Banner / confidence-badge form: card source resolves to a scalar
+        # (bool/str/int/float) and DSL author-supplied ``props`` carry the
+        # banner ``style`` + ``template`` text. The scalar becomes ``value`` so
+        # generic_renderer can fall back to ``template`` or display the value
+        # (e.g. ``confidence: high`` → 🟢 High badge).
+        if isinstance(value, (bool, str, int, float)):
+            base.setdefault("value", value)
+            return base
+        raise PayloadBuildError(
+            f"card source must be an object or scalar, got {type(value).__name__}"
+        )
     if component == "card_group":
         if not isinstance(value, list):
             raise PayloadBuildError(

@@ -341,6 +341,13 @@ def run_script(
             cli,
             capture_output=True,
             text=True,
+            # Force UTF-8 decoding so scripts emitting Chinese / non-ASCII output
+            # don't blow up on Windows (where the default locale codec is GBK).
+            # ``errors='replace'`` keeps stdout/stderr non-None even when the
+            # script emits invalid bytes — otherwise ``completed.stderr`` lands
+            # as ``None`` and the error-extraction path below ``TypeError``s.
+            encoding="utf-8",
+            errors="replace",
             timeout=descriptor.timeout_seconds,
             cwd=descriptor.skill_dir,
             check=False,
