@@ -36,6 +36,7 @@ class NacosRegistry:
         self._heartbeat_task: asyncio.Task | None = None
         self._running = False
         self._registered = False
+        self._access_token: str | None = None
 
     @property
     def registered(self) -> bool:
@@ -45,6 +46,41 @@ class NacosRegistry:
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=10.0)
         return self._http
+
+    async def _login(self) -> str | None:
+        """Authenticate with Nacos and return an access token.
+
+        Returns None if auth is not configured or login fails.
+        """
+        if not self._config.username or not self._config.password:
+            return None
+        http = await self._ensure_client()
+        url = f"{self._base_url}/auth/login"
+        try:
+            resp = await http.post(
+                url,
+                data={"username": self._config.username, "password": self._config.password},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                token = data.get("accessToken")
+                if token:
+                    logger.info("Nacos authentication successful")
+                    return token
+            logger.warning("Nacos login returned: %s %s", resp.status_code, resp.text[:200])
+        except Exception:
+            logger.exception("Nacos authentication failed")
+        return None
+
+    async def _get_auth_params(self) -> dict[str, str]:
+        """Return auth query params, logging in first if needed."""
+        if not self._config.username or not self._config.password:
+            return {}
+        if self._access_token is None:
+            self._access_token = await self._login()
+        if self._access_token:
+            return {"accessToken": self._access_token}
+        return {}
 
     def _resolve_ip(self) -> str:
         if self._config.service.ip:
@@ -82,6 +118,7 @@ class NacosRegistry:
         """
         http = await self._ensure_client()
         params = self._build_instance_params()
+        params.update(await self._get_auth_params())
         url = f"{self._base_url}/ns/instance"
         logger.info(
             "Registering service %s with Nacos at %s",
@@ -109,6 +146,7 @@ class NacosRegistry:
             return True
         http = await self._ensure_client()
         params = self._build_instance_params()
+        params.update(await self._get_auth_params())
         url = f"{self._base_url}/ns/instance"
         logger.info("Deregistering service from Nacos")
         try:
@@ -138,6 +176,9 @@ class NacosRegistry:
             "ephemeral": "true",
             "beat": '{"ip":"%s","port":%d,"weight":%s}' % (ip, svc.port, svc.weight),
         })
+        auth_params = await self._get_auth_params()
+        if auth_params:
+            query += "&" + urlencode(auth_params)
         url = f"{self._base_url}/ns/instance/beat?{query}"
         try:
             resp = await http.put(url)
@@ -221,6 +262,7 @@ class NacosRegistry:
             "namespaceId": cfg.namespace,
             "healthyOnly": "true",
         }
+        params.update(await self._get_auth_params())
         url = f"{self._base_url}/ns/instance/list"
         try:
             resp = await http.get(url, params=params)

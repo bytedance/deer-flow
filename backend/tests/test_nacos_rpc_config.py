@@ -48,6 +48,21 @@ class TestNacosConfigDefaults:
         with pytest.raises(Exception):
             NacosHeartbeatConfig(timeout=3)
 
+    def test_auth_fields(self):
+        cfg = NacosConfig(
+            server_addr="localhost:8848",
+            namespace="test",
+            username="nacos",
+            password="nacos123",
+        )
+        assert cfg.username == "nacos"
+        assert cfg.password == "nacos123"
+
+    def test_auth_fields_default_none(self):
+        cfg = NacosConfig(server_addr="localhost:8848", namespace="test")
+        assert cfg.username is None
+        assert cfg.password is None
+
 
 class TestNacosConfigSingleton:
     def test_load_and_get(self):

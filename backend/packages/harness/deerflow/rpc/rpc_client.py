@@ -4,16 +4,11 @@ Uses httpx for HTTP/JSON-RPC communication with connection pooling,
 Nacos-based service discovery, timeout handling, and retry support.
 """
 
+import asyncio
 import logging
 from typing import Any
 
 import httpx
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from deerflow.config.nacos_config import get_nacos_config
 from deerflow.config.rpc_config import (
@@ -188,6 +183,74 @@ class RpcClient:
 
         return resp.json() if resp.text else None
 
+    async def call_raw(
+        self,
+        service_name: str,
+        path: str,
+        http_method: str = "GET",
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> Any:
+        """Call a Java RPC service with a raw path (no endpoint config lookup).
+
+        Use this when the client code already knows the HTTP path and method,
+        e.g. from a typed Python wrapper around a Java FeignClient.
+
+        Args:
+            service_name: Configured service name in config.yaml.
+            path: Full HTTP path (e.g. /ins-bus-rpc/machineModel/getMachineInfoByIds).
+            http_method: HTTP method (GET, POST, PUT, DELETE).
+            params: Query string parameters (GET/DELETE) or request body (POST/PUT).
+            timeout: Per-call timeout override in seconds.
+
+        Returns:
+            Parsed JSON response.
+
+        Raises:
+            RpcError: On 4xx/5xx responses.
+            RpcConnectionError: On network errors.
+            RpcTimeoutError: On timeout.
+        """
+        if params is None:
+            params = {}
+
+        service = self._get_service(service_name)
+        base_url = await self._resolve_base_url(service)
+        url = f"{base_url}{path}"
+
+        call_timeout = timeout or service.timeout or (get_rpc_config() or _DEFAULT_RPC_CFG).default_timeout
+
+        http = await self._ensure_client()
+        retry_cfg = service.retry or (get_rpc_config() or _DEFAULT_RPC_CFG).default_retry
+
+        # Build a synthetic endpoint just for _do_request
+        endpoint = RpcEndpointConfig(method="__raw__", path=path, http_method=http_method)
+
+        try:
+            if retry_cfg.max_attempts > 1:
+                resp = await self._request_with_retry(http, endpoint, url, params, call_timeout, retry_cfg.max_attempts)
+            else:
+                resp = await self._do_request(http, endpoint, url, params, call_timeout)
+        except RpcError:
+            raise
+        except httpx.TimeoutException:
+            raise RpcTimeoutError(f"RPC call to {service_name}{path} timed out after {call_timeout}s")
+        except httpx.ConnectError as e:
+            raise RpcConnectionError(f"Connection failed to {url}: {e}") from e
+        except Exception as e:
+            raise RpcConnectionError(f"RPC call failed: {e}") from e
+
+        if resp.status_code >= 400:
+            body_text = resp.text[:1000]
+            raise RpcError(
+                f"RPC call to {service_name}{path} returned {resp.status_code}: {body_text}",
+                status_code=resp.status_code,
+                body=body_text,
+            )
+
+        return resp.json() if resp.text else None
+
     async def _do_request(
         self,
         http: httpx.AsyncClient,
@@ -228,7 +291,7 @@ class RpcClient:
                         "RPC call attempt %d/%d failed, retrying in %.1fs: %s",
                         attempt, max_attempts, delay, e,
                     )
-                    await __import__("asyncio").sleep(delay)
+                    await asyncio.sleep(delay)
         raise RpcConnectionError(f"RPC call failed after {max_attempts} attempts") from last_error
 
     async def close(self) -> None:

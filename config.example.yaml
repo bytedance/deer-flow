@@ -1192,6 +1192,8 @@ rate_limit:
 # nacos:
 #   server_addr: "127.0.0.1:8848"   # Nacos server address, supports $NACOS_SERVER_ADDR
 #   namespace: ""                    # Namespace ID (empty = public)
+#   username: "nacos"                # Nacos login username (omit for no auth)
+#   password: "$NACOS_PASSWORD"      # Nacos login password, supports $ENV_VAR
 #   group: "DEFAULT_GROUP"           # Service group
 #   service:
 #     name: "deer-flow-gateway"      # Registered service name
@@ -1219,14 +1221,14 @@ rate_limit:
 #     max_attempts: 3                # Max retries for transient failures
 #     backoff_factor: 0.5            # Backoff multiplier
 #   services:
-#     - name: "user-service"         # Logical service name for client lookup
-#       discovery: "user-service"    # Nacos service name for discovery
-#       # base_url: "http://localhost:8080"  # Direct URL (alternative to discovery)
-#       # timeout: 60.0              # Per-service timeout override
-#       endpoints:
-#         - method: "getUserById"
-#           path: "/api/user/{id}"
-#           http_method: "GET"
-#         - method: "createUser"
-#           path: "/api/user"
-#           http_method: "POST"
+#     # Example: MachineService (设备服务)
+#     - name: ins-bus-rpc
+#       discovery: ins-bus-rpc       # Nacos service name
+#       # When discovery is configured, MachineServiceClient handles endpoint paths automatically
+#     # Generic service with explicit endpoints:
+#     # - name: "user-service"
+#     #   discovery: "user-service"
+#     #   endpoints:
+#     #     - method: "getUserById"
+#     #       path: "/api/user/{id}"
+#     #       http_method: "GET"

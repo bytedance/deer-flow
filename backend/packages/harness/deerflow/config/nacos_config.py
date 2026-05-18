@@ -84,6 +84,14 @@ class NacosConfig(BaseModel):
         default="",
         description="Nacos namespace ID (empty = public namespace)",
     )
+    username: str | None = Field(
+        default=None,
+        description="Nacos username for authentication (None = no auth)",
+    )
+    password: str | None = Field(
+        default=None,
+        description="Nacos password for authentication. Supports $ENV_VAR syntax.",
+    )
     group: str = Field(
         default="DEFAULT_GROUP",
         description="Nacos service group name",

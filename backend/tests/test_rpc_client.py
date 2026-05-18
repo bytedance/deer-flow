@@ -130,3 +130,59 @@ class TestRpcClientNacosDiscovery:
         with patch.object(client, "_get_registry", return_value=mock_registry):
             base_url = asyncio.run(client._resolve_base_url(svc))
             assert base_url == "http://10.0.0.5:8080"
+
+
+class TestRpcClientCallRaw:
+    def test_call_raw_get_success(self):
+        client = RpcClient()
+        mock_resp = AsyncMock(spec=httpx.Response)
+        mock_resp.status_code = 200
+        mock_resp.text = '{"data": [{"id": 1, "name": "pump-01"}]}'
+        mock_resp.json.return_value = {"data": [{"id": 1, "name": "pump-01"}]}
+
+        with patch.object(client, "_ensure_client") as mock_client_fn:
+            mock_http = AsyncMock()
+            mock_http.get.return_value = mock_resp
+            mock_client_fn.return_value = mock_http
+
+            result = asyncio.run(client.call_raw(
+                "test-service",
+                "/ins-bus-rpc/machineModel/getMachineInfoByIds",
+                "GET",
+                {"machineIds": "1,2,3"},
+            ))
+            assert result == {"data": [{"id": 1, "name": "pump-01"}]}
+
+    def test_call_raw_post_success(self):
+        client = RpcClient()
+        mock_resp = AsyncMock(spec=httpx.Response)
+        mock_resp.status_code = 200
+        mock_resp.text = '{"success": true}'
+        mock_resp.json.return_value = {"success": True}
+
+        with patch.object(client, "_ensure_client") as mock_client_fn:
+            mock_http = AsyncMock()
+            mock_http.post.return_value = mock_resp
+            mock_client_fn.return_value = mock_http
+
+            result = asyncio.run(client.call_raw(
+                "test-service",
+                "/api/create",
+                "POST",
+                {"name": "test"},
+            ))
+            assert result == {"success": True}
+
+    def test_call_raw_returns_error_status(self):
+        client = RpcClient()
+        mock_resp = AsyncMock(spec=httpx.Response)
+        mock_resp.status_code = 500
+        mock_resp.text = "Internal Server Error"
+
+        with patch.object(client, "_ensure_client") as mock_client_fn:
+            mock_http = AsyncMock()
+            mock_http.get.return_value = mock_resp
+            mock_client_fn.return_value = mock_http
+
+            with pytest.raises(RpcError, match="500"):
+                asyncio.run(client.call_raw("test-service", "/api/test", "GET"))
