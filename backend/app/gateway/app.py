@@ -26,10 +26,12 @@ from app.gateway.routers import (
     feedback,
     genui,
     genui_telemetry,
+    ins_base_auth,
     knowledge_bases,
     mcp,
     memory,
     models,
+    organize,
     rag,
     report_runs,
     report_template_telemetry,
@@ -615,6 +617,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Auth API is mounted at /api/auth
     app.include_router(auth_router.router)
 
+    # InsBase Auth API is mounted at /api/v1/auth/ins-base
+    app.include_router(ins_base_auth.router)
+
     # Cost API is mounted at /api/cost
     app.include_router(cost.router)
 
@@ -649,6 +654,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # GenUI telemetry and block recovery API
     app.include_router(genui_telemetry.router)
+
+    # Organize tree API (proxy to ins-bus-rpc)
+    app.include_router(organize.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

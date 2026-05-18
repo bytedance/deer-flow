@@ -25,11 +25,10 @@ _AUTH_WHITELIST = {
     "/openapi.json",
     "/api/auth/login",
     "/api/auth/refresh",
-    "/api/v1/auth/login/local",
-    "/api/v1/auth/register",
+    "/api/v1/auth/ins-base/login",
+    "/api/v1/auth/ins-base/refresh",
+    "/api/v1/auth/ins-base/authenticate",
     "/api/v1/auth/logout",
-    "/api/v1/auth/setup-status",
-    "/api/v1/auth/initialize",
 }
 
 
@@ -112,6 +111,46 @@ def create_auth_middleware():
                 return await call_next(request)
             finally:
                 reset_tenant_id(token)
+
+        # InsBase provider: verify token via ins-base-rpc /auth/authentication
+        if config.provider == "ins_base":
+            access_token = request.cookies.get("access_token")
+            auth_header = request.headers.get("Authorization", "")
+            if not access_token and auth_header.startswith("Bearer "):
+                access_token = auth_header[7:]
+
+            if access_token:
+                try:
+                    from app.gateway.deps import get_ins_base_provider
+                    ins_provider = get_ins_base_provider()
+                    if ins_provider is not None:
+                        user = await ins_provider.get_user(access_token)
+                        if user is not None:
+                            tenant_id = "default"
+                            try:
+                                validate_tenant_id(tenant_id)
+                            except ValueError as e:
+                                return _json_error(400, str(e))
+                            error = await _check_tenant_active(tenant_id, request)
+                            if error is not None:
+                                return error
+                            ctx_token = set_current_tenant_id(tenant_id)
+                            request.state.user = {
+                                "username": getattr(user, "email", "ins-base-user"),
+                                "tenant_id": tenant_id,
+                                "role": "member",
+                                "auth_method": "ins_base",
+                                "ins_base_token": access_token,
+                            }
+                            try:
+                                return await call_next(request)
+                            finally:
+                                reset_tenant_id(ctx_token)
+                except Exception:
+                    logger.exception("InsBase token verification failed for path=%s", request.url.path)
+
+            logger.warning("create_auth_middleware (ins_base): no valid token for path=%s", request.url.path)
+            return _json_error(401, "Missing or invalid authentication token")
 
         # Auth enabled: resolve token from Authorization header or access_token cookie.
         # Cookie-based auth is the primary frontend mechanism (HttpOnly cookie set

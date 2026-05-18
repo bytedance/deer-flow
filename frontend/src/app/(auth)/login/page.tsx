@@ -9,21 +9,21 @@ import { IndustrialBackdrop } from "@/components/auth/industrial-backdrop";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { parseAuthError } from "@/core/auth/types";
 import { setCurrentTenantId } from "@/core/tenant/store";
 
 /**
  * Validate next parameter
  * Prevent open redirect attacks
- * Per RFC-001: Only allow relative paths starting with /
  */
 function validateNextParam(next: string | null): string | null {
   if (!next) {
     return null;
   }
+
   if (!next.startsWith("/")) {
     return null;
   }
+
   if (
     next.startsWith("//") ||
     next.startsWith("http://") ||
@@ -31,9 +31,11 @@ function validateNextParam(next: string | null): string | null {
   ) {
     return null;
   }
+
   if (next.includes(":") && !next.startsWith("/")) {
     return null;
   }
+
   return next;
 }
 
@@ -42,14 +44,10 @@ export default function LoginPage() {
   const searchParams = useSearchParams();
   const { isAuthenticated } = useAuth();
 
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [tenantChoices, setTenantChoices] = useState<
-    { tenant_id: string; email: string }[]
-  >([]);
 
   const nextParam = searchParams.get("next");
   const redirectPath = validateNextParam(nextParam) ?? "/workspace";
@@ -60,57 +58,32 @@ export default function LoginPage() {
     }
   }, [isAuthenticated, redirectPath, router]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void fetch("/api/v1/auth/setup-status")
-      .then((r) => r.json())
-      .then((data: { needs_setup?: boolean }) => {
-        if (!cancelled && data.needs_setup) {
-          router.push("/setup");
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [router]);
-
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
 
     try {
-      const endpoint = isLogin
-        ? "/api/v1/auth/login/local"
-        : "/api/v1/auth/register";
-      const body = isLogin
-        ? `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`
-        : JSON.stringify({ email, password });
-      const headers: HeadersInit = isLogin
-        ? { "Content-Type": "application/x-www-form-urlencoded" }
-        : { "Content-Type": "application/json" };
-
-      const res = await fetch(endpoint, {
+      const res = await fetch("/api/v1/auth/ins-base/login", {
         method: "POST",
-        headers,
-        body,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
         credentials: "include",
       });
 
       if (!res.ok) {
         const data = await res.json();
-        if (
-          res.status === 409 &&
-          data.detail?.code === "tenant_selection_required"
-        ) {
-          setTenantChoices(data.detail.tenants);
-          setError("");
-          return;
-        }
-        const authError = parseAuthError(data);
-        setError(authError.message);
+        const detail =
+          typeof data?.detail === "string"
+            ? data.detail
+            : data?.detail?.message || data?.message || "登录失败";
+        setError(detail);
         return;
+      }
+
+      const data = await res.json();
+      if (data.tenant_id) {
+        setCurrentTenantId(data.tenant_id);
       }
 
       const meRes = await fetch("/api/v1/auth/me", { credentials: "include" });
@@ -120,51 +93,14 @@ export default function LoginPage() {
           setCurrentTenantId(userData.tenant_id);
         }
       }
+
       router.push(redirectPath);
     } catch {
-      setError("Network error. Please try again.");
+      setError("网络错误，请重试");
     } finally {
       setLoading(false);
     }
   };
-
-  const handleTenantSelect = async (tenantId: string) => {
-    setLoading(true);
-    setError("");
-
-    try {
-      const res = await fetch("/api/v1/auth/login/local", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-DeerFlow-Tenant": tenantId,
-        },
-        body: `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`,
-        credentials: "include",
-      });
-
-      if (res.ok) {
-        setTenantChoices([]);
-        setCurrentTenantId(tenantId);
-        router.push(redirectPath);
-      } else {
-        const data = await res.json();
-        const authError = parseAuthError(data);
-        setError(authError.message);
-      }
-    } catch {
-      setError("Network error. Please try again.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const subtitle =
-    tenantChoices.length > 0
-      ? "请选择登录到的组织"
-      : isLogin
-        ? "登录到设备健康管理工作台"
-        : "创建账号以开始使用";
 
   return (
     <div className="bg-background grid min-h-screen lg:grid-cols-[3fr_2fr]">
@@ -186,134 +122,66 @@ export default function LoginPage() {
 
           <div className="space-y-1.5">
             <h2 className="text-foreground text-xl font-semibold tracking-tight">
-              {tenantChoices.length > 0
-                ? "选择组织"
-                : isLogin
-                  ? "欢迎回来"
-                  : "新建账号"}
+              欢迎回来
             </h2>
-            <p className="text-muted-foreground text-sm">{subtitle}</p>
+            <p className="text-muted-foreground text-sm">
+              登录到设备健康管理工作台
+            </p>
           </div>
 
-          {tenantChoices.length > 0 ? (
-            <div className="space-y-3">
-              <p className="text-muted-foreground text-xs">
-                你的账号属于多个组织，请选择本次登录的组织。
-              </p>
-              <div className="space-y-2">
-                {tenantChoices.map((t) => (
-                  <Button
-                    key={t.tenant_id}
-                    variant="outline"
-                    className="w-full justify-start font-mono text-xs"
-                    disabled={loading}
-                    onClick={() => handleTenantSelect(t.tenant_id)}
-                  >
-                    {t.tenant_id}
-                  </Button>
-                ))}
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setTenantChoices([]);
-                  setError("");
-                }}
-                className="text-muted-foreground hover:text-foreground block w-full text-left text-xs underline-offset-2 transition-colors hover:underline"
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div className="space-y-2">
+              <label
+                htmlFor="username"
+                className="text-muted-foreground block text-xs font-medium"
               >
-                ← 返回登录
-              </button>
+                用户名
+              </label>
+              <div className="relative">
+                <MailIcon className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" />
+                <Input
+                  id="username"
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  className="pl-10"
+                  placeholder="请输入用户名"
+                  required
+                />
+              </div>
             </div>
-          ) : (
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="space-y-1.5">
-                <label
-                  htmlFor="email"
-                  className="text-foreground text-xs font-medium tracking-wide"
-                >
-                  邮箱
-                </label>
-                <div className="relative">
-                  <MailIcon
-                    className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                    aria-hidden="true"
-                  />
-                  <Input
-                    id="email"
-                    type="email"
-                    autoComplete="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
-                    className="pl-9"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <label
-                  htmlFor="password"
-                  className="text-foreground text-xs font-medium tracking-wide"
-                >
-                  密码
-                </label>
-                <div className="relative">
-                  <LockIcon
-                    className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-                    aria-hidden="true"
-                  />
-                  <Input
-                    id="password"
-                    type="password"
-                    autoComplete={isLogin ? "current-password" : "new-password"}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="•••••••"
-                    className="pl-9"
-                    required
-                    minLength={isLogin ? 6 : 8}
-                  />
-                </div>
-              </div>
-
-              {error && (
-                <p
-                  className="text-alarm-high text-xs"
-                  role="alert"
-                  aria-live="polite"
-                >
-                  {error}
-                </p>
-              )}
-
-              <Button type="submit" className="w-full" disabled={loading}>
-                {loading ? "请稍候..." : isLogin ? "登录" : "创建账号"}
-              </Button>
-            </form>
-          )}
-
-          {tenantChoices.length === 0 && (
-            <div className="text-muted-foreground text-xs">
-              {isLogin ? "还没有账号？" : "已有账号？"}{" "}
-              <button
-                type="button"
-                onClick={() => {
-                  setIsLogin(!isLogin);
-                  setError("");
-                }}
-                className="text-primary underline-offset-2 hover:underline"
+            <div className="space-y-2">
+              <label
+                htmlFor="password"
+                className="text-muted-foreground block text-xs font-medium"
               >
-                {isLogin ? "立即注册" : "去登录"}
-              </button>
+                密码
+              </label>
+              <div className="relative">
+                <LockIcon className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" />
+                <Input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="pl-10"
+                  placeholder="•••••••"
+                  required
+                />
+              </div>
             </div>
-          )}
 
-          <div className="border-border/60 border-t pt-6">
-            <Link
-              href="/"
-              className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs transition-colors"
-            >
+            {error && (
+              <p className="text-destructive text-sm">{error}</p>
+            )}
+
+            <Button type="submit" className="w-full" disabled={loading}>
+              {loading ? "登录中..." : "登录"}
+            </Button>
+          </form>
+
+          <div className="text-muted-foreground text-center text-xs">
+            <Link href="/" className="hover:underline">
               ← 返回首页
             </Link>
           </div>

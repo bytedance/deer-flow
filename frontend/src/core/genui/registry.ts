@@ -21,6 +21,9 @@ const COMPONENT_REGISTRY: Record<string, () => Promise<{ default: LazyComponent 
   alarm: () => import("@/components/genui/AlarmBlock") as any,
   metric: () => import("@/components/genui/MetricBlock") as any,
   status: () => import("@/components/genui/StatusBlock") as any,
+  // Device selector components
+  "device-selector": () => import("@/components/genui/DeviceSelectorBlock") as any,
+  "device-selector-multi": () => import("@/components/genui/DeviceSelectorMultiBlock") as any,
 };
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -56,6 +59,8 @@ export function getBlockComponent(
   componentCache.set(componentType, LazyComp);
   return LazyComp;
 }
+
+export const KNOWN_COMPONENTS = Object.keys(COMPONENT_REGISTRY);
 
 export function isKnownComponent(componentType: string): boolean {
   return componentType in COMPONENT_REGISTRY;

@@ -18,6 +18,8 @@ class AuthConfig(BaseModel):
     api_key_enabled: bool = Field(default=True, description="Enable API Key authentication")
     admin_username: str = Field(default="admin", description="Default admin username for MVP")
     admin_password_hash: str = Field(default="", description="Bcrypt hash of the admin password")
+    provider: str = Field(default="ins_base", description="Auth provider type: 'local' or 'ins_base'")
+    rsa_public_key: str = Field(default="", description="RSA public key PEM for encrypting login credentials when provider is 'ins_base'")
 
 
 _auth_config: AuthConfig | None = None

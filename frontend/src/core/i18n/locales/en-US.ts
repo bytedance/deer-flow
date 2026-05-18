@@ -203,6 +203,7 @@ export const enUS: Translations = {
     demoChats: "Demo chats",
     agents: "Agents",
     knowledgeBases: "Knowledge Bases",
+    a2uiDebug: "A2UI Debug",
   },
 
   // Agents

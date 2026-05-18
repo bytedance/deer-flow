@@ -1095,6 +1095,8 @@ auth:
   api_key_enabled: true
   admin_username: "admin"
   admin_password_hash: ""            # bcrypt hash of the admin password
+  provider: "local"                  # Auth provider type: "local" (default) or "ins_base"
+  rsa_public_key: ""                 # RSA public key PEM for ins_base provider login encryption
 
 # ============================================================================
 # Rate Limiting Configuration
@@ -1225,6 +1227,10 @@ rate_limit:
 #     - name: ins-bus-rpc
 #       discovery: ins-bus-rpc       # Nacos service name
 #       # When discovery is configured, MachineServiceClient handles endpoint paths automatically
+#     # Example: ins-base-rpc (用户认证服务)
+#     - name: ins-base-rpc
+#       discovery: ins-base-rpc      # Nacos service name
+#       # base_url: "http://localhost:8081"  # 直连模式（与 discovery 二选一）
 #     # Generic service with explicit endpoints:
 #     # - name: "user-service"
 #     #   discovery: "user-service"

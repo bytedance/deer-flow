@@ -48,6 +48,12 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   status: new Set([
     "status", "tag", "label",
   ]),
+  "device-selector": new Set([
+    "title", "queryParams",
+  ]),
+  "device-selector-multi": new Set([
+    "title", "queryParams", "maxSelect",
+  ]),
 };
 
 function sanitizeValue(value: unknown, depth = 0): unknown {

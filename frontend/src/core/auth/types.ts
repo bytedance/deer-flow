@@ -4,9 +4,8 @@ import { z } from "zod";
 
 export const userSchema = z.object({
   id: z.string(),
-  email: z.string().email(),
+  email: z.string(),
   system_role: z.enum(["superadmin", "tenant_admin", "user"]),
-  needs_setup: z.boolean().optional().default(false),
   tenant_id: z.string().optional().default("default"),
   tenant_name: z.string().optional(),
 });
@@ -17,8 +16,6 @@ export type User = z.infer<typeof userSchema>;
 
 export type AuthResult =
   | { tag: "authenticated"; user: User }
-  | { tag: "needs_setup"; user: User }
-  | { tag: "system_setup_required" }
   | { tag: "unauthenticated" }
   | { tag: "gateway_unavailable" }
   | { tag: "config_error"; message: string };
@@ -38,10 +35,8 @@ const AUTH_ERROR_CODES = [
   "token_expired",
   "token_invalid",
   "user_not_found",
-  "email_already_exists",
   "provider_not_found",
   "not_authenticated",
-  "system_already_initialized",
 ] as const;
 
 export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];

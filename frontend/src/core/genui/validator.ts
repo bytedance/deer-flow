@@ -227,6 +227,25 @@ const statusPropsSchema = z.object({
   label: z.string().max(200).optional(),
 });
 
+// ─── Device selector schemas ──────────────────────────────────────
+
+const deviceQueryParamsSchema = z.object({
+  userId: z.number().optional(),
+  orgId: z.number().optional(),
+  treeType: z.number().optional(),
+});
+
+const deviceSelectorPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  queryParams: deviceQueryParamsSchema.optional(),
+});
+
+const deviceSelectorMultiPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  queryParams: deviceQueryParamsSchema.optional(),
+  maxSelect: z.number().min(1).optional(),
+});
+
 const propsSchemas: Record<string, z.ZodType> = {
   chart: chartPropsSchema,
   echart: echartPropsSchema,
@@ -243,6 +262,8 @@ const propsSchemas: Record<string, z.ZodType> = {
   alarm: alarmPropsSchema,
   metric: metricPropsSchema,
   status: statusPropsSchema,
+  "device-selector": deviceSelectorPropsSchema,
+  "device-selector-multi": deviceSelectorMultiPropsSchema,
 };
 
 export function validateProps(
