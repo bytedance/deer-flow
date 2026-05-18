@@ -148,8 +148,7 @@ async def run_agent(
     snapshot_capture_failed = False
 
     journal = None
-
-    journal = None
+    partial_ai_content: dict[str, list[str]] = {}
 
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
@@ -279,6 +278,11 @@ async def run_agent(
 
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
+        # Accumulate AIMessageChunk content per message-id for partial-response capture.
+        # Only populated when "messages" mode is in the stream — the same path that feeds
+        # the SSE bridge, so the IDs here are identical to what the frontend already saw.
+        partial_ai_content: dict[str, list[str]] = {}
+
         # 7. Stream using graph.astream
         if len(lg_modes) == 1 and not stream_subgraphs:
             # Single mode, no subgraphs: astream yields raw chunks
@@ -287,6 +291,7 @@ async def run_agent(
                 if record.abort_event.is_set():
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
+                _accumulate_ai_chunk(single_mode, chunk, partial_ai_content)
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
         else:
@@ -305,6 +310,7 @@ async def run_agent(
                 if mode is None:
                     continue
 
+                _accumulate_ai_chunk(mode, chunk, partial_ai_content)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
 
@@ -366,6 +372,12 @@ async def run_agent(
     finally:
         # Flush any buffered journal events and persist completion data
         if journal is not None:
+            if record.status == RunStatus.interrupted and partial_ai_content:
+                try:
+                    for msg_id, tokens in partial_ai_content.items():
+                        journal.record_partial_ai_message(msg_id, "".join(tokens))
+                except Exception:
+                    logger.warning("Failed to record partial AI messages for run %s", run_id, exc_info=True)
             try:
                 await journal.flush()
             except Exception:
@@ -515,6 +527,30 @@ async def _rollback_to_pre_run_checkpoint(
 def _new_checkpoint_marker() -> dict[str, str]:
     marker = empty_checkpoint()
     return {"id": marker["id"], "ts": marker["ts"]}
+
+
+def _accumulate_ai_chunk(mode: str, chunk: Any, target: dict[str, list[str]]) -> None:
+    """Extract text from an AIMessageChunk and append it to *target* keyed by message id.
+
+    Only operates on "messages" mode events — the same events published to the SSE
+    bridge, so the message ids here match exactly what the frontend already received.
+    No-ops for all other modes or chunk types.
+    """
+    if mode != "messages":
+        return
+    if not isinstance(chunk, tuple) or len(chunk) != 2:
+        return
+    from langchain_core.messages import AIMessageChunk
+
+    msg_chunk, _ = chunk
+    if not isinstance(msg_chunk, AIMessageChunk):
+        return
+    msg_id = msg_chunk.id
+    if not msg_id:
+        return
+    content = msg_chunk.content if isinstance(msg_chunk.content, str) else ""
+    if content:
+        target.setdefault(msg_id, []).append(content)
 
 
 def _lg_mode_to_sse_event(mode: str) -> str:
