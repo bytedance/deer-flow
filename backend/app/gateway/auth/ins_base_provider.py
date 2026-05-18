@@ -27,9 +27,10 @@ def _map_system_role(username: str) -> str:
     - "admin" → "tenant_admin"
     - anything else → "user"
     """
-    if username == "superadmin":
+    lower = username.lower()
+    if lower == "superadmin":
         return "superadmin"
-    if username == "admin":
+    if lower == "admin":
         return "tenant_admin"
     return "user"
 
@@ -155,8 +156,9 @@ class InsBaseAuthProvider(AuthProvider):
             return None
 
         data = response.get("data") or {}
-        user_data = data.get("user") or {}
-        permissions = data.get("permissions") or []
+        # ins-base returns user/permissions at root level, not nested under "data"
+        user_data = data.get("user") or response.get("user") or {}
+        permissions = data.get("permissions") or response.get("permissions") or []
 
         # Extract the real user identifier from ins-base response data.
         # The Java API may use either "userId" or "id" in the user_data dict.
@@ -194,7 +196,7 @@ class InsBaseAuthProvider(AuthProvider):
                 "id": real_user_id,
                 "email": user_data.get("email", f"user@{real_user_id}"),
                 "password_hash": None,
-                "system_role": _map_system_role(user_data.get("username", "")),
+                "system_role": _map_system_role(user_data.get("userName", "")),
                 "needs_setup": False,
                 "token_version": 0,
                 "tenant_id": "default",

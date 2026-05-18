@@ -41,7 +41,9 @@ export function AdminSidebar() {
       {user && (
         <div className="mt-auto border-t pt-4">
           <div className="mb-3 min-w-0">
-            <p className="truncate text-sm font-medium">{user.email}</p>
+            <p className="truncate text-sm font-medium">
+              {user.real_name || user.user_name || user.email}
+            </p>
             <p className="mt-1 text-xs text-muted-foreground">
               {t.admin.currentTenant}: {user.tenant_id}
             </p>

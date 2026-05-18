@@ -77,7 +77,7 @@ export function WorkspaceNavMenu() {
                   size="lg"
                   className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
                 >
-                  <NavMenuButtonContent isSidebarOpen={isSidebarOpen} userName={user?.email ?? null} />
+                  <NavMenuButtonContent isSidebarOpen={isSidebarOpen} userName={user?.real_name || user?.user_name || user?.email || null} />
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent

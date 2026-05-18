@@ -139,7 +139,7 @@ def create_auth_middleware():
                                 "id": getattr(user, "id", tenant_id),
                                 "username": getattr(user, "email", "ins-base-user"),
                                 "tenant_id": tenant_id,
-                                "role": "member",
+                                "role": getattr(user, "system_role", "member"),
                                 "auth_method": "ins_base",
                                 "ins_base_token": access_token,
                             }
