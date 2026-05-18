@@ -156,3 +156,40 @@ async def test_compact_sqlite_checkpointer_skips_small_deletes_by_default(tmp_pa
         compacted = await compact_sqlite_checkpointer(saver)
 
         assert compacted is False
+
+
+@pytest.mark.anyio
+async def test_compact_sqlite_checkpointer_skips_when_database_exceeds_auto_limit(tmp_path):
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoints.db")) as saver:
+        await saver.setup()
+        async with saver.lock:
+            for idx in range(10):
+                await saver.conn.execute(
+                    """
+                    INSERT INTO checkpoints (
+                        thread_id,
+                        checkpoint_ns,
+                        checkpoint_id,
+                        parent_checkpoint_id,
+                        type,
+                        checkpoint,
+                        metadata
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("large-thread", "", f"{idx:04d}", None, "json", b"x" * 8192, b"{}"),
+                )
+            await saver.conn.commit()
+
+        await saver.adelete_thread("large-thread")
+        assert await _pragma_int(saver.conn, "PRAGMA freelist_count") > 0
+
+        compacted = await compact_sqlite_checkpointer(
+            saver,
+            min_reclaimable_bytes=1,
+            min_reclaimable_ratio=0,
+            max_database_bytes=1,
+        )
+
+        assert compacted is False
+        assert await _pragma_int(saver.conn, "PRAGMA freelist_count") > 0

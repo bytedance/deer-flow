@@ -108,8 +108,11 @@ async def migrate_checkpoint_threads_to_thread_meta(
     Older DeerFlow installs could have valid LangGraph checkpoints without a
     corresponding ``threads_meta`` row. After search moved to ThreadMetaStore,
     those threads became invisible to the normal thread list and also failed
-    strict destructive owner checks. Assigning these legacy rows to the first
-    admin mirrors the existing no-auth-to-auth orphan migration.
+    strict destructive owner checks.
+
+    Assigning these legacy rows to the first admin mirrors the existing
+    no-auth-to-auth orphan migration. It is an ownership-recovery fallback for
+    pre-auth single-owner installs, not a multi-tenant ownership audit tool.
     """
     conn = _sqlite_saver_connection(checkpointer)
     if conn is None:
@@ -179,12 +182,16 @@ async def compact_sqlite_checkpointer(
     checkpointer: Any,
     *,
     min_reclaimable_bytes: int = 64 * 1024 * 1024,
+    min_reclaimable_ratio: float = 0.10,
+    max_database_bytes: int = 2 * 1024 * 1024 * 1024,
 ) -> bool:
     """Best-effort SQLite compaction after checkpoint deletes.
 
     LangGraph's SQLite saver deletes checkpoint rows, but SQLite keeps the file
     size until a VACUUM. Running this only when the active saver exposes a
-    SQLite connection keeps postgres/memory backends as no-ops.
+    SQLite connection keeps postgres/memory backends as no-ops. Automatic
+    compaction is intentionally conservative because VACUUM rewrites the whole
+    database; large stores should use the explicit maintenance CLI instead.
     """
     conn = _sqlite_saver_connection(checkpointer)
     if conn is None:
@@ -198,8 +205,16 @@ async def compact_sqlite_checkpointer(
         await conn.commit()
         await _execute("PRAGMA wal_checkpoint(TRUNCATE)")
         page_size = await _pragma_int(conn, "PRAGMA page_size")
+        page_count = await _pragma_int(conn, "PRAGMA page_count")
         freelist_count = await _pragma_int(conn, "PRAGMA freelist_count")
-        if page_size * freelist_count < min_reclaimable_bytes:
+        reclaimable_bytes = page_size * freelist_count
+        database_bytes = page_size * page_count
+        reclaimable_ratio = freelist_count / page_count if page_count else 0
+        if reclaimable_bytes < min_reclaimable_bytes:
+            return False
+        if reclaimable_ratio < min_reclaimable_ratio:
+            return False
+        if database_bytes > max_database_bytes:
             return False
         await _execute("VACUUM")
         await conn.commit()
