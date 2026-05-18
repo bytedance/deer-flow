@@ -307,5 +307,5 @@ rpc:
       #discovery: ins-bus-rpc     # Nacos 服务发现名称（与 base_url 二选一）
       base_url: "http://182.92.187.198:8801"  # 直连模式（与 discovery 二选一）
     - name: ins-base-rpc
-      discovery: ins-base-rpc    # Nacos 服务发现名称（与 base_url 二选一）
-      # base_url: "http://localhost:8081"  # 直连模式（与 discovery 二选一）
+#      discovery: ins-base-rpc    # Nacos 服务发现名称（与 base_url 二选一）
+      base_url: "http://182.92.187.198:8601"  # 直连模式（与 discovery 二选一）
