@@ -146,4 +146,4 @@ def test_disabled_root_with_submodule_warns(caplog) -> None:
             enabled=False,
             audit=AuditConfig(enabled=True, sign_key="x"),
         )
-    assert any("enabled" in r.message.lower() or "inert" in r.message.lower() for r in caplog.records), "Expected a silent-inertness warning"
+    assert any("enterprise.enabled=false" in r.message.lower() and "ignored" in r.message.lower() for r in caplog.records), "Expected a silent-inertness warning"
