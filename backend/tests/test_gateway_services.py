@@ -256,6 +256,37 @@ def test_context_merges_into_configurable():
     assert "thread_id" not in {k for k in context if k in _CONTEXT_CONFIGURABLE_KEYS}
 
 
+def test_merge_run_context_overrides_propagates_to_runtime_context():
+    """Regression for issue #2677: ``agent_name`` (and other whitelisted keys) from
+    ``body.context`` must be propagated into BOTH ``config['configurable']`` and
+    ``config['context']``. Previously only ``configurable`` was populated, so after
+    the LangGraph 1.1.x upgrade removed the fallback from ``configurable``, the
+    ``setup_agent`` tool read ``runtime.context`` with ``agent_name=None`` and
+    silently wrote SOUL.md to the global base_dir.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"agent_name": "my-agent", "is_bootstrap": True, "thread_id": "ignored"})
+
+    assert config["configurable"]["agent_name"] == "my-agent"
+    assert config["configurable"]["is_bootstrap"] is True
+    assert config["context"]["agent_name"] == "my-agent"
+    assert config["context"]["is_bootstrap"] is True
+    # Non-whitelisted keys are not forwarded.
+    assert "thread_id" not in config["context"]
+
+
+def test_merge_run_context_overrides_noop_for_empty_context():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    before = {k: dict(v) if isinstance(v, dict) else v for k, v in config.items()}
+    merge_run_context_overrides(config, None)
+    merge_run_context_overrides(config, {})
+    assert config == before
+
+
 def test_context_does_not_override_existing_configurable():
     """Values already in config.configurable must NOT be overridden by context."""
     from app.gateway.services import build_run_config
@@ -291,6 +322,21 @@ def test_context_does_not_override_existing_configurable():
     assert config["configurable"]["is_plan_mode"] is False
     # New values should be added
     assert config["configurable"]["subagent_enabled"] is True
+
+
+def test_inject_authenticated_user_context_overrides_client_user_id():
+    """Run context should carry the authenticated user, not client-supplied user_id."""
+    from types import SimpleNamespace
+
+    from app.gateway.services import build_run_config, inject_authenticated_user_context
+
+    config = build_run_config("thread-1", None, None)
+    config["context"] = {"user_id": "spoofed-client"}
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="auth-user-42")))
+
+    inject_authenticated_user_context(config, request)
+
+    assert config["context"]["user_id"] == "auth-user-42"
 
 
 # ---------------------------------------------------------------------------

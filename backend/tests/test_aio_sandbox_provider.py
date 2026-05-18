@@ -1,11 +1,13 @@
 """Tests for AioSandboxProvider mount helpers."""
 
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from deerflow.config.paths import Paths, join_host_path
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
 
@@ -57,6 +59,7 @@ def test_get_thread_mounts_includes_acp_workspace(tmp_path, monkeypatch):
     """_get_thread_mounts must include /mnt/acp-workspace (read-only) for docker sandbox."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
 
     mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-3")
 
@@ -95,6 +98,7 @@ def test_get_thread_mounts_preserves_windows_host_path_style(tmp_path, monkeypat
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setenv("DEER_FLOW_HOST_BASE_DIR", r"C:\Users\demo\deer-flow\backend\.deer-flow")
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
 
     mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-10")
 
@@ -134,3 +138,36 @@ def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatc
             provider._discover_or_create_with_lock("thread-5", "sandbox-5")
 
     assert unlock_calls == []
+
+
+def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
+    """Provisioner mode must receive user_id so PVC subPath matches user isolation."""
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    token = set_current_user(SimpleNamespace(id="user-7"))
+    posted: dict = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"sandbox_url": "http://sandbox.local"}
+
+    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+        posted.update({"url": url, "json": json, "timeout": timeout})
+        return _Response()
+
+    monkeypatch.setattr(remote_mod.requests, "post", _post)
+
+    try:
+        backend.create("thread-42", "sandbox-42")
+    finally:
+        reset_current_user(token)
+
+    assert posted["url"] == "http://provisioner:8002/api/sandboxes"
+    assert posted["json"] == {
+        "sandbox_id": "sandbox-42",
+        "thread_id": "thread-42",
+        "user_id": "user-7",
+    }

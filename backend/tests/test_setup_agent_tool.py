@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deerflow.tools.builtins.setup_agent_tool import setup_agent
 
 # --- Helpers ---
@@ -27,6 +29,7 @@ def _make_paths_mock(tmp_path: Path):
     paths = MagicMock()
     paths.base_dir = tmp_path
     paths.agent_dir = lambda name: tmp_path / "agents" / name
+    paths.user_agent_dir = lambda user_id, name: tmp_path / "users" / user_id / "agents" / name
     return paths
 
 
@@ -54,7 +57,7 @@ def test_setup_agent_rejects_invalid_agent_name_before_writing(tmp_path, monkeyp
     messages = result.update["messages"]
     assert len(messages) == 1
     assert "Invalid agent name" in messages[0].content
-    assert not (tmp_path / "agents").exists()
+    assert not (tmp_path / "users" / "test-user-autouse" / "agents").exists()
     assert not (outside_dir / "evil" / "SOUL.md").exists()
 
 
@@ -68,7 +71,7 @@ def test_setup_agent_rejects_absolute_agent_name_before_writing(tmp_path, monkey
     messages = result.update["messages"]
     assert len(messages) == 1
     assert "Invalid agent name" in messages[0].content
-    assert not (tmp_path / "agents").exists()
+    assert not (tmp_path / "users" / "test-user-autouse" / "agents").exists()
     assert not (Path(absolute_agent) / "SOUL.md").exists()
 
 
@@ -81,10 +84,10 @@ class TestSetupAgentNoDataLoss:
     def test_existing_agent_dir_preserved_on_failure(self, tmp_path: Path):
         """If the agent directory already exists and setup fails,
         the directory and its contents must NOT be deleted."""
-        agent_dir = tmp_path / "agents" / "test-agent"
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "test-agent"
         agent_dir.mkdir(parents=True)
         old_soul = agent_dir / "SOUL.md"
-        old_soul.write_text("original soul content")
+        old_soul.write_text("original soul content", encoding="utf-8")
 
         with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
             # Force soul_file.write_text to raise after directory already exists
@@ -103,7 +106,7 @@ class TestSetupAgentNoDataLoss:
     def test_new_agent_dir_cleaned_up_on_failure(self, tmp_path: Path):
         """If the agent directory is newly created and setup fails,
         the directory should be cleaned up."""
-        agent_dir = tmp_path / "agents" / "test-agent"
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "test-agent"
         assert not agent_dir.exists()
 
         with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
@@ -121,7 +124,27 @@ class TestSetupAgentNoDataLoss:
         """Happy path: setup_agent creates config.yaml and SOUL.md."""
         _call_setup_agent(tmp_path, soul="# My Agent", description="A test agent")
 
-        agent_dir = tmp_path / "agents" / "test-agent"
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "test-agent"
         assert agent_dir.exists()
         assert (agent_dir / "SOUL.md").read_text() == "# My Agent"
         assert (agent_dir / "config.yaml").exists()
+
+    @pytest.mark.no_auto_user
+    def test_runtime_user_id_used_when_contextvar_missing(self, tmp_path: Path):
+        """setup_agent should not fall back to default when runtime carries user_id."""
+        runtime = _DummyRuntime(
+            context={"agent_name": "test-agent", "user_id": "auth-user-42"},
+            tool_call_id="tool-3",
+        )
+
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
+            setup_agent.func(
+                soul="# My Agent",
+                description="A test agent",
+                runtime=runtime,
+            )
+
+        expected_dir = tmp_path / "users" / "auth-user-42" / "agents" / "test-agent"
+        default_dir = tmp_path / "users" / "default" / "agents" / "test-agent"
+        assert (expected_dir / "SOUL.md").read_text() == "# My Agent"
+        assert not default_dir.exists()
