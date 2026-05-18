@@ -201,6 +201,19 @@ class SQLiteUserRepository(UserRepository):
             result = await session.execute(stmt)
             return [self._row_to_user(row) for row in result.scalars().all()]
 
+    async def list_all_users(self) -> list[User]:
+        """Return every user row (used by ``migrate_enterprise``).
+
+        No ordering is imposed at the SQL level — the migration command
+        does not depend on it and adding ``ORDER BY`` would force an
+        unnecessary index scan once the table grows. Tests that need a
+        stable order sort by ``email`` in Python.
+        """
+        stmt = select(UserRow)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_user(row) for row in result.scalars().all()]
+
 
 # Backwards-compatibility alias: the file is named ``sqlite.py`` and
 # the original class was named ``SQLiteUserRepository``, but the same

@@ -126,3 +126,19 @@ class UserRepository(ABC):
         the desired behaviour.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    async def list_all_users(self) -> list[User]:
+        """Return every user row.
+
+        Used by the enterprise migration command
+        (``migrate_enterprise``) to enumerate accounts and back-fill
+        their RBAC ``roles`` from the legacy ``system_role`` column.
+
+        Not paginated: the migration is an admin-only one-shot and the
+        ``users`` table is small (RFC §11.5). Streaming/pagination can
+        be added later if the table grows materially.
+
+        Returns an empty list when no users exist.
+        """
+        raise NotImplementedError
