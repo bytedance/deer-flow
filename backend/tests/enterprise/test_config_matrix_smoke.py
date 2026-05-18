@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging  # noqa: F401  -- used by Task 9 warning combinations
 
 import pytest
-from pydantic import ValidationError  # noqa: F401  -- used by Task 8 illegal combinations
+from pydantic import ValidationError
 
 from deerflow.enterprise.config import (
     ApprovalConfig,
@@ -89,3 +89,32 @@ def test_legal_combinations_parse_clean(kwargs) -> None:
     """Each legal combination must construct without raising."""
     cfg = EnterpriseConfig(**kwargs)
     assert cfg is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — illegal combinations (fail-fast)
+# ---------------------------------------------------------------------------
+
+
+def test_approval_without_rbac_raises() -> None:
+    """approver lookup needs RBAC; without it no ticket can be answered."""
+    with pytest.raises(ValidationError) as exc:
+        EnterpriseConfig(
+            enabled=True,
+            audit=AuditConfig(enabled=True, sign_key="x"),
+            approval=ApprovalConfig(enabled=True),
+            rbac=RbacConfig(enabled=False),
+        )
+    assert "rbac" in str(exc.value).lower()
+
+
+def test_approval_without_audit_raises() -> None:
+    """Approval decisions must be auditable; degrading audit defeats the workflow."""
+    with pytest.raises(ValidationError) as exc:
+        EnterpriseConfig(
+            enabled=True,
+            rbac=RbacConfig(enabled=True),
+            audit=AuditConfig(enabled=False),
+            approval=ApprovalConfig(enabled=True),
+        )
+    assert "audit" in str(exc.value).lower()
