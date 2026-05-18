@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
-from deerflow.runtime import RunRecord, serialize_channel_values
+from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -92,6 +92,12 @@ class ThreadTokenUsageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
+    if record.status in (RunStatus.pending, RunStatus.running):
+        return f"Run {run_id} is not active on this worker and cannot be cancelled"
+    return f"Run {run_id} is not cancellable (status: {record.status.value})"
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -191,7 +197,7 @@ async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
-    record = await run_mgr.aget(run_id, user_id=user_id)
+    record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return _record_to_response(record)
@@ -214,16 +220,13 @@ async def cancel_run(
     - wait=false: Return immediately with 202
     """
     run_mgr = get_run_manager(request)
-    record = run_mgr.get(run_id)
+    record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
     cancelled = await run_mgr.cancel(run_id, action=action)
     if not cancelled:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Run {run_id} is not cancellable (status: {record.status.value})",
-        )
+        raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
 
     if wait and record.task is not None:
         try:
@@ -239,12 +242,14 @@ async def cancel_run(
 @require_permission("runs", "read", owner_check=True)
 async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
-    bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = run_mgr.get(run_id)
+    record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    if record.store_only:
+        raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
+    bridge = get_stream_bridge(request)
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
@@ -273,14 +278,18 @@ async def stream_existing_run(
     remaining buffered events so the client observes a clean shutdown.
     """
     run_mgr = get_run_manager(request)
-    record = run_mgr.get(run_id)
+    record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    if record.store_only and action is None:
+        raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:
         cancelled = await run_mgr.cancel(run_id, action=action)
-        if cancelled and wait and record.task is not None:
+        if not cancelled:
+            raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
+        if wait and record.task is not None:
             try:
                 await record.task
             except (asyncio.CancelledError, Exception):

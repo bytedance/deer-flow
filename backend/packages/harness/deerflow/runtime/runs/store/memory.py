@@ -66,6 +66,11 @@ class MemoryRunStore(RunStore):
                 self._runs[run_id]["error"] = error
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
+    async def update_model_name(self, run_id, model_name):
+        if run_id in self._runs:
+            self._runs[run_id]["model_name"] = model_name
+            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+
     async def delete(self, run_id):
         self._runs.pop(run_id, None)
 

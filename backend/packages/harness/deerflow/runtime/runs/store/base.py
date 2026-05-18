@@ -67,6 +67,15 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def update_model_name(
+        self,
+        run_id: str,
+        model_name: str | None,
+    ) -> None:
+        """Update the model_name field for an existing run."""
+        pass
+
+    @abc.abstractmethod
     async def update_run_completion(
         self,
         run_id: str,

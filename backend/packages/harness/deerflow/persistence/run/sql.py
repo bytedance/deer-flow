@@ -151,6 +151,11 @@ class RunRepository(RunStore):
             await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
             await session.commit()
 
+    async def update_model_name(self, run_id, model_name):
+        async with self._sf() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(model_name=self._normalize_model_name(model_name), updated_at=datetime.now(UTC)))
+            await session.commit()
+
     async def delete(
         self,
         run_id,
