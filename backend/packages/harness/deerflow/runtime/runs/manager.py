@@ -83,7 +83,11 @@ class RunManager:
 
     @staticmethod
     def _record_from_store(row: dict[str, Any]) -> RunRecord:
-        """Build a read-only runtime record from a serialized store row."""
+        """Build a read-only runtime record from a serialized store row.
+
+        NULL status/on_disconnect columns (e.g. from rows written before those
+        columns were added) default to ``pending`` and ``cancel`` respectively.
+        """
         return RunRecord(
             run_id=row["run_id"],
             thread_id=row["thread_id"],
@@ -196,8 +200,9 @@ class RunManager:
         if self._store is None:
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}
+        store_limit = max(0, limit - len(memory_records))
         try:
-            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=limit)
+            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]

@@ -289,7 +289,7 @@ async def stream_existing_run(
         cancelled = await run_mgr.cancel(run_id, action=action)
         if not cancelled:
             raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
-        if cancelled and wait and record.task is not None:
+        if wait and record.task is not None:
             try:
                 await record.task
             except (asyncio.CancelledError, Exception):
