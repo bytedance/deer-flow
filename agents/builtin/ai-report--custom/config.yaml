@@ -1,0 +1,13 @@
+name: ai-report--custom
+display_name: "自定义模板"
+description: "按需定制报告格式"
+icon: "📝"
+parent: ai-report
+order: 8
+model: null
+tool_groups:
+  - bash
+mcp_servers: null
+tags:
+  - report
+  - custom

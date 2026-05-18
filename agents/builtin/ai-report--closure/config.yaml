@@ -1,0 +1,13 @@
+name: ai-report--closure
+display_name: "闭环报告"
+description: "缺陷闭环处理总结"
+icon: "✅"
+parent: ai-report
+order: 7
+model: null
+tool_groups:
+  - bash
+mcp_servers: null
+tags:
+  - report
+  - closure

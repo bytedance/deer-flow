@@ -1,0 +1,15 @@
+name: ai-report--monthly
+display_name: "月度报告"
+description: "月度综合运行分析"
+icon: "📈"
+parent: ai-report
+order: 5
+model: null
+tool_groups:
+  - bash
+skills:
+  - data-analyst
+mcp_servers: null
+tags:
+  - report
+  - monthly

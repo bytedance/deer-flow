@@ -1,0 +1,16 @@
+name: fault-diagnosis
+display_name: "故障诊断"
+description: "擅长设备故障分析、根因定位、诊断建议"
+icon: "🔮"
+order: 1
+model: null
+tool_groups:
+  - bash
+exclude_tools: []
+skills: []
+mcp_servers: null
+tags:
+  - diagnosis
+  - fault
+advanced:
+  subagent_enabled: false
