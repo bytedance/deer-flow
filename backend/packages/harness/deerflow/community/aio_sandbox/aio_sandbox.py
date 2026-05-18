@@ -102,6 +102,15 @@ class AioSandbox(Sandbox):
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
 
+    def download_file(self, path: str) -> bytes:
+        """Download file bytes from the sandbox."""
+        with self._lock:
+            try:
+                return b"".join(self._client.file.download_file(path=path))
+            except Exception as e:
+                logger.error(f"Failed to download file in sandbox: {e}")
+                raise
+
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         """List the contents of a directory in the sandbox.
 

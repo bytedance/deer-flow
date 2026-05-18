@@ -379,6 +379,15 @@ class LocalSandbox(Sandbox):
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
 
+    def download_file(self, path: str) -> bytes:
+        resolved_path = self._resolve_path(path)
+        try:
+            with open(resolved_path, "rb") as f:
+                return f.read()
+        except OSError as e:
+            # Re-raise with the original path for clearer error messages, hiding internal resolved paths
+            raise type(e)(e.errno, e.strerror, path) from None
+
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved = self._resolve_path_with_mapping(path)
         resolved_path = resolved.path

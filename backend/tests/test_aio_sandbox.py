@@ -233,3 +233,53 @@ class TestConcurrentFileWrites:
             thread.join()
 
         assert storage["content"] in {"seed\nA\nB\n", "seed\nB\nA\n"}
+
+
+class TestDownloadFile:
+    """Tests for AioSandbox.download_file."""
+
+    def test_returns_concatenated_bytes(self, sandbox):
+        """download_file should join chunks from the client iterator into bytes."""
+        sandbox._client.file.download_file = MagicMock(return_value=[b"hel", b"lo"])
+
+        result = sandbox.download_file("/tmp/file.bin")
+
+        assert result == b"hello"
+        sandbox._client.file.download_file.assert_called_once_with(path="/tmp/file.bin")
+
+    def test_returns_empty_bytes_for_empty_file(self, sandbox):
+        """download_file should return b'' when the iterator yields nothing."""
+        sandbox._client.file.download_file = MagicMock(return_value=iter([]))
+
+        result = sandbox.download_file("/tmp/empty.bin")
+
+        assert result == b""
+
+    def test_uses_lock_during_download(self, sandbox):
+        """download_file should hold the lock while calling the client."""
+        lock_was_held = []
+
+        def tracking_download(path):
+            lock_was_held.append(sandbox._lock.locked())
+            return iter([b"data"])
+
+        sandbox._client.file.download_file = tracking_download
+
+        sandbox.download_file("/tmp/file.bin")
+
+        assert lock_was_held == [True], "download_file must hold the lock during client call"
+
+    def test_raises_on_client_error(self, sandbox):
+        """download_file should propagate exceptions from the client."""
+        sandbox._client.file.download_file = MagicMock(side_effect=RuntimeError("network error"))
+
+        with pytest.raises(RuntimeError, match="network error"):
+            sandbox.download_file("/tmp/file.bin")
+
+    def test_single_chunk(self, sandbox):
+        """download_file should work correctly with a single-chunk response."""
+        sandbox._client.file.download_file = MagicMock(return_value=[b"single-chunk"])
+
+        result = sandbox.download_file("/tmp/single.bin")
+
+        assert result == b"single-chunk"

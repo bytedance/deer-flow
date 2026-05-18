@@ -40,6 +40,18 @@ class Sandbox(ABC):
         pass
 
     @abstractmethod
+    def download_file(self, path: str) -> bytes:
+        """Download the binary content of a file.
+
+        Args:
+            path: The absolute path of the file to read.
+
+        Returns:
+            Raw file bytes.
+        """
+        pass
+
+    @abstractmethod
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         """List the contents of a directory.
 
