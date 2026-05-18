@@ -93,6 +93,43 @@ Help me clone DeerFlow if needed, then bootstrap it for local development by fol
 
 That prompt is intended for coding agents. It tells the agent to clone the repo if needed, choose Docker when available, and stop with the exact next command plus any missing config the user still needs to provide.
 
+## Enterprise Extension (Optional)
+
+DeerFlow ships with an opt-in enterprise layer for organisations that
+need RBAC, audit logging, human-in-the-loop approval, and OIDC SSO.
+**Disabled by default — a config without an `enterprise:` block is a
+fully working OSS install.**
+
+- Configuration example: see `config.example.yaml` → `enterprise:`
+- Architecture spec: [docs/superpowers/specs/2026-05-18-deerflow-enterprise-rfc.md](docs/superpowers/specs/2026-05-18-deerflow-enterprise-rfc.md)
+- Implementation plan: [docs/superpowers/plans/2026-05-18-deerflow-enterprise-plan.md](docs/superpowers/plans/2026-05-18-deerflow-enterprise-plan.md)
+
+### Enabling
+
+1. Set `enterprise.enabled: true` in `config.yaml` and configure the
+   desired sub-modules (`rbac` / `audit` / `approval` / `oidc`).
+2. Run database migrations:
+
+   ```bash
+   cd backend && PYTHONPATH=. uv run alembic upgrade head
+   ```
+
+3. (Existing installs) Migrate legacy `system_role` admins into RBAC
+   `roles=['admin']`:
+
+   ```bash
+   cd backend && PYTHONPATH=. uv run python -m scripts.migrate_enterprise [--dry-run]
+   ```
+
+4. Restart the Gateway.
+
+### Compatibility
+
+The enterprise layer extends the existing user model and middleware
+chain; **all existing OSS endpoints remain unchanged**. `User.system_role`
+has been relaxed from `Literal["admin","member"]` to `str` so RBAC roles
+can carry through — this is a type widening, not a breaking change.
+
 ## Quick Start
 
 ### Configuration
