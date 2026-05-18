@@ -229,28 +229,20 @@ const statusPropsSchema = z.object({
 
 // ─── Device selector schemas ──────────────────────────────────────
 
-const orgTreeNodeSchema: z.ZodType<unknown> = z.lazy(() =>
-  z.object({
-    id: z.string(),
-    label: z.string(),
-    type: z.number(),
-    path: z.string().optional().default(""),
-    parentId: z.string().optional().default(""),
-    displayOrder: z.number().optional(),
-    hiddenFlag: z.number().optional(),
-    authFlag: z.boolean().optional(),
-    children: z.array(orgTreeNodeSchema).optional(),
-  }),
-);
+const deviceQueryParamsSchema = z.object({
+  userId: z.number().optional(),
+  orgId: z.number().optional(),
+  treeType: z.number().optional(),
+});
 
 const deviceSelectorPropsSchema = z.object({
   title: z.string().max(200).optional(),
-  treeData: z.array(orgTreeNodeSchema),
+  queryParams: deviceQueryParamsSchema.optional(),
 });
 
 const deviceSelectorMultiPropsSchema = z.object({
   title: z.string().max(200).optional(),
-  treeData: z.array(orgTreeNodeSchema),
+  queryParams: deviceQueryParamsSchema.optional(),
   maxSelect: z.number().min(1).optional(),
 });
 

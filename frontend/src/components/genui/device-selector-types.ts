@@ -16,3 +16,9 @@ export interface SelectedDevice {
   type: number;
   path: string;
 }
+
+export interface DeviceQueryParams {
+  userId?: number;
+  orgId?: number;
+  treeType?: number;
+}
