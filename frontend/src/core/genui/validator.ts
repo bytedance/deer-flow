@@ -227,6 +227,33 @@ const statusPropsSchema = z.object({
   label: z.string().max(200).optional(),
 });
 
+// ─── Device selector schemas ──────────────────────────────────────
+
+const orgTreeNodeSchema: z.ZodType<unknown> = z.lazy(() =>
+  z.object({
+    id: z.string(),
+    label: z.string(),
+    type: z.number(),
+    path: z.string().optional().default(""),
+    parentId: z.string().optional().default(""),
+    displayOrder: z.number().optional(),
+    hiddenFlag: z.number().optional(),
+    authFlag: z.boolean().optional(),
+    children: z.array(orgTreeNodeSchema).optional(),
+  }),
+);
+
+const deviceSelectorPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  treeData: z.array(orgTreeNodeSchema),
+});
+
+const deviceSelectorMultiPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  treeData: z.array(orgTreeNodeSchema),
+  maxSelect: z.number().min(1).optional(),
+});
+
 const propsSchemas: Record<string, z.ZodType> = {
   chart: chartPropsSchema,
   echart: echartPropsSchema,
@@ -243,6 +270,8 @@ const propsSchemas: Record<string, z.ZodType> = {
   alarm: alarmPropsSchema,
   metric: metricPropsSchema,
   status: statusPropsSchema,
+  "device-selector": deviceSelectorPropsSchema,
+  "device-selector-multi": deviceSelectorMultiPropsSchema,
 };
 
 export function validateProps(
