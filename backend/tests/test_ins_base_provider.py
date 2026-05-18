@@ -30,11 +30,14 @@ def mock_rpc_client():
 @pytest.fixture
 def provider(mock_rpc_client, rsa_public_key):
     """Create an InsBaseAuthProvider with a mock RPC client and real RSA key."""
-    with patch("app.gateway.auth.ins_base_provider.get_auth_config") as mock_config:
+    with (
+        patch("app.gateway.auth.ins_base_provider.get_auth_config") as mock_config,
+        patch("deerflow.rpc.ins_base_auth_service.get_rpc_client", return_value=mock_rpc_client),
+    ):
         cfg = MagicMock()
         cfg.rsa_public_key = rsa_public_key
         mock_config.return_value = cfg
-        yield InsBaseAuthProvider(rpc_client=mock_rpc_client)
+        yield InsBaseAuthProvider()
 
 
 class TestInsBaseAuthProvider:
@@ -63,8 +66,53 @@ class TestInsBaseAuthProvider:
         assert mock_rpc_client.call_raw.called
 
     @pytest.mark.asyncio
+    async def test_authenticate_success_admin_role(self, provider, mock_rpc_client):
+        """Username 'superadmin' gets superadmin role."""
+        mock_rpc_client.call_raw.return_value = {
+            "code": 200,
+            "data": {"token": "t1", "refresh": "r1"},
+            "token": "t1",
+            "refresh": "r1",
+        }
+
+        result = await provider.authenticate({"username": "superadmin", "password": "pass"})
+
+        assert result is not None
+        assert result.system_role == "superadmin"
+
+    @pytest.mark.asyncio
+    async def test_authenticate_success_tenant_admin_role(self, provider, mock_rpc_client):
+        """Username 'admin' gets tenant_admin role."""
+        mock_rpc_client.call_raw.return_value = {
+            "code": 200,
+            "data": {"token": "t1", "refresh": "r1"},
+            "token": "t1",
+            "refresh": "r1",
+        }
+
+        result = await provider.authenticate({"username": "admin", "password": "pass"})
+
+        assert result is not None
+        assert result.system_role == "tenant_admin"
+
+    @pytest.mark.asyncio
+    async def test_authenticate_success_user_role(self, provider, mock_rpc_client):
+        """Normal username gets user role."""
+        mock_rpc_client.call_raw.return_value = {
+            "code": 200,
+            "data": {"token": "t1", "refresh": "r1"},
+            "token": "t1",
+            "refresh": "r1",
+        }
+
+        result = await provider.authenticate({"username": "zhangsan", "password": "pass"})
+
+        assert result is not None
+        assert result.system_role == "user"
+
+    @pytest.mark.asyncio
     async def test_authenticate_failure(self, provider, mock_rpc_client):
-        """Failed login returns None."""
+        """Failed login raises RuntimeError."""
         mock_rpc_client.call_raw.return_value = {
             "code": 500,
             "msg": "登录失败",
@@ -110,6 +158,25 @@ class TestInsBaseAuthProvider:
         assert str(result.tenant_id) == "default"
         assert "read" in result.ins_base_permissions
         assert mock_rpc_client.call_raw.called
+
+    @pytest.mark.asyncio
+    async def test_get_user_role_mapping(self, provider, mock_rpc_client):
+        """get_user maps username from ins-base data to system_role."""
+        mock_rpc_client.call_raw.return_value = {
+            "code": 200,
+            "data": {
+                "user": {
+                    "userId": 1,
+                    "username": "superadmin",
+                },
+                "permissions": [],
+            },
+        }
+
+        result = await provider.get_user("token")
+
+        assert result is not None
+        assert result.system_role == "superadmin"
 
     @pytest.mark.asyncio
     async def test_get_user_invalid_token(self, provider, mock_rpc_client):
@@ -163,24 +230,29 @@ class TestInsBaseAuthProvider:
 
     @pytest.mark.asyncio
     async def test_no_rpc_client_configured(self, rsa_public_key):
-        """Raises error when RPC client is not configured."""
-        with patch("app.gateway.auth.ins_base_provider.get_rpc_client", return_value=None):
-            with patch("app.gateway.auth.ins_base_provider.get_auth_config") as mock_config:
-                cfg = MagicMock()
-                cfg.rsa_public_key = rsa_public_key
-                mock_config.return_value = cfg
-                p = InsBaseAuthProvider()
-                with pytest.raises(RpcNotConfiguredError):
-                    await p.authenticate({"username": "u", "password": "p"})
+        """Raises RuntimeError when RPC client is not configured."""
+        with (
+            patch("app.gateway.auth.ins_base_provider.get_auth_config") as mock_config,
+            patch("deerflow.rpc.ins_base_auth_service.get_rpc_client", return_value=None),
+        ):
+            cfg = MagicMock()
+            cfg.rsa_public_key = rsa_public_key
+            mock_config.return_value = cfg
+            p = InsBaseAuthProvider()
+            with pytest.raises(RpcNotConfiguredError):
+                await p.authenticate({"username": "u", "password": "p"})
 
     @pytest.mark.asyncio
     async def test_no_rsa_key_configured(self, mock_rpc_client):
         """Raises error when RSA key is not configured."""
-        with patch("app.gateway.auth.ins_base_provider.get_auth_config") as mock_config:
+        with (
+            patch("app.gateway.auth.ins_base_provider.get_auth_config") as mock_config,
+            patch("deerflow.rpc.ins_base_auth_service.get_rpc_client", return_value=mock_rpc_client),
+        ):
             cfg = MagicMock()
             cfg.rsa_public_key = ""
             mock_config.return_value = cfg
-            p = InsBaseAuthProvider(rpc_client=mock_rpc_client)
+            p = InsBaseAuthProvider()
             with pytest.raises(ValueError, match="RSA public key is not configured"):
                 await p.authenticate({"username": "u", "password": "p"})
 

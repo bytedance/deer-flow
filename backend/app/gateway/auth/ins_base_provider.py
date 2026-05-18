@@ -10,9 +10,13 @@ from uuid import UUID, uuid4
 from app.gateway.auth.providers import AuthProvider
 from app.gateway.auth.rsa_utils import rsa_encrypt
 from deerflow.config.auth_config import get_auth_config
-from deerflow.rpc.rpc_client import RpcClient, get_rpc_client
+from deerflow.rpc.ins_base_auth_service import InsBaseAuthServiceClient
 
 logger = logging.getLogger(__name__)
+
+
+class RpcNotConfiguredError(Exception):
+    """Raised when the RPC client is not configured."""
 
 
 def _map_system_role(username: str) -> str:
@@ -27,10 +31,6 @@ def _map_system_role(username: str) -> str:
     if username == "admin":
         return "tenant_admin"
     return "user"
-
-
-class RpcNotConfiguredError(Exception):
-    """Raised when the RPC client is not configured."""
 
 
 class InsBaseAuthProvider(AuthProvider):
@@ -50,18 +50,12 @@ class InsBaseAuthProvider(AuthProvider):
       2. Return new token
     """
 
-    SERVICE_NAME = "ins-base-rpc"
-
-    def __init__(self, rpc_client: RpcClient | None = None):
-        self._rpc_client = rpc_client
-
-    def _get_client(self) -> RpcClient:
-        client = self._rpc_client or get_rpc_client()
-        if client is None:
-            raise RpcNotConfiguredError(
-                "ins-base-rpc is not configured. Add it to config.yaml under rpc.services."
-            )
-        return client
+    @property
+    def _auth_service(self) -> InsBaseAuthServiceClient:
+        try:
+            return InsBaseAuthServiceClient()
+        except RuntimeError as e:
+            raise RpcNotConfiguredError(str(e)) from e
 
     def _get_rsa_key(self) -> str:
         config = get_auth_config()
@@ -94,18 +88,10 @@ class InsBaseAuthProvider(AuthProvider):
         encoded_user = rsa_encrypt(username, rsa_key)
         encoded_pass = rsa_encrypt(password, rsa_key)
 
-        client = self._get_client()
         try:
-            response = await client.call_raw(
-                self.SERVICE_NAME,
-                "/auth/login",
-                http_method="GET",
-                params={
-                    "captchaPass": "true",
-                    "enCodeUser": encoded_user,
-                    "enCodePassword": encoded_pass,
-                },
-            )
+            response = await self._auth_service.login(encoded_user, encoded_pass)
+        except RpcNotConfiguredError:
+            raise
         except Exception as e:
             logger.exception("ins-base-rpc /auth/login call failed")
             raise RuntimeError(f"登录服务调用失败: {e}") from e
@@ -149,14 +135,8 @@ class InsBaseAuthProvider(AuthProvider):
         if not user_id:
             return None
 
-        client = self._get_client()
         try:
-            response = await client.call_raw(
-                self.SERVICE_NAME,
-                "/auth/authentication",
-                http_method="GET",
-                params={"token": user_id},
-            )
+            response = await self._auth_service.authenticate(user_id)
         except Exception as e:
             logger.exception("ins-base-rpc /auth/authentication call failed")
             return None
@@ -203,14 +183,8 @@ class InsBaseAuthProvider(AuthProvider):
         if not refresh_token:
             return None
 
-        client = self._get_client()
         try:
-            response = await client.call_raw(
-                self.SERVICE_NAME,
-                "/auth/refresh",
-                http_method="GET",
-                params={"refresh": refresh_token},
-            )
+            response = await self._auth_service.refresh(refresh_token)
         except Exception as e:
             logger.exception("ins-base-rpc /auth/refresh call failed")
             return None
