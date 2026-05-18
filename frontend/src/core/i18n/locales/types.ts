@@ -303,6 +303,7 @@ export interface Translations {
     presentFiles: string;
     needYourHelp: string;
     useTool: (toolName: string) => string;
+    preparingForm: string;
     searchForRelatedInfo: string;
     searchForRelatedImages: string;
     searchFor: (query: string) => string;
