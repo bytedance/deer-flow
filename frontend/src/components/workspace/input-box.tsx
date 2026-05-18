@@ -1368,7 +1368,7 @@ export function InputBox({
       </PromptInput>
 
       {isNewThread && searchParams.get("mode") !== "skill" && (
-        <div className="flex items-center justify-center pt-2">
+        <div className="flex items-center justify-center">
           <SuggestionList />
         </div>
       )}
@@ -1422,7 +1422,7 @@ function SuggestionList() {
     [textInput],
   );
   return (
-    <Suggestions className="min-h-16 w-fit items-start">
+    <Suggestions className="w-fit items-start py-1">
       {t.inputBox.suggestions.map((suggestion) => (
         <Suggestion
           key={suggestion.suggestion}
