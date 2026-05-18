@@ -129,3 +129,29 @@ If the request is specifically about browsing machine trees, trends, waveforms, 
 ## References
 
 - Main rule base: `references/diagnosis-rules.md`
+
+## Fault family code mapping
+
+> Source: `docs/plans/2026-05-18-fault-diagnosis-design.md` §4.4 `fd-rotating-focus`. This mapping is
+> the contract between the rotating-machinery diagnosis SOUL form and the rule sections in
+> `references/diagnosis-rules.md`. Keep both sides in sync when rules evolve.
+
+| code | references 章节中文 | 说明 |
+| ---- | ---- | ---- |
+| `unbalance` | 不平衡类 / 初始不平衡 | 1X 主导 + 长期稳定 |
+| `misalignment` | 不对中 | 联端突出 + 1X 主导 |
+| `critical_response` | 临界响应大 | 启停过临界转速带响应剧增 |
+| `thermal_bend` | 转子热弯曲 | 稳速 / 升速段四通道同升 |
+| `permanent_bend` | 转子永久性弯曲 | 低速段已偏高 + 椭圆轨迹 |
+| `rub_seal` | 动静摩擦 / 密封摩擦 | 削顶 / 毛刺 / 分数次谐波 |
+| `support_bearing` | 支撑轴承装配、软脚/刚度差异 | **不含温度异常**；XY 差异 / 刚度方向性 |
+| `rotating_stall_surge` | 旋转失速 / 喘振 | 低频不稳定 / 工艺联动 |
+| `runout` | 晃度 | **measurement effect / probe surface runout**，不是 shaft runout |
+| `axial_offset_calibration` | 轴位移零点调校异常 | 检修后轴位移突高但温度正常 |
+| `bearing_temperature_high` | 支撑轴承温度异常 / 装配异常 | 启动即高且平 |
+| `thrust_bearing_temperature_high` | 推力轴承温度异常 / 装配或设计异常 | 双通道高且平 |
+
+When LLM produces a primary diagnosis, use the `code` value verbatim in any structured output
+(e.g. `diagnosis_features.json.rule_matches[].fault_family`); use the Chinese name in human-facing
+narrative.
+

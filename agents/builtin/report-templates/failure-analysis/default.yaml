@@ -1,0 +1,147 @@
+dsl_version: "1"
+name: failure-analysis
+display_name: "失效分析报告"
+description: "针对设备失效模式开展根因分析，支持 5Why / 鱼骨图 / FMEA 三种方法。属于 §13.2 解释性报告：每条 finding 至少 2 条 evidence，source_type 联合覆盖 timeseries / inspection_record / maintenance_record / spare_part 等。"
+visibility: builtin
+
+form_steps:
+  - id: scope
+    title: 生成失效分析报告
+    description: 请填写失效对象、失效模式和分析方法。
+    fields:
+      - name: asset_id
+        label: 失效对象 ID
+        type: text
+        required: true
+        placeholder: "例如 P-001"
+        validation:
+          pattern: "^[A-Za-z0-9_-]+$"
+      - name: failure_mode
+        label: 失效模式
+        type: text
+        required: true
+        placeholder: "例如：轴承卡死 / 密封泄漏"
+      - name: analysis_method
+        label: 分析方法
+        type: select
+        required: true
+        default: five_why
+        options:
+          - { label: 5Why, value: five_why }
+          - { label: 鱼骨图, value: fishbone }
+          - { label: FMEA, value: fmea }
+      - name: evidence_range
+        label: 证据时间范围
+        type: text
+        required: false
+        placeholder: "YYYY-MM-DD..YYYY-MM-DD"
+        description: "可选：限定证据回溯窗口"
+    next: generate
+
+data_steps:
+  - id: failure_data
+    kind: script
+    name: data-analyst/query_failure_data
+    args:
+      asset_id: "{{ $.form.scope.asset_id }}"
+      failure_mode: "{{ $.form.scope.failure_mode }}"
+      analysis_method: "{{ $.form.scope.analysis_method }}"
+      evidence_range: "{{ $.form.scope.evidence_range }}"
+    outputs:
+      failure_data: failure_data.json
+
+transforms:
+  - id: failure_analysis
+    kind: script
+    name: data-analyst/failure_analysis
+    input: failure_data.failure_data
+    outputs:
+      failure_analysis: failure_analysis.json
+
+sections:
+  # Section 1: §13.2 human-review banner
+  - id: review_banner
+    title: 人工复核提示
+    component: card
+    source: $.steps.failure_analysis.failure_analysis.human_review_required
+    props:
+      style: warning
+      template: "本报告为 §13.2 解释性报告，根因分析结论需现场专家复核后方可作为正式输出。"
+
+  # Section 2: overall_status digest card
+  - id: overview
+    title: 背景与方法
+    component: card
+    source: $.steps.failure_analysis.failure_analysis.overall_status
+
+  # Section 3: method_block — structurally distinct per method (5why/fishbone/fmea)
+  - id: method_block
+    title: 分析过程 (Method Block)
+    component: table
+    source: $.steps.failure_analysis.failure_analysis.method_block
+
+  # Section 4: findings (root causes)
+  - id: findings
+    title: 根因分析 (Findings)
+    component: table
+    source: $.steps.failure_analysis.failure_analysis.findings
+    props:
+      columns:
+        - { key: id, label: 编号 }
+        - { key: label, label: 根因 }
+        - { key: severity, label: 严重度 }
+        - { key: is_primary, label: 优先排查 }
+        - { key: rationale, label: 推理依据 }
+
+  # Section 5: evidence chain
+  - id: evidence
+    title: 证据链 (Evidence Trail)
+    component: table
+    source: $.steps.failure_analysis.failure_analysis.evidence
+    props:
+      columns:
+        - { key: finding_id, label: 关联根因 }
+        - { key: source_type, label: 来源类型 }
+        - { key: source_id, label: 来源 ID }
+        - { key: snapshot_path, label: 快照路径 }
+        - { key: checksum, label: 校验和 }
+        - { key: description, label: 备注 }
+
+  # Section 6: corrective actions
+  - id: corrective
+    title: 改进措施 (Corrective Actions)
+    component: table
+    source: $.steps.failure_analysis.failure_analysis.corrective_actions
+    props:
+      columns:
+        - { key: id, label: 编号 }
+        - { key: action, label: 措施 }
+        - { key: owner, label: 责任人 }
+        - { key: due_date, label: 截止 }
+        - { key: verification_plan, label: 验证方法 }
+
+  # Section 7: validation plan
+  - id: validation
+    title: 验证计划 (Validation Plan)
+    component: table
+    source: $.steps.failure_analysis.failure_analysis.validation_plan
+    props:
+      columns:
+        - { key: step, label: 验证步骤 }
+        - { key: method, label: 验证方法 }
+
+  # Section 8: data coverage card
+  - id: data_coverage
+    title: 数据覆盖
+    component: card
+    source: $.steps.failure_analysis.failure_analysis.data_coverage
+
+  # Section 9: assumptions
+  - id: assumptions
+    title: 假设与说明
+    component: markdown
+    source: $.steps.failure_analysis.failure_analysis.assumptions
+
+export:
+  formats: [md, pdf]
+  renderer: generic_report

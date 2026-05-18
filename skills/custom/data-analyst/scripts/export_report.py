@@ -27,7 +27,11 @@ from pathlib import Path
 
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "daily_kpi.json"
+WEEKLY_INPUT_FILENAME = "weekly_kpi.json"
+MONTHLY_INPUT_FILENAME = "monthly_kpi.json"
+DIAGNOSIS_INPUT_FILENAME = "diagnosis_features.json"
 SUPPORTED_FORMATS = {"md", "pdf"}
+SUPPORTED_REPORT_TYPES = {"daily", "weekly", "monthly", "diagnosis"}
 
 TYPE_DISPLAY = {
     "static_equipment": "静设备",
@@ -38,7 +42,40 @@ TYPE_DISPLAY = {
 }
 
 
-def _output_dir() -> Path:
+def _output_dir(report_type: str = "daily") -> Path:
+    """Resolve output dir.
+
+    Daily reports keep their original env contract (``DAILY_REPORT_OUTPUT_DIR``).
+    Weekly reports prefer ``WEEKLY_REPORT_OUTPUT_DIR`` but fall back to the
+    daily var so a single sandbox configuration covers both. Monthly extends
+    the chain to ``MONTHLY_REPORT_OUTPUT_DIR`` → weekly → daily.
+    Diagnosis prefers ``DIAGNOSIS_OUTPUT_DIR`` (matches query_diagnosis.py /
+    diagnosis_features.py) and falls back to the daily var.
+    """
+    if report_type == "monthly":
+        return Path(
+            os.environ.get(
+                "MONTHLY_REPORT_OUTPUT_DIR",
+                os.environ.get(
+                    "WEEKLY_REPORT_OUTPUT_DIR",
+                    os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
+                ),
+            )
+        )
+    if report_type == "weekly":
+        return Path(
+            os.environ.get(
+                "WEEKLY_REPORT_OUTPUT_DIR",
+                os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
+            )
+        )
+    if report_type == "diagnosis":
+        return Path(
+            os.environ.get(
+                "DIAGNOSIS_OUTPUT_DIR",
+                os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
+            )
+        )
     return Path(os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
 
 
@@ -75,7 +112,14 @@ def trend_chart_to_svg(chart: dict, theme: str = "transparent") -> str:
 
     x_labels = (chart.get("xAxis") or {}).get("data") or [f"{h:02d}:00" for h in range(24)]
     title_text = (chart.get("title") or {}).get("text", "")
-    y_name = (chart.get("yAxis") or {}).get("name", "")
+    y_axis_raw = chart.get("yAxis")
+    if isinstance(y_axis_raw, list):
+        # Multi-axis charts (e.g. weekly daily_trend_chart) — pick first axis name
+        y_name = (y_axis_raw[0] or {}).get("name", "") if y_axis_raw else ""
+    elif isinstance(y_axis_raw, dict):
+        y_name = y_axis_raw.get("name", "")
+    else:
+        y_name = ""
 
     all_values: list[float] = []
     for s in all_series:
@@ -419,25 +463,435 @@ def render_markdown(payload: dict, chart_images: list[str] | None = None, thread
 def render_html(payload: dict, chart_images: list[str] | None = None) -> str:
     """Render payload as a standalone HTML document with embedded CSS."""
     md = render_markdown(payload, chart_images)
+    return _markdown_to_html(md, payload=payload, chart_images=chart_images)
+
+
+COMPARE_LABEL_WEEKLY = {
+    "previous_week": "对比上一周",
+    "previous_year": "对比去年同期",
+    "none": "无对比",
+}
+
+
+def _format_weekly_kpi_value(value, unit: str) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        return f"{value:.2f}{unit}" if unit else f"{value:.2f}"
+    return f"{value}{unit}" if unit else str(value)
+
+
+def _format_weekly_delta(item: dict) -> str:
+    delta = item.get("delta_mean")
+    pct = item.get("delta_pct")
+    if delta is None:
+        return "—"
+    arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
+    if pct is None:
+        return f"{arrow} {_format_number(abs(delta))}"
+    return f"{arrow} {_format_number(abs(delta))} ({pct * 100:+.1f}%)"
+
+
+def render_weekly_markdown(payload: dict, thread_id: str | None = None) -> str:
+    """Render weekly KPI payload as a Markdown report string.
+
+    The output is intentionally distinct from ``render_markdown`` (daily) so
+    user-facing reports never blur the two:
+    - KPI table headers say "本周均值/峰值/低谷/波动率" instead of "当前/上一周期".
+    - Trend section embeds an SVG built from ``daily_trend_chart`` (7-day x-axis).
+    - Anomaly table is the TopN aggregation from ``weekly_kpi.anomaly_top_n``.
+    - Alarm flow table follows. Next-week focus closes the report.
+    """
+    period = payload.get("report_period") or {}
+    week_start = period.get("week_start", "")
+    week_end = period.get("week_end", "")
+    compare_type = payload.get("compare_type", "none")
+    compare_period = payload.get("compare_period") or {}
+
+    lines: list[str] = []
+    lines.append("# 设备运行周报")
+    lines.append("")
+    if payload.get("data_source") == "demo_fallback":
+        lines.append("> ⚠ 当前为演示数据，请勿用于生产决策。")
+        lines.append("")
+    if payload.get("week_start_warning"):
+        lines.append(f"> ⚠ {payload['week_start_warning']}。")
+        lines.append("")
+    lines.append(f"- 报告周期：{week_start} 至 {week_end}")
+    compare_label = COMPARE_LABEL_WEEKLY.get(compare_type, compare_type)
+    if compare_type != "none" and compare_period.get("start") and compare_period.get("end"):
+        compare_label = f"{compare_label}（{compare_period['start']} 至 {compare_period['end']}）"
+    lines.append(f"- 对比基准：{compare_label}")
+    if payload.get("compare_warning"):
+        lines.append(f"- 对比说明：{payload['compare_warning']}")
+    lines.append("")
+
+    overall = payload.get("overall_status") or {}
+    lines.append("## 本周概览")
+    lines.append("")
+    lines.append(f"- 状态：{overall.get('level', 'good')}")
+    lines.append(f"- 总结：{overall.get('summary', '')}")
+    lines.append("")
+
+    lines.append("## 周 KPI")
+    lines.append("")
+    lines.append("> 口径说明：均值=7 日 daily KPI 简单平均；峰值/低谷=7 日 max/min；波动率=std÷mean。")
+    lines.append("")
+    lines.append("| 指标 | 周均值 | 周峰值 | 周低谷 | 波动率 | 上期均值 | 周环比 |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for item in payload.get("kpi_summary") or []:
+        unit = item.get("unit", "")
+        volatility = item.get("current_volatility")
+        volatility_str = f"{volatility * 100:.1f}%" if isinstance(volatility, (int, float)) else "—"
+        lines.append(
+            "| {name} | {mean} | {peak} | {trough} | {vol} | {prev} | {delta} |".format(
+                name=_table_cell(item.get("name", item.get("key", ""))),
+                mean=_table_cell(_format_weekly_kpi_value(item.get("current_mean"), unit)),
+                peak=_table_cell(_format_weekly_kpi_value(item.get("current_peak"), unit)),
+                trough=_table_cell(_format_weekly_kpi_value(item.get("current_trough"), unit)),
+                vol=_table_cell(volatility_str),
+                prev=_table_cell(_format_weekly_kpi_value(item.get("previous_mean"), unit)),
+                delta=_table_cell(_format_weekly_delta(item)),
+            )
+        )
+    lines.append("")
+
+    trend_chart = payload.get("daily_trend_chart")
+    if trend_chart and trend_chart.get("series"):
+        svg_str = trend_chart_to_svg(trend_chart)
+        if svg_str:
+            lines.append("## 日趋势")
+            lines.append("")
+            lines.append(_embed_chart_image(svg_str, "本周日趋势图", thread_id))
+            lines.append("")
+
+    anomaly_top_n = payload.get("anomaly_top_n") or []
+    if anomaly_top_n:
+        lines.append("## 异常 TopN")
+        lines.append("")
+        lines.append("| 设备 | 级别 | 次数 | 最近一次 | 主导原因 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for row in anomaly_top_n:
+            lines.append(
+                "| {eq} | {lv} | {cnt} | {latest} | {msg} |".format(
+                    eq=_table_cell(row.get("equipment", "")),
+                    lv=_table_cell(row.get("level", "")),
+                    cnt=_table_cell(row.get("count", 0)),
+                    latest=_table_cell(row.get("latest_time", "")),
+                    msg=_table_cell(row.get("dominant_message", "")),
+                )
+            )
+        lines.append("")
+
+    lines.append("## 告警流水")
+    lines.append("")
+    alarm_table = payload.get("alarm_table") or []
+    if alarm_table:
+        lines.append("| 时间 | 设备 | 级别 | 描述 |")
+        lines.append("| --- | --- | --- | --- |")
+        for alarm in alarm_table:
+            lines.append(
+                "| {t} | {eq} | {lv} | {msg} |".format(
+                    t=_table_cell(alarm.get("time", "")),
+                    eq=_table_cell(alarm.get("equipment", "")),
+                    lv=_table_cell(alarm.get("level", "")),
+                    msg=_table_cell(alarm.get("message", "")),
+                )
+            )
+    else:
+        lines.append("本周无告警事件。")
+    lines.append("")
+
+    lines.append("## 下周关注")
+    lines.append("")
+    for focus in payload.get("next_week_focus") or []:
+        lines.append(f"- {focus}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_weekly_html(payload: dict) -> str:
+    """Render weekly payload as a standalone HTML document."""
+    md = render_weekly_markdown(payload)
+    return _markdown_to_html(md, payload=None, chart_images=None)
+
+
+# ---------------------------------------------------------------------------
+# Monthly rendering (single entry — see design doc §4.3 "render_monthly_markdown
+# is the sole renderer; monthly_kpi.py does NOT emit summary_markdown").
+# ---------------------------------------------------------------------------
+
+COMPARE_LABEL_MONTHLY = {
+    "previous_month": "上月（环比 MoM）",
+    "previous_year_month": "去年同月（同比 YoY）",
+    "none": "无对比",
+}
+
+
+def _format_monthly_pct(pct: float | None) -> str:
+    """Render a delta_pct value as ``+3.2%`` / ``—`` (None → dash)."""
+    if pct is None:
+        return "—"
+    return f"{pct * 100:+.1f}%"
+
+
+def _format_monthly_value(value, unit: str) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        return f"{value:.2f}{unit}" if unit else f"{value:.2f}"
+    return f"{value}{unit}" if unit else str(value)
+
+
+def render_monthly_markdown(payload: dict, thread_id: str | None = None) -> str:
+    """Render monthly KPI payload as a Markdown report string.
+
+    This is the ONLY full-markdown renderer for monthly reports — see design
+    doc §4.3 and §6.2 rendering-layer contract: ``monthly_kpi.py`` outputs
+    structured fields only, and the artifact-quality 8-section Markdown is
+    assembled exclusively here. The function deliberately ignores any
+    ``summary_markdown`` key the payload may carry (kept for forward-compat
+    if a future revision re-introduces it; sprint plan M7 has a regression
+    test asserting the field is NOT consulted).
+
+    Eight sections, in order:
+      1. 月度总览
+      2. 月 KPI 表（含 MTBF/MTTR/达标率 + 小节尾"口径说明"引用块）
+      3. 周维度趋势（PDF 时嵌入 SVG）
+      4. 异常 TopN
+      5. 重大事件回顾
+      6. 月环比 + 同比
+      7. 改进措施跟踪
+      8. 下月计划
+    """
+    period = payload.get("report_period") or {}
+    month_label = period.get("report_month") or ""
+    month_start = period.get("month_start", "")
+    month_end = period.get("month_end", "")
+    compare_types = payload.get("compare_types") or []
+    compare_periods = payload.get("compare_periods") or {}
+
+    lines: list[str] = []
+    lines.append(f"# 设备运行月报：{month_label}")
+    lines.append("")
+    if payload.get("data_source") == "demo_fallback":
+        lines.append("> ⚠ 当前为演示数据，请勿用于生产决策。")
+        lines.append("")
+    if payload.get("compare_warning"):
+        lines.append(f"> ⚠ {payload['compare_warning']}。")
+        lines.append("")
+
+    # Header bullets
+    lines.append(f"- 报告月份：{month_label}（{month_start} 至 {month_end}）")
+    if compare_types:
+        compare_lines = []
+        for basis in compare_types:
+            label = COMPARE_LABEL_MONTHLY.get(basis, basis)
+            cp = compare_periods.get(basis) or {}
+            if cp.get("start") and cp.get("end"):
+                compare_lines.append(f"{label}（{cp['start']} 至 {cp['end']}）")
+            else:
+                compare_lines.append(label)
+        lines.append(f"- 对比基准：{'; '.join(compare_lines)}")
+    else:
+        lines.append("- 对比基准：无对比")
+    lines.append("")
+
+    overall = payload.get("overall_status") or {}
+    # Section 1: 月度总览
+    lines.append("## 1. 月度总览")
+    lines.append("")
+    lines.append(f"- 状态：{overall.get('level', 'good')}")
+    lines.append(f"- 总结：{overall.get('summary', '')}")
+    lines.append("")
+
+    # Section 2: 月 KPI
+    lines.append("## 2. 月 KPI")
+    lines.append("")
+    lines.append(
+        "| 指标 | 月均值 | 月峰值 | 月低谷 | 波动率 | 达标率 | 上月均值 | 月环比 | 去年同月 | 同比 |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for item in payload.get("kpi_summary") or []:
+        unit = item.get("unit", "")
+        volatility = item.get("current_volatility")
+        vol_str = (
+            f"{volatility * 100:.1f}%" if isinstance(volatility, (int, float)) else "—"
+        )
+        ratio = item.get("current_in_target_ratio")
+        ratio_str = (
+            f"{ratio * 100:.1f}%" if isinstance(ratio, (int, float)) else "—"
+        )
+        lines.append(
+            "| {name} | {mean} | {peak} | {trough} | {vol} | {ratio} | {pmo} | {dmo} | {pyr} | {dyr} |".format(
+                name=_table_cell(item.get("name", item.get("key", ""))),
+                mean=_table_cell(_format_monthly_value(item.get("current_mean"), unit)),
+                peak=_table_cell(_format_monthly_value(item.get("current_peak"), unit)),
+                trough=_table_cell(_format_monthly_value(item.get("current_trough"), unit)),
+                vol=_table_cell(vol_str),
+                ratio=_table_cell(ratio_str),
+                pmo=_table_cell(_format_monthly_value(item.get("previous_month_mean"), unit)),
+                dmo=_table_cell(_format_monthly_pct(item.get("delta_mom_pct"))),
+                pyr=_table_cell(_format_monthly_value(item.get("previous_year_month_mean"), unit)),
+                dyr=_table_cell(_format_monthly_pct(item.get("delta_yoy_pct"))),
+            )
+        )
+    lines.append("")
+    lines.append(
+        "> 口径说明：月均值按 7 日桶 ``day_count`` 加权平均（区别于周报 7 日简单平均、日报单日值）；MTBF=`total_uptime_hours / max(total_failures, 1)`；MTTR=`total_repair_minutes / max(total_failures, 1) / 60`；零故障月 MTBF/MTTR 输出 `—`。"
+    )
+    lines.append("")
+
+    # Section 3: 周维度趋势
+    trend_chart = payload.get("weekly_trend_chart")
+    if trend_chart and trend_chart.get("series"):
+        svg_str = trend_chart_to_svg(trend_chart)
+        if svg_str:
+            lines.append("## 3. 周维度趋势")
+            lines.append("")
+            lines.append(_embed_chart_image(svg_str, "本月周维度趋势图", thread_id))
+            lines.append("")
+
+    # Section 4: 异常 TopN
+    anomaly_top_n = payload.get("anomaly_top_n") or []
+    if anomaly_top_n:
+        lines.append("## 4. 异常 TopN")
+        lines.append("")
+        lines.append("| 设备 | 级别 | 次数 | 最近一次 | 主导原因 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for row in anomaly_top_n:
+            lines.append(
+                "| {eq} | {lv} | {cnt} | {latest} | {msg} |".format(
+                    eq=_table_cell(row.get("equipment", "")),
+                    lv=_table_cell(row.get("level", "")),
+                    cnt=_table_cell(row.get("count", 0)),
+                    latest=_table_cell(row.get("latest_time", "")),
+                    msg=_table_cell(row.get("dominant_message", "")),
+                )
+            )
+        lines.append("")
+
+    # Section 5: 重大事件回顾 — skip table when empty (sprint plan M3 acceptance)
+    critical_events = payload.get("critical_events") or []
+    if critical_events:
+        lines.append("## 5. 重大事件回顾")
+        lines.append("")
+        lines.append("| 时间 | 设备 | 级别 | 描述 | 处置时长(分钟) | 已处置 |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for e in critical_events:
+            lines.append(
+                "| {t} | {eq} | {lv} | {msg} | {dur} | {res} |".format(
+                    t=_table_cell(e.get("time", "")),
+                    eq=_table_cell(e.get("equipment", "")),
+                    lv=_table_cell(e.get("level", "")),
+                    msg=_table_cell(e.get("message", "")),
+                    dur=_table_cell(e.get("duration_minutes", "—")),
+                    res=_table_cell("是" if e.get("resolved") else "否"),
+                )
+            )
+        lines.append("")
+
+    # Section 6: 月环比 + 同比 (compact textual digest derived from kpi_summary)
+    if compare_types:
+        lines.append("## 6. 月环比 + 同比")
+        lines.append("")
+        lines.append("| 指标 | 月环比 (MoM) | 同比 (YoY) |")
+        lines.append("| --- | --- | --- |")
+        for item in payload.get("kpi_summary") or []:
+            lines.append(
+                "| {name} | {mo} | {yr} |".format(
+                    name=_table_cell(item.get("name", item.get("key", ""))),
+                    mo=_table_cell(_format_monthly_pct(item.get("delta_mom_pct"))),
+                    yr=_table_cell(_format_monthly_pct(item.get("delta_yoy_pct"))),
+                )
+            )
+        lines.append("")
+
+    # Section 7: 改进措施跟踪 — skip table when empty (sprint plan M3 acceptance)
+    improvement_tracking = payload.get("improvement_tracking") or []
+    if improvement_tracking:
+        lines.append("## 7. 改进措施跟踪")
+        lines.append("")
+        lines.append("| 编号 | 负责人 | 计划 | 截止 | 状态 | 完成度 | 备注 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for r in improvement_tracking:
+            completion = r.get("completion_rate")
+            completion_str = (
+                f"{completion}%" if isinstance(completion, (int, float)) else "—"
+            )
+            lines.append(
+                "| {id} | {owner} | {plan} | {due} | {status} | {comp} | {note} |".format(
+                    id=_table_cell(r.get("id", "")),
+                    owner=_table_cell(r.get("owner", "")),
+                    plan=_table_cell(r.get("plan", "")),
+                    due=_table_cell(r.get("due_date", "")),
+                    status=_table_cell(r.get("status", "")),
+                    comp=_table_cell(completion_str),
+                    note=_table_cell(r.get("note", "")),
+                )
+            )
+        lines.append("")
+
+    # Section 8: 下月计划
+    lines.append("## 8. 下月计划")
+    lines.append("")
+    next_month_plan = payload.get("next_month_plan") or []
+    if next_month_plan:
+        for plan_item in next_month_plan:
+            lines.append(f"- {plan_item}")
+    else:
+        lines.append("- 本月无显著异常，下月保持当前预防性维护节奏。")
+    lines.append("")
+
+    # Trailing 月度复盘 (multi-paragraph, lives below the 8 numbered sections to
+    # keep section indexing stable; the 8-section structure refers to the
+    # numbered chapters above).
+    monthly_review = payload.get("monthly_review")
+    if monthly_review:
+        lines.append("---")
+        lines.append("")
+        lines.append("### 月度复盘")
+        lines.append("")
+        lines.append(monthly_review)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def render_monthly_html(payload: dict) -> str:
+    """Render monthly payload as a standalone HTML document."""
+    md = render_monthly_markdown(payload)
+    return _markdown_to_html(md, payload=None, chart_images=None)
+
+
+def _markdown_to_html(md: str, payload: dict | None = None, chart_images: list[str] | None = None) -> str:
+    """Shared Markdown → HTML wrapper.
+
+    Daily callers pass ``payload`` + optional ``chart_images`` to keep the
+    legacy chart-fallback behaviour. Weekly callers pass ``payload=None`` and
+    rely on the SVG already being inlined inside ``md`` by
+    ``render_weekly_markdown``.
+    """
     try:
         import markdown as md_lib
         body = md_lib.markdown(md, extensions=["tables"])
     except ImportError:
         body = "<pre>" + md.replace("&", "&amp;").replace("<", "&lt;") + "</pre>"
-        chart_html = ""
-        if chart_images:
-            for i, img_path in enumerate(chart_images):
-                data_uri = _read_image_as_data_uri(img_path)
-                if data_uri:
-                    chart_html += f'\n<img src="{data_uri}" alt="趋势图{i + 1}" style="max-width:100%">\n'
-        if chart_html:
-            body += f"\n<h2>运行趋势</h2>\n{chart_html}"
-        else:
-            trend_chart = payload.get("trend_chart")
-            if trend_chart and trend_chart.get("series"):
-                svg_str = trend_chart_to_svg(trend_chart)
-                if svg_str:
-                    body += f"\n<h2>运行趋势</h2>\n{svg_str}\n"
+        if payload is not None:
+            chart_html = ""
+            if chart_images:
+                for i, img_path in enumerate(chart_images):
+                    data_uri = _read_image_as_data_uri(img_path)
+                    if data_uri:
+                        chart_html += f'\n<img src="{data_uri}" alt="趋势图{i + 1}" style="max-width:100%">\n'
+            if chart_html:
+                body += f"\n<h2>运行趋势</h2>\n{chart_html}"
+            else:
+                trend_chart = payload.get("trend_chart")
+                if trend_chart and trend_chart.get("series"):
+                    svg_str = trend_chart_to_svg(trend_chart)
+                    if svg_str:
+                        body += f"\n<h2>运行趋势</h2>\n{svg_str}\n"
 
     return (
         "<!DOCTYPE html>\n<html lang='zh'>\n<head>\n<meta charset='utf-8'>\n"
@@ -467,22 +921,65 @@ def _write_pdf(html: str, out_path: Path) -> None:
     WeasyprintHTML(string=html).write_pdf(str(out_path))
 
 
-def write_report(payload: dict, fmt: str, path: Path | None = None, chart_images: list[str] | None = None) -> Path:
+def write_report(
+    payload: dict,
+    fmt: str,
+    path: Path | None = None,
+    chart_images: list[str] | None = None,
+    report_type: str = "daily",
+) -> Path:
     if fmt not in SUPPORTED_FORMATS:
         raise ValueError(f"Unsupported export format: {fmt}")
-    out_path = path or (_output_dir() / f"daily_report.{fmt}")
+    if report_type not in SUPPORTED_REPORT_TYPES:
+        raise ValueError(f"Unsupported report type: {report_type}")
+    filename = f"{report_type}_report.{fmt}"
+    out_path = path or (_output_dir(report_type) / filename)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if fmt == "pdf":
-        html = render_html(payload, chart_images)
-        _write_pdf(html, out_path)
+    if report_type == "diagnosis":
+        # Lazy import to avoid module-load-time circular dependency
+        from export_diagnosis_report import (  # type: ignore[import-not-found]
+            render_diagnosis_html,
+            render_diagnosis_markdown,
+        )
+
+        if fmt == "pdf":
+            html = render_diagnosis_html(payload)
+            _write_pdf(html, out_path)
+        else:
+            content = render_diagnosis_markdown(payload)
+            out_path.write_text(content, encoding="utf-8")
+    elif report_type == "monthly":
+        if fmt == "pdf":
+            html = render_monthly_html(payload)
+            _write_pdf(html, out_path)
+        else:
+            content = render_monthly_markdown(payload)
+            out_path.write_text(content, encoding="utf-8")
+    elif report_type == "weekly":
+        if fmt == "pdf":
+            html = render_weekly_html(payload)
+            _write_pdf(html, out_path)
+        else:
+            content = render_weekly_markdown(payload)
+            out_path.write_text(content, encoding="utf-8")
     else:
-        content = render_markdown(payload, chart_images)
-        out_path.write_text(content, encoding="utf-8")
+        if fmt == "pdf":
+            html = render_html(payload, chart_images)
+            _write_pdf(html, out_path)
+        else:
+            content = render_markdown(payload, chart_images)
+            out_path.write_text(content, encoding="utf-8")
     return out_path
 
 
-def build_export_result(payload: dict, fmt: str, path: Path | None = None, chart_images: list[str] | None = None) -> dict:
-    out_path = write_report(payload, fmt, path=path, chart_images=chart_images)
+def build_export_result(
+    payload: dict,
+    fmt: str,
+    path: Path | None = None,
+    chart_images: list[str] | None = None,
+    report_type: str = "daily",
+) -> dict:
+    out_path = write_report(payload, fmt, path=path, chart_images=chart_images, report_type=report_type)
     filename = out_path.name
     virtual_path = f"/mnt/user-data/outputs/{filename}"
     return {
@@ -494,21 +991,42 @@ def build_export_result(payload: dict, fmt: str, path: Path | None = None, chart
     }
 
 
-def load_payload(path: Path | None = None) -> dict:
-    target = path or (_output_dir() / INPUT_FILENAME)
+def load_payload(path: Path | None = None, report_type: str = "daily") -> dict:
+    if path is not None:
+        target = path
+    else:
+        if report_type == "monthly":
+            filename = MONTHLY_INPUT_FILENAME
+        elif report_type == "weekly":
+            filename = WEEKLY_INPUT_FILENAME
+        elif report_type == "diagnosis":
+            filename = DIAGNOSIS_INPUT_FILENAME
+        else:
+            filename = INPUT_FILENAME
+        target = _output_dir(report_type) / filename
     return json.loads(target.read_text(encoding="utf-8"))
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Export daily report")
+    parser = argparse.ArgumentParser(description="Export report (daily / weekly / monthly)")
     parser.add_argument("--input", default=None, help="Input KPI JSON path")
     parser.add_argument("--format", default="md", choices=sorted(SUPPORTED_FORMATS))
     parser.add_argument("--output", default=None, help="Output file path")
-    parser.add_argument("--chart-images", default="", help="JSON array of chart image paths")
+    parser.add_argument("--chart-images", default="", help="JSON array of chart image paths (daily only)")
+    parser.add_argument(
+        "--report-type",
+        default="daily",
+        choices=sorted(SUPPORTED_REPORT_TYPES),
+        help="Report type (default: daily, preserves legacy behaviour)",
+    )
     args = parser.parse_args()
 
     try:
-        payload = load_payload(Path(args.input)) if args.input else load_payload()
+        payload = (
+            load_payload(Path(args.input), report_type=args.report_type)
+            if args.input
+            else load_payload(report_type=args.report_type)
+        )
     except FileNotFoundError as exc:
         print(json.dumps({"error": f"input not found: {exc}"}, ensure_ascii=False))
         return 0
@@ -517,7 +1035,7 @@ def main() -> int:
         return 0
 
     chart_images: list[str] = []
-    if args.chart_images:
+    if args.chart_images and args.report_type == "daily":
         try:
             parsed = json.loads(args.chart_images)
             if isinstance(parsed, list):
@@ -526,7 +1044,13 @@ def main() -> int:
             pass
 
     try:
-        result = build_export_result(payload, args.format, path=Path(args.output) if args.output else None, chart_images=chart_images or None)
+        result = build_export_result(
+            payload,
+            args.format,
+            path=Path(args.output) if args.output else None,
+            chart_images=chart_images or None,
+            report_type=args.report_type,
+        )
     except ImportError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 0

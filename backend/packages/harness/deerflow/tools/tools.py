@@ -6,7 +6,17 @@ from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
-from deerflow.tools.builtins import ask_clarification_tool, http_connector_tool, present_file_tool, render_ui_tool, task_tool, view_image_tool
+from deerflow.tools.builtins import (
+    REPORT_TEMPLATE_LIFECYCLE_TOOLS,
+    REPORT_TEMPLATE_RUNTIME_TOOLS,
+    ask_clarification_tool,
+    http_connector_tool,
+    present_file_tool,
+    render_ui_tool,
+    report_template_record_fallback_tool,
+    task_tool,
+    view_image_tool,
+)
 from deerflow.tools.builtins.tool_search import reset_deferred_registry
 
 logger = logging.getLogger(__name__)
@@ -16,6 +26,9 @@ BUILTIN_TOOLS = [
     ask_clarification_tool,
     render_ui_tool,
     http_connector_tool,
+    *REPORT_TEMPLATE_LIFECYCLE_TOOLS,
+    *REPORT_TEMPLATE_RUNTIME_TOOLS,
+    report_template_record_fallback_tool,
 ]
 
 SUBAGENT_TOOLS = [

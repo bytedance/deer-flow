@@ -1,0 +1,29 @@
+name: fault-diagnosis--reciprocating
+display_name: "往复机故障诊断"
+description: "往复式压缩机 / 往复式泵的曲轴角联动 + 缸压 + 阀门事件诊断"
+icon: "🔧"
+parent: fault-diagnosis
+order: 3
+model: null
+tool_groups:
+  - bash
+exclude_tools: []
+skills:
+  - data-analyst
+  - reciprocating-fault-diagnosis
+  - ins-device-analysis
+  - ins-get-trend-data
+  - ins-get-waveform-data
+  - ins-extract-trend-features
+  - ins-extract-spectral-waveform-features
+mcp_servers: null
+tags:
+  - diagnosis
+  - reciprocating
+  - compressor
+starters:
+  - label: "诊断往复机故障"
+    prompt: "诊断往复机故障"
+    auto_start: true
+advanced:
+  subagent_enabled: false

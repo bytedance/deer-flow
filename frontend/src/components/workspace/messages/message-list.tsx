@@ -238,7 +238,7 @@ export function MessageList({
   });
 
   useEffect(() => {
-    fetchResolvedBlockHistory(threadId, messages).then((history) => {
+    void fetchResolvedBlockHistory(threadId, messages).then((history) => {
       setResolvedBlockHistory(history);
       // Populate interaction state from backend data (survives page refresh).
       const store = useBlockStore.getState();

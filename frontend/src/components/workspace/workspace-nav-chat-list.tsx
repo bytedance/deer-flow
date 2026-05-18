@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpenIcon, BotIcon, ChevronDownIcon, MessagesSquare } from "lucide-react";
+import { BookOpenIcon, BotIcon, ChevronDownIcon, FileTextIcon, HistoryIcon, MessagesSquare } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -124,6 +124,36 @@ export function WorkspaceNavChatList() {
             >
               <BookOpenIcon />
               <span>{t.sidebar.knowledgeBases}</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            isActive={pathname.startsWith("/workspace/report-templates")}
+            asChild
+          >
+            <Link
+              className="text-muted-foreground"
+              href="/workspace/report-templates"
+            >
+              <FileTextIcon />
+              <span>报告模板</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            isActive={pathname.startsWith("/workspace/report-runs")}
+            asChild
+          >
+            <Link
+              className="text-muted-foreground"
+              href="/workspace/report-runs"
+            >
+              <HistoryIcon />
+              <span>报告历史</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

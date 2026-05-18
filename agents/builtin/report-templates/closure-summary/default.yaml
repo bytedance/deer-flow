@@ -1,0 +1,103 @@
+dsl_version: "1"
+name: closure-summary
+display_name: "问题闭环报告"
+description: "面向问题单跟踪与闭环复核：汇总状态分布、未闭项、风险检查与闭环结论。事实性报告（无 §13.2 evidence/confidence/human_review_required 字段）。"
+visibility: builtin
+
+form_steps:
+  - id: scope
+    title: 生成问题闭环报告
+    description: 请填写问题单 ID 列表与验证周期。
+    fields:
+      - name: issue_ids
+        label: 问题单 ID 列表
+        type: textarea
+        required: true
+        placeholder: "ISSUE-2026-001, ISSUE-2026-002 (英文逗号分隔)"
+        description: "支持多个问题单，CSV 格式"
+      - name: owner_department
+        label: 责任部门
+        type: text
+        required: false
+        placeholder: "例如 运行部 / 维修部"
+      - name: verification_period
+        label: 验证周期
+        type: text
+        required: false
+        placeholder: "YYYY-MM-DD..YYYY-MM-DD"
+    next: generate
+
+data_steps:
+  - id: closure_items
+    kind: script
+    name: data-analyst/query_closure_items
+    args:
+      issue_ids: "{{ $.form.scope.issue_ids }}"
+      owner_department: "{{ $.form.scope.owner_department }}"
+      verification_period: "{{ $.form.scope.verification_period }}"
+    outputs:
+      closure_items: closure_items.json
+
+transforms:
+  - id: closure_summary
+    kind: script
+    name: data-analyst/closure_summary
+    input: closure_items.closure_items
+    outputs:
+      closure_summary: closure_summary.json
+
+sections:
+  # Section 1: overall_status card (factual digest)
+  - id: overview
+    title: 闭环总览
+    component: card
+    source: $.steps.closure_summary.closure_summary.overall_status
+
+  # Section 2: status distribution table (5 statuses always populated)
+  - id: status_distribution
+    title: 状态分布
+    component: table
+    source: $.steps.closure_summary.closure_summary.status_distribution
+    props:
+      columns:
+        - { key: status, label: 状态 }
+        - { key: count, label: 数量 }
+
+  # Section 3: unclosed items detail
+  - id: unclosed_items
+    title: 未闭项明细
+    component: table
+    source: $.steps.closure_summary.closure_summary.unclosed_items
+    props:
+      columns:
+        - { key: id, label: 编号 }
+        - { key: title, label: 标题 }
+        - { key: status, label: 状态 }
+        - { key: owner, label: 负责人 }
+        - { key: department, label: 部门 }
+        - { key: due_date, label: 截止 }
+        - { key: notes, label: 备注 }
+
+  # Section 4: risk items (overdue + reopened)
+  - id: risk_items
+    title: 风险检查
+    component: table
+    source: $.steps.closure_summary.closure_summary.risk_items
+    props:
+      columns:
+        - { key: id, label: 编号 }
+        - { key: kind, label: 风险类型 }
+        - { key: status, label: 状态 }
+        - { key: due_date, label: 截止 }
+        - { key: owner, label: 负责人 }
+        - { key: note, label: 备注 }
+
+  # Section 5: conclusion
+  - id: conclusion
+    title: 闭环结论
+    component: markdown
+    source: $.steps.closure_summary.closure_summary.closure_conclusion
+
+export:
+  formats: [md, pdf]
+  renderer: generic_report

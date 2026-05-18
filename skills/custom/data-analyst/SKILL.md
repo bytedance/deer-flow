@@ -84,6 +84,43 @@ python /mnt/skills/custom/data-analyst/scripts/export_report.py \
 
 Currently supports Markdown only; PDF is deferred (Sprint plan Story 6).
 
+### query_diagnosis.py — Query diagnosis trend features (fault-diagnosis MVP)
+
+```bash
+python /mnt/skills/custom/data-analyst/scripts/query_diagnosis.py \
+  --kind centrifugal_pump \
+  --equipment "PUMP-A-001,PUMP-A-002" \
+  --start "2026-05-12T00:00:00" \
+  --end "2026-05-13T00:00:00" \
+  --mode oneoff \
+  --compare previous_period
+```
+
+Stage 1 (aggregate trend pull) for the `fault-diagnosis--{pump,rotating,reciprocating}`
+agents. Internally invokes `ins-extract-trend-features` and falls back to deterministic
+demo data when the InS toolchain is unavailable. Writes
+`/mnt/user-data/outputs/query_diagnosis.json` per design doc §7.1. Waveform / spectrum /
+orbit are not pulled here — the LLM handles those sparsely as Stage 2 against the
+`anomaly_time_ms` returned in `points[].trend_summary`.
+
+### diagnosis_features.py — Compute diagnosis features + rule matches
+
+```bash
+python /mnt/skills/custom/data-analyst/scripts/diagnosis_features.py \
+  --input /mnt/user-data/outputs/query_diagnosis.json \
+  --focus "unbalance,cavitation,min_flow_violation" \
+  --rules-skill pump-fault-diagnosis \
+  --output /mnt/user-data/outputs/diagnosis_features.json
+```
+
+Stage 2 of the fault-diagnosis pipeline. Reads `query_diagnosis.json`, optionally
+picks up `spectrum_*.json` / `orbit_*.json` deep-sample files written by the LLM
+during Stage 2, loads the corresponding rule book SKILL.md / references, runs a
+best-effort rule match against `--focus` codes, and writes
+`diagnosis_features.json` per design doc §7.2 (containing `evidence_chain` with
+`verdict ∈ {exceed, marginal, normal}`, `rule_matches`, ECharts options, demo
+historical cases, recommendations). Reciprocating kinds skip orbit charts.
+
 ## Output Convention
 
 - All scripts output JSON to stdout

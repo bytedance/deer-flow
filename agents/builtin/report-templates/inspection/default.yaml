@@ -1,0 +1,119 @@
+dsl_version: "1"
+name: inspection
+display_name: "巡检报告"
+description: "面向单日巡检记录的概况汇总：severity 分布、异常清单、附件摘要、整改建议。事实性报告（无 §13.2 evidence/confidence/human_review_required 字段）。"
+visibility: builtin
+
+form_steps:
+  - id: scope
+    title: 生成巡检报告
+    description: 请选择巡检日期、路线和异常等级下限。
+    fields:
+      - name: inspection_date
+        label: 巡检日期
+        type: date
+        required: true
+      - name: route
+        label: 巡检路线
+        type: text
+        required: false
+        placeholder: "可选：路线名称"
+      - name: area
+        label: 巡检区域
+        type: text
+        required: false
+        placeholder: "可选：区域名称"
+      - name: severity_min
+        label: 异常等级下限
+        type: select
+        required: true
+        default: low
+        options:
+          - { label: 低 (含全部), value: low }
+          - { label: 中, value: medium }
+          - { label: 高, value: high }
+    next: generate
+
+data_steps:
+  - id: inspection_data
+    kind: script
+    name: data-analyst/query_inspection
+    args:
+      inspection_date: "{{ $.form.scope.inspection_date }}"
+      route: "{{ $.form.scope.route }}"
+      area: "{{ $.form.scope.area }}"
+      severity_min: "{{ $.form.scope.severity_min }}"
+    outputs:
+      inspection_data: inspection_data.json
+
+transforms:
+  - id: inspection_summary
+    kind: script
+    name: data-analyst/inspection_summary
+    input: inspection_data.inspection_data
+    outputs:
+      inspection_summary: inspection_summary.json
+
+  - id: inspection_attachments
+    kind: script
+    name: data-analyst/inspection_attachment_summary
+    input: inspection_data.inspection_data
+    outputs:
+      inspection_attachments: inspection_attachments.json
+
+sections:
+  # Section 1: overall_status card (factual digest)
+  - id: overview
+    title: 巡检概况
+    component: card
+    source: $.steps.inspection_summary.inspection_summary.overall_status
+
+  # Section 2: severity distribution table (always 4 rows: low/medium/high/critical)
+  - id: severity_distribution
+    title: 等级分布
+    component: table
+    source: $.steps.inspection_summary.inspection_summary.severity_distribution
+    props:
+      columns:
+        - { key: severity, label: 等级 }
+        - { key: count, label: 数量 }
+        - { key: percentage, label: 占比 }
+
+  # Section 3: anomaly list (medium + high + critical, sorted severity desc)
+  - id: anomalies
+    title: 异常清单
+    component: table
+    source: $.steps.inspection_summary.inspection_summary.anomaly_list
+    props:
+      columns:
+        - { key: id, label: 巡检 ID }
+        - { key: time, label: 时间 }
+        - { key: equipment, label: 设备 }
+        - { key: inspector, label: 巡检员 }
+        - { key: severity, label: 严重度 }
+        - { key: status, label: 状态 }
+        - { key: description, label: 描述 }
+
+  # Section 4: per-record attachment summary (photo_count + note_snippet)
+  - id: attachment_summary
+    title: 附件摘要
+    component: table
+    source: $.steps.inspection_attachments.inspection_attachments.attachment_summary
+    props:
+      columns:
+        - { key: record_id, label: 巡检 ID }
+        - { key: equipment, label: 设备 }
+        - { key: severity, label: 严重度 }
+        - { key: photo_count, label: 照片数 }
+        - { key: note_count, label: 备注数 }
+        - { key: note_snippet, label: 备注摘要 }
+
+  # Section 5: corrective recommendations
+  - id: recommendations
+    title: 整改建议
+    component: markdown
+    source: $.steps.inspection_summary.inspection_summary.corrective_recommendations
+
+export:
+  formats: [md, pdf]
+  renderer: generic_report

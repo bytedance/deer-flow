@@ -1,0 +1,11 @@
+id: builtin-closure-summary
+display_name: "问题闭环报告"
+description: |
+  面向问题单跟踪与闭环复核：问题单、责任部门、验证周期。
+  章节：闭环总览 / 核心指标 / 未闭项 / 风险检查 / 闭环结论。
+  P3 优先级，事实性报告。
+dsl_version: "1"
+tags:
+  - closure
+  - issue-tracking
+  - kpi

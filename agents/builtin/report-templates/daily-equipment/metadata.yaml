@@ -1,0 +1,16 @@
+id: builtin-daily-equipment
+display_name: "设备运行日报"
+description: |
+  面向单日运行的设备日报。完整流程：
+  1. 选择日期 / 设备类型 / 对比基准
+  2. 动态加载并多选设备（按区域分组）
+  3. 多选 KPI
+  4. 生成报告（query_daily → daily_kpi）
+  5. 展示 6 个章节（总览 / KPI / 趋势 / 异常 / 告警 / 建议）
+  6. 导出 Markdown（必须）和 PDF（可选降级）
+dsl_version: "1"
+tags:
+  - daily
+  - equipment
+  - kpi
+  - baseline

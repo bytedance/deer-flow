@@ -1,0 +1,12 @@
+id: builtin-monthly-equipment
+display_name: "设备月度报告"
+description: |
+  月度运行报告：覆盖 KPI 达成、MTBF/MTTR、环比同比、重大事件、改进跟踪。
+  复用日报/周报的设备/KPI 体系，时间窗口聚合到月度。
+  章节：月度总览 / KPI 达成 / MTBF-MTTR / 重大事件 / 环比同比 / 改进跟踪 / 下月计划。
+dsl_version: "1"
+tags:
+  - monthly
+  - equipment
+  - kpi
+  - mtbf

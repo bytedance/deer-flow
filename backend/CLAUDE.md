@@ -225,6 +225,8 @@ FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWA
 | **Agents** (`/api/agents`) | `GET /` - three-level merged listing; `GET /mine` - user's agents; `PUT /{name}/enabled` - enable/disable; `POST /fork/{name}` - fork to user; `POST /{name}/usage` - record usage; `GET /stats` - tenant counts; `GET /stats/mine` - user counts; `GET /recommend?q=` - recommendations |
 | **Tenant Agents** (`/api/tenants/{id}/agents`) | `POST /` - create; `GET /` - list; `GET /{name}` - details; `PUT /{name}` - update; `DELETE /{name}` - delete; `PUT /{name}/enabled` - enable/disable; `POST /{name}/permissions` - set permissions |
 | **Tenant MCP Servers** (`/api/tenants/{id}/mcp-servers`) | `POST /` - create; `GET /` - list; `GET /{name}` - details; `PUT /{name}` - update; `DELETE /{name}` - delete; `PUT /{name}/enabled` - enable/disable |
+| **Report Templates** (`/api/report-templates`) | `GET /` - list (filter by `visibility`); `POST /` - create draft; `GET /{id}` - metadata; `PUT /{id}` - update draft (etag); `GET /{id}/versions` - list versions; `GET /{id}/versions/{n}` - version snapshot; `POST /{id}/validate` - DSL validate; `POST /{id}/publish` - publish new version; `POST /{id}/fork` - fork into private draft; `POST /{id}/archive` - soft-archive; `DELETE /{id}` - hard-delete |
+| **Report Runs** (`/api/report-runs`) | `GET /` - list visible runs; `GET /{rid}` - run record; `GET /{rid}/payload` - read assembled `report_payload.json`. `POST /{rid}/cancel` is deferred until an independent runner exists (see design §8.3); MVP runs are bound to a live thread/run and cancel via that path |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
 
@@ -319,6 +321,74 @@ Three-tier agent discovery with priority-based override: **user > tenant > built
 - Agent-level `mcp_servers` filter applies after merge
 
 **Tests**: `tests/test_multi_level_agents.py` (59 tests covering all levels, isolation, security, recommendations)
+
+### Report Template Platform (`packages/harness/deerflow/report_templates/`)
+
+DSL-driven report generation: users describe a report (forms, data steps, transforms, sections) in YAML; the runtime collects inputs through GenUI, runs allowlisted scripts inside the existing thread/run, and writes a `report_payload.json` plus Markdown/PDF artifacts. Full design: [docs/plans/2026-05-14-ai-report-custom-template-design.md](../docs/plans/2026-05-14-ai-report-custom-template-design.md).
+
+**Module layout**:
+
+```text
+report_templates/
+  schema.py                  # DSL v1 Pydantic schema (form_steps, data_steps, transforms, sections, export)
+  validator.py               # Cross-ref / JSONPath / script registry / section type checks
+  source_resolver.py         # JSONPath subset (whitelist: root / field / array-all; depth ≤ 8)
+  script_registry.py         # Loads `report_scripts.yaml` from each enabled skill
+  repository.py              # FileSystemReportTemplateRepository (etag + atomic rename + fcntl)
+  records.py                 # ReportTemplate / ReportTemplateVersion / ReportRun Pydantic models
+  permissions.py             # private/tenant/builtin matrix, reuses superadmin/tenant_admin
+  service.py                 # Cross-cutting orchestration used by routes + tools
+  push_block.py              # Helper for streaming GenUI blocks from tool implementations
+  generic_renderer.py        # sections → Markdown (must) + ECharts SVG (PDF fallback)
+  runtime/
+    state.py                 # status.json state machine + step transition checks
+    step_renderer.py         # form_step + before_step → GenUI form block
+    step_submitter.py        # form payload validation + dispatch
+    data_runner.py           # subprocess-based allowlist execution; outputs to run-scoped dir
+    payload_builder.py       # assemble report_payload.json from sections
+    report_renderer.py       # sections → GenUI blocks pushed via get_stream_writer
+    exporter.py              # invokes export_report.py for .md (required) / .pdf (optional)
+```
+
+**LLM-driven runtime**: the runtime is not a background worker — it is a set of 14 builtin tools the `ai-report--custom` agent calls in sequence under SOUL guidance. Cross-tool state lives in `{run_output_dir}/status.json`. Every tool verifies `report_run_id` + `expected_step` against status.json before acting; mismatch returns `STATE_MISMATCH` so the LLM cannot drift.
+
+**Tools** (in `packages/harness/deerflow/tools/builtins/`):
+
+| File | Tools |
+|------|-------|
+| `report_template_tools.py` | `report_template_list`, `report_template_get`, `report_template_validate`, `report_template_save_draft`, `report_template_publish`, `report_template_fork` |
+| `report_template_runtime_tools.py` | `report_template_prepare_run`, `report_template_render_step`, `report_template_submit_step`, `report_template_run_data_steps`, `report_template_assemble_payload`, `report_template_render_report`, `report_template_export`, `report_template_resume_run` |
+
+Tools are thin shells (≤50 lines each) that unpack args, call a `runtime/` module, and wrap errors. `user_id` / `tenant_id` always come from the auth context — never from request body or LLM args.
+
+**Storage**:
+
+- User/tenant templates (writable): `{DEER_FLOW_HOME}/report-templates/{users|tenants}/{owner_id}/{template_id}/`. Each contains `template.json` (metadata + etag), `versions/v{N}.json` (immutable snapshots holding both parsed `dsl` and original `dsl_yaml`), and `runs/{report_run_id}.json` (lightweight index — payload + artifacts live under the thread).
+- Builtin templates (read-only, version-controlled): `agents/builtin/report-templates/{template-name}/{default.yaml,metadata.yaml}`. Loaded into an in-memory index at startup; cannot be written through the API — modify via code PR + restart.
+- Run-scoped output: `{thread_output_dir}/report-runs/{report_run_id}/{parameters.json,template_version.json,status.json,data/*.json,report_payload.json,exports/{report.md,report.pdf?}}`. Thread is the lifecycle root: deleting a thread also deletes its ReportRun index entries and outputs.
+
+**Concurrency / safety**:
+
+- All writes: temp file + atomic rename, `expected_etag` optimistic lock returning 409 on mismatch, fcntl/Windows fallback for cross-process locks, `index.json` updated under the same lock as `template.json`.
+- ID validation: `template_id` matches `^tpl_[A-Z0-9]{20,32}$`, `report_run_id` matches `^rr_[A-Z0-9]{20,32}$`. All paths go through `Path.resolve()` + `relative_to()` containment checks before writes.
+
+**Script registry** (skill-contributed):
+
+Each skill may ship a `report_scripts.yaml` at its root. The registry scans enabled skills and exposes scripts namespaced as `{skill_name}/{script_name}` (e.g. `data-analyst/query_daily`). DSL `data_steps[].name` must use the qualified name. `ScriptDescriptorYaml` supports `args_aliases: dict[str, dict[str, str]]` for translating short DSL names to canonical script enum values (consumed by `runtime/data_runner.py`).
+
+**Section components**: `markdown`, `card`, `card_group`, `echart`, `table`, `image`. Validator warns when a `section.source` tail doesn't look like the component's expected payload (e.g. `echart` should point at something ending in `chart`/`option`).
+
+**Builtin templates shipped**: `daily-equipment`, `weekly-equipment`, `monthly-equipment`, `trend-equipment`, `diagnosis-fault`, `failure-analysis`, `closure-summary`, `inspection`. The CI test `tests/test_builtin_report_templates.py` validates every `agents/builtin/report-templates/*/default.yaml` against the validator on each push.
+
+**Interpretive reports** (§13.2): trend / diagnosis / failure-analysis stub transforms output `findings[]`, `evidence[]` (with `source_type`, `source_id`, `snapshot_path`, `checksum`, `time_range`, `retrieved_at`), `confidence`, `assumptions[]`, `data_coverage`, and `human_review_required: true`.
+
+**Export**: Markdown is required (failed Markdown render = ReportRun failed). PDF is optional — `weasyprint` ImportError is caught and `pdf_skipped_reason = "weasyprint_unavailable"` is recorded.
+
+**ai-report--daily fallback**: the DSL path is preferred; the legacy hardcoded SOUL.md path remains as a fallback (triggered on `report_template_*` errors / missing builtin / disabled skill / validator regression). `ai-report--custom` and any from-scratch agent have **no fallback** — they fail loudly when the platform is down.
+
+**Tests**: 347 tests across `tests/test_report_template_*.py`, `tests/test_builtin_report_templates.py`, and `tests/test_ai_report_weekly_*.py` cover schema, validator, source resolver, repository, permissions, runtime modules, registry, lifecycle tools, runtime tools, REST routes, generic renderer, push-block, and CI validation of all shipped builtin DSL files.
+
+**Telemetry (Phase 7)**: `report_templates/telemetry.py` provides a thread-safe in-memory collector mirroring the `RenderUIMetrics` pattern — no Prometheus / OTel dependency. Six event types are emitted from埋点 inside the platform: `report_run_outcome` (state.transition → terminal), `fallback_triggered` (via the `report_template_record_fallback` tool LLMs call in `ai-report--daily/SOUL.md`), `validator_outcome` (validator.validate_dsl), `storage_snapshot` + `version_count_snapshot` (storage_scanner, invoked by `POST /api/telemetry/report-templates/scan-storage|scan-versions`), and `skill_unavailable` (data_runner + script_registry). Events are simultaneously counted in memory and appended to `{DEER_FLOW_HOME}/report-templates/.telemetry.log` (JSONL) so the charter §4.2 30-day fallback-cohort report can be reconstructed offline. Disable the JSONL sink with `DEER_FLOW_REPORT_TELEMETRY_LOG=0`. HTTP surface: `GET /api/telemetry/report-templates/summary` returns the live counter snapshot. See [docs/plans/2026-05-18-phase7-charter.md](../docs/plans/2026-05-18-phase7-charter.md) for the alert thresholds and [docs/admin-guide/report-templates.md](../docs/admin-guide/report-templates.md) §5 for indicator semantics + alert wiring.
 
 ### Tool System (`packages/harness/deerflow/tools/`)
 

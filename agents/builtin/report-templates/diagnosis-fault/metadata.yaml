@@ -1,0 +1,12 @@
+id: builtin-diagnosis-fault
+display_name: "故障诊断报告"
+description: |
+  面向具体故障场景的诊断报告：故障对象、时间窗口、现象、关联设备。
+  章节：故障概述 / 事件时间线 / 影响评估 / 候选根因（含证据） / 处理建议。
+  P2 优先级，§13.2 解释性报告：findings/evidence/confidence/human_review_required。
+dsl_version: "1"
+tags:
+  - diagnosis
+  - fault
+  - timeline
+  - interpretive

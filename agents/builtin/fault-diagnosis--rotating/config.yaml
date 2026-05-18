@@ -1,0 +1,32 @@
+name: fault-diagnosis--rotating
+display_name: "旋转机组故障诊断"
+description: "汽轮机 / 离心 / 轴流 / 齿轮 / 螺杆压缩机 / 齿轮箱的振动诊断"
+icon: "⚙️"
+parent: fault-diagnosis
+order: 2
+model: null
+tool_groups:
+  - bash
+exclude_tools: []
+skills:
+  - data-analyst
+  - vibration-fault-diagnosis
+  - ins-device-analysis
+  - ins-get-trend-data
+  - ins-get-waveform-data
+  - ins-get-orbit-data
+  - ins-extract-trend-features
+  - ins-extract-spectral-waveform-features
+  - ins-extract-orbit-centerline-features
+mcp_servers: null
+tags:
+  - diagnosis
+  - rotating
+  - turbine
+  - compressor
+starters:
+  - label: "诊断旋转机组振动异常"
+    prompt: "诊断旋转机组故障"
+    auto_start: true
+advanced:
+  subagent_enabled: false
