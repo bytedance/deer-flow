@@ -107,6 +107,7 @@ def make_authed_test_app(
 
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)
+    repo.delete = AsyncMock(return_value=None)
     app.state.thread_store = repo
 
     return app

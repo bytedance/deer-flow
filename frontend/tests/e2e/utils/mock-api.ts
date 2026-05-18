@@ -48,7 +48,7 @@ export type MockAPIOptions = {
  * for a real backend.
  */
 export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
-  const threads = options?.threads ?? [];
+  const threads = [...(options?.threads ?? [])];
   const agents = options?.agents ?? [];
 
   // Thread search — sidebar thread list & chats list page
@@ -94,6 +94,28 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ thread_id: MOCK_THREAD_ID }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Direct backend thread delete - used by the chat delete menu.
+  void page.route("**/api/threads/*", (route) => {
+    if (route.request().method() === "DELETE") {
+      const threadId = decodeURIComponent(
+        route.request().url().split("/").pop() ?? "",
+      );
+      const index = threads.findIndex((t) => t.thread_id === threadId);
+      if (index >= 0) {
+        threads.splice(index, 1);
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          message: `Deleted local thread data for ${threadId}`,
+        }),
       });
     }
     return route.fallback();

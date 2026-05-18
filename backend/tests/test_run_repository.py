@@ -92,6 +92,30 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_delete_by_thread(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1")
+        await repo.put("r2", thread_id="t1")
+        await repo.put("r3", thread_id="t2")
+        deleted = await repo.delete_by_thread("t1")
+        assert deleted == 2
+        assert await repo.get("r1") is None
+        assert await repo.get("r2") is None
+        assert await repo.get("r3") is not None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_delete_by_thread_owner_filter(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", user_id="alice")
+        await repo.put("r2", thread_id="t1", user_id="bob")
+        deleted = await repo.delete_by_thread("t1", user_id="alice")
+        assert deleted == 1
+        assert await repo.get("r1", user_id=None) is None
+        assert await repo.get("r2", user_id=None) is not None
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_delete_nonexistent_is_noop(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.delete("nope")  # should not raise
