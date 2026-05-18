@@ -1,0 +1,302 @@
+config_version: 11
+log_level: info
+token_usage:
+  enabled: true
+database:
+  backend: sqlite
+  sqlite_dir: .deer-flow/data
+auth:
+  enabled: true
+  jwt_secret: change-me-in-production-use-env-var
+  jwt_algorithm: HS256
+  jwt_expire_minutes: 1440
+  api_key_enabled: true
+  admin_username: admin
+  admin_password_hash: ''
+models:
+- name: gpt-5.4
+  display_name: gpt-5.4
+  use: langchain_openai:ChatOpenAI
+  model: gpt-5.4
+  api_key: $OPENAI_API_KEY
+  request_timeout: 600.0
+  max_retries: 2
+  max_tokens: 4096
+  temperature: 0.7
+  supports_vision: true
+  base_url: https://aiapi.shenguyun.com/v1
+- name: gpt-5.2
+  display_name: gpt-5.2
+  use: langchain_openai:ChatOpenAI
+  model: gpt-5.2
+  api_key: $OPENAI_API_KEY
+  request_timeout: 600.0
+  max_retries: 2
+  max_tokens: 4096
+  temperature: 0.7
+  supports_vision: true
+  base_url: https://aiapi.shenguyun.com/v1
+- name: deepseek-v4-pro
+  display_name: deepseek-v4-pro
+  use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  model: deepseek-v4-pro
+  api_key: $OPENAI_API_KEY
+  api_base: https://aiapi.shenguyun.com/v1
+  timeout: 600.0
+  max_retries: 2
+  max_tokens: 8192
+  supports_thinking: true
+  supports_vision: true
+  when_thinking_enabled:
+    extra_body:
+      thinking:
+        type: enabled
+  when_thinking_disabled:
+    extra_body:
+      thinking:
+        type: disabled
+tool_groups:
+- name: web
+- name: file:read
+- name: file:write
+- name: bash
+tools:
+- name: web_search
+  group: web
+  use: deerflow.community.ddg_search.tools:web_search_tool
+  max_results: 5
+- name: web_fetch
+  group: web
+  use: deerflow.community.jina_ai.tools:web_fetch_tool
+  timeout: 10
+- name: image_search
+  group: web
+  use: deerflow.community.image_search.tools:image_search_tool
+  max_results: 5
+- name: ls
+  group: file:read
+  use: deerflow.sandbox.tools:ls_tool
+- name: read_file
+  group: file:read
+  use: deerflow.sandbox.tools:read_file_tool
+- name: glob
+  group: file:read
+  use: deerflow.sandbox.tools:glob_tool
+  max_results: 200
+- name: grep
+  group: file:read
+  use: deerflow.sandbox.tools:grep_tool
+  max_results: 100
+- name: write_file
+  group: file:write
+  use: deerflow.sandbox.tools:write_file_tool
+- name: str_replace
+  group: file:write
+  use: deerflow.sandbox.tools:str_replace_tool
+- name: bash
+  group: bash
+  use: deerflow.sandbox.tools:bash_tool
+tool_search:
+  enabled: false
+uploads:
+  pdf_converter: auto
+  max_files: 10
+  max_file_size: 52428800
+  max_total_size: 104857600
+  auto_convert_documents: false
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  image: deer-flow-sandbox-features-tool:latest
+  environment:
+    INS_USERNAME: $INS_USERNAME
+    INS_PASSWORD: $INS_PASSWORD
+    FEATURES_TOOL_ROOT: /opt/features-tool
+  bash_output_max_chars: 20000
+  read_file_output_max_chars: 50000
+  ls_output_max_chars: 20000
+  allow_host_bash: false
+skills:
+  container_path: /mnt/skills
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null
+summarization:
+  enabled: true
+  model_name: null
+  trigger:
+  - type: tokens
+    value: 15564
+  keep:
+    type: messages
+    value: 10
+  trim_tokens_to_summarize: 15564
+  summary_prompt: null
+  preserve_recent_skill_count: 5
+  preserve_recent_skill_tokens: 25000
+  preserve_recent_skill_tokens_per_skill: 5000
+  skill_file_read_tool_names:
+  - read_file
+  - read
+  - view
+  - cat
+memory:
+  enabled: false
+  storage_path: memory.json
+  debounce_seconds: 30
+  model_name: null
+  max_facts: 100
+  fact_confidence_threshold: 0.7
+  injection_enabled: true
+  max_injection_tokens: 2000
+agents_api:
+  enabled: true
+skill_evolution:
+  enabled: false
+  moderation_model_name: null
+checkpointer:
+  type: sqlite
+  connection_string: checkpoints.db
+cost:
+  enabled: true
+  storage_backend: json
+  model_pricing:
+  - model: gpt-5.4
+    input_per_1k_tokens: 0.003
+    output_per_1k_tokens: 0.015
+  - model: gpt-5.2
+    input_per_1k_tokens: 0.003
+    output_per_1k_tokens: 0.015
+  budget:
+    default_daily_limit_usd: 50.0
+    default_monthly_limit_usd: 1000.0
+    alert_threshold_pct: 0.8
+    action_on_exceed: warn
+content_safety:
+  enabled: true
+  input_guard:
+    enabled: true
+    block_on_harmful: true
+    categories:
+    - hate
+    - sexual
+    - violence
+    - self-harm
+    - illegal
+    prompt_injection_detection: true
+  output_guard:
+    enabled: true
+    pii_detection: true
+    pii_action: mask
+    block_on_harmful: false
+  provider:
+    use: deerflow.content_safety.builtin:RegexPIIProvider
+    config:
+      action: mask
+      detect_credit_cards: true
+      detect_phones: true
+      detect_emails: true
+      detect_chinese_ids: true
+rag:
+  enabled: true
+  embedding_model: openai:text-embedding-v4
+  embedding_api_key: $OPENAI_API_KEY
+  embedding_base_url: https://aiapi.shenguyun.com/v1
+  vector_store_backend: chroma
+  chunk_size: 1000
+  chunk_overlap: 200
+  chunk_strategy: recursive
+  retrieval_top_k: 5
+  score_threshold: 0.0
+  reranker_enabled: false
+  injection_enabled: true
+  tool_enabled: true
+  max_injection_chunks: 3
+  max_injection_tokens: 2000
+run_events:
+  backend: memory
+  max_trace_content: 10240
+  track_token_usage: true
+audio_input:
+  enabled: true
+  microphone_enabled: true
+  file_transcription_enabled: true
+  default_locale: zh-CN
+  supported_locales:
+    - zh-CN
+    - en-US
+  accepted_mime_types:
+    - audio/mpeg
+    - audio/mp3
+    - audio/wav
+    - audio/x-wav
+    - audio/wave
+    - audio/webm
+    - audio/ogg
+    - audio/mp4
+    - audio/x-m4a
+    - audio/aac
+    - audio/flac
+  max_file_size: 26214400
+  provider:
+    use: deerflow.audio.providers.openai:OpenAITranscriptionProvider
+    config:
+      model: whisper-1
+      api_key: $OPENAI_API_KEY
+      base_url: https://aiapi.shenguyun.com/v1
+http_connectors:
+  default:
+    - name: list_datasets
+      description: "列举可用数据集"
+      url: "http://data-platform.internal/api/v1/datasets"
+      method: GET
+      auth_type: bearer
+      auth_token_env: DATA_PLATFORM_TOKEN
+      timeout_seconds: 30
+      max_response_bytes: 524288
+      cache_ttl_seconds: 300
+      max_retries: 1
+    - name: fetch_dataset
+      description: "获取指定数据集的数据"
+      url: "http://data-platform.internal/api/v1/datasets/query"
+      method: POST
+      auth_type: bearer
+      auth_token_env: DATA_PLATFORM_TOKEN
+      timeout_seconds: 60
+      max_response_bytes: 1048576
+      max_retries: 1
+    - name: dataset_schema
+      description: "获取数据集的字段结构"
+      url: "http://data-platform.internal/api/v1/datasets/schema"
+      method: GET
+      auth_type: bearer
+      auth_token_env: DATA_PLATFORM_TOKEN
+      timeout_seconds: 15
+      max_response_bytes: 262144
+      max_retries: 1
+rate_limit:
+  enabled: false
+  backend: memory
+  redis_url: ''
+  global_per_minute: 1000
+  tenant_per_minute: 100
+  user_per_minute: 60
+  llm_calls_per_minute: 50
+  tokens_per_minute: 100000
+
+# ============================================================================
+# Nacos Service Discovery (set to null or omit to disable)
+# ============================================================================
+# nacos:
+#   server_addr: "127.0.0.1:8848"
+#   namespace: ""
+#   service:
+#     name: "deer-flow-gateway"
+#     port: 8001
+
+# ============================================================================
+# Java RPC Client (set to null or omit to disable)
+# ============================================================================
+# rpc:
+#   services: []

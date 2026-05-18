@@ -906,6 +906,7 @@ dependencies = [
     { name = "readabilipy" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "tavily-python" },
+    { name = "tenacity" },
     { name = "tiktoken" },
 ]
 
@@ -975,6 +976,7 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'pgvector'", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
+    { name = "tenacity", specifier = ">=9.0.0" },
     { name = "tiktoken", specifier = ">=0.8.0" },
 ]
 provides-extras = ["ollama", "postgres", "pymupdf", "rag", "pgvector"]

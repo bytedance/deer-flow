@@ -37,6 +37,7 @@ dependencies = [
     "aiosqlite>=0.19",
     "alembic>=1.13",
     "langchain-text-splitters>=0.3.0",
+    "tenacity>=9.0.0",
 ]
 
 [project.optional-dependencies]

@@ -22,8 +22,10 @@ from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_
 from deerflow.config.http_connector_config import HttpConnectorConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.nacos_config import NacosConfig, load_nacos_config_from_dict
 from deerflow.config.rag_config import RagConfig, load_rag_config_from_dict
 from deerflow.config.rate_limit_config import RateLimitConfig, load_rate_limit_config_from_dict
+from deerflow.config.rpc_config import RpcConfig, load_rpc_config_from_dict
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skills_config import SkillsConfig
@@ -117,6 +119,8 @@ class AppConfig(BaseModel):
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
     http_connectors: dict[str, list[HttpConnectorConfig]] = Field(default_factory=dict, description="HTTP connectors keyed by tenant_id for external API integration")
+    nacos: NacosConfig | None = Field(default=None, description="Nacos service discovery configuration (null = disabled)")
+    rpc: RpcConfig | None = Field(default=None, description="Java RPC client configuration (null = disabled)")
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
@@ -214,6 +218,8 @@ class AppConfig(BaseModel):
         load_checkpointer_config_from_dict(config.checkpointer.model_dump() if config.checkpointer is not None else None)
         load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
         load_acp_config_from_dict({name: agent.model_dump() for name, agent in acp_agents.items()})
+        load_nacos_config_from_dict(config.nacos.model_dump() if config.nacos is not None else None)
+        load_rpc_config_from_dict(config.rpc.model_dump() if config.rpc is not None else None)
 
         if previous_checkpointer_config != config.checkpointer:
             # These runtime singletons derive their backend from checkpointer config.
