@@ -429,7 +429,6 @@ Optional, opt-in extension that layers RBAC, audit, approval, and OIDC SSO on to
 
 **Roadmap (not yet implemented)**:
 - M1 — RBAC tables, `RbacPermissionProvider`, role/permission CRUD routes
-- M3 — Approval workflow + `ApprovalTimeoutChecker`
 - M4 — `OIDCAuthProvider` for enterprise SSO
 
 **Audit subsystem (M2, landed)**:
@@ -511,7 +510,368 @@ lifespan hook (after package init completes) rather than in
   the agent-loop budget.
 
 **Roadmap (still not landed)**:
-- M3 — Approval workflow + `ApprovalTimeoutChecker`
+- M4 — `OIDCAuthProvider` for enterprise SSO
+
+**Approval subsystem (M3 data layer, landed)**:
+
+Human-in-the-loop guardrail for high-risk tool calls: an
+`ApprovalRuleEngine` decides whether a tool invocation needs human
+sign-off, the run is paused and a row is persisted, approvers are
+notified out-of-band (Web SSE / Feishu / WeCom), and a background
+`ApprovalTimeoutChecker` expires stale requests. **M3-8
+(`ApprovalMiddleware` agent hook), M3-9 (HTTP/webhook router),
+M3-10 (gateway lifespan wiring), M3-11 (true resume-run spawn +
+read-path compat), and the M3 e2e integration test are all landed**.
+
+- `enterprise.approval.models` — ORM rows (`Approval`,
+  `ApprovalDecision`) + Pydantic v2 DTOs (`ApprovalDTO`,
+  `ApprovalDecisionDTO`). Shared `Base` (not a new `declarative_base`).
+  Enums: `ApprovalStatus` (`PENDING`/`GRANTED`/`DENIED`/`EXPIRED`/`CANCELLED`
+  — `GRANTED`/`DENIED` chosen so the verb matches RBAC's
+  `APPROVAL_GRANT` permission), `ApprovalAction`
+  (`APPROVE`/`DENY`/`RESUBMIT`), `ApprovalUrgency`
+  (`NORMAL`/`URGENT`/`CRITICAL`). Indexes: `(status, deadline)` for the
+  timeout sweep, `(requested_by, requested_at)` for the per-user
+  dashboard, `(thread_id, requested_at)` for the resume-on-recovery
+  path. `revision_of` is a self-FK so resubmits link to the prior
+  request. `action_detail` / `checkpoint` are TEXT JSON columns.
+- `enterprise.approval.repository.ApprovalRepository` (ABC) →
+  `SqliteApprovalRepository` / `PostgresApprovalRepository` (single
+  shared `_SqlAlchemyApprovalRepository` body). `record_approval_decision`
+  inserts the decision row and aggregates distinct approvers in the
+  same transaction (`func.count(distinct(decided_by))` after flush),
+  applying `min_approvals` atomically. `DENY` is immediately terminal,
+  `RESUBMIT` is audit-only. `mark_expired` is a single UPDATE so the
+  timeout sweep is race-free. Terminal-state writes raise `ValueError`;
+  missing IDs raise `LookupError`.
+- `enterprise.approval.engine.ApprovalRuleEngine` — pure (no DB,
+  no clock) decision function over a list of `ApprovalRule`. Each rule
+  declares `action_type` (prefix-matched against the tool name with
+  colon boundaries — `sandbox` matches `sandbox` and `sandbox:bash`,
+  not `sandboxed`), an optional Python `condition` expression evaluated
+  by a hardened AST walker (`RestrictedExpressionEvaluator`) with a
+  small `_ALLOWED_NODES` whitelist, `min_approvals`, `urgency`, and
+  `approver_role` / `approver_users`. Subscripts are allowed but
+  constrained to constant indices (rejects `x[i]` and slices) — wide
+  enough for `tool_input["path"]` ergonomics, narrow enough that no
+  attacker-controlled index reaches the evaluator. `eval()` runs with
+  `{"__builtins__": {}}` as a defence-in-depth backstop. Broken rules
+  are skipped with a warning rather than crashing the agent loop.
+  Approver resolution goes through a constructor-injected `UserLookup`
+  Protocol (`get_users_by_role`) so the engine never imports
+  `app.UserRepository` — the app layer will pass in its own adapter.
+- `enterprise.approval.checkpoint` — `STATE_FIELD_POLICY: dict[str,
+  Literal["keep", "drop"]]` whitelist over every `ThreadState` field.
+  `serialize_state` round-trips `keep` fields and drops the rest with
+  a WARNING log for any unmapped field. A meta-test
+  (`test_all_thread_state_fields_have_policy`) walks `ThreadState.__mro__`
+  and fails if a new upstream field has no explicit classification —
+  silent drops on resume are how you ship subtly broken state, so the
+  invariant is enforced rather than documented. `keep`: `sandbox`,
+  `thread_data`, `title`, `artifacts`, `todos`, `uploaded_files`.
+  `drop`: `viewed_images` (megabytes of base64), `messages` /
+  `remaining_steps` / `jump_to` / `structured_response` (owned by
+  LangGraph / AgentState — duplicating them invites the two stores to
+  disagree). `save_suspend_point` / `restore` are thin repo wrappers.
+- `enterprise.approval.timeout.ApprovalTimeoutChecker` — long-lived
+  `asyncio.Task` that periodically calls `repo.mark_expired(now)` and
+  fans the resulting rows out to every registered notifier. Per-notifier
+  `try/except` so one bad webhook does not kill the loop. `start()` /
+  `close()` are both idempotent; `interval_seconds <= 0` is rejected
+  at construction (catches the "0 means disabled" misconfiguration
+  that would silently spin the loop).
+- `enterprise.approval.notifiers` — `ApprovalNotifier` Protocol
+  (`notify_requested` / `notify_decided` / `notify_expired`) with three
+  implementations: `WebNotifier` puts events on a bounded
+  `asyncio.Queue` (drops + warns on `QueueFull` rather than blocking
+  the loop), `FeishuNotifier` posts a `msg_type=interactive` card with
+  optional HMAC-SHA256 signing (`key = f"{timestamp}\n{secret}"`,
+  `msg = b""`, base64 — the documented Feishu algorithm), `WecomNotifier`
+  posts a `msgtype=markdown` card to a webhook URL with the secret
+  embedded in the key parameter (WeCom does not sign outbound
+  webhooks). Both support an `approval_url_template` for adding a
+  dashboard button / link.
+- `app.enterprise.webhooks.signature` — `verify_feishu` (SHA-256 hex
+  over `(timestamp + nonce + encrypt_key).encode + body`) and
+  `verify_wecom` (SHA-1 hex over `"".join(sorted([token, timestamp,
+  nonce, body_str]))`). Both use `hmac.compare_digest`, enforce
+  `MAX_SKEW_SECONDS = 300`, and accept a `now: float | None` parameter
+  so tests can pin the clock. Replay protection (nonce store) is
+  deliberately the router's responsibility, not the verifier's — the
+  module docstring spells out why.
+- Alembic revision `20260518_m3_approval` (down_revision
+  `20260518_m2_audit`) creates `approvals` + `approval_decisions` and
+  the four production indexes.
+- `enterprise.approval.guardrail_provider.ApprovalMiddleware` —
+  agent-loop hook (subclass of `langchain.agents.middleware.AgentMiddleware`,
+  NOT a `GuardrailProvider`; the OSS protocol has no state input and
+  cannot return `Command(goto=END)`). Per spike option (c), the
+  middleware self-implements `awrap_tool_call` and pulls
+  thread/user/run identifiers from `request.runtime` the same way
+  `AuditMiddleware` does. Two independent paths:
+    * Resume gate — checks `runtime.config["configurable"]["metadata"]["_approval_ids"]`,
+      treats an entry as a bypass *only if* the matching approval row
+      is `GRANTED` AND its stored `tool_input` equals the current
+      call's `tool_input`. Defends against an attacker re-using a
+      granted id for a different command. Reverse-evidence test:
+      `test_granted_approval_for_different_tool_input_does_not_bypass`.
+    * Engine call — on a fresh match, persists state via
+      `save_suspend_point`, fires every registered notifier inside its
+      own `try/except`, and returns `Command(goto=END,
+      update={"messages": [ToolMessage(...)]} )` to pause the run.
+  Engine misconfiguration fails *open* (run the tool) rather than
+  closed (deny everything until config is fixed) — matches the
+  `_safe_evaluate_condition` decision in the engine itself.
+- `enterprise.middlewares` — extends the M2 singleton story to
+  approval: `get_approval_repo` (lazy-built from
+  `ApprovalRepositoryConfig`), `set_approval_user_lookup` (gateway
+  registers an adapter that wraps the app-layer `UserRepository`,
+  preserving the harness boundary), `set_approval_notifiers` (gateway
+  passes the configured Web/Feishu/WeCom chain). Falls back to a
+  `_NullUserLookup` if the gateway hasn't wired one yet so the harness
+  still boots in tests.
+- `enterprise.config.ApprovalRepositoryConfig` — mirrors
+  `AuditStorageConfig`; defaults to `SqliteApprovalRepository` so a
+  single-process deployment works with no extra config.
+
+**Approval HTTP / webhook router (M3-9, landed)**:
+
+Read + write HTTP API mounted at `/api/enterprise/approvals`, plus
+two IM webhook endpoints for Feishu/WeCom card callbacks. All routes
+are wired through `app.enterprise.deps.get_approval_repo` /
+`get_approval_config` so the router and the M3-8 agent middleware
+share the same row store and config tree.
+
+- `app.enterprise.routers.approval` — 8 endpoints:
+  - `GET /` — paginated list with `status` / `user_id` / `thread_id`
+    filters; unknown status → 400 (the only place we surface the enum
+    parse error to clients).
+  - `GET /{id}` — single row; 404 on miss.
+  - `POST /{id}/approve` — `@require_permission("approval", "grant")`;
+    aggregates distinct approvers in `repo.record_approval_decision`,
+    and on transition to `GRANTED` calls `_spawn_resume_run` to
+    schedule a new run via `request.app.state.run_manager` with
+    `metadata={"_approval_ids": [id]}`. `LookupError` → 404,
+    `ValueError` (terminal-state guard) → 409. Response carries
+    `resumed_run_id` (nullable when no `run_manager` is wired).
+  - `POST /{id}/deny` — `approval:reject`; `DENY` is immediately
+    terminal; no resume run.
+  - `POST /{id}/resubmit` — audit-only (`approval:grant`); status
+    unchanged.
+  - `POST /{id}/cancel` — auth-only; the handler reads the row,
+    rejects if `requested_by != ctx.user.id` (403), then issues an
+    explicit `update(Approval).where(id==x, status==PENDING).values(
+    status=CANCELLED, ...)` via `repo._sf()` (chosen over adding a
+    one-off `cancel()` to the ABC). Non-PENDING → 409.
+  - `POST /webhook/feishu`, `POST /webhook/wecom` — NO `@require_auth`;
+    signature-authenticated via
+    `app.enterprise.webhooks.signature.verify_feishu` /
+    `verify_wecom`. Webhook secrets pulled from
+    `request.app.state.approval_webhook_secrets`
+    (`feishu_encrypt_key` / `wecom_token`). Missing secret → 503; bad
+    sig → 401; missing fields → 400. Webhooks reuse the same
+    `_record_and_respond` write path as the HTTP handlers so resume
+    semantics are identical.
+- `app.enterprise.deps` adds two request-scoped `Depends` helpers:
+  - `get_approval_config` — 503 when approval is disabled (parallels
+    `get_audit_config`).
+  - `get_approval_repo` — proxies to
+    `deerflow.enterprise.middlewares.get_approval_repo` so HTTP and
+    middleware writes hit the same backend.
+
+**Approval gateway lifespan wiring (M3-10, landed)**:
+
+The gateway owns four pieces that the harness can't see: the
+`UserLookup` adapter (it pulls from the app-layer users table), the
+notifier chain (network-side config), the long-lived
+`ApprovalTimeoutChecker`, and inbound webhook secrets. They're all
+wired in one place so `app/gateway/app.py` lifespan stays free of
+M3-specific imports.
+
+- `app.enterprise.lifecycle` — owns `start_approval_subsystem(app,
+  approval, *, user_repo)` and `stop_approval_subsystem(app)`. Both
+  are idempotent. Each sub-step is wrapped in `try / except`; a
+  failed enterprise sub-module degrades to "router returns 503"
+  rather than crashing OSS chat / runs paths.
+  1. **UserLookup adapter** — wraps the app-layer
+     `UserRepository` in `AppUserLookup` (projects `[u.id for u in
+     users]`, swallows repo exceptions to `[]`) and registers it via
+     `set_approval_user_lookup`. Must run before the timeout checker
+     so the engine doesn't see `_NullUserLookup`.
+  2. **Notifier chain** — calls `_build_notifier(cfg)` per entry.
+     `_build_notifier` resolves `cfg.use` via `resolve_class(...,
+     ApprovalNotifier)` and forwards `cfg.model_dump(exclude={"use"})`
+     as kwargs (Pydantic v2 `extra="allow"` carries
+     `webhook_url` / `sign_secret` / `approval_url_template`
+     through). Per-entry `try/except` so one bad notifier class
+     doesn't break the others.
+  3. **Timeout checker** — built from the same repo singleton the
+     middleware writes to (`get_approval_repo`), `start()` is
+     awaited, the instance is stored on
+     `app.state.approval_timeout_checker` so shutdown can `close()`
+     it.
+  4. **Webhook secrets** — read from
+     `DEER_FLOW_APPROVAL_FEISHU_ENCRYPT_KEY` /
+     `DEER_FLOW_APPROVAL_WECOM_TOKEN` env vars (rotation without a
+     config-file edit). Stored as `app.state.approval_webhook_secrets`
+     dict — always set, possibly empty, so the router can
+     distinguish "feature wired but no key" (503 per endpoint) from
+     "lifespan never ran" (AttributeError, 500).
+- `app.enterprise.adapters.user_lookup.AppUserLookup` — Protocol
+  adapter that wraps `app.gateway.auth.repositories.SQLiteUserRepository`
+  so the harness `ApprovalRuleEngine.get_users_by_role(role)` can
+  return `list[str]` user ids without importing `app.*`. Exceptions
+  from the repo degrade to `[]` rather than killing the engine.
+- `app.gateway.deps.get_user_repo()` — exposes the cached
+  `SQLiteUserRepository` instance the auth flow already builds. The
+  approval lifespan reads through this so notifier-side role lookups
+  share the same users table the auth flow does (no duplicate
+  engine, no second cache).
+- `app.gateway.app.py` lifespan — adds an M3 startup branch after
+  the audit router mount: when `enterprise.approval.enabled`, calls
+  `start_approval_subsystem` and `app.include_router(enterprise_
+  approval.router)`. Mirror teardown branch before RBAC teardown
+  calls `stop_approval_subsystem(app)` with the standard 30 s
+  timeout. Errors during start log + skip the router mount; OSS
+  paths remain available.
+- Both router mount paths (audit at M2, approval at M3) live in
+  lifespan, not `create_app()`, because importing
+  `app.enterprise.routers.*` transitively imports
+  `app.gateway.authz`, which re-enters the gateway package's
+  `__init__`. Mounting after package init avoids the circular
+  import.
+
+**Approval resume-run spawn (M3-11, landed)**:
+
+The approve endpoint must do more than persist a `RunRecord` — it
+has to actually relaunch the agent graph so the previously-paused
+tool call gets re-attempted with the granted approval id wired
+into the runtime metadata. M3-11 closes that loop and fixes a
+shape mismatch between the spike contract and the standard HTTP
+run-create path.
+
+- `app.enterprise.routers.approval._spawn_resume_run` — on a
+  successful approve transition (`PENDING -> GRANTED`), in
+  addition to `run_manager.create(...)`:
+  1. Resolves the lead-agent factory via
+     `services.resolve_agent_factory(None)` and normalizes a
+     blank graph input via `services.normalize_input(None)` so
+     the resume run starts cleanly from the checkpoint rather
+     than re-feeding the original user message.
+  2. Builds a `RunnableConfig` via
+     `services.build_run_config(thread_id, request_config=None,
+     metadata=None)`, then deep-sets
+     `configurable.metadata._approval_ids` to the granted id
+     (deduplicated with whatever was already there). This is the
+     shape `ApprovalMiddleware._approval_ids_from_metadata`
+     reads — the deep-set ensures the middleware's resume gate
+     fires regardless of what `build_run_config` produced.
+  3. Pulls `stream_bridge`, `run_context`, `run_manager` off
+     `request.app.state` / `deps.get_run_context(...)` and
+     schedules `worker.run_agent(bridge, run_mgr, record,
+     ctx=..., agent_factory=..., graph_input=..., config=...)`
+     via `asyncio.create_task`. The task handle is hung off
+     `record.task` so the standard run lifecycle (cancel /
+     join) keeps working.
+  4. Best-effort fallback: any failure in the spawn block is
+     logged and swallowed; the `RunRecord` row already exists
+     so operators can manually trigger a resume from the
+     dashboard if the launch fails (this keeps the test
+     environment, which doesn't have a real graph wired,
+     functional with record-only behavior).
+- `deerflow.enterprise.approval.guardrail_provider._approval_ids_from_metadata`
+  now accepts BOTH metadata shapes:
+  - `config["configurable"]["metadata"]["_approval_ids"]` — the
+    spike contract (M2.5 option c), what custom resume callers
+    should target.
+  - `config["metadata"]["_approval_ids"]` — what
+    `app.gateway.services.build_run_config` produces when the
+    HTTP run-create API forwards `body.metadata` (top-level on
+    the RunnableConfig per LangGraph convention).
+  Both shapes are walked, results deduplicated. This makes
+  `ApprovalMiddleware` work regardless of which surface launched
+  the resume run.
+- Tests added (2):
+  - `test_granted_approval_id_in_top_level_metadata_also_skips_engine`
+    — proves the middleware accepts the HTTP shape.
+  - `test_approve_spawns_resume_run_with_approval_id_in_configurable_metadata`
+    — end-to-end intercept of `worker.run_agent` to verify
+    `_spawn_resume_run` launches the graph with
+    `configurable.metadata._approval_ids == [approval.id]`.
+  Total enterprise test count: **239 passing**.
+
+**Tests for M3 data + middleware + router + lifespan + spawn + e2e (241 passing)**:
+- `tests/enterprise/test_approval_repository.py` — round-trip,
+  filter combinations, decision aggregation (single / multi-approver
+  threshold, duplicate decider dedup), `mark_expired` race-free path,
+  terminal-state guard.
+- `tests/enterprise/test_approval_engine.py` — rule matching,
+  prefix-with-colon-boundary semantics, urgency selection, approver
+  resolution via `UserLookup`, graceful degradation when lookup fails.
+- `tests/enterprise/test_approval_engine_condition.py` — the
+  `RestrictedExpressionEvaluator` whitelist: accepted shapes (literals,
+  comparisons, `and`/`or`/`not`, `in`, constant-indexed subscripts) and
+  rejected shapes (calls, attribute access, variable / slice
+  subscripts, walrus, comprehensions); reverse-evidence test that the
+  walker would crash on a payload like `__import__('os')` if the
+  whitelist were widened.
+- `tests/enterprise/test_approval_checkpoint.py` — meta-test over
+  `ThreadState.__mro__`, `keep` / `drop` behaviour, unknown-field
+  warning, full round-trip through SQLite via `save_suspend_point` →
+  `restore`.
+- `tests/enterprise/test_approval_timeout.py` — `_tick` fans out to
+  every notifier, notifier failure isolation, `start` / `close`
+  idempotency, end-to-end loop with a 1-second interval to prove the
+  task actually fires.
+- `tests/enterprise/test_approval_notifiers.py` — `WebNotifier`
+  queue-full warning, `FeishuNotifier` payload shape (unsigned vs
+  signed, cross-checked against an independent HMAC implementation),
+  optional dashboard button, post-failure propagation; `WecomNotifier`
+  markdown shape + dashboard link.
+- `tests/enterprise/test_webhook_signature.py` — Feishu and WeCom
+  signing cross-checked against second-source reference helpers
+  (rejects wrong key / wrong body / wrong sort order / stale
+  timestamp / non-UTF-8 body / non-numeric timestamp), and
+  documents that replay protection is deliberately the router's
+  responsibility.
+- `tests/enterprise/test_approval_guardrail_provider.py` —
+  `ApprovalMiddleware` paths: no rule match passes through, fresh
+  match returns `Command(goto=END)` with the row + checkpoint + a
+  notification fired, granted-id-in-metadata skips the engine,
+  reverse-evidence that a granted id for a *different* `tool_input`
+  does NOT skip, pending-status-id does NOT skip, notifier failure
+  isolation, engine exception fails open, non-dict args coerced,
+  checkpoint-write failure does not block the pause.
+- `tests/enterprise/test_approval_routes.py` — 20 router tests:
+  list pagination/filter/400, get hit + 404, approve happy +
+  two-eyes threshold + 409 terminal + 404 missing + resume-run
+  metadata round-trip, deny terminal (no resume), resubmit
+  audit-only, cancel by requester + 403 for non-requester + 409 on
+  non-PENDING, Feishu webhook valid/bad-sig/missing-key/missing-
+  fields, WeCom webhook valid/bad-sig. Uses an in-memory repo with
+  a `_StubSession` that cracks the cancel UPDATE's compiled SQL
+  params instead of running a real SQLAlchemy session.
+- `tests/enterprise/test_approval_lifecycle.py` — 7 lifespan
+  tests: start wires `AppUserLookup` / notifier chain / timeout
+  checker / webhook secrets correctly; stop closes the checker and
+  clears harness singletons; stop is idempotent on a fresh app;
+  empty webhook env yields `{}` not `None`; a broken notifier
+  `use` path is skipped without aborting startup;
+  `AppUserLookup` projects rows to `[u.id, ...]` and swallows
+  repo failures to `[]`. Uses `monkeypatch` to bypass
+  `resolve_class` and the harness `get_approval_repo` so tests
+  don't need a real `EnterpriseDatabase`.
+- `tests/enterprise/integration/test_approval_e2e.py` — 2 e2e
+  tests over a real `SqliteApprovalRepository` +
+  `SqliteAuditStorage` sharing one async SQLAlchemy engine.
+  Happy path drives a `bash` call through `AuditMiddleware` →
+  `ApprovalMiddleware` → engine intercept (pending row +
+  notifier fire + `Command(goto=END)`) → repo grant → resume
+  call with `_approval_ids` in `configurable.metadata` → handler
+  runs, audit records `SANDBOX_COMMAND_EXECUTED`, no second
+  pending row. Reverse-evidence test: a DENIED id in metadata
+  does NOT bypass — a NEW pending row is created. This is the
+  acceptance test for the M3 milestone.
 
 **Tests for M0 foundation**:
 - `tests/test_lead_agent_middleware_order.py` — locks the chain order contract (`custom_middlewares` injected immediately before `ClarificationMiddleware`)
