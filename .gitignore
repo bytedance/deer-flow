@@ -40,6 +40,8 @@ coverage/
 .claude/
 # skills/custom/*
 logs/
+!frontend/src/app/admin/logs/
+!frontend/src/app/admin/logs/**
 log/
 debug.log
 
