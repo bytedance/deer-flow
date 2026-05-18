@@ -66,3 +66,33 @@ async def test_dry_run_lists_admins_without_modifying(repo) -> None:
     alice = await repo.get_user_by_email("alice@example.com")
     assert alice is not None
     assert alice.roles == []
+
+
+@pytest.mark.asyncio
+async def test_real_run_assigns_admin_role(repo) -> None:
+    await repo.create_user(_u("alice@example.com", system_role="admin"))
+    await repo.create_user(_u("bob@example.com", system_role="user"))
+
+    report = await migrate_admins(repo, dry_run=False)
+
+    assert report["upgraded"] == 1
+    alice = await repo.get_user_by_email("alice@example.com")
+    bob = await repo.get_user_by_email("bob@example.com")
+    assert alice is not None and alice.roles == ["admin"]
+    assert bob is not None and bob.roles == []  # untouched
+
+
+@pytest.mark.asyncio
+async def test_idempotent_does_not_overwrite_existing_roles(repo) -> None:
+    """An admin who's been hand-curated to roles=['admin', 'auditor'] must NOT be reset."""
+    await repo.create_user(
+        _u("alice@example.com", system_role="admin", roles=["admin", "auditor"]),
+    )
+
+    report = await migrate_admins(repo, dry_run=False)
+
+    assert report["upgraded"] == 0
+    assert report["skipped"] == 1
+    alice = await repo.get_user_by_email("alice@example.com")
+    assert alice is not None
+    assert sorted(alice.roles) == ["admin", "auditor"]  # preserved
