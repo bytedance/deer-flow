@@ -121,9 +121,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             internal_user = get_internal_user()
 
         # If the outer create_auth_middleware already validated a Bearer token
-        # (API key or JWT from Authorization header), pass through — auth is
+        # (API key or JWT from Authorization header) or an ins_base token
+        # (via InsBaseAuthProvider.get_user()), pass through — auth is
         # already handled and request.state.user is set.
-        if internal_user is None and not request.cookies.get("access_token"):
+        if internal_user is None:
             if hasattr(request.state, "user") and request.state.user is not None:
                 state_user = request.state.user
                 if isinstance(state_user, dict):
@@ -134,15 +135,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 finally:
                     reset_current_user(token)
 
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "detail": AuthErrorResponse(
-                        code=AuthErrorCode.NOT_AUTHENTICATED,
-                        message="Authentication required",
-                    ).model_dump()
-                },
-            )
+            if not request.cookies.get("access_token"):
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": AuthErrorResponse(
+                            code=AuthErrorCode.NOT_AUTHENTICATED,
+                            message="Authentication required",
+                        ).model_dump()
+                    },
+                )
 
         # Strict JWT validation: reject junk/expired tokens with 401
         # right here instead of silently passing through. This closes
