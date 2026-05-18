@@ -6,8 +6,8 @@ import pytest
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.runtime.runs import worker
 from deerflow.runtime.runs.manager import RunManager
-from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import RunContext, _agent_factory_supports_app_config, _build_runtime_context, _install_runtime_context, _rollback_to_pre_run_checkpoint, run_agent
 
 
@@ -55,7 +55,7 @@ def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_co
 
 
 @pytest.mark.anyio
-async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
+async def test_run_agent_threads_explicit_app_config_into_config_only_factory(monkeypatch: pytest.MonkeyPatch):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     bridge = SimpleNamespace(
@@ -65,6 +65,16 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
     )
     app_config = object()
     captured: dict[str, object] = {}
+    scheduled_tasks: list[asyncio.Task] = []
+    original_create_task = asyncio.create_task
+
+    def capture_task(coro):
+        task = original_create_task(coro)
+        scheduled_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(worker, "_TERMINAL_RUN_RETENTION_SECONDS", 0)
+    monkeypatch.setattr(worker.asyncio, "create_task", capture_task)
 
     class DummyAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
@@ -84,13 +94,14 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
         graph_input={},
         config={},
     )
-    await asyncio.sleep(0)
+    assert scheduled_tasks
+    await asyncio.gather(*scheduled_tasks)
 
     assert captured["factory_context"]["app_config"] is app_config
     assert captured["astream_context"]["app_config"] is app_config
-    assert run_manager.get(record.run_id).status == RunStatus.success
+    assert run_manager.get(record.run_id) is None
     bridge.publish_end.assert_awaited_once_with(record.run_id)
-    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=0)
 
 
 @pytest.mark.anyio

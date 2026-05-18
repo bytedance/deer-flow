@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+_TERMINAL_RUN_RETENTION_SECONDS = 60.0
 
 
 def _build_runtime_context(
@@ -400,7 +401,14 @@ async def run_agent(
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
         await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        asyncio.create_task(
+            _cleanup_completed_run_with_logging(
+                run_id,
+                bridge=bridge,
+                run_manager=run_manager,
+                delay=_TERMINAL_RUN_RETENTION_SECONDS,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +425,39 @@ async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_nam
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+async def _cleanup_completed_run(
+    run_id: str,
+    *,
+    bridge: StreamBridge,
+    run_manager: RunManager,
+    delay: float,
+) -> None:
+    """Expire terminal run metadata and stream history on the same schedule."""
+    if delay > 0:
+        await asyncio.sleep(delay)
+    await run_manager.cleanup(run_id, delay=0)
+    await bridge.cleanup(run_id, delay=0)
+
+
+async def _cleanup_completed_run_with_logging(
+    run_id: str,
+    *,
+    bridge: StreamBridge,
+    run_manager: RunManager,
+    delay: float,
+) -> None:
+    """Run deferred cleanup without letting background task failures go silent."""
+    try:
+        await _cleanup_completed_run(
+            run_id,
+            bridge=bridge,
+            run_manager=run_manager,
+            delay=delay,
+        )
+    except Exception:
+        logger.exception("Run %s deferred cleanup failed", run_id)
 
 
 async def _rollback_to_pre_run_checkpoint(
