@@ -44,6 +44,7 @@ WORKDIR /app
 
 # Copy backend source code
 COPY backend ./backend
+COPY agents ./agents
 
 # Install dependencies with cache mount
 # When UV_EXTRAS is set (e.g. "postgres"), installs optional dependencies.

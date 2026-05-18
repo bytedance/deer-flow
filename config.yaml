@@ -288,21 +288,21 @@ rate_limit:
 # ============================================================================
 # Nacos Service Discovery (set to null or omit to disable)
 # ============================================================================
-# nacos:
-#   server_addr: "127.0.0.1:8848"
-#   namespace: ""
-#   username: "nacos"          # Nacos 登录用户名（可选，不配置则不认证）
-#   password: "$NACOS_PASSWORD"  # Nacos 登录密码（可选，支持 $ENV_VAR 语法）
-#   service:
-#     name: "deer-flow-gateway"
-#     port: 8001
+nacos:
+  server_addr: "182.92.187.198:8848"
+  namespace: "385e3ff9-08b9-4f24-b7df-a9c6a323a9ff"
+  username: "nacos"          # Nacos 登录用户名（可选，不配置则不认证）
+  password: "$NACOS_PASSWORD"  # Nacos 登录密码（可选，支持 $ENV_VAR 语法）
+  service:
+    name: "deer-flow-gateway"
+    port: $GATEWAY_PORT
 
 # ============================================================================
 # Java RPC Client (set to null or omit to disable)
 # ============================================================================
-# rpc:
-#   default_timeout: 30.0
-#   services:
-#     - name: ins-bus-rpc
-#       discovery: ins-bus-rpc     # Nacos 服务发现名称（与 base_url 二选一）
-#       # base_url: "http://localhost:8080"  # 直连模式（与 discovery 二选一）
+rpc:
+  default_timeout: 30.0
+  services:
+    - name: ins-bus-rpc
+      discovery: ins-bus-rpc     # Nacos 服务发现名称（与 base_url 二选一）
+      # base_url: "http://localhost:8080"  # 直连模式（与 discovery 二选一）
