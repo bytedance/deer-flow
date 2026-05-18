@@ -7,6 +7,7 @@ database:
   sqlite_dir: .deer-flow/data
 auth:
   enabled: true
+  rsa_public_key: $RSA_PUBLIC
   jwt_secret: change-me-in-production-use-env-var
   jwt_algorithm: HS256
   jwt_expire_minutes: 1440
