@@ -1,0 +1,17 @@
+name: defect-closure
+display_name: "缺陷闭环"
+description: "擅长缺陷跟踪、处置方案制定、闭环验证管理"
+icon: "✅"
+order: 5
+model: null
+tool_groups:
+  - bash
+exclude_tools: []
+skills: []
+mcp_servers: null
+tags:
+  - defect
+  - closure
+  - tracking
+advanced:
+  subagent_enabled: false

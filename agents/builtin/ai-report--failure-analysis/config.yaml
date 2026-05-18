@@ -1,0 +1,13 @@
+name: ai-report--failure-analysis
+display_name: "失效分析报告"
+description: "根因分析与改进建议"
+icon: "⚠️"
+parent: ai-report
+order: 4
+model: null
+tool_groups:
+  - bash
+mcp_servers: null
+tags:
+  - report
+  - failure-analysis

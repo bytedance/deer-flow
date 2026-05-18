@@ -1,0 +1,17 @@
+name: ai-report
+display_name: "AI报告"
+description: "擅长自动生成设备状态报告、巡检报告、分析报告"
+icon: "📋"
+type: group
+order: 4
+model: null
+tool_groups:
+  - bash
+exclude_tools: []
+skills: []
+mcp_servers: null
+tags:
+  - report
+  - document
+advanced:
+  subagent_enabled: false

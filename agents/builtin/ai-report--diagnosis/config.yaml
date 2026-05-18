@@ -1,0 +1,13 @@
+name: ai-report--diagnosis
+display_name: "诊断报告"
+description: "故障诊断分析及结论"
+icon: "🔍"
+parent: ai-report
+order: 3
+model: null
+tool_groups:
+  - bash
+mcp_servers: null
+tags:
+  - report
+  - diagnosis

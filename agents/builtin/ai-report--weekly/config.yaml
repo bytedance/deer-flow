@@ -1,0 +1,19 @@
+name: ai-report--weekly
+display_name: "周报"
+description: "周度运行趋势与异常统计"
+icon: "📊"
+parent: ai-report
+order: 2
+model: null
+tool_groups:
+  - bash
+skills:
+  - data-analyst
+mcp_servers: null
+tags:
+  - report
+  - weekly
+starters:
+  - label: "生成设备运行周报"
+    prompt: "生成周报"
+    auto_start: true

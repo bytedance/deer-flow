@@ -1,0 +1,16 @@
+name: anomaly-judgment
+display_name: "异常研判"
+description: "擅长监测数据异常识别、趋势预警、状态评估"
+icon: "🔴"
+order: 2
+model: null
+tool_groups:
+  - bash
+exclude_tools: []
+skills: []
+mcp_servers: null
+tags:
+  - anomaly
+  - judgment
+advanced:
+  subagent_enabled: false

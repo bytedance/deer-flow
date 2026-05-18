@@ -1,0 +1,15 @@
+name: ai-report--trend
+display_name: "趋势分析报告"
+description: "长期趋势与预测"
+icon: "📉"
+parent: ai-report
+order: 6
+model: null
+tool_groups:
+  - bash
+skills:
+  - data-analyst
+mcp_servers: null
+tags:
+  - report
+  - trend
