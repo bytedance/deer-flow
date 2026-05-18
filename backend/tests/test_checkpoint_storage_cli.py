@@ -5,6 +5,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 _MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "checkpoint_storage.py"
 _SPEC = importlib.util.spec_from_file_location("checkpoint_storage", _MODULE_PATH)
 assert _SPEC is not None
@@ -251,6 +253,131 @@ database:
     assert payload["source"] == "legacy checkpointer"
     assert payload["app_thread_count"] == 2
     assert payload["orphan_checkpoint_thread_count"] == 0
+
+
+def test_cli_report_resolves_database_path_from_project_root(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    project_root = tmp_path / "project"
+    other_cwd = tmp_path / "other"
+    project_root.mkdir()
+    other_cwd.mkdir()
+
+    db_path = project_root / ".deer-flow" / "data" / "deerflow.db"
+    db_path.parent.mkdir(parents=True)
+    _create_checkpoint_db(db_path)
+    config_path = project_root / "config.yaml"
+    config_path.write_text(
+        """
+database:
+  backend: sqlite
+  sqlite_dir: .deer-flow/data
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project_root))
+    monkeypatch.chdir(other_cwd)
+
+    exit_code = checkpoint_storage.main(["report", "--config", str(config_path), "--json"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["source"] == "database"
+    assert payload["checkpoint_db_path"] == str(db_path)
+
+
+def test_cli_report_resolves_legacy_checkpointer_from_runtime_home(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    project_root = tmp_path / "project"
+    other_cwd = tmp_path / "other"
+    project_root.mkdir()
+    other_cwd.mkdir()
+
+    checkpoint_db = project_root / ".deer-flow" / "checkpoints.db"
+    checkpoint_db.parent.mkdir(parents=True)
+    _create_checkpoint_db(checkpoint_db)
+    _create_app_db(project_root / ".deer-flow" / "data" / "deerflow.db", ["thread-a"])
+    config_path = project_root / "config.yaml"
+    config_path.write_text(
+        """
+checkpointer:
+  type: sqlite
+  connection_string: checkpoints.db
+database:
+  backend: sqlite
+  sqlite_dir: .deer-flow/data
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project_root))
+    monkeypatch.chdir(other_cwd)
+
+    exit_code = checkpoint_storage.main(["report", "--config", str(config_path), "--json"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["source"] == "legacy checkpointer"
+    assert payload["checkpoint_db_path"] == str(checkpoint_db)
+
+
+def test_inspect_checkpoint_storage_closes_read_connections(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "deerflow.db"
+    _create_checkpoint_db(db_path)
+    opened: list[sqlite3.Connection] = []
+    original_connect = checkpoint_storage._connect_read_only
+
+    def tracking_connect(path: Path) -> sqlite3.Connection:
+        conn = original_connect(path)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(checkpoint_storage, "_connect_read_only", tracking_connect)
+
+    checkpoint_storage.inspect_checkpoint_storage(db_path)
+
+    assert opened
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            conn.execute("SELECT 1")
+
+
+def test_prune_checkpoint_storage_closes_write_connection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "deerflow.db"
+    _create_checkpoint_db(db_path)
+    opened: list[sqlite3.Connection] = []
+    original_connect = checkpoint_storage._connect_read_write
+
+    def tracking_connect(path: Path) -> sqlite3.Connection:
+        conn = original_connect(path)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(checkpoint_storage, "_connect_read_write", tracking_connect)
+
+    checkpoint_storage.prune_checkpoint_storage(
+        db_path,
+        keep=1,
+        dry_run=False,
+    )
+
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        opened[0].execute("SELECT 1")
 
 
 def test_prune_dry_run_does_not_delete_rows(tmp_path: Path) -> None:

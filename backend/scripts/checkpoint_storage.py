@@ -16,10 +16,13 @@ import os
 import sqlite3
 import sys
 from collections import defaultdict
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from deerflow.config.runtime_paths import resolve_path, runtime_home
 
 CHECKPOINT_TABLES = ("checkpoints", "checkpoint_blobs", "writes")
 THREAD_META_TABLE = "threads_meta"
@@ -383,12 +386,6 @@ def _compact_sqlite(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
-def _runtime_home() -> Path:
-    if env_home := os.getenv("DEER_FLOW_HOME"):
-        return Path(env_home).expanduser().resolve()
-    return Path.cwd().resolve() / ".deer-flow"
-
-
 def _resolve_config_path(config_path: str | None) -> Path:
     if config_path:
         path = Path(config_path).expanduser()
@@ -423,15 +420,15 @@ def _env_value(value: Any) -> Any:
 
 def _resolve_project_path(raw: str) -> Path:
     path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = Path.cwd().resolve() / path
-    return path.resolve()
+    if path.is_absolute():
+        return path.resolve()
+    return resolve_path(path)
 
 
 def _resolve_base_path(raw: str) -> Path:
     path = Path(raw).expanduser()
     if not path.is_absolute():
-        path = _runtime_home() / path
+        path = runtime_home() / path
     return path.resolve()
 
 
@@ -479,7 +476,7 @@ def inspect_checkpoint_storage(
     checkpoint_db_path = checkpoint_db_path.expanduser().resolve()
     app_db_path = app_db_path.expanduser().resolve() if app_db_path is not None else checkpoint_db_path
 
-    with _connect_read_only(checkpoint_db_path) as checkpoint_conn:
+    with closing(_connect_read_only(checkpoint_db_path)) as checkpoint_conn:
         checkpoint_threads = _distinct_thread_ids(checkpoint_conn, "checkpoints")
         table_stats = _inspect_tables(checkpoint_conn)
         top_threads = _build_top_threads(
@@ -493,11 +490,11 @@ def inspect_checkpoint_storage(
     app_threads: set[str] = set()
     app_db_exists = app_db_path.exists() if app_db_path is not None else False
     if app_db_path == checkpoint_db_path:
-        with _connect_read_only(checkpoint_db_path) as app_conn:
+        with closing(_connect_read_only(checkpoint_db_path)) as app_conn:
             app_thread_table_exists = _table_exists(app_conn, THREAD_META_TABLE)
             app_threads = _distinct_thread_ids(app_conn, THREAD_META_TABLE)
     elif app_db_path is not None and app_db_path.exists():
-        with _connect_read_only(app_db_path) as app_conn:
+        with closing(_connect_read_only(app_db_path)) as app_conn:
             app_thread_table_exists = _table_exists(app_conn, THREAD_META_TABLE)
             app_threads = _distinct_thread_ids(app_conn, THREAD_META_TABLE)
 
@@ -542,7 +539,7 @@ def prune_checkpoint_storage(
     before_shm_size = _file_size(Path(str(checkpoint_db_path) + "-shm"))
 
     conn_factory = _connect_read_only if dry_run else _connect_read_write
-    with conn_factory(checkpoint_db_path) as conn:
+    with closing(conn_factory(checkpoint_db_path)) as conn:
         if not _table_exists(conn, "checkpoints"):
             raise CheckpointStorageError("SQLite database does not contain a checkpoints table")
         has_checkpoint_blobs = _table_exists(conn, "checkpoint_blobs")
