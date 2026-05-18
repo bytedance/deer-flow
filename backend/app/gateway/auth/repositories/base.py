@@ -100,3 +100,29 @@ class UserRepository(ABC):
             User if found, None otherwise
         """
         raise NotImplementedError
+
+    @abstractmethod
+    async def get_users_by_role(self, role: str) -> list[User]:
+        """Return every user that holds ``role`` (plan §3 M1-6, RFC §11.1 #8).
+
+        Used by:
+
+        * ``GET /api/enterprise/rbac/users/{id}/role`` reverse look-ups,
+        * ``ApprovalRuleEngine._resolve_approvers`` (M3) to find the
+          users that can approve a given rule.
+
+        A user "holds" a role when either:
+
+        - ``role`` appears in their ``roles`` JSON list, OR
+        - their legacy ``system_role`` maps to the requested role
+          (``"admin"`` ↔ ``"admin"``, ``"user"`` ↔ ``"member"``).
+
+        The double-source lookup means M1 routes work both for users
+        provisioned through the enterprise RBAC UI (writes ``roles``)
+        and for legacy accounts that only have ``system_role``.
+
+        Returns an empty list when the role is unknown — callers are
+        expected to ``raise HTTPException(404)`` themselves if that is
+        the desired behaviour.
+        """
+        raise NotImplementedError

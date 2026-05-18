@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Index, String, text
+from sqlalchemy import Boolean, DateTime, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -31,6 +31,20 @@ class UserRow(Base):
     # "admin" | "user" — kept as plain string to avoid ALTER TABLE pain
     # when new roles are introduced.
     system_role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
+
+    # Enterprise RBAC roles (RFC §11.5 / plan M1-6). Stored as a JSON
+    # array of role-id strings, e.g. ``'["admin","viewer"]'``. The
+    # column is NOT NULL because every row needs at least an empty list
+    # — that lets ``RbacPermissionProvider._resolve_roles`` use the
+    # legacy ``system_role`` fallback path without first guarding for
+    # ``None``. Default ``'[]'`` keeps behaviour parity for users
+    # created before RBAC was introduced.
+    roles: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+        server_default="[]",
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

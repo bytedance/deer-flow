@@ -173,14 +173,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
-    # Enterprise extension lifecycle hook (plan M0-11).
+    # Enterprise extension lifecycle hook (plan M0-11 / M1-9).
     #
     # Sub-modules (RBAC permission provider, audit storage, approval
     # timeout checker, OIDC client) register themselves here in M1-M4.
-    # The M0 implementation only logs that the extension is enabled — no
-    # routes are mounted and no providers are registered yet. Keeping
-    # this branch wired now means later milestones add code without
-    # touching this file again.
+    # M1 wires the RBAC ``PermissionProvider`` so existing routes pick
+    # up enterprise permission resolution as soon as the gateway
+    # finishes startup. Subsequent milestones extend this branch with
+    # audit storage, approval timeout checker, and the OIDC adapter.
     enterprise_config = app.state.config.enterprise
     if enterprise_config.enabled:
         logger.info(
@@ -190,7 +190,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             enterprise_config.approval.enabled,
             enterprise_config.auth.oidc.enabled,
         )
-        # TODO(M1): if enterprise_config.rbac.enabled, init enterprise DB and register RbacPermissionProvider.
+
+        if enterprise_config.rbac.enabled:
+            # Lazy import keeps app.gateway.app importable when the
+            # enterprise extra is not installed (defence in depth — the
+            # package ships with deerflow today, but we may split it
+            # later).
+            from app.enterprise.deps import get_enterprise_db, get_rbac_checker
+            from app.gateway.authz import set_permission_provider
+
+            await get_enterprise_db()  # liveness check + initialise pool
+            set_permission_provider(await get_rbac_checker())
+            logger.info("RBAC PermissionProvider registered — enterprise permissions are live")
+
         # TODO(M2): if enterprise_config.audit.enabled, init AuditStorage + signer.
         # TODO(M3): if enterprise_config.approval.enabled, start ApprovalTimeoutChecker.
         # TODO(M4): if enterprise_config.auth.oidc.enabled, register OIDCAuthProvider.
@@ -229,6 +241,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to stop channel service")
+
+        # Enterprise teardown (plan M1-9). Mirror the startup branch so
+        # the engine is disposed cleanly. Skipped when the extension was
+        # never initialised so test paths that disable the feature do not
+        # pay any cost.
+        if enterprise_config.enabled and enterprise_config.rbac.enabled:
+            try:
+                from app.enterprise.deps import _reset_for_tests, get_enterprise_db
+                from app.gateway.authz import set_permission_provider
+
+                db = await get_enterprise_db()
+                await asyncio.wait_for(db.close(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+                set_permission_provider(None)
+                _reset_for_tests()  # also clears the cached RbacPermissionProvider
+            except TimeoutError:
+                logger.warning(
+                    "Enterprise database shutdown exceeded %.1fs; proceeding with worker exit.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.exception("Failed to dispose enterprise database")
 
     logger.info("Shutting down API Gateway")
 
@@ -390,6 +423,31 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
+
+    # Enterprise extension routes (plan M1-9 / RFC §9.4). Mounted only
+    # when the extension is enabled so disabling the feature flag fully
+    # removes the route surface — operators who never opt in have no
+    # extra OpenAPI noise. Each sub-router has its own ``enabled`` guard
+    # for individual modules (rbac in M1, audit in M2, ...).
+    #
+    # ``create_app`` runs before ``lifespan`` resolves ``AppConfig``, so
+    # we load it explicitly here. ``get_app_config`` caches internally
+    # and the call is cheap.
+    try:
+        app_config_for_routes = get_app_config()
+    except Exception:
+        # Defensive: if config resolution fails this early, the gateway
+        # is going to crash anyway in lifespan. We let create_app finish
+        # and log to make that diagnosable instead of swallowing it.
+        logger.exception("Failed to resolve AppConfig during create_app; enterprise routes will NOT be mounted")
+        app_config_for_routes = None
+    if app_config_for_routes is not None:
+        enterprise_config = app_config_for_routes.enterprise
+        if enterprise_config.enabled and enterprise_config.rbac.enabled:
+            from app.enterprise.routers.rbac import router as rbac_router
+
+            app.include_router(rbac_router, prefix="/api/enterprise/rbac")
+            logger.info("Mounted enterprise RBAC router at /api/enterprise/rbac")
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
