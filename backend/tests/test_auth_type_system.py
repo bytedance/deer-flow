@@ -215,7 +215,7 @@ def test_login_response_model_fields():
     from app.gateway.routers.auth import LoginResponse
 
     fields = set(LoginResponse.model_fields.keys())
-    assert fields == {"expires_in", "needs_setup"}
+    assert fields == {"expires_in", "needs_setup", "tenant_id"}
 
 
 # ── AuthConfig in Route ──────────────────────────────────────────────

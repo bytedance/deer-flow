@@ -26,6 +26,9 @@ from _stub_helpers import (
     write_json,
 )
 
+import _data_provider_impls  # noqa: F401 — register-only
+from _data_providers import fetch_with_fallback
+
 
 SCHEMA_VERSION = "1"
 
@@ -115,15 +118,23 @@ def main() -> int:
         return emit_error("INVALID_ISSUE_IDS", "--issue-ids cannot be empty")
 
     today = date.today()
-    items = [_build_issue(idx, iid, today, args.owner_department) for idx, iid in enumerate(ids)]
+    result = fetch_with_fallback(
+        source="closure_items",
+        fetch_args={
+            "issue_ids": ids,
+            "owner_department": args.owner_department,
+            "verification_period": args.verification_period,
+        },
+    )
+    items = result.data.get("closure_items") or []
 
     output = {
         "schema_version": SCHEMA_VERSION,
         "verification_period": args.verification_period,
         "owner_department": args.owner_department,
         "closure_items": items,
-        "data_source": "demo_fallback",
-        "_meta": {"stub": True, "generated_at": iso_now(), "as_of": today.isoformat()},
+        "data_source": result.data_source,
+        "_meta": {"stub": True, "generated_at": iso_now(), "as_of": today.isoformat(), "provider_notes": result.notes},
     }
     write_json(Path(args.output_dir), "closure_items", output)
     return 0

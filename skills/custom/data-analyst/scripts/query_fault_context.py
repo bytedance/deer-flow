@@ -30,6 +30,9 @@ from _stub_helpers import (
     write_json,
 )
 
+import _data_provider_impls  # noqa: F401 — register-only
+from _data_providers import fetch_with_fallback
+
 
 SCHEMA_VERSION = "1"
 
@@ -211,19 +214,30 @@ def main() -> int:
     if not eq_id:
         return emit_error("INVALID_EQUIPMENT_ID", "--equipment-id must be non-empty")
 
+    result = fetch_with_fallback(
+        source="fault_context",
+        fetch_args={
+            "fault_time": args.fault_time,
+            "equipment_id": eq_id,
+            "symptom": args.symptom,
+            "include_related_equipment": bool(args.include_related_equipment),
+        },
+    )
+    payload = result.data
+
     output = {
         "schema_version": SCHEMA_VERSION,
         "fault_time": args.fault_time,
         "equipment_id": eq_id,
         "symptom": args.symptom,
         "include_related": bool(args.include_related_equipment),
-        "data_source": "demo_fallback",
-        "operations": _operations(fault_day, eq_id),
-        "alarms": _alarms(fault_day, eq_id),
-        "work_orders": _work_orders(fault_day, eq_id),
-        "maintenance_records": _maintenance_records(fault_day, eq_id),
-        "related_equipment": [f"{eq_id}-aux", f"{eq_id}-spare"] if args.include_related_equipment else [],
-        "_meta": {"stub": True, "generated_at": iso_now()},
+        "data_source": result.data_source,
+        "operations": payload.get("operations") or [],
+        "alarms": payload.get("alarms") or [],
+        "work_orders": payload.get("work_orders") or [],
+        "maintenance_records": payload.get("maintenance_records") or [],
+        "related_equipment": payload.get("related_equipment") or [],
+        "_meta": {"stub": True, "generated_at": iso_now(), "provider_notes": result.notes},
     }
 
     write_json(Path(args.output_dir), "fault_context", output)

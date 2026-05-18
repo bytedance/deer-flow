@@ -26,6 +26,9 @@ from _stub_helpers import (
     write_json,
 )
 
+import _data_provider_impls  # noqa: F401 — register-only
+from _data_providers import fetch_with_fallback
+
 
 SCHEMA_VERSION = "1"
 
@@ -275,24 +278,32 @@ def main() -> int:
         return emit_error("INVALID_FAILURE_MODE", "--failure-mode must be non-empty")
 
     today = date.today()
+    result = fetch_with_fallback(
+        source="failure_data",
+        fetch_args={
+            "asset_id": asset_id,
+            "failure_mode": failure_mode,
+            "analysis_method": method,
+            "evidence_range": args.evidence_range,
+        },
+    )
+    payload = result.data
     output = {
         "schema_version": SCHEMA_VERSION,
         "asset_id": asset_id,
         "failure_mode": failure_mode,
         "analysis_method": method,
         "evidence_range_raw": args.evidence_range,
-        "data_source": "demo_fallback",
-        "operations": _operations(today, asset_id),
-        "maintenance": _maintenance(today, asset_id),
-        "inspections": _inspections(today, asset_id),
-        "spares": _spares(today, asset_id),
-        "environment": _environment(),
-        "method_seed": {
-            "five_why": _five_why_seed(failure_mode) if method == "five_why" else None,
-            "fishbone": _fishbone_seed(failure_mode) if method == "fishbone" else None,
-            "fmea": _fmea_seed(failure_mode) if method == "fmea" else None,
+        "data_source": result.data_source,
+        "operations": payload.get("operations") or [],
+        "maintenance": payload.get("maintenance") or [],
+        "inspections": payload.get("inspections") or [],
+        "spares": payload.get("spares") or [],
+        "environment": payload.get("environment") or {},
+        "method_seed": payload.get("method_seed") or {
+            "five_why": None, "fishbone": None, "fmea": None,
         },
-        "_meta": {"stub": True, "generated_at": iso_now(), "fetched_at": today.isoformat()},
+        "_meta": {"stub": True, "generated_at": iso_now(), "fetched_at": today.isoformat(), "provider_notes": result.notes},
     }
     write_json(Path(args.output_dir), "failure_data", output)
     return 0

@@ -403,21 +403,123 @@ Should Stories（共 2.5 SP，容量允许时推进）:
 
 | Sprint | 验证手段 | 范围 |
 | ---- | ---- | ---- |
-| S1-8 | 集成冒烟（手动 + 截图归档） | 父 group → 子 agent 切换、机泵端到端、占位入口可见 |
-| S2-6 | 单元 + 契约测试（pytest） | 三脚本各项 acceptance、SOUL 静态扫描、query → features → export 契约 |
+| S1-8 | 集成冒烟测试套 (`backend/tests/test_fault_diagnosis_smoke.py`，15 用例) | 发现层（group + 3 子 agent + skill 装配）、SOUL 契约（callback 命名 / 两阶段分工 / in-process import / present_files 白名单 / 演示数据降级 / 禁词扫描）、端到端管线（query → features → write_report，含 PDF ImportError 路径） |
+| S2-6 | 单元 + 契约测试增强（pytest） | 真实 InS 接入回归、historical_cases 真实数据回归、PDF 中文字体落地验证 |
 
-> 集成冒烟不能替代单元测试；单元测试不能替代手动验证 GenUI 渲染。两者并存。
+> 自动化冒烟测试**已替代** S1-8 初版的"手动 + 截图归档"方案：CI 守护契约稳定，S2 才补真实数据 / PDF 落地后的人工验证。
 
 ---
 
-## 5. 待办清单（S1 完成后填）
+## 5. S1 交付清单（实际产出）
 
-由 S1-9 负责追加。
+> 本节由 Story S1-9 在 S1 收尾时填写。
+
+### 5.1 新增 / 修改的 agent 资产
+
+| 文件 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `agents/builtin/fault-diagnosis/config.yaml` | 修改 | 升级为 `type: group`；description / tags 重写 |
+| `agents/builtin/fault-diagnosis/SOUL.md` | 修改 | 改写为 group 引导页 |
+| `agents/builtin/fault-diagnosis--pump/{config.yaml,SOUL.md}` | 新建 | 完整 SOUL（389 行，三轮 GenUI + 两阶段分工 + in-process 导出） |
+| `agents/builtin/fault-diagnosis--rotating/{config.yaml,SOUL.md}` | 新建 | placeholder SOUL（S2-2 落地） |
+| `agents/builtin/fault-diagnosis--reciprocating/{config.yaml,SOUL.md}` | 新建 | placeholder SOUL（S2-3 落地） |
+
+### 5.2 新增的 skill 资产
+
+| 路径 | 说明 |
+| ---- | ---- |
+| `skills/custom/pump-fault-diagnosis/{SKILL.md,references/diagnosis-rules.md}` | 9 项故障家族 code mapping + 3 条占位规则（不平衡 / 汽蚀 / 流量低于最小连续流量） |
+| `skills/custom/reciprocating-fault-diagnosis/{SKILL.md,references/diagnosis-rules.md}` | 11 项故障家族 code mapping + 3 条占位规则（吸气阀 / 活塞环 / 十字头敲缸）。**注**：本应由 S2-1 落地，S1 阶段提前完成以解锁 reciprocating placeholder agent 的 skill 装配。 |
+| `skills/custom/vibration-fault-diagnosis/SKILL.md` | 末尾追加 12 项故障家族 code mapping（与 §4.4 旋转机组对齐） |
+
+### 5.3 新增的脚本资产
+
+| 路径 | 行数 | 单测 | 说明 |
+| ---- | ---- | ---- | ---- |
+| `skills/custom/data-analyst/scripts/query_diagnosis.py` | 425 | `tests/test_query_diagnosis.py` (19) | Stage 1 聚合趋势特征拉取 + 演示数据回退 |
+| `skills/custom/data-analyst/scripts/diagnosis_features.py` | 595 | `tests/test_diagnosis_features.py` (21) | Stage 2 特征 + 规则匹配 + ECharts |
+| `skills/custom/data-analyst/scripts/export_diagnosis_report.py` | 195 | 与下行共测 | 6 节 Markdown / HTML 渲染纯函数 |
+| `skills/custom/data-analyst/scripts/export_report.py` | 修改 | `tests/test_export_diagnosis_report.py` (14) | `SUPPORTED_REPORT_TYPES` 加 `"diagnosis"`、`write_report` / `load_payload` / `_output_dir` 加 diagnosis 分支 |
+| — | — | `tests/test_fault_diagnosis_smoke.py` (15) | 集成冒烟（覆盖 S1-8 全部 acceptance） |
+
+**测试规模**：69 个 fault-diagnosis 专属单测 + 集成冒烟，全部 PASSED；与日报 / 周报 / 月报回归共 100+ 测全绿；ruff 无新增告警。
+
+### 5.4 设计文档同步
+
+- §4.4 顶部加入 S1-2 评审 changelog（机泵 8→9、往复机 10→11、旋转机 12 不变 + runout 双标）
+- §5.3 改写为"扩展 SUPPORTED_REPORT_TYPES"路径（核验后取代原"提升私有 API / 复制实现"备选）
+- §6.1 / §6.2 数量与 §4.4 对齐（轴承损伤合并到 family 层，subtype 报告内细化）
+- §9 PDF 行 + group 升级行重写（链接到 §9.1 迁移策略）
+
+---
+
+## 6. 双 Sprint 完结总览
+
+由 S2-7 在双 Sprint 收尾时确认所有 Story 交付状态：
 
 ```text
-TODO（S2 入口前）：
-- [ ] S1-7b 是否完成？若未完成，S2 Day 1 优先补齐
-- [ ] code 评审记录是否已合入设计文档 §4.4？
-- [ ] sandbox weasyprint 镜像 PR 是否已开？
-- [ ] 现场历史案例库对接联系人是否确认？
+□ S1 完成（机泵端到端 MVP）：
+  ✅ S1-1 group + 4 config.yaml
+  ✅ S1-2 故障家族 code 评审 + vibration mapping 段
+  ✅ S1-3 pump-fault-diagnosis skill 骨架（9 family + 3 占位规则）
+  ✅ S1-4 query_diagnosis.py（19 单测）
+  ✅ S1-5 diagnosis_features.py（21 单测）
+  ✅ S1-6 export_diagnosis_report.py + export_report.py 注册 diagnosis（14 单测）
+  ✅ S1-7 fault-diagnosis--pump SOUL.md（389 行完整实现）
+  ✅ S1-8 集成冒烟测试套（初版 15 用例 → S2-6 扩展为 35 用例）
+  ✅ S1-9 S1 文档收尾
+
+□ S2 完成（旋转机 / 往复机扩展 + 单测增强）：
+  ✅ S2-1 reciprocating-fault-diagnosis skill 骨架（11 family + 3 占位规则；提前在 S1 完成）
+  ✅ S2-2 fault-diagnosis--rotating SOUL.md（407 行 / 12 项 focus codes / 保留 orbit）
+  ✅ S2-3 fault-diagnosis--reciprocating SOUL.md（392 行 / 11 项 focus codes / 跳过 orbit）
+  ⏸ S2-4 sandbox 镜像 weasyprint + 中文字体（依赖运维 PR；降级路径已就位）
+  ⏸ S2-5 真实历史故障案例库接入（依赖现场对接；query_diagnosis 已预留 hook）
+  ✅ S2-6 单测增强 + 集成冒烟覆盖三个子 agent（35 用例，含 cross-talk 矩阵 / orbit 分流 / 三方 e2e）
+  ✅ S2-7 双 Sprint 收尾文档（本节 + 运行手册）
+
+□ 仍依赖外部的项目（移交 follow-up）：
+  □ sandbox 镜像更新（weasyprint + 中文字体）→ 等运维 PR 合并后 PDF 即可用
+  □ 现场 InS 部署接入（往复机的曲轴角 / 缸压通道）→ 决定演示数据回退退场时机
+  □ 现场历史故障案例库 API → 决定 historical_cases 真实数据接入时机
+  □ 领域专家逐条评审占位规则 → 真实样本规则
+  □ 跨子 agent 故障 code 自动校验脚本（CI 治理）
 ```
+
+---
+
+## 7. 运行手册（如何切到真实数据 / 如何更新规则）
+
+### 7.1 切到真实 InS 数据
+
+`query_diagnosis.py` 已实现"InS 优先 + 演示数据回退"双路径，sandbox 部署条件满足即自动切换：
+
+1. **环境准备**：在 sandbox 中部署 `features-tool/` 仓库到 `FEATURES_TOOL_ROOT`（默认 `/opt/features-tool`），并部署 `ins-extract-trend-features` skill 到 `INS_SKILL_ROOT`（默认 `/mnt/skills/custom`）。
+2. **环境变量**：确保 InS API 凭证（`DATA_PLATFORM_URL` / `DATA_PLATFORM_TOKEN` 等）在 sandbox 进程环境可见。
+3. **验证**：触发任一子 agent 的诊断流程，最终报告顶部不再出现 `⚠️ 当前为演示数据回退` 警告即说明已切到真实路径。
+4. **回退监控**：读取 `/mnt/user-data/outputs/query_diagnosis.json` 的 `data_source` 字段（`ins` / `demo_fallback`）和 `warnings[]` 列表，可定位具体哪台设备 / 哪个测点回退到了演示数据。
+
+### 7.2 更新规则库
+
+三个规则 skill 的 `references/diagnosis-rules.md` 是诊断结论的权威来源，更新流程：
+
+1. **占位规则 → 真实规则**：编辑对应文件（`pump-fault-diagnosis` / `reciprocating-fault-diagnosis` / `vibration-fault-diagnosis`），按现有"### 故障家族中文名"章节格式新增或替换规则。
+2. **新增故障家族**（罕见操作）：
+   - 在对应 skill 的 `SKILL.md` "Fault family code mapping" 表中新增一行 `<新 code> | <章节中文名>`。
+   - 在 `diagnosis-rules.md` 新增对应章节。
+   - 在 SOUL.md 的 Round 2 表单 `fields` 中新增一项 `focus_<code>` checkbox。
+   - 在设计文档 §4.4 `fd-{kind}-focus` 列表中加入新 code。
+   - 运行 `pytest tests/test_fault_diagnosis_smoke.py::test_subagent_focus_codes_match_design`，确保静态扫描通过。
+3. **`diagnosis_features.py` 关键词识别能力**：脚本通过特征别名（`pp_value` / `rms` / `1X` 等）匹配规则文本。如规则文本只用英文专业术语，可考虑：(a) 在规则中追加中文标签；(b) 在 `diagnosis_features._section_matches_evidence()` 的 `aliases` 字典中扩充别名。Sprint S2 已确认 vibration skill 的英文规则与演示数据存在天然不匹配，**等真实 InS 数据接入后再调优**。
+
+### 7.3 PDF 启用
+
+PDF 已通过 `export_report.py` 的 `_write_pdf` 路径接好，等 sandbox 镜像装上 `weasyprint` + 中文字体（推荐 Noto Sans CJK 或 思源黑体）后**无需改任何代码**即可使用。验证方法：在 SOUL 的 `try/except ImportError` 不再被触发，前端报告底部出现 `[下载 PDF](...)` 链接而不是 `PDF 不可用（weasyprint 未安装）`。
+
+### 7.4 历史案例库接入
+
+`diagnosis_features.build_historical_cases` 当前返回 `data_source=demo_fallback` 的演示数据。真实接入路径：
+
+1. 在 `query_diagnosis.py` 加 `--history-source` 参数（已预留位置）。
+2. 在 `diagnosis_features.py` 中替换 `build_historical_cases` 的实现，从真实历史案例库 API 检索同设备 / 同故障家族的历史记录。
+3. 真实记录返回时 `data_source` 字段填 `real_history`；SOUL 在渲染 `card` 时会自动去掉"演示 · "前缀（步骤 5 中已按 `data_source == "demo_fallback"` 判定）。

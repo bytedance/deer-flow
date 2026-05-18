@@ -27,6 +27,9 @@ from _stub_helpers import (
     write_json,
 )
 
+import _data_provider_impls  # noqa: F401 — register-only
+from _data_providers import fetch_with_fallback
+
 
 SCHEMA_VERSION = "1"
 
@@ -113,35 +116,17 @@ def main() -> int:
     except ValueError as exc:
         return emit_error("INVALID_INSPECTION_DATE", str(exc))
 
-    min_rank = SEVERITY_RANK[args.severity_min]
-    base_dt = datetime.combine(inspection_day, datetime.min.time()) + timedelta(hours=8)
-
-    records: list[dict] = []
-    used_attachment_ids: set[str] = set()
-    for idx, template in enumerate(DEMO_RECORDS):
-        if SEVERITY_RANK[template["severity"]] < min_rank:
-            continue
-        record_dt = base_dt + timedelta(minutes=idx * 27)
-        record_id = f"INSP-{inspection_day.strftime('%Y%m%d')}-{idx + 1:03d}"
-        record_attachments = template["attachment_refs"]
-        used_attachment_ids.update(record_attachments)
-        records.append(
-            {
-                "id": record_id,
-                "time": record_dt.isoformat(timespec="seconds"),
-                "route": args.route,
-                "area": args.area,
-                "equipment": template["equipment"],
-                "inspector": template["inspector"],
-                "status": template["status"],
-                "severity": template["severity"],
-                "description": template["description"],
-                "attachment_refs": record_attachments,
-            }
-        )
-
-    # Filter attachments to those actually referenced by surviving records.
-    attachments = [att for att in DEMO_ATTACHMENTS if att["id"] in used_attachment_ids]
+    result = fetch_with_fallback(
+        source="inspection",
+        fetch_args={
+            "inspection_date": args.inspection_date,
+            "route": args.route,
+            "area": args.area,
+            "severity_min": args.severity_min,
+        },
+    )
+    records = result.data.get("records") or []
+    attachments = result.data.get("attachments") or []
 
     output = {
         "schema_version": SCHEMA_VERSION,
@@ -149,10 +134,10 @@ def main() -> int:
         "route": args.route,
         "area": args.area,
         "severity_min": args.severity_min,
-        "data_source": "demo_fallback",
+        "data_source": result.data_source,
         "records": records,
         "attachments": attachments,
-        "_meta": {"stub": True, "generated_at": iso_now()},
+        "_meta": {"stub": True, "generated_at": iso_now(), "provider_notes": result.notes},
     }
     write_json(Path(args.output_dir), "inspection_data", output)
     return 0

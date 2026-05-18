@@ -71,7 +71,7 @@ def test_initialize_creates_admin_and_sets_cookie(client):
     assert resp.status_code == 201
     data = resp.json()
     assert data["email"] == "admin@example.com"
-    assert data["system_role"] == "admin"
+    assert data["system_role"] == "superadmin"
     assert "access_token" in resp.cookies
 
 

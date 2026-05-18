@@ -153,6 +153,18 @@ def _render_table(props: dict[str, Any]) -> list[str]:
 
 
 def _render_cards(props: dict[str, Any], *, group: bool) -> list[str]:
+    # Banner-style card (§13.2 human_review_required / data-quality warnings):
+    # when props.style is one of {warning, danger, info} we emit a Markdown
+    # quote block instead of a bullet so the banner stands out from regular cards.
+    if not group and props.get("style") in ("warning", "danger", "info"):
+        return _render_banner_card(props)
+
+    # Confidence badge — when the source resolved to a single low/medium/high
+    # string (DSL renders confidence with component=card), turn the value into
+    # a coloured badge for readability.
+    if not group and _looks_like_confidence(props):
+        return _render_confidence_badge(props)
+
     if group:
         items = props.get("items") or props.get("cards") or []
     else:
@@ -175,6 +187,54 @@ def _render_cards(props: dict[str, Any], *, group: bool) -> list[str]:
     if not lines:
         lines.append("_(no cards)_")
     return lines
+
+
+_BANNER_PREFIX = {"warning": "⚠", "danger": "🛑", "info": "ℹ"}
+
+
+def _render_banner_card(props: dict[str, Any]) -> list[str]:
+    """Render a card with a ``style`` hint as a Markdown quote-block banner.
+
+    Lookup order for banner text:
+      1. ``template`` (DSL author-provided literal)
+      2. ``value`` (when the source resolved to a single string)
+      3. ``title`` (fallback)
+    """
+    style = props.get("style", "info")
+    icon = _BANNER_PREFIX.get(style, "ℹ")
+    template = props.get("template")
+    if isinstance(template, str) and template.strip():
+        text = template
+    else:
+        value = props.get("value")
+        if isinstance(value, str) and value.strip():
+            text = value
+        else:
+            text = props.get("title") or ""
+    safe = _safe_str(text)
+    return [f"> {icon} {safe}"]
+
+
+_CONFIDENCE_LEVELS = {"low", "medium", "high"}
+_CONFIDENCE_BADGE = {
+    "low": "🔴 Low",
+    "medium": "🟡 Medium",
+    "high": "🟢 High",
+}
+
+
+def _looks_like_confidence(props: dict[str, Any]) -> bool:
+    value = props.get("value")
+    return isinstance(value, str) and value.lower() in _CONFIDENCE_LEVELS
+
+
+def _render_confidence_badge(props: dict[str, Any]) -> list[str]:
+    value = str(props.get("value", "")).lower()
+    badge = _CONFIDENCE_BADGE.get(value, value)
+    title = _safe_str(props.get("title", ""))
+    if title:
+        return [f"- **{title}**: {badge}"]
+    return [f"- {badge}"]
 
 
 def _render_echart_placeholder(props: dict[str, Any]) -> list[str]:

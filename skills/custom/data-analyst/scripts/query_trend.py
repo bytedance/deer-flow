@@ -40,6 +40,12 @@ from _stub_helpers import (
     write_json,
 )
 
+# Importing this module registers DemoTrendProvider + HttpTrendProvider in the
+# DataConnector registry. fetch_with_fallback() then routes based on the
+# DEER_FLOW_DATA_PROVIDER env var.
+import _data_provider_impls  # noqa: F401 — register-only side-effect import
+from _data_providers import fetch_with_fallback
+
 
 SCHEMA_VERSION = "1"
 
@@ -155,8 +161,21 @@ def main() -> int:
     if not timestamps:
         return emit_error("EMPTY_WINDOW", "date_range produced no sample points")
 
-    time_series = [_build_series(m, timestamps) for m in metrics]
-    total_points = sum(s["point_count"] for s in time_series)
+    # Route through the DataConnector abstraction: HttpTrendProvider when
+    # ``DEER_FLOW_DATA_PROVIDER=http`` + ``DEERFLOW_TREND_URL`` are set,
+    # otherwise DemoTrendProvider. fetch_with_fallback handles graceful
+    # degradation when the HTTP path fails.
+    result = fetch_with_fallback(
+        source="trend",
+        fetch_args={
+            "metric_keys": metrics,
+            "date_range": (start.isoformat(), end.isoformat()),
+            "aggregation": args.aggregation,
+            "forecast_horizon": args.forecast_horizon,
+        },
+    )
+    time_series = result.data.get("time_series") or []
+    total_points = sum(s.get("point_count", len(s.get("values") or [])) for s in time_series)
 
     output = {
         "schema_version": SCHEMA_VERSION,
@@ -165,7 +184,7 @@ def main() -> int:
             "aggregation": args.aggregation,
             "forecast_horizon": args.forecast_horizon,
             "requested_metric_keys": metrics,
-            "data_source": "demo_fallback",
+            "data_source": result.data_source,
         },
         "time_series": time_series,
         "summary": {
@@ -174,7 +193,7 @@ def main() -> int:
             "first_timestamp": timestamps[0],
             "last_timestamp": timestamps[-1],
         },
-        "_meta": {"stub": True, "generated_at": iso_now()},
+        "_meta": {"stub": True, "generated_at": iso_now(), "provider_notes": result.notes},
     }
 
     write_json(Path(args.output_dir), "trend_data", output)

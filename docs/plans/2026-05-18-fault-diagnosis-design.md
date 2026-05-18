@@ -331,6 +331,12 @@ starters:
 - 旋转机 `runout` 注：英文 code 来自 references 中"晃度"章节，语义为**测量探头表面跳动 / measurement effect**，不是"shaft runout"。SOUL 提示文案需写中英文双标。
 - vibration skill code 映射段已落入 [skills/custom/vibration-fault-diagnosis/SKILL.md](../../skills/custom/vibration-fault-diagnosis/SKILL.md) 末尾。
 
+**Changelog · 2026-05-18 Story S2-2 / S2-3 SOUL 落地后追溯**：
+
+- 三个子 agent 的 SOUL.md `focus_*` 字段、checkbox label（含中英文 code）、`default_values` 已与本节列表 1:1 对齐；由 `tests/test_fault_diagnosis_smoke.py::test_subagent_focus_codes_match_design` 静态守护。
+- Round 2 表单中往复机 `valve_failure` label 显式写明"subtype 在报告内拆吸 / 排气"；LLM 渲染报告 §4 时按吸 / 排气 subtype 细化。
+- 旋转机 `runout` checkbox label 同时显示"晃度 / 测量探头表面跳动 (runout，注意：非 shaft runout)"双标，避免误选。
+
 > 故障家族选项**按设备类型差异化呈现**，避免无关项干扰 LLM。下面列出三个子 agent 的不同 `options`。
 
 机泵 `fd-pump-focus`（9 项）：
@@ -809,3 +815,5 @@ references/diagnosis-rules.md 章节骨架：
 ## 11. 实施计划引用
 
 具体实施排期、Story 拆分、依赖、验收标准与 Sprint Sequencing 见独立文档：[故障诊断智能体 Sprint 实施计划](./2026-05-18-fault-diagnosis-sprint-plan.md)。
+
+S1（机泵端到端 MVP）+ S2（旋转机 / 往复机扩展 + 单测增强）已交付，详细产物清单见 Sprint Plan §5（S1 交付）+ §6（双 Sprint 完结总览）。S2 仍依赖外部的 Story（S2-4 sandbox 镜像、S2-5 历史案例库）已移交 follow-up。运行手册（如何切到真实数据 / 如何更新规则 / 如何启用 PDF / 如何接入历史案例库）见 Sprint Plan §7。
