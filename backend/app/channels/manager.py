@@ -19,6 +19,7 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 from app.gateway.internal_auth import create_internal_auth_headers
+from deerflow.config.agents_config import load_agent_config
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -355,7 +356,7 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
-def _is_enabled_slash_skill_command(text: str) -> bool:
+def _is_enabled_slash_skill_command(text: str, available_skills: set[str] | None = None) -> bool:
     if parse_slash_skill_reference(text) is None:
         return False
     try:
@@ -364,6 +365,7 @@ def _is_enabled_slash_skill_command(text: str) -> bool:
             resolve_slash_skill(
                 text,
                 storage.load_skills(enabled_only=True),
+                available_skills=available_skills,
                 container_base_path=storage.get_container_root(),
             )
             is not None
@@ -650,6 +652,21 @@ class ChannelManager:
             assistant_id = DEFAULT_ASSISTANT_ID
 
         return assistant_id, run_config, run_context
+
+    def _resolve_available_skill_names(self, msg: InboundMessage) -> set[str] | None:
+        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
+        _, _, run_context = self._resolve_run_params(msg, thread_id)
+        if run_context.get("is_bootstrap"):
+            return {"bootstrap"}
+
+        agent_name = run_context.get("agent_name")
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            return None
+
+        agent_config = load_agent_config(_normalize_custom_agent_name(agent_name))
+        if agent_config and agent_config.skills is not None:
+            return set(agent_config.skills)
+        return None
 
     # -- LangGraph SDK client (lazy) ----------------------------------------
 
@@ -1007,7 +1024,7 @@ class ChannelManager:
                 "/<skill-name> <task> — Activate an enabled skill for one turn\n"
                 "/help — Show this help"
             )
-        elif await asyncio.to_thread(_is_enabled_slash_skill_command, text):
+        elif await asyncio.to_thread(lambda: _is_enabled_slash_skill_command(text, self._resolve_available_skill_names(msg))):
             from dataclasses import replace as _dc_replace
 
             chat_msg = _dc_replace(msg, msg_type=InboundMessageType.CHAT)

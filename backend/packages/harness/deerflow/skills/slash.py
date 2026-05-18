@@ -71,7 +71,7 @@ def resolve_slash_skill(
     if available_skills is not None and reference.name not in available_skills:
         return None
 
-    skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
+    skill = next((candidate for candidate in skills if candidate.name == reference.name and candidate.enabled), None)
     if skill is None:
         return None
 

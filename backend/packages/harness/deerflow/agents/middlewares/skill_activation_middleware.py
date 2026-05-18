@@ -6,13 +6,14 @@ import asyncio
 import hashlib
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
-from langgraph.runtime import Runtime
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.skills.slash import get_original_user_content_text, parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SLASH_SKILL_ACTIVATION_KEY = "slash_skill_activation"
-_SLASH_SKILL_PROCESSED_KEY = "slash_skill_activation_processed"
 _SUMMARY_MESSAGE_NAME = "summary"
 
 
@@ -38,6 +38,12 @@ class _Activation:
     remaining_text: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ActivationResolution:
+    activation: _Activation | None = None
+    failure_message: str | None = None
+
+
 def is_slash_skill_activation_reminder(message: object) -> bool:
     return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get(_SLASH_SKILL_ACTIVATION_KEY))
 
@@ -49,7 +55,7 @@ def _is_user_activation_target(message: object) -> bool:
         return False
     if message.additional_kwargs.get("hide_from_ui"):
         return False
-    return not bool(message.additional_kwargs.get(_SLASH_SKILL_PROCESSED_KEY))
+    return True
 
 
 class SkillActivationMiddleware(AgentMiddleware):
@@ -71,13 +77,22 @@ class SkillActivationMiddleware(AgentMiddleware):
         return get_or_new_skill_storage()
 
     @staticmethod
-    def _read_skill_content(skill_file: Path) -> str:
+    def _read_skill_content(skill_file: Path, skills_root: Path) -> str:
         if skill_file.name != SKILL_MD_FILE:
             raise ValueError(f"Expected {SKILL_MD_FILE}, got {skill_file.name}")
-        return skill_file.read_text(encoding="utf-8")
+        resolved_root = skills_root.resolve()
+        resolved_file = skill_file.resolve()
+        try:
+            resolved_file.relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
+        if not resolved_file.is_file():
+            raise FileNotFoundError(resolved_file)
+        return resolved_file.read_text(encoding="utf-8")
 
-    def _resolve_activation(self, text: str) -> _Activation | None:
-        if parse_slash_skill_reference(text) is None:
+    def _resolve_activation(self, text: str) -> _ActivationResolution | None:
+        reference = parse_slash_skill_reference(text)
+        if reference is None:
             return None
 
         storage = self._storage()
@@ -89,22 +104,24 @@ class SkillActivationMiddleware(AgentMiddleware):
             container_base_path=storage.get_container_root(),
         )
         if resolved is None:
-            return None
+            return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not enabled or is not available for this agent.")
 
         try:
-            skill_content = self._read_skill_content(resolved.skill.skill_file)
-        except OSError:
+            skill_content = self._read_skill_content(resolved.skill.skill_file, storage.get_skills_root_path())
+        except (OSError, ValueError):
             logger.exception("Failed to read slash-activated skill %s", resolved.skill.name)
-            return None
+            return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be loaded safely. Please check the skill installation.")
 
         content_hash = hashlib.sha256(skill_content.encode("utf-8")).hexdigest()
-        return _Activation(
-            skill_name=resolved.skill.name,
-            category=str(resolved.skill.category),
-            container_file_path=resolved.container_file_path,
-            skill_content=skill_content,
-            content_hash=content_hash,
-            remaining_text=resolved.remaining_text,
+        return _ActivationResolution(
+            activation=_Activation(
+                skill_name=resolved.skill.name,
+                category=str(resolved.skill.category),
+                container_file_path=resolved.container_file_path,
+                skill_content=skill_content,
+                content_hash=content_hash,
+                remaining_text=resolved.remaining_text,
+            )
         )
 
     @staticmethod
@@ -127,28 +144,18 @@ Follow this skill before choosing a general workflow. Load supporting resources 
 </slash_skill_activation>"""
 
     @staticmethod
-    def _make_activation_and_user_messages(original: HumanMessage, activation_content: str) -> tuple[HumanMessage, HumanMessage]:
-        stable_id = original.id or str(uuid.uuid4())
-        activation_msg = HumanMessage(
+    def _make_activation_message(target: HumanMessage, activation_content: str) -> HumanMessage:
+        stable_id = target.id or str(uuid.uuid4())
+        return HumanMessage(
             content=activation_content,
-            id=stable_id,
+            id=f"{stable_id}__slash_activation",
             additional_kwargs={
                 "hide_from_ui": True,
                 _SLASH_SKILL_ACTIVATION_KEY: True,
             },
         )
-        user_kwargs = dict(original.additional_kwargs)
-        user_kwargs[_SLASH_SKILL_PROCESSED_KEY] = True
-        user_msg = HumanMessage(
-            content=original.content,
-            id=f"{stable_id}__slash_user",
-            name=original.name,
-            additional_kwargs=user_kwargs,
-        )
-        return activation_msg, user_msg
 
-    def _inject(self, state) -> dict | None:
-        messages = list(state.get("messages", []))
+    def _find_activation_target(self, messages: list) -> tuple[HumanMessage, _ActivationResolution] | None:
         if not messages:
             return None
 
@@ -157,7 +164,21 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
-        activation = self._resolve_activation(content)
+        resolution = self._resolve_activation(content)
+        if resolution is None:
+            return None
+        return target, resolution
+
+    def _prepare_model_request(self, request: ModelRequest) -> ModelRequest | AIMessage | None:
+        target_and_resolution = self._find_activation_target(list(request.messages))
+        if target_and_resolution is None:
+            return None
+
+        target, resolution = target_and_resolution
+        if resolution.failure_message:
+            return AIMessage(content=resolution.failure_message)
+
+        activation = resolution.activation
         if activation is None:
             return None
 
@@ -167,13 +188,34 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             activation.category,
             activation.content_hash[:12],
         )
-        activation_msg, user_msg = self._make_activation_and_user_messages(target, self._build_activation_reminder(activation))
-        return {"messages": [activation_msg, user_msg]}
+        activation_msg = self._make_activation_message(target, self._build_activation_reminder(activation))
+        messages = list(request.messages)
+        target_index = next((idx for idx, msg in enumerate(messages) if msg is target), len(messages))
+        messages.insert(target_index, activation_msg)
+        return request.override(messages=messages)
 
     @override
-    def before_agent(self, state, runtime: Runtime) -> dict | None:
-        return self._inject(state)
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse | AIMessage:
+        prepared = self._prepare_model_request(request)
+        if prepared is None:
+            return handler(request)
+        if isinstance(prepared, AIMessage):
+            return prepared
+        return handler(prepared)
 
     @override
-    async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
-        return await asyncio.to_thread(self._inject, state)
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse | AIMessage:
+        prepared = await asyncio.to_thread(self._prepare_model_request, request)
+        if prepared is None:
+            return await handler(request)
+        if isinstance(prepared, AIMessage):
+            return prepared
+        return await handler(prepared)
