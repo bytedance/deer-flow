@@ -1,0 +1,44 @@
+rules:
+  - id: shell-reverse-shell
+    languages:
+      - generic
+    severity: ERROR
+    message: Shell reverse-shell idiom is embedded in a skill script.
+    metadata:
+      deerflow_severity: CRITICAL
+      remediation: Remove reverse-shell code and use explicit DeerFlow tool calls for required operations.
+    paths:
+      include:
+        - "*.sh"
+        - "**/*.sh"
+        - "*.bash"
+        - "**/*.bash"
+        - "*.zsh"
+        - "**/*.zsh"
+    pattern-either:
+      - pattern-regex: '/dev/tcp/'
+      - pattern-regex: '\bbash\s+-i\b'
+      - pattern-regex: '\bnc\s+-e\b'
+      - pattern-regex: '\bmkfifo\b[^\n]*/tmp/[^\n]*(\bsh\b|\bbash\b|\bnc\b)'
+
+  - id: shell-sensitive-exfil
+    languages:
+      - generic
+    severity: ERROR
+    message: Skill code combines sensitive system files with network egress.
+    metadata:
+      deerflow_severity: CRITICAL
+      remediation: Remove reads of sensitive system files and any network exfiltration command.
+    paths:
+      include:
+        - "*.sh"
+        - "**/*.sh"
+        - "*.bash"
+        - "**/*.bash"
+        - "*.zsh"
+        - "**/*.zsh"
+        - "*.py"
+        - "**/*.py"
+    pattern-either:
+      - pattern-regex: '(/etc/shadow|/etc/passwd)[^\n]*(curl|wget|nc|scp)\b'
+      - pattern-regex: '\b(curl|wget|nc|scp)\b[^\n]*(/etc/shadow|/etc/passwd)'
