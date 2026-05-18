@@ -273,6 +273,7 @@ export interface Translations {
     contactUs: string;
     about: string;
     logout: string;
+    guestUser: string;
   };
 
   // Conversation

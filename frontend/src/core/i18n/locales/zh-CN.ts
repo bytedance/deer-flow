@@ -331,6 +331,7 @@ export const zhCN: Translations = {
     contactUs: "联系我们",
     about: "关于本系统",
     logout: "退出登录",
+    guestUser: "未登录",
   },
 
   // Conversation

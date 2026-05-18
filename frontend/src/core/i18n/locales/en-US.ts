@@ -360,6 +360,7 @@ export const enUS: Translations = {
     contactUs: "Contact us",
     about: "About",
     logout: "Log out",
+    guestUser: "Guest",
   },
 
   // Conversation
