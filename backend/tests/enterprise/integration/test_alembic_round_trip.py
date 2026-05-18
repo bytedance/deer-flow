@@ -116,3 +116,65 @@ def test_m2_audit_round_trip(db: Path) -> None:
     # And brought back up clean.
     command.upgrade(cfg, "20260518_m2_audit")
     assert _tables(db) == tables_after_upgrade
+
+
+def test_m3_approval_round_trip_preserves_m2_data(db: Path) -> None:
+    """m3 builds on m2 → downgrading m3 must NOT touch audit_events rows."""
+    cfg = _cfg(db)
+
+    # Up to m2; seed one audit row that must survive an m3 downgrade.
+    command.upgrade(cfg, "20260518_m2_audit")
+    audit_id = str(uuid4())
+    eng = create_engine(f"sqlite:///{db}")
+    with eng.begin() as conn:
+        conn.execute(
+            text("INSERT INTO audit_events (id, event_type, timestamp, user_id, resource, action, details, signature) VALUES (:id, :et, :ts, :uid, :res, :act, :det, :sig)"),
+            {
+                "id": audit_id,
+                "et": "agent_task_started",
+                "ts": "2026-05-18T00:00:00+00:00",
+                "uid": "alice",
+                "res": "agent",
+                "act": "start",
+                "det": "{}",
+                "sig": "deadbeef",
+            },
+        )
+    eng.dispose()
+
+    # Up to m3.
+    command.upgrade(cfg, "20260518_m3_approval")
+    tables = _tables(db)
+    assert "approvals" in tables
+    assert "approval_decisions" in tables
+    assert "audit_events" in tables  # still here from m2
+
+    # Downgrade exactly one revision: should remove approval tables,
+    # keep audit_events and its row.
+    command.downgrade(cfg, "-1")
+    tables_after_down = _tables(db)
+    assert "approvals" not in tables_after_down, "m3 downgrade did not drop approvals"
+    assert "approval_decisions" not in tables_after_down, "m3 downgrade did not drop approval_decisions"
+    assert "audit_events" in tables_after_down, "m3 downgrade WRONGLY dropped audit_events (m2 data lost!)"
+
+    # Confirm the seeded row is still there.
+    eng = create_engine(f"sqlite:///{db}")
+    with eng.begin() as conn:
+        row_count = conn.execute(text("SELECT COUNT(*) FROM audit_events WHERE id = :id"), {"id": audit_id}).scalar()
+    eng.dispose()
+    assert row_count == 1, "audit row was lost during m3 downgrade"
+
+    # Bring it back up. m2 data survives; m3 tables are empty (expected).
+    # NOTE: we target the m3 revision id explicitly rather than "head" —
+    # the revision graph still has two roots (``m1_initial_rbac`` and
+    # ``20260518_m2_audit``), so ``head`` is ambiguous and Alembic
+    # raises ``MultipleHeads``. Walking only the m2→m3 chain matches
+    # the test's contract anyway.
+    command.upgrade(cfg, "20260518_m3_approval")
+    eng = create_engine(f"sqlite:///{db}")
+    with eng.begin() as conn:
+        survived = conn.execute(text("SELECT COUNT(*) FROM audit_events WHERE id = :id"), {"id": audit_id}).scalar()
+        approvals_empty = conn.execute(text("SELECT COUNT(*) FROM approvals")).scalar()
+    eng.dispose()
+    assert survived == 1
+    assert approvals_empty == 0
