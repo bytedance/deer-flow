@@ -69,6 +69,12 @@ class MemoryRunStore(RunStore):
     async def delete(self, run_id):
         self._runs.pop(run_id, None)
 
+    async def delete_by_thread(self, thread_id, *, user_id=None):
+        run_ids = [run_id for run_id, run in self._runs.items() if run["thread_id"] == thread_id and (user_id is None or run.get("user_id") == user_id)]
+        for run_id in run_ids:
+            self._runs.pop(run_id, None)
+        return len(run_ids)
+
     async def update_run_completion(self, run_id, *, status, **kwargs):
         if run_id in self._runs:
             self._runs[run_id]["status"] = status

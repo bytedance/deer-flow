@@ -113,12 +113,12 @@ class MemoryRunEventStore(RunEventStore):
         all_events = self._events.get(thread_id, [])
         return sum(1 for e in all_events if e["category"] == "message")
 
-    async def delete_by_thread(self, thread_id):
+    async def delete_by_thread(self, thread_id, *, user_id=None):
         events = self._events.pop(thread_id, [])
         self._seq_counters.pop(thread_id, None)
         return len(events)
 
-    async def delete_by_run(self, thread_id, run_id):
+    async def delete_by_run(self, thread_id, run_id, *, user_id=None):
         all_events = self._events.get(thread_id, [])
         if not all_events:
             return 0

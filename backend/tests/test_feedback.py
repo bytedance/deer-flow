@@ -208,6 +208,33 @@ class TestFeedbackRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_delete_by_thread(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.create(thread_id="t1", run_id="r1", rating=1, user_id="u1")
+        await repo.create(thread_id="t1", run_id="r2", rating=-1, user_id="u1")
+        await repo.create(thread_id="t2", run_id="r3", rating=1, user_id="u1")
+
+        deleted = await repo.delete_by_thread("t1", user_id="u1")
+
+        assert deleted == 2
+        assert await repo.list_by_thread("t1", user_id="u1") == []
+        assert len(await repo.list_by_thread("t2", user_id="u1")) == 1
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_delete_by_thread_owner_filter(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.create(thread_id="t1", run_id="r1", rating=1, user_id="u1")
+        await repo.create(thread_id="t1", run_id="r2", rating=-1, user_id="u2")
+
+        deleted = await repo.delete_by_thread("t1", user_id="u1")
+
+        assert deleted == 1
+        assert await repo.list_by_thread("t1", user_id="u1") == []
+        assert len(await repo.list_by_thread("t1", user_id="u2")) == 1
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_list_by_thread_grouped(self, tmp_path):
         repo = await _make_feedback_repo(tmp_path)
         await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")

@@ -67,6 +67,11 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def delete_by_thread(self, thread_id: str, *, user_id: str | None = None) -> int:
+        """Delete all runs for a thread. Return the number of deleted runs."""
+        pass
+
+    @abc.abstractmethod
     async def update_run_completion(
         self,
         run_id: str,

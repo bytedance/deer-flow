@@ -168,7 +168,7 @@ class JsonlRunEventStore(RunEventStore):
         all_events = self._read_thread_events(thread_id)
         return sum(1 for e in all_events if e.get("category") == "message")
 
-    async def delete_by_thread(self, thread_id):
+    async def delete_by_thread(self, thread_id, *, user_id=None):
         all_events = self._read_thread_events(thread_id)
         count = len(all_events)
         thread_dir = self._thread_dir(thread_id)
@@ -178,7 +178,7 @@ class JsonlRunEventStore(RunEventStore):
         self._seq_counters.pop(thread_id, None)
         return count
 
-    async def delete_by_run(self, thread_id, run_id):
+    async def delete_by_run(self, thread_id, run_id, *, user_id=None):
         events = self._read_run_events(thread_id, run_id)
         count = len(events)
         path = self._run_file(thread_id, run_id)

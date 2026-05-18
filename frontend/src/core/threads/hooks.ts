@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { env } from "@/env";
 
 import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
@@ -901,7 +902,9 @@ export function useDeleteThread() {
   const apiClient = getAPIClient();
   return useMutation({
     mutationFn: async ({ threadId }: { threadId: string }) => {
-      await apiClient.threads.delete(threadId);
+      if (env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
+        await apiClient.threads.delete(threadId);
+      }
 
       const response = await fetch(
         `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,

@@ -128,6 +128,26 @@ class TestMemoryRunStore:
         assert await store.get("r1") is None
 
     @pytest.mark.anyio
+    async def test_delete_by_thread(self, store):
+        await store.put("r1", thread_id="t1")
+        await store.put("r2", thread_id="t1")
+        await store.put("r3", thread_id="t2")
+
+        assert await store.delete_by_thread("t1") == 2
+        assert await store.get("r1") is None
+        assert await store.get("r2") is None
+        assert await store.get("r3") is not None
+
+    @pytest.mark.anyio
+    async def test_delete_by_thread_owner_filter(self, store):
+        await store.put("r1", thread_id="t1", user_id="alice")
+        await store.put("r2", thread_id="t1", user_id="bob")
+
+        assert await store.delete_by_thread("t1", user_id="alice") == 1
+        assert await store.get("r1") is None
+        assert await store.get("r2") is not None
+
+    @pytest.mark.anyio
     async def test_delete_nonexistent_is_noop(self, store):
         await store.delete("nope")  # should not raise
 

@@ -218,10 +218,11 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     and removes the thread_meta row from the configured ThreadMetaStore
     (sqlite or memory).
     """
-    from app.gateway.deps import get_thread_store
+    from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_store, get_thread_store
 
     # Clean local filesystem
-    response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
+    user_id = get_effective_user_id()
+    response = _delete_thread_data(thread_id, user_id=user_id)
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
@@ -232,13 +233,32 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         except Exception:
             logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
 
+    try:
+        event_store = get_run_event_store(request)
+        await event_store.delete_by_thread(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete run_events for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    try:
+        feedback_repo = get_feedback_repo(request)
+        await feedback_repo.delete_by_thread(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete feedback for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    try:
+        run_store = get_run_store(request)
+        await run_store.delete_by_thread(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete runs for thread %s (not critical)", sanitize_log_param(thread_id))
+
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search.
     try:
         thread_store = get_thread_store(request)
         await thread_store.delete(thread_id)
     except Exception:
-        logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
+        logger.exception("Failed to delete thread_meta for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread metadata.")
 
     return response
 

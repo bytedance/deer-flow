@@ -1,5 +1,5 @@
 import re
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -123,6 +123,38 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
     assert response.status_code == 200
     assert response.json() == {"success": True, "message": "Deleted local thread data for thread-route"}
     assert not thread_dir.exists()
+
+
+def test_delete_thread_route_cleans_run_payloads(tmp_path):
+    paths = Paths(tmp_path)
+    app = make_authed_test_app()
+    app.state.run_event_store = AsyncMock()
+    app.state.feedback_repo = AsyncMock()
+    app.state.run_store = AsyncMock()
+    app.include_router(threads.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-route")
+
+    assert response.status_code == 200
+    app.state.run_event_store.delete_by_thread.assert_awaited_once_with("thread-route", user_id="test-user-autouse")
+    app.state.feedback_repo.delete_by_thread.assert_awaited_once_with("thread-route", user_id="test-user-autouse")
+    app.state.run_store.delete_by_thread.assert_awaited_once_with("thread-route", user_id="test-user-autouse")
+
+
+def test_delete_thread_route_returns_500_when_thread_meta_delete_fails(tmp_path):
+    paths = Paths(tmp_path)
+    app = make_authed_test_app()
+    app.state.thread_store.delete = AsyncMock(side_effect=RuntimeError("db failed"))
+    app.include_router(threads.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-route")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Failed to delete thread metadata."
 
 
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
