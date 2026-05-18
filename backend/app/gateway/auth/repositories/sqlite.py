@@ -202,14 +202,12 @@ class SQLiteUserRepository(UserRepository):
             return [self._row_to_user(row) for row in result.scalars().all()]
 
     async def list_all_users(self) -> list[User]:
-        """Return every user row (used by ``migrate_enterprise``).
+        """Return every row from ``users`` ordered by ``created_at``.
 
-        No ordering is imposed at the SQL level — the migration command
-        does not depend on it and adding ``ORDER BY`` would force an
-        unnecessary index scan once the table grows. Tests that need a
-        stable order sort by ``email`` in Python.
+        Ordered output keeps script logs deterministic across runs and
+        helps operators diff dry-run vs real-run output line by line.
         """
-        stmt = select(UserRow)
+        stmt = select(UserRow).order_by(UserRow.created_at)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_user(row) for row in result.scalars().all()]

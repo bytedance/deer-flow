@@ -129,16 +129,12 @@ class UserRepository(ABC):
 
     @abstractmethod
     async def list_all_users(self) -> list[User]:
-        """Return every user row.
+        """Return every user row in the table.
 
-        Used by the enterprise migration command
-        (``migrate_enterprise``) to enumerate accounts and back-fill
-        their RBAC ``roles`` from the legacy ``system_role`` column.
-
-        Not paginated: the migration is an admin-only one-shot and the
-        ``users`` table is small (RFC §11.5). Streaming/pagination can
-        be added later if the table grows materially.
-
-        Returns an empty list when no users exist.
+        Used by one-shot migration scripts that need to walk the full set
+        (e.g. ``scripts/migrate_enterprise.py``). The result is materialised
+        into memory, so callers should bound the user count or chunk
+        themselves for very large tables. For the foreseeable scale of
+        a single-tenant DeerFlow install this is acceptable.
         """
         raise NotImplementedError
