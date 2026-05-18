@@ -43,9 +43,7 @@
 #### 4a. `diagnosis-fault/default.yaml` `args.timeline` placeholder
 DSL 用 `args.timeline: "{{ $.steps.fault_timeline.fault_timeline }}"` 想把 timeline 作为 `--timeline` 文件路径传给 `diagnosis_analysis.py` — 但 placeholder 解析后是 JSON dict 而非路径，脚本试图 `open()` 整个 dict-stringified 字符串失败。
 
-**修复**：删掉 `args.timeline`（`--timeline` 是 optional）— [diagnosis-fault/default.yaml:59-66](agents/builtin/report-templates/diagnosis-fault/default.yaml#L59)。脚本退化为只用 fault_context 自行 derive timeline 视图。
-
-> **TODO**（后续 Sprint）：扩展 placeholder 解析，当表达式形如 `$.steps.<step>.<output>` 且解析后是 dict，自动转成对应的 `{run_output_dir}/data/<output>.json` 路径。
+**修复**：~~删掉 `args.timeline`（`--timeline` 是 optional）~~ → ✅ **已正式实施**（2026-05-18）：在 `data_runner.py` 增加 placeholder→path 自动转换（详见 §"已知遗留 2"），DSL 现已重新启用 `args.timeline` 引用，diagnosis 报告的 timeline section 不再依赖脚本自行 derive，能直接消费 `fault_timeline` 步骤的输出文件。
 
 #### 4b. `failure-analysis/default.yaml` `method_block` 表格
 DSL 用 `component: table` source 指向 `method_block`（dict 结构 `{method, why_chain | branches | fmea_rows}`），但 table 要 list。
@@ -141,9 +139,7 @@ _[echart chart: line]_
 
 1. ~~**`_(no cards)_` 占位**：`overall_status` / `data_coverage` 这种 dict 但不含 title/value 直接字段的 card source~~ — ✅ 已修复（2026-05-18）：[generic_renderer.py `_render_single_card`](backend/packages/harness/deerflow/report_templates/generic_renderer.py) 加入 generic dict fallback，把每个 key 渲染为 `- **key**: value` 子条目。
 
-2. **placeholder → file path 自动转换**：当前如果 DSL 作者写 `args.something: "{{ $.steps.X.Y }}"`，runtime 把它解析成 JSON dict 并 stringify。如果它形态像 step-output 引用，应自动转成 `{run_output_dir}/data/Y.json` 路径。
-
-   **下个 Sprint 实施建议**：在 [data_runner.py `_render_string`](backend/packages/harness/deerflow/report_templates/runtime/data_runner.py) 的 single-full-placeholder 分支里检测：(1) AST 形如 `$.steps.<step>.<output>` 且仅两层 segment；(2) 解析结果是 dict；(3) `accumulated[step]` 中存在 `output` 键。三条件满足时返回 `str({run_output_dir}/data/{output}.json)`。需要相应增加 4-6 个单元测试覆盖：placeholder 完全匹配 / placeholder 嵌套深度 > 2 / step 不存在 / output 不存在 / 解析非 dict / 文件不存在。受影响的 DSL：[diagnosis-fault/default.yaml](agents/builtin/report-templates/diagnosis-fault/default.yaml) 现在删掉了 `args.timeline`，等本功能上线后可重新启用。
+2. ~~**placeholder → file path 自动转换**：当前如果 DSL 作者写 `args.something: "{{ $.steps.X.Y }}"`，runtime 把它解析成 JSON dict 并 stringify。如果它形态像 step-output 引用，应自动转成 `{run_output_dir}/data/Y.json` 路径。~~ — ✅ 已修复（2026-05-18）：[data_runner.py `_maybe_coerce_to_step_output_path`](backend/packages/harness/deerflow/report_templates/runtime/data_runner.py) 在 single-full-placeholder 分支检测三条件后返回 `str({run_output_dir}/data/{output}.json)`：(1) 表达式 AST 形如 `$.steps.<step>.<output>`（恰好 4 个 AST 节点：Root + 3×FieldAccess）；(2) 解析结果为 dict；(3) `{run_output_dir}/data/<output>.json` 文件已落盘。任何一条不满足时 silent fallback 到原有 stringify 行为。`render_args` 新增 `run_output_dir: Path | None = None` kwarg，由 `run_script` 传入。[diagnosis-fault/default.yaml](agents/builtin/report-templates/diagnosis-fault/default.yaml) 已重新启用 `args.timeline: "{{ $.steps.fault_timeline.fault_timeline }}"`，diagnosis 报告 Markdown 从 6569b → 7302b（timeline 实际进入分析）。新增 16 个单元测试 [test_data_runner_placeholder_coercion.py](backend/tests/test_data_runner_placeholder_coercion.py) 覆盖：trigger happy path × 2 / silent fallback × 7 (no run_output_dir / file 不存在 / 解析非 dict / 深度 > 2 / form placeholder / mixed text / array selector) / 内部 helper 6 个边界。e2e smoke 5/5 全过。
 
 3. ~~**method_block 三种结构的渲染**：5why levels / fishbone branches / fmea rows 三种 dict 结构无法用单一 component 表达。~~ — ✅ 已修复（2026-05-18）：[failure_analysis.py `_flatten_method_block`](skills/custom/data-analyst/scripts/failure_analysis.py) 新增扁平化输出 `method_table: [{position, label, detail, evidence_hint}]`，DSL 用单一 `component: table` 即可统一渲染三种 method。
 

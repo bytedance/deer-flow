@@ -101,36 +101,63 @@ class StepResult:
 # ---------------------------------------------------------------------------
 
 
-def render_args(args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+def render_args(
+    args: dict[str, Any],
+    context: dict[str, Any],
+    *,
+    run_output_dir: Path | None = None,
+) -> dict[str, Any]:
     """Substitute ``{{ ... }}`` placeholders inside the args mapping.
 
     Recursively walks dicts and lists. Values that contain a single
     ``{{ expr }}`` are replaced with the *parsed* JSONPath value (preserving
     types — lists/numbers/etc.). Values mixed with non-placeholder text are
     rendered as strings via ``str()``.
+
+    **step-output → file-path coercion** (when ``run_output_dir`` is provided):
+        If an arg value is a single full-string placeholder of the form
+        ``{{ $.steps.<step>.<output> }}`` AND the placeholder resolves to a
+        dict AND ``{run_output_dir}/data/<output>.json`` exists, the arg
+        value is coerced to that absolute file path string. Lets DSL authors
+        pass step outputs to scripts that expect ``--input <path>`` without
+        having to type out the path manually.
+
+        Silent fallback to the regular (stringified-dict) behaviour when any
+        of the three conditions is not met. Args without a path-friendly
+        intent (e.g. nested dict args) are unaffected.
     """
-    return _render_recursive(args, context)
+    return _render_recursive(args, context, run_output_dir=run_output_dir)
 
 
-def _render_recursive(value: Any, context: dict[str, Any]) -> Any:
+def _render_recursive(
+    value: Any, context: dict[str, Any], *, run_output_dir: Path | None = None
+) -> Any:
     if isinstance(value, dict):
-        return {k: _render_recursive(v, context) for k, v in value.items()}
+        return {k: _render_recursive(v, context, run_output_dir=run_output_dir) for k, v in value.items()}
     if isinstance(value, list):
-        return [_render_recursive(v, context) for v in value]
+        return [_render_recursive(v, context, run_output_dir=run_output_dir) for v in value]
     if isinstance(value, str):
-        return _render_string(value, context)
+        return _render_string(value, context, run_output_dir=run_output_dir)
     return value
 
 
-def _render_string(text: str, context: dict[str, Any]) -> Any:
+def _render_string(
+    text: str, context: dict[str, Any], *, run_output_dir: Path | None = None
+) -> Any:
     exprs = extract_expressions(text)
     if not exprs:
         return text
     stripped = text.strip()
     # Single full-string placeholder → preserve native type
     if len(exprs) == 1 and stripped.startswith("{{") and stripped.endswith("}}"):
-        ast = parse(exprs[0])
-        return evaluate(ast, context)
+        expr = exprs[0]
+        ast = parse(expr)
+        resolved = evaluate(ast, context)
+        # step-output → file-path coercion (see render_args docstring)
+        coerced = _maybe_coerce_to_step_output_path(
+            expr=expr, resolved=resolved, run_output_dir=run_output_dir
+        )
+        return coerced if coerced is not None else resolved
     # Mixed text — interpolate
     out = text
     for expr in exprs:
@@ -140,6 +167,74 @@ def _render_string(text: str, context: dict[str, Any]) -> Any:
         for raw in _iter_raw_placeholders(text, expr):
             out = out.replace(raw, _stringify(resolved), 1)
     return out
+
+
+def _maybe_coerce_to_step_output_path(
+    *, expr: str, resolved: Any, run_output_dir: Path | None
+) -> str | None:
+    """Coerce a placeholder result to ``{run_output_dir}/data/<output>.json``.
+
+    Returns the coerced path string if **all** these gates pass, else None
+    (caller falls back to the regular ``resolved`` value):
+
+    1. ``run_output_dir`` was supplied (i.e. caller is in args-rendering scope).
+    2. The placeholder expression is exactly ``$.steps.<step>.<output>`` —
+       two segments after ``steps``, no deeper traversal, no array selectors.
+    3. The resolved value is a ``dict`` (step outputs are always dicts; if it
+       isn't one, the caller likely wants the scalar value as-is).
+    4. ``{run_output_dir}/data/<output>.json`` exists on disk.
+
+    Silent fallback policy: any gate failure returns None and lets the caller
+    use the original (stringified dict) behaviour. Errors are NEVER raised
+    from this function — the coercion is an opportunistic upgrade.
+    """
+    if run_output_dir is None:
+        return None
+    segments = _step_output_segments(expr)
+    if segments is None:
+        return None
+    _step_id, output_id = segments
+    if not isinstance(resolved, dict):
+        return None
+    candidate = (run_output_dir / "data" / f"{output_id}.json").resolve()
+    try:
+        if not candidate.exists():
+            return None
+    except OSError:
+        # e.g. permission errors on the lookup — silently fall back.
+        return None
+    return str(candidate)
+
+
+def _step_output_segments(expr: str) -> tuple[str, str] | None:
+    """Parse ``$.steps.<step>.<output>`` into (step_id, output_id).
+
+    Returns None when the expression has any other shape — deeper paths,
+    array-all selectors, or root other than ``$.steps``.
+    """
+    try:
+        ast = parse(expr)
+    except JSONPathError:
+        return None
+    # AST nodes are dataclasses: Root() / FieldAccess(name=...) / ArrayAll()
+    # Expected shape: [Root, FieldAccess("steps"), FieldAccess(step), FieldAccess(output)]
+    if len(ast) != 4:
+        return None
+    types_ok = (
+        type(ast[0]).__name__ == "Root"
+        and type(ast[1]).__name__ == "FieldAccess"
+        and type(ast[2]).__name__ == "FieldAccess"
+        and type(ast[3]).__name__ == "FieldAccess"
+    )
+    if not types_ok:
+        return None
+    if getattr(ast[1], "name", None) != "steps":
+        return None
+    step_id = getattr(ast[2], "name", None)
+    output_id = getattr(ast[3], "name", None)
+    if not isinstance(step_id, str) or not isinstance(output_id, str):
+        return None
+    return step_id, output_id
 
 
 def _iter_raw_placeholders(text: str, expr: str):
@@ -302,9 +397,12 @@ def run_script(
     """
     descriptor = _resolve_descriptor(script_qualified_name, registry)
 
-    # 1. Substitute placeholders.
+    # 1. Substitute placeholders. Pass run_output_dir so single-full-string
+    #    placeholders of the form ``{{ $.steps.<step>.<output> }}`` that
+    #    resolve to a dict get coerced into the corresponding output file
+    #    path (when that file actually exists on disk).
     try:
-        rendered_args = render_args(args, context)
+        rendered_args = render_args(args, context, run_output_dir=run_output_dir)
     except JSONPathError as e:
         raise ScriptExecutionError(
             script=script_qualified_name,
