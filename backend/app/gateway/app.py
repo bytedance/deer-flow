@@ -376,7 +376,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
+        # Start Nacos service registration if configured
+        nacos_registry = None
+        try:
+            from deerflow.config.nacos_config import get_nacos_config
+            from deerflow.rpc.nacos_registry import NacosRegistry
+
+            nacos_cfg = get_nacos_config()
+            if nacos_cfg is not None:
+                nacos_registry = NacosRegistry(nacos_cfg)
+                await nacos_registry.start()
+                app.state.nacos_registry = nacos_registry
+                logger.info("Nacos service registration started")
+            else:
+                logger.info("Nacos service discovery not configured, skipping")
+        except Exception:
+            logger.exception("Failed to start Nacos registration (non-fatal)")
+
         yield
+
+        # Stop Nacos registration on shutdown
+        nacos_registry = getattr(app.state, "nacos_registry", None)
+        if nacos_registry is not None:
+            try:
+                await asyncio.wait_for(
+                    nacos_registry.stop(),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Nacos deregistration exceeded %.1fs; proceeding with worker exit.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.exception("Failed to stop Nacos registration")
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:

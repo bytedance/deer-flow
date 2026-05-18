@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 10
+config_version: 11
 
 # ============================================================================
 # Logging
@@ -1182,3 +1182,53 @@ rate_limit:
 #     default_monthly_limit_usd: 1000.0
 #     alert_threshold_pct: 0.8     # Alert when 80% of budget is consumed
 #     action_on_exceed: block      # "block" or "warn"
+
+# ============================================================================
+# Nacos Service Discovery
+# ============================================================================
+# Register the DeerFlow gateway with Nacos so Java microservices can discover it.
+# Set to null or omit to disable service discovery entirely.
+#
+# nacos:
+#   server_addr: "127.0.0.1:8848"   # Nacos server address, supports $NACOS_SERVER_ADDR
+#   namespace: ""                    # Namespace ID (empty = public)
+#   username: "nacos"                # Nacos login username (omit for no auth)
+#   password: "$NACOS_PASSWORD"      # Nacos login password, supports $ENV_VAR
+#   group: "DEFAULT_GROUP"           # Service group
+#   service:
+#     name: "deer-flow-gateway"      # Registered service name
+#     ip: ""                         # Leave empty for auto-detection
+#     port: 8001                     # Service port
+#     weight: 1.0                    # Instance weight (0.0 - 100.0)
+#     metadata: {}                   # Additional key-value metadata
+#   heartbeat:
+#     interval: 5                    # Heartbeat interval in seconds (1-30)
+#     timeout: 15                    # Instance expiration on Nacos side in seconds (5-60)
+#   retry:
+#     max_attempts: 10               # Max registration retries on startup failure (0 = no retry)
+#     base_delay: 1.0                # Initial backoff delay in seconds
+#     max_delay: 60.0                # Maximum backoff delay in seconds
+
+# ============================================================================
+# Java RPC Client
+# ============================================================================
+# Configure Java microservice RPC endpoints for the Python backend to call.
+# Set to null or omit to disable the RPC client entirely.
+#
+# rpc:
+#   default_timeout: 30.0            # Default request timeout in seconds
+#   default_retry:
+#     max_attempts: 3                # Max retries for transient failures
+#     backoff_factor: 0.5            # Backoff multiplier
+#   services:
+#     # Example: MachineService (设备服务)
+#     - name: ins-bus-rpc
+#       discovery: ins-bus-rpc       # Nacos service name
+#       # When discovery is configured, MachineServiceClient handles endpoint paths automatically
+#     # Generic service with explicit endpoints:
+#     # - name: "user-service"
+#     #   discovery: "user-service"
+#     #   endpoints:
+#     #     - method: "getUserById"
+#     #       path: "/api/user/{id}"
+#     #       http_method: "GET"

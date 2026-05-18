@@ -71,3 +71,4 @@ backend/.coverage
 !README.md
 !frontend/README.md
 !backend/README.md
+!agents/**
