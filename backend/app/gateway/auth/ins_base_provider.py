@@ -163,12 +163,28 @@ class InsBaseAuthProvider(AuthProvider):
         # The raw token (user_id parameter) is only used as a last resort
         # since it contains dots / special chars that violate the user_id
         # filesystem-path validation in deerflow/config/paths.py.
+        #
+        # As an additional fallback, decode the JWT token payload without
+        # signature verification — the ins-base API has already validated
+        # the token. The token itself carries {"id": 1, ...} in its claims.
+        token_user_id = user_id
+        try:
+            import jwt as pyjwt
+            token_payload = pyjwt.decode(user_id, options={"verify_signature": False})
+            token_user_id = str(
+                token_payload.get("id")
+                or token_payload.get("sub")
+                or user_id
+            )
+        except Exception:
+            pass
+
         real_user_id = str(
             user_data.get("userId")
             or user_data.get("id")
             or data.get("userId")
             or data.get("id")
-            or user_id
+            or token_user_id
         )
 
         user = type(
