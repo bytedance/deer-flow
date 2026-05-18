@@ -133,6 +133,7 @@ export interface Translations {
     demoChats: string;
     agents: string;
     knowledgeBases: string;
+    a2uiDebug: string;
   };
 
   // Agents

@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpenIcon, BotIcon, ChevronDownIcon, MessagesSquare } from "lucide-react";
+import { BookOpenIcon, BotIcon, BugIcon, ChevronDownIcon, MessagesSquare } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -124,6 +124,21 @@ export function WorkspaceNavChatList() {
             >
               <BookOpenIcon />
               <span>{t.sidebar.knowledgeBases}</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            isActive={pathname.startsWith("/workspace/debug/a2ui")}
+            asChild
+          >
+            <Link
+              className="text-muted-foreground"
+              href="/workspace/debug/a2ui"
+            >
+              <BugIcon />
+              <span>{t.sidebar.a2uiDebug}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

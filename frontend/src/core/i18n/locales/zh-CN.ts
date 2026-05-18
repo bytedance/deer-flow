@@ -184,6 +184,7 @@ export const zhCN: Translations = {
     demoChats: "演示对话",
     agents: "智能体",
     knowledgeBases: "知识库",
+    a2uiDebug: "A2UI 调试",
   },
 
   // Agents

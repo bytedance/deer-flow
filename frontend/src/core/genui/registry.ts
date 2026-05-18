@@ -57,6 +57,8 @@ export function getBlockComponent(
   return LazyComp;
 }
 
+export const KNOWN_COMPONENTS = Object.keys(COMPONENT_REGISTRY);
+
 export function isKnownComponent(componentType: string): boolean {
   return componentType in COMPONENT_REGISTRY;
 }
