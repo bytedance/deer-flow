@@ -107,7 +107,26 @@ _kill_repo_port() {
 
 _is_port_listening() {
     local port=$1
-    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1
+
+    if command -v lsof >/dev/null 2>&1; then
+        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn "( sport = :$port )" 2>/dev/null | tail -n +2 | grep -q .; then
+            return 0
+        fi
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
+            return 0
+        fi
+    fi
+
+    return 1
 }
 
 _is_repo_nginx_pid() {
@@ -318,7 +337,7 @@ run_service() {
 
     if _is_port_listening "$port"; then
         echo "✗ $name cannot start because port $port is already in use."
-        echo "  Run 'make stop' to clean up stale DeerFlow services, or free the port manually."
+        echo "  If it belongs to this worktree, run 'make stop'; otherwise free the port manually."
         cleanup 1
     fi
 
