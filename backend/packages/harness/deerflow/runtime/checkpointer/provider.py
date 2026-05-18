@@ -77,6 +77,48 @@ def warn_legacy_checkpointer_precedence(app_config: Any) -> None:
     )
 
 
+@contextlib.contextmanager
+def _sync_checkpointer_from_database(db_config: Any) -> Iterator[Checkpointer]:
+    """Construct a sync checkpointer from unified DatabaseConfig."""
+    if db_config.backend == "memory":
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        logger.info("Checkpointer: using InMemorySaver (database.backend=memory)")
+        yield InMemorySaver()
+        return
+
+    if db_config.backend == "sqlite":
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+        except ImportError as exc:
+            raise ImportError(SQLITE_INSTALL) from exc
+
+        conn_str = db_config.checkpointer_sqlite_path
+        ensure_sqlite_parent_dir(conn_str)
+        with SqliteSaver.from_conn_string(conn_str) as saver:
+            saver.setup()
+            logger.info("Checkpointer: using SqliteSaver from database config (%s)", conn_str)
+            yield saver
+        return
+
+    if db_config.backend == "postgres":
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+        except ImportError as exc:
+            raise ImportError(POSTGRES_INSTALL) from exc
+
+        if not db_config.postgres_url:
+            raise ValueError("database.postgres_url is required for the postgres backend")
+
+        with PostgresSaver.from_conn_string(db_config.postgres_url) as saver:
+            saver.setup()
+            logger.info("Checkpointer: using PostgresSaver from database config")
+            yield saver
+        return
+
+    raise ValueError(f"Unknown database backend: {db_config.backend!r}")
+
+
 # ---------------------------------------------------------------------------
 # Sync factory
 # ---------------------------------------------------------------------------
@@ -155,31 +197,42 @@ def get_checkpointer() -> Checkpointer:
     # Ensure app config is loaded before checking checkpointer config
     # This prevents returning InMemorySaver when config.yaml actually has a checkpointer section
     # but hasn't been loaded yet
-    from deerflow.config.app_config import _app_config
     from deerflow.config.checkpointer_config import get_checkpointer_config
 
+    app_config = None
     config = get_checkpointer_config()
 
-    if config is None and _app_config is None:
+    if config is None:
         # Only load app config lazily when neither the app config nor an explicit
         # checkpointer config has been initialized yet. This keeps tests that
         # intentionally set the global checkpointer config isolated from any
         # ambient config.yaml on disk.
         try:
-            get_app_config()
+            app_config = get_app_config()
         except FileNotFoundError:
             # In test environments without config.yaml, this is expected.
             pass
         config = get_checkpointer_config()
     if config is None:
+        db_config = getattr(app_config, "database", None)
+        if db_config is not None and db_config.backend != "memory":
+            _checkpointer_ctx = _sync_checkpointer_from_database(db_config)
+            _checkpointer = _checkpointer_ctx.__enter__()
+            return _checkpointer
+
         from langgraph.checkpoint.memory import InMemorySaver
 
         logger.info("Checkpointer: using InMemorySaver (in-process, not persistent)")
         _checkpointer = InMemorySaver()
         return _checkpointer
 
-    if _app_config is not None:
-        warn_legacy_checkpointer_precedence(_app_config)
+    if app_config is None:
+        import deerflow.config.app_config as app_config_module
+
+        app_config = app_config_module._app_config
+
+    if app_config is not None:
+        warn_legacy_checkpointer_precedence(app_config)
 
     _checkpointer_ctx = _sync_checkpointer_cm(config)
     _checkpointer = _checkpointer_ctx.__enter__()
@@ -222,14 +275,20 @@ def checkpointer_context() -> Iterator[Checkpointer]:
     Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
     """
 
-    config = get_app_config()
-    if config.checkpointer is None:
+    app_config = get_app_config()
+    if app_config.checkpointer is None:
+        db_config = getattr(app_config, "database", None)
+        if db_config is not None and db_config.backend != "memory":
+            with _sync_checkpointer_from_database(db_config) as saver:
+                yield saver
+            return
+
         from langgraph.checkpoint.memory import InMemorySaver
 
         yield InMemorySaver()
         return
 
-    warn_legacy_checkpointer_precedence(config)
+    warn_legacy_checkpointer_precedence(app_config)
 
-    with _sync_checkpointer_cm(config.checkpointer) as saver:
+    with _sync_checkpointer_cm(app_config.checkpointer) as saver:
         yield saver

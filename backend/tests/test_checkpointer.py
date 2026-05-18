@@ -109,6 +109,28 @@ class TestLegacyCheckpointerPrecedenceWarning:
 
         assert "Legacy checkpointer config is present" not in caplog.text
 
+    def test_warning_redacts_postgres_targets(self, caplog):
+        from deerflow.runtime.checkpointer.provider import warn_legacy_checkpointer_precedence
+
+        app_config = MagicMock()
+        app_config.checkpointer = CheckpointerConfig(
+            type="postgres",
+            connection_string="postgresql://legacy_user:legacy_pass@example.test/deerflow",
+        )
+        app_config.database = DatabaseConfig(
+            backend="postgres",
+            postgres_url="postgresql://database_user:database_pass@example.test/deerflow",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.checkpointer.provider"):
+            warn_legacy_checkpointer_precedence(app_config)
+
+        assert "postgres:<configured>" in caplog.text
+        assert "legacy_user" not in caplog.text
+        assert "legacy_pass" not in caplog.text
+        assert "database_user" not in caplog.text
+        assert "database_pass" not in caplog.text
+
     @pytest.mark.anyio
     async def test_async_make_checkpointer_warns_when_legacy_overrides_database(self, caplog):
         from langgraph.checkpoint.memory import InMemorySaver
@@ -331,6 +353,89 @@ class TestGetCheckpointer:
         assert cp is mock_saver_instance
         mock_saver_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
         mock_saver_instance.setup.assert_called_once()
+
+    def test_get_checkpointer_uses_database_when_legacy_checkpointer_absent(self, tmp_path):
+        """Sync singleton should mirror async provider database fallback."""
+        app_config = MagicMock()
+        app_config.checkpointer = None
+        app_config.database = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+
+        mock_saver_instance = MagicMock()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string = MagicMock(return_value=mock_cm)
+
+        mock_module = MagicMock()
+        mock_module.SqliteSaver = mock_saver_cls
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
+            patch.dict(sys.modules, {"langgraph.checkpoint.sqlite": mock_module}),
+            patch("deerflow.runtime.checkpointer.provider.ensure_sqlite_parent_dir") as mock_ensure,
+        ):
+            cp = get_checkpointer()
+
+        expected_path = str(tmp_path / "deerflow.db")
+        assert cp is mock_saver_instance
+        mock_ensure.assert_called_once_with(expected_path)
+        mock_saver_cls.from_conn_string.assert_called_once_with(expected_path)
+        mock_saver_instance.setup.assert_called_once()
+
+    def test_checkpointer_context_uses_database_when_legacy_checkpointer_absent(self, tmp_path):
+        """One-shot sync context should not fall back to memory when database is configured."""
+        from deerflow.runtime.checkpointer.provider import checkpointer_context
+
+        app_config = MagicMock()
+        app_config.checkpointer = None
+        app_config.database = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+
+        mock_saver_instance = MagicMock()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string = MagicMock(return_value=mock_cm)
+
+        mock_module = MagicMock()
+        mock_module.SqliteSaver = mock_saver_cls
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
+            patch.dict(sys.modules, {"langgraph.checkpoint.sqlite": mock_module}),
+            patch("deerflow.runtime.checkpointer.provider.ensure_sqlite_parent_dir") as mock_ensure,
+        ):
+            with checkpointer_context() as cp:
+                assert cp is mock_saver_instance
+
+        expected_path = str(tmp_path / "deerflow.db")
+        mock_ensure.assert_called_once_with(expected_path)
+        mock_saver_cls.from_conn_string.assert_called_once_with(expected_path)
+        mock_saver_instance.setup.assert_called_once()
+
+    def test_get_checkpointer_warns_after_lazy_app_config_load(self, caplog):
+        """The warning should use the app config returned by lazy loading."""
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        app_config = MagicMock()
+        app_config.checkpointer = CheckpointerConfig(type="memory")
+        app_config.database = DatabaseConfig(backend="sqlite", sqlite_dir=".deer-flow/data")
+
+        def load_config():
+            set_checkpointer_config(app_config.checkpointer)
+            return app_config
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", side_effect=load_config),
+            caplog.at_level(logging.WARNING, logger="deerflow.runtime.checkpointer.provider"),
+        ):
+            cp = get_checkpointer()
+
+        assert isinstance(cp, InMemorySaver)
+        assert "Legacy checkpointer config is present" in caplog.text
 
 
 class TestAsyncCheckpointer:
