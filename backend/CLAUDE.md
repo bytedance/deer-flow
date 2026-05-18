@@ -429,9 +429,89 @@ Optional, opt-in extension that layers RBAC, audit, approval, and OIDC SSO on to
 
 **Roadmap (not yet implemented)**:
 - M1 — RBAC tables, `RbacPermissionProvider`, role/permission CRUD routes
-- M2 — Audit storage, signer, `AuditMiddleware`
 - M3 — Approval workflow + `ApprovalTimeoutChecker`
 - M4 — `OIDCAuthProvider` for enterprise SSO
+
+**Audit subsystem (M2, landed)**:
+
+Append-only, HMAC-signed event log that records what every agent run did.
+Wire-up: `enterprise.audit.enabled=true` in `config.yaml` causes the
+gateway lifespan to instantiate `EnterpriseDatabase`, then
+`get_enterprise_middlewares()` appends `AuditMiddleware` to every
+lead-agent run. Reads are served by a dedicated router under
+`/api/enterprise/audit/`.
+
+- `enterprise.audit.events.AuditEvent` — Pydantic v2 row with `id`,
+  `event_type` (`AuditEventType` enum), `timestamp` (UTC), `user_id`,
+  `resource`, `action`, `details: dict`, `signature` (HMAC hex).
+- `enterprise.audit.signer.AuditSigner` — HMAC-SHA256 over the row's
+  canonical JSON (sorted keys, compact separators). Signed payload
+  excludes only `signature` itself; `id` is included so tamper checks
+  catch row-rewrite attacks. Verify uses `hmac.compare_digest`.
+- `enterprise.audit.storage.AuditStorage` (ABC) →
+  `SqliteAuditStorage` / `PostgresAuditStorage`. Single `audit_events`
+  table shared via `deerflow.persistence.base:Base`. Indexes:
+  `(user_id, timestamp)` and `(event_type, timestamp)` — the two
+  hottest query shapes from the read API. SQLite backend gets WAL +
+  `synchronous=NORMAL` automatically via a `connect` event listener
+  in `EnterpriseDatabase`, taking append P99 from ~83 ms to ~6 ms.
+- `enterprise.audit.tool_event_map.map_tool_to_event_type(tool_name)` —
+  routes a sandbox/MCP/skill tool call to the right `AuditEventType`,
+  returns `None` to skip (built-in conversation helpers). MCP server
+  name is extracted from `mcp_<server>_<tool>` for the details payload.
+- `enterprise.audit.middleware.AuditMiddleware` — emits
+  `AGENT_TASK_STARTED` / `AGENT_TASK_COMPLETED` and one tool event per
+  call. Signs each event before `await storage.append(event)`. Storage
+  exceptions are logged and swallowed (RFC §5.4 — losing audit visibility
+  is preferable to crashing the agent loop; we revisit in v2 with the
+  outbox queue from the §10 backlog).
+- `enterprise.middlewares.get_audit_storage` /
+  `get_audit_signer` — process-wide singletons built once from
+  `EnterpriseDatabase.session_factory`; clear with
+  `reset_audit_singletons()` for tests.
+- Alembic revision `20260518_m2_audit` creates the table + both indexes.
+- Read API (mounted by lifespan, not by `create_app()` — see below):
+  - `GET /api/enterprise/audit/events` — paginated list with
+    `user_id` / `event_type` / `resource` / `since` / `until` / `limit` /
+    `offset`. Returns `{data, total, limit, offset, has_more}`.
+  - `GET /api/enterprise/audit/events/{event_id}` — single row, 404 if
+    absent.
+  - `GET /api/enterprise/audit/event-types` — static enum catalog for
+    dashboard dropdowns.
+  - `GET /api/enterprise/audit/stats` — per-event-type counts in the
+    requested window (capped at 10k rows, sample-based).
+  - `POST /api/enterprise/audit/verify` — recomputes HMAC for the
+    sampled range; returns 503 if `sign_key` is unset rather than
+    silently lying about integrity.
+- All routes gated by `@require_auth @require_permission("audit", "read")`.
+
+**Circular-import note**: the audit router transitively imports
+`app.gateway.authz`, which re-enters the gateway package's `__init__`.
+We therefore mount `enterprise_audit.router` inside the FastAPI
+lifespan hook (after package init completes) rather than in
+`create_app()`.
+
+**Tests for M2**:
+- `tests/enterprise/test_audit_signer.py` — determinism, dict order,
+  tamper detection, unsigned-event verify=False, key isolation.
+- `tests/enterprise/test_audit_tool_event_map.py` — parametrized
+  routing for sandbox/MCP/skill tool names.
+- `tests/enterprise/test_audit_storage_sqlite.py` — round-trip,
+  filter combinations, `verify_integrity` happy + tamper paths.
+- `tests/enterprise/test_audit_middleware.py` — abefore/aafter hook
+  emission, tool wrapping, storage-failure swallowing.
+- `tests/enterprise/test_audit_routes.py` — 5 routes end-to-end with
+  in-memory storage + monkeypatched `_authenticate`.
+- `tests/enterprise/integration/test_audit_end_to_end.py` — middleware
+  → real SqliteAuditStorage → `verify_integrity` true.
+- `tests/enterprise/bench_audit_append.py` — manual microbenchmark
+  (1000 appends; reports min/avg/P50/P95/P99/max). With WAL pragmas
+  applied by `EnterpriseDatabase`, observed P99 on Windows SQLite is
+  ~6 ms — above the plan's aspirational 1 ms target, but well within
+  the agent-loop budget.
+
+**Roadmap (still not landed)**:
+- M3 — Approval workflow + `ApprovalTimeoutChecker`
 
 **Tests for M0 foundation**:
 - `tests/test_lead_agent_middleware_order.py` — locks the chain order contract (`custom_middlewares` injected immediately before `ClarificationMiddleware`)

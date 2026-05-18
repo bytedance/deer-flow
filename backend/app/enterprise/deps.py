@@ -1,4 +1,4 @@
-"""Lazy singletons for enterprise resources (plan M1-7, RFC §9.3).
+"""Lazy singletons for enterprise resources (plan M1-7 / M2-8, RFC §9.3).
 
 Each helper constructs its target on first use and caches the result so
 repeated calls in a single process — typically from
@@ -12,10 +12,24 @@ object. The trade-off is that tests must reset the cache explicitly via
 :func:`_reset_for_tests`.
 
 All factories are **defensive about config**: if the relevant
-sub-module is disabled, they raise ``RuntimeError`` so a buggy router
-cannot silently bypass the operator's intent. The opposite (returning
-``None``) was rejected because FastAPI typically wraps the result in
-``Depends()`` and a ``None`` would surface as a confusing 500.
+sub-module is disabled, they raise ``RuntimeError`` (or HTTP 503 for
+request-time deps) so a buggy router cannot silently bypass the
+operator's intent.
+
+M2 audit deps
+=============
+
+The audit router needs the same :class:`AuditStorage` /
+:class:`AuditSigner` that the agent middleware writes to — reading
+from a different engine would create a split-brain where the router
+can't see middleware-written rows. We therefore route through the
+process-wide singletons in
+:mod:`deerflow.enterprise.middlewares` (``get_audit_storage`` /
+``get_audit_signer``), which in turn pull their session factory from
+:func:`deerflow.enterprise.persistence.database.get_enterprise_session_factory`.
+For that to work the same :class:`EnterpriseDatabase` instance must be
+registered process-wide via :func:`set_enterprise_database` — which
+:func:`get_enterprise_db` does on first call.
 """
 
 from __future__ import annotations
@@ -23,9 +37,19 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from fastapi import HTTPException, Request
+
 from deerflow.config.app_config import get_app_config
-from deerflow.enterprise.config import EnterpriseConfig
-from deerflow.enterprise.persistence.database import EnterpriseDatabase
+from deerflow.enterprise.audit.signer import AuditSigner
+from deerflow.enterprise.audit.storage import AuditStorage
+from deerflow.enterprise.config import AuditConfig, EnterpriseConfig
+from deerflow.enterprise.middlewares import (
+    get_audit_signer as _get_audit_signer_singleton,
+)
+from deerflow.enterprise.middlewares import (
+    get_audit_storage as _get_audit_storage_singleton,
+)
+from deerflow.enterprise.persistence.database import EnterpriseDatabase, set_enterprise_database
 from deerflow.enterprise.rbac.repository import (
     PostgresRbacRepository,
     RbacRepository,
@@ -62,6 +86,12 @@ async def get_enterprise_db() -> EnterpriseDatabase:
     schema management lives in Alembic (plan §9.4). This is safe to
     call from both ``lifespan`` and request handlers — only the first
     call pays the cost.
+
+    Also registers the instance via
+    :func:`set_enterprise_database` so M2's audit middleware singletons
+    (``get_audit_storage`` / ``get_audit_signer`` in
+    :mod:`deerflow.enterprise.middlewares`) resolve through the same
+    engine and session factory.
     """
     global _enterprise_db
     if _enterprise_db is None:
@@ -72,6 +102,7 @@ async def get_enterprise_db() -> EnterpriseDatabase:
             )
         _enterprise_db = EnterpriseDatabase(config.database)
         await _enterprise_db.init()
+        set_enterprise_database(_enterprise_db)
         logger.info("Enterprise database initialised: %s", config.database.url)
     return _enterprise_db
 
@@ -120,6 +151,34 @@ async def get_rbac_checker() -> RbacPermissionProvider:
     return _rbac_checker
 
 
+# ── M2 audit request-time deps (FastAPI ``Depends``) ───────────────────
+
+
+def get_audit_config(request: Request) -> AuditConfig:
+    """Return the active :class:`AuditConfig`.
+
+    Raises 503 when audit is administratively disabled rather than 404
+    — the route exists in the router table, the *feature* is off. A
+    503 lets monitoring distinguish "feature off" from "route missing".
+    """
+    config = request.app.state.config.enterprise
+    if not config.enabled or not config.audit.enabled:
+        raise HTTPException(status_code=503, detail="Audit subsystem is disabled")
+    return config.audit
+
+
+def get_audit_storage(request: Request) -> AuditStorage:
+    """Return the shared :class:`AuditStorage` singleton."""
+    audit = get_audit_config(request)
+    return _get_audit_storage_singleton(audit)
+
+
+def get_audit_signer(request: Request) -> AuditSigner | None:
+    """Return the shared :class:`AuditSigner` singleton (may be ``None``)."""
+    audit = get_audit_config(request)
+    return _get_audit_signer_singleton(audit)
+
+
 def _reset_for_tests() -> None:
     """Clear every cached singleton — call from pytest fixtures only.
 
@@ -130,10 +189,14 @@ def _reset_for_tests() -> None:
     _enterprise_db = None
     _rbac_repo = None
     _rbac_checker = None
+    set_enterprise_database(None)
 
 
 __all__ = [
     "_reset_for_tests",
+    "get_audit_config",
+    "get_audit_signer",
+    "get_audit_storage",
     "get_enterprise_config",
     "get_enterprise_db",
     "get_rbac_checker",

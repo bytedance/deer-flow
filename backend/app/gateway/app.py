@@ -199,13 +199,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from app.enterprise.deps import get_enterprise_db, get_rbac_checker
             from app.gateway.authz import set_permission_provider
 
-            await get_enterprise_db()  # liveness check + initialise pool
+            # ``get_enterprise_db()`` initialises the pool AND registers
+            # the engine via ``set_enterprise_database`` so M2's audit
+            # singletons resolve through the same session factory.
+            await get_enterprise_db()
             set_permission_provider(await get_rbac_checker())
             logger.info("RBAC PermissionProvider registered — enterprise permissions are live")
 
-        # TODO(M2): if enterprise_config.audit.enabled, init AuditStorage + signer.
+        # M2: ensure ``EnterpriseDatabase`` is alive when audit (or any
+        # later module) needs it but RBAC has not already brought it up.
+        # ``get_enterprise_db()`` is idempotent; calling it a second time
+        # is cheap.
+        if enterprise_config.audit.enabled or enterprise_config.approval.enabled:
+            from app.enterprise.deps import get_enterprise_db
+
+            await get_enterprise_db()
+            logger.info("EnterpriseDatabase ready for audit/approval modules")
         # TODO(M3): if enterprise_config.approval.enabled, start ApprovalTimeoutChecker.
         # TODO(M4): if enterprise_config.auth.oidc.enabled, register OIDCAuthProvider.
+
+        # Mount the audit read API. We do this in lifespan rather than in
+        # ``create_app()`` because the router transitively imports
+        # ``app.gateway.authz`` — at module load time that would re-enter
+        # ``create_app()`` and explode. By the time lifespan fires, the
+        # gateway package has finished initialising. Plan M2-7.
+        from app.enterprise.routers import audit as enterprise_audit
+
+        app.include_router(enterprise_audit.router)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app):
@@ -433,6 +453,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # ``create_app`` runs before ``lifespan`` resolves ``AppConfig``, so
     # we load it explicitly here. ``get_app_config`` caches internally
     # and the call is cheap.
+    #
+    # NOTE: the M2 audit router is intentionally mounted from the
+    # lifespan hook (not here) because its import path traverses
+    # ``app.gateway.authz`` and would re-enter this very function while
+    # the gateway package is still initialising. Lifespan runs after
+    # package init completes.
     try:
         app_config_for_routes = get_app_config()
     except Exception:
