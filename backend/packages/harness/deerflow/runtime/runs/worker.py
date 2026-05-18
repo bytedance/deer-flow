@@ -366,6 +366,11 @@ async def run_agent(
     finally:
         # Flush any buffered journal events and persist completion data
         if journal is not None:
+            if record.status == RunStatus.interrupted:
+                try:
+                    journal.flush_partial_messages()
+                except Exception:
+                    logger.warning("Failed to flush partial messages for run %s", run_id, exc_info=True)
             try:
                 await journal.flush()
             except Exception:
