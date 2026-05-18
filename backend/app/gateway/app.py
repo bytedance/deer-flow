@@ -173,6 +173,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
+    # Enterprise extension lifecycle hook (plan M0-11).
+    #
+    # Sub-modules (RBAC permission provider, audit storage, approval
+    # timeout checker, OIDC client) register themselves here in M1-M4.
+    # The M0 implementation only logs that the extension is enabled — no
+    # routes are mounted and no providers are registered yet. Keeping
+    # this branch wired now means later milestones add code without
+    # touching this file again.
+    enterprise_config = app.state.config.enterprise
+    if enterprise_config.enabled:
+        logger.info(
+            "Enterprise extension enabled (rbac=%s, audit=%s, approval=%s, oidc=%s) — sub-modules wire in M1-M4",
+            enterprise_config.rbac.enabled,
+            enterprise_config.audit.enabled,
+            enterprise_config.approval.enabled,
+            enterprise_config.auth.oidc.enabled,
+        )
+        # TODO(M1): if enterprise_config.rbac.enabled, init enterprise DB and register RbacPermissionProvider.
+        # TODO(M2): if enterprise_config.audit.enabled, init AuditStorage + signer.
+        # TODO(M3): if enterprise_config.approval.enabled, start ApprovalTimeoutChecker.
+        # TODO(M4): if enterprise_config.auth.oidc.enabled, register OIDCAuthProvider.
+
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app):
         logger.info("LangGraph runtime initialised")

@@ -17,7 +17,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
-from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
+from app.gateway.authz import AuthContext, _resolve_permissions_for_user
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -117,8 +117,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # and request.state.auth (so @require_permission's "auth is
         # None" branch short-circuits instead of running the entire
         # JWT-decode + DB-lookup pipeline a second time per request).
+        #
+        # Permissions resolution: when an enterprise PermissionProvider
+        # is registered (see ``app.gateway.authz.set_permission_provider``),
+        # delegate to it; otherwise fall back to ``_ALL_PERMISSIONS`` for
+        # behaviour parity with pre-enterprise builds. This is the SINGLE
+        # place permission resolution happens in the request lifecycle —
+        # ``@require_permission`` sees ``auth is not None`` and skips its
+        # own ``_authenticate()`` call (authz.py:254-257), so failing to
+        # plug the provider in here is exactly the "RBAC silently inert"
+        # bug the plan §11 risk register calls out.
         request.state.user = user
-        request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+        permissions = await _resolve_permissions_for_user(user)
+        request.state.auth = AuthContext(user=user, permissions=permissions)
         token = set_current_user(user)
         try:
             return await call_next(request)

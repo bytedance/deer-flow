@@ -264,6 +264,7 @@ Key sections:
 - `summarization` - Context summarization settings
 - `subagents` - Subagent system (enabled/disabled)
 - `memory` - Memory system settings (enabled, storage, debounce, facts limits)
+- `enterprise` - Optional enterprise extension (RBAC, audit, approval, OIDC). **Disabled by default**; see [docs/14-enterprise-cases.md](docs/14-enterprise-cases.md) for opt-in usage.
 
 Provider note:
 - `models[*].use` references provider classes by module path (for example `langchain_openai:ChatOpenAI`).

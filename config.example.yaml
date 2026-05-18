@@ -1089,3 +1089,95 @@ run_events:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# Enterprise Extension Configuration
+# ============================================================================
+# Opt-in enterprise features: RBAC, audit log, human-in-the-loop approval, OIDC
+# SSO. The entire block is OFF by default — leaving it commented or absent
+# preserves the open-source single-user behavior verbatim.
+#
+# Illegal combinations (fail-fast at startup, raised by EnterpriseConfig validator):
+#   - approval.enabled=true + rbac.enabled=false
+#     (approvers are resolved by role; impossible without RBAC)
+#   - approval.enabled=true + audit.enabled=false
+#     (approval decisions MUST land in the audit log for compliance)
+#
+# Warnings (logged at startup, allowed):
+#   - oidc.enabled=true + rbac.enabled=false (OIDC writes user.roles but nothing reads them)
+#   - enterprise.enabled=false + any sub-module enabled=true (sub-module silently inert)
+#
+# See backend/docs/14-enterprise-cases.md and the RFC at
+# docs/superpowers/specs/2026-05-18-deerflow-enterprise-rfc.md for details.
+
+# enterprise:
+#   enabled: false
+#
+#   rbac:
+#     enabled: false
+#     default_role: member
+#     # Override default role -> permissions map. Leave null to use the
+#     # built-in DEFAULT_ROLE_PERMISSIONS table (landing in M1).
+#     role_permissions: null
+#
+#   audit:
+#     enabled: false
+#     storage:
+#       use: deerflow.enterprise.audit.storage:SqliteAuditStorage
+#     retention_days: 2555  # ~7 years, SOX-style
+#     sign_key: $AUDIT_SIGN_KEY  # required when enabled=true
+#
+#   approval:
+#     enabled: false
+#     timeout_check_interval_seconds: 60
+#     rules:
+#       - id: sandbox_dangerous_cmd
+#         name: Dangerous sandbox command approval
+#         action_type: sandbox:command
+#         condition: "command in ['rm', 'sudo', 'chmod']"
+#         approver_roles: [admin, project_manager]
+#         urgency: normal
+#         deadline_hours: 24
+#         min_approvals: 1
+#         enabled: true
+#       - id: data_export
+#         name: Data export approval
+#         action_type: data:export
+#         condition: null
+#         approver_roles: [admin]
+#         urgency: urgent
+#         deadline_hours: 48
+#         min_approvals: 2
+#         enabled: true
+#     notifiers:
+#       - use: deerflow.enterprise.approval.notifiers.web:WebNotifier
+#       - use: deerflow.enterprise.approval.notifiers.feishu:FeishuNotifier
+#         app_id: $FEISHU_APP_ID
+#         app_secret: $FEISHU_APP_SECRET
+#       - use: deerflow.enterprise.approval.notifiers.wecom:WeComNotifier
+#         corp_id: $WECOM_CORP_ID
+#         agent_id: $WECOM_AGENT_ID
+#         secret: $WECOM_SECRET
+#
+#   auth:
+#     oidc:
+#       enabled: false
+#       issuer: https://keycloak.example.com/realms/myorg
+#       client_id: deerflow
+#       client_secret: $OIDC_CLIENT_SECRET
+#       scopes: [openid, profile, email, groups]
+#       redirect_uri: https://deerflow.example.com/api/enterprise/auth/oidc/callback
+#       role_mapping:
+#         claim_field: groups
+#         mappings:
+#           deerflow-admin: admin
+#           deerflow-pm: project_manager
+#           deerflow-member: member
+#         default_role: member
+#       auto_provision: true
+#       jwks_cache_ttl_seconds: 600
+#
+#   database:
+#     url: sqlite+aiosqlite:///./enterprise.db
+#     echo: false
+#     pool_size: 5

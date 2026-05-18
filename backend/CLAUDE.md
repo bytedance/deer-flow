@@ -404,12 +404,38 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `summarization` - Context summarization (enabled, trigger conditions, keep policy)
 - `subagents.enabled` - Master switch for subagent delegation
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens)
+- `enterprise` - **Enterprise extension** (disabled by default; see "Enterprise Extension" below)
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description)
 - `skills` - Map of skill name → state (enabled)
 
 Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` methods.
+
+### Enterprise Extension (`packages/harness/deerflow/enterprise/`)
+
+Optional, opt-in extension that layers RBAC, audit, approval, and OIDC SSO on top of the OSS gateway. **Disabled by default — `config.yaml` without an `enterprise:` block is a fully working OSS install**.
+
+**Foundation modules (M0, landed)**:
+- `enterprise.config` — Pydantic v2 `EnterpriseConfig` with `model_validator(mode="after")` that:
+  - Hard-fails on `approval.enabled=True` + `rbac.enabled=False` (approval grants depend on identity)
+  - Hard-fails on `approval.enabled=True` + `audit.enabled=False` (approval decisions must be auditable)
+  - Warns on `oidc.enabled=True` + `rbac.enabled=False` (SSO without role mapping silently grants `_ALL_PERMISSIONS`)
+  - Warns on `enterprise.enabled=False` while any sub-module is enabled (silent inertness)
+- `enterprise.middlewares.get_enterprise_middlewares(config)` — agent-layer middleware factory. Returns `[]` in M0; later milestones append `AuditMiddleware` and friends here. Wired into the lead-agent chain via `_build_middlewares(custom_middlewares=...)` so the enterprise stack lands as the second-to-last entry, with `ClarificationMiddleware` always at the tail (locked in by `tests/test_lead_agent_middleware_order.py`).
+- `enterprise.persistence.database.EnterpriseDatabase` — async engine wrapper. **Reuses `deerflow.persistence.base:Base`** rather than creating a second declarative_base so the existing Alembic env detects enterprise tables automatically.
+- `app.gateway.authz.PermissionProvider` (Protocol) — pluggable permission resolution backend. Registered via `set_permission_provider(provider)`; both `_authenticate()` and `AuthMiddleware.dispatch()` route through `_resolve_permissions_for_user(user)`, which delegates to the provider when registered and falls back to `_ALL_PERMISSIONS` otherwise. This single chokepoint avoids the "AuthMiddleware short-circuit" bug where decorator-level provider calls would never fire.
+- Alembic env (`packages/harness/deerflow/persistence/migrations/env.py`) ImportError-tolerantly imports `deerflow.enterprise.{rbac,audit,approval}` modules so `alembic revision --autogenerate` will detect them once they land in M1/M2/M3.
+
+**Roadmap (not yet implemented)**:
+- M1 — RBAC tables, `RbacPermissionProvider`, role/permission CRUD routes
+- M2 — Audit storage, signer, `AuditMiddleware`
+- M3 — Approval workflow + `ApprovalTimeoutChecker`
+- M4 — `OIDCAuthProvider` for enterprise SSO
+
+**Tests for M0 foundation**:
+- `tests/test_lead_agent_middleware_order.py` — locks the chain order contract (`custom_middlewares` injected immediately before `ClarificationMiddleware`)
+- `tests/enterprise/test_authz_permission_provider.py` — covers no-provider fallback, provider override, provider call-count reverse evidence, `AuthMiddleware`/decorator short-circuit, and the `internal_auth` header branch
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 

@@ -25,6 +25,26 @@ except ImportError:
     # Models not available — migration will work with existing metadata only.
     logging.getLogger(__name__).warning("Could not import deerflow.persistence.models; Alembic may not detect all tables")
 
+# Enterprise ORM model registration (M0 placeholder; populated by M1/M2/M3).
+#
+# Each enterprise sub-package (rbac/audit/approval) will declare ORM models
+# on the shared ``deerflow.persistence.base:Base`` metadata. Importing those
+# modules here forces SQLAlchemy class registration so ``alembic revision
+# --autogenerate`` can detect the tables. The blocks below are intentionally
+# tolerant of ImportError because in M0 these sub-modules do not yet exist;
+# this lets the existing migration environment keep working unchanged while
+# we land the foundation.
+for _enterprise_module in (
+    "deerflow.enterprise.rbac.repository",
+    "deerflow.enterprise.audit.storage",
+    "deerflow.enterprise.approval.repository",
+):
+    try:
+        __import__(_enterprise_module)
+    except ImportError:
+        # Sub-module not yet implemented (expected during M0); silent skip.
+        logging.getLogger(__name__).debug("Enterprise migration import skipped: %s not yet available", _enterprise_module)
+
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

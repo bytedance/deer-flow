@@ -31,9 +31,10 @@ from __future__ import annotations
 
 import functools
 import inspect
+import logging
 from collections.abc import Callable
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar, runtime_checkable
 
 from fastapi import HTTPException, Request
 
@@ -42,6 +43,8 @@ if TYPE_CHECKING:
 
 P = ParamSpec("P")
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 
 # Permission constants
@@ -119,6 +122,72 @@ _ALL_PERMISSIONS: list[str] = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PermissionProvider — pluggable permission resolution (RFC §11.3 / plan M0-7)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class PermissionProvider(Protocol):
+    """Protocol for permission resolution backends.
+
+    The enterprise RBAC module implements this protocol in
+    ``deerflow.enterprise.rbac.permission_provider:RbacPermissionProvider``
+    (landing in M1) and registers itself via :func:`set_permission_provider`
+    during gateway lifespan. When no provider is registered, ``_authenticate()``
+    and :class:`app.gateway.auth_middleware.AuthMiddleware` fall back to
+    ``_ALL_PERMISSIONS`` so existing behavior is preserved verbatim.
+    """
+
+    async def resolve_permissions(self, user: User) -> set[str]:
+        """Return the set of permission strings granted to ``user``.
+
+        Implementations should treat the returned set as the complete
+        authoritative list — callers will NOT additionally union it with
+        ``_ALL_PERMISSIONS``. Adapters that want legacy thread/run
+        permissions on top must explicitly include them (see plan §3 M1
+        ``LEGACY_PERMISSIONS_FOR_ROLE``).
+        """
+        ...
+
+
+_permission_provider: PermissionProvider | None = None
+
+
+def set_permission_provider(provider: PermissionProvider | None) -> None:
+    """Register (or clear) the global :class:`PermissionProvider`.
+
+    Pass ``None`` to revert to the default ``_ALL_PERMISSIONS`` behavior;
+    primarily useful in tests that want to reset state between cases.
+    Wiring is intentionally module-global because ``@require_permission``
+    and :class:`app.gateway.auth_middleware.AuthMiddleware` both need to
+    consult the same provider without dependency-injecting it through every
+    FastAPI route.
+    """
+    global _permission_provider
+    _permission_provider = provider
+
+
+def get_permission_provider() -> PermissionProvider | None:
+    """Return the currently-registered provider (or ``None``)."""
+    return _permission_provider
+
+
+async def _resolve_permissions_for_user(user: User) -> list[str]:
+    """Resolve permissions for ``user`` via the registered provider, with fallback.
+
+    Centralises the "provider if registered, else _ALL_PERMISSIONS" decision
+    so both ``_authenticate()`` and the global auth middleware share one
+    implementation. Provider exceptions are intentionally propagated — a
+    misbehaving RBAC backend should surface as a 500 instead of silently
+    granting all permissions, which would defeat the whole feature.
+    """
+    if _permission_provider is None:
+        return _ALL_PERMISSIONS
+    resolved = await _permission_provider.resolve_permissions(user)
+    return list(resolved)
+
+
 def _make_test_request_stub() -> Any:
     """Create a minimal request-like object for direct unit calls.
 
@@ -133,6 +202,11 @@ async def _authenticate(request: Request) -> AuthContext:
 
     Delegates to deps.get_optional_user_from_request() for the JWT→User pipeline.
     Returns AuthContext with user=None for anonymous requests.
+
+    When a :class:`PermissionProvider` is registered via
+    :func:`set_permission_provider`, ``permissions`` is filled from the
+    provider; otherwise the legacy ``_ALL_PERMISSIONS`` set is used so
+    behavior is unchanged when the enterprise extension is disabled.
     """
     from app.gateway.deps import get_optional_user_from_request
 
@@ -140,8 +214,8 @@ async def _authenticate(request: Request) -> AuthContext:
     if user is None:
         return AuthContext(user=None, permissions=[])
 
-    # In future, permissions could be stored in user record
-    return AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+    permissions = await _resolve_permissions_for_user(user)
+    return AuthContext(user=user, permissions=permissions)
 
 
 def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
