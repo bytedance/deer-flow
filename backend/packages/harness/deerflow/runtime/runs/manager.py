@@ -111,15 +111,60 @@ class RunManager:
         return record
 
     def get(self, run_id: str) -> RunRecord | None:
-        """Return a run record by ID, or ``None``."""
+        """Return an in-memory run record by ID, or ``None``."""
         return self._runs.get(run_id)
 
-    async def list_by_thread(self, thread_id: str) -> list[RunRecord]:
-        """Return all runs for a given thread, newest first."""
+    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+        """Return a run record by ID, checking the persistent store as fallback."""
+        record = self._runs.get(run_id)
+        if record is not None:
+            return record
+        if self._store is not None:
+            try:
+                d = await self._store.get(run_id, user_id=user_id)
+                if d is not None:
+                    return self._store_dict_to_record(d)
+            except Exception:
+                logger.warning("Failed to query store for run %s", run_id, exc_info=True)
+        return None
+
+    def _store_dict_to_record(self, d: dict) -> RunRecord:
+        """Convert a store dict back to a RunRecord for read-only use."""
+        return RunRecord(
+            run_id=d["run_id"],
+            thread_id=d["thread_id"],
+            assistant_id=d.get("assistant_id"),
+            status=RunStatus(d.get("status", RunStatus.error.value)),
+            on_disconnect=DisconnectMode.cancel,
+            multitask_strategy=d.get("multitask_strategy", "reject"),
+            metadata=d.get("metadata", {}),
+            kwargs=d.get("kwargs", {}),
+            created_at=d.get("created_at", ""),
+            updated_at=d.get("updated_at", ""),
+            model_name=d.get("model_name"),
+            error=d.get("error"),
+        )
+
+    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None) -> list[RunRecord]:
+        """Return all runs for a given thread, oldest first."""
         async with self._lock:
-            # Dict insertion order matches creation order, so reversing it gives
-            # us deterministic newest-first results even when timestamps tie.
-            return [r for r in self._runs.values() if r.thread_id == thread_id]
+            in_memory = [r for r in self._runs.values() if r.thread_id == thread_id]
+            in_memory_ids = {r.run_id for r in in_memory}
+
+        store_records: list[RunRecord] = []
+        if self._store is not None:
+            try:
+                store_dicts = await self._store.list_by_thread(thread_id, user_id=user_id)
+                for d in store_dicts:
+                    if d["run_id"] not in in_memory_ids:
+                        store_records.append(self._store_dict_to_record(d))
+            except Exception:
+                logger.warning("Failed to query store for thread %s runs", thread_id, exc_info=True)
+
+        return sorted(
+            in_memory + store_records,
+            key=lambda record: record.created_at or "",
+        )
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
