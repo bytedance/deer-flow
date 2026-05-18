@@ -331,7 +331,7 @@ export default function FormBlock({ block }: FormBlockProps) {
   }
 
   return (
-    <div className="rounded-lg border bg-card p-4" role="region" aria-label={title ?? "Form"}>
+    <div className="bg-card w-full max-w-md rounded-lg border p-4" role="region" aria-label={title ?? "Form"}>
       {title && <h3 className="mb-1 text-sm font-medium">{title}</h3>}
       {description && <p className="mb-3 text-xs text-muted-foreground">{description}</p>}
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-3" noValidate aria-label={title ?? "Form"}>
