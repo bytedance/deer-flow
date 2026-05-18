@@ -45,6 +45,8 @@ class UserResponse(BaseModel):
     system_role: Literal["superadmin", "tenant_admin", "user"]
     needs_setup: bool = False
     tenant_id: str = "default"
+    user_name: str = ""
+    real_name: str = ""
 
 
 class LoginRequest(BaseModel):

@@ -57,6 +57,19 @@ def _set_session_cookie(response: Response, token_value: str, request: Request) 
     )
 
 
+def _set_refresh_cookie(response: Response, refresh_value: str, request: Request) -> None:
+    """Set the refresh_token HttpOnly cookie on the response."""
+    is_https = is_secure_request(request)
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_value,
+        httponly=True,
+        secure=is_https,
+        samesite="lax",
+        max_age=7 * 24 * 3600 if is_https else None,
+    )
+
+
 @router.post("/login", response_model=InsBaseLoginResponse)
 async def login(request: Request, response: Response, body: InsBaseLoginRequest):
     """Authenticate with ins-base-rpc using RSA-encrypted credentials.
@@ -100,6 +113,7 @@ async def login(request: Request, response: Response, body: InsBaseLoginRequest)
 
     # Set session cookie with the ins-base token
     _set_session_cookie(response, user.ins_base_token, request)
+    _set_refresh_cookie(response, user.ins_base_refresh, request)
 
     return InsBaseLoginResponse(
         token=user.ins_base_token,

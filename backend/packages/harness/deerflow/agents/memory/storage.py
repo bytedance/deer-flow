@@ -68,16 +68,11 @@ class FileMemoryStorage(MemoryStorage):
 
     def __init__(self):
         """Initialize the file memory storage."""
-        # Per-tenant, per-agent memory cache: keyed by (tenant_id, agent_name)
+        # Per-tenant, per-agent memory cache: keyed by (user_id, agent_name)
         # Value: (memory_data, file_mtime)
-        self._memory_cache: dict[tuple[str, str | None], tuple[dict[str, Any], float | None]] = {}
+        self._memory_cache: dict[tuple[str | None, str | None], tuple[dict[str, Any], float | None]] = {}
         # Guards all reads and writes to _memory_cache across concurrent callers.
         self._cache_lock = threading.Lock()
-
-    @staticmethod
-    def _cache_key(agent_name: str | None = None) -> tuple[str, str | None]:
-        """Return the cache key for the current tenant and agent."""
-        return (get_current_tenant_id(), agent_name)
 
     def _validate_agent_name(self, agent_name: str) -> None:
         """Validate that the agent name is safe to use in filesystem paths.
@@ -218,9 +213,9 @@ class StoreMemoryStorage(MemoryStorage):
         """
         self._store_factory = store_factory
 
-    def _ns(self, agent_name: str | None = None) -> tuple[str, str, str]:
-        """Return the Store namespace for the current tenant and agent."""
-        return ("memory", get_current_tenant_id(), agent_name or "default")
+    def _ns(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[str, str, str, str]:
+        """Return the Store namespace for the current tenant, user, and agent."""
+        return ("memory", get_current_tenant_id(), user_id or "", agent_name or "default")
 
     def _get_store(self) -> BaseStore:
         store = self._store_factory()
@@ -228,11 +223,11 @@ class StoreMemoryStorage(MemoryStorage):
             raise RuntimeError("Store is not available")
         return store
 
-    def load(self, agent_name: str | None = None) -> dict[str, Any]:
+    def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Load memory data from the Store."""
         try:
             store = self._get_store()
-            item = _run_async(store.aget(self._ns(agent_name), "data"))
+            item = _run_async(store.aget(self._ns(agent_name, user_id=user_id), "data"))
         except Exception:
             logger.warning("StoreMemoryStorage.load failed, returning empty memory", exc_info=True)
             return create_empty_memory()
@@ -241,17 +236,17 @@ class StoreMemoryStorage(MemoryStorage):
             return create_empty_memory()
         return item.value
 
-    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
+    def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Reload memory data from the Store (same as load for Store backend)."""
-        return self.load(agent_name)
+        return self.load(agent_name, user_id=user_id)
 
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
         """Save memory data to the Store."""
         try:
             store = self._get_store()
             memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
-            _run_async(store.aput(self._ns(agent_name), "data", memory_data))
-            logger.info("Memory saved to Store for tenant=%s agent=%s", get_current_tenant_id(), agent_name or "default")
+            _run_async(store.aput(self._ns(agent_name, user_id=user_id), "data", memory_data))
+            logger.info("Memory saved to Store for tenant=%s user=%s agent=%s", get_current_tenant_id(), user_id or "", agent_name or "default")
             return True
         except Exception:
             logger.error("StoreMemoryStorage.save failed", exc_info=True)

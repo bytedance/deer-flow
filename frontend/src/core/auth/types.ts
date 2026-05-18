@@ -8,6 +8,8 @@ export const userSchema = z.object({
   system_role: z.enum(["superadmin", "tenant_admin", "user"]),
   tenant_id: z.string().optional().default("default"),
   tenant_name: z.string().optional(),
+  user_name: z.string().optional().default(""),
+  real_name: z.string().optional().default(""),
 });
 
 export type User = z.infer<typeof userSchema>;

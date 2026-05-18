@@ -508,18 +508,9 @@ export interface Translations {
     account: {
       profileTitle: string;
       email: string;
+      realName: string;
+      userName: string;
       role: string;
-      changePasswordTitle: string;
-      changePasswordDescription: string;
-      currentPassword: string;
-      newPassword: string;
-      confirmNewPassword: string;
-      passwordMismatch: string;
-      passwordTooShort: string;
-      passwordChangedSuccess: string;
-      networkError: string;
-      updating: string;
-      updatePassword: string;
       signOut: string;
     };
     acknowledge: {

@@ -79,7 +79,7 @@ export function WorkspaceNavMenu() {
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
   const { user } = useAuth();
-  const userLabel = formatUserLabel(user?.email, t.workspace.guestUser);
+  const displayName = user?.real_name || user?.user_name || formatUserLabel(user?.email, t.workspace.guestUser);
 
   useEffect(() => {
     setMounted(true);
@@ -103,7 +103,7 @@ export function WorkspaceNavMenu() {
                 >
                   <NavMenuButtonContent
                     isSidebarOpen={isSidebarOpen}
-                    userName={userLabel}
+                    userName={displayName}
                   />
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
@@ -139,7 +139,7 @@ export function WorkspaceNavMenu() {
             <SidebarMenuButton size="lg" className="pointer-events-none">
               <NavMenuButtonContent
                 isSidebarOpen={isSidebarOpen}
-                userName={userLabel}
+                userName={displayName}
               />
             </SidebarMenuButton>
           )}

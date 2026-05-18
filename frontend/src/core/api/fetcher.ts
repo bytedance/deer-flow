@@ -86,6 +86,24 @@ export async function fetch(
   });
 
   if (res.status === 401) {
+    // A refresh attempt is about to be made — set a flag to avoid infinite loops
+    // when the refresh endpoint itself returns 401.
+    const isRefreshRequest = url.includes("/api/v1/auth/refresh");
+    if (!isRefreshRequest) {
+      try {
+        const refreshRes = await globalThis.fetch("/api/v1/auth/refresh", {
+          method: "POST",
+          credentials: "include",
+        });
+        if (refreshRes.ok) {
+          // Token refreshed successfully — retry the original request
+          return globalThis.fetch(input, { ...init, headers, credentials: "include" });
+        }
+      } catch {
+        // Refresh failed, fall through to redirect
+      }
+    }
+
     window.location.href = buildLoginUrl(window.location.pathname);
     throw new Error("Unauthorized");
   }
