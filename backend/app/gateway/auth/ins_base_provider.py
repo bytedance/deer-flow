@@ -15,6 +15,20 @@ from deerflow.rpc.rpc_client import RpcClient, get_rpc_client
 logger = logging.getLogger(__name__)
 
 
+def _map_system_role(username: str) -> str:
+    """Map username to system_role.
+
+    - "superadmin" → "superadmin"
+    - "admin" → "tenant_admin"
+    - anything else → "user"
+    """
+    if username == "superadmin":
+        return "superadmin"
+    if username == "admin":
+        return "tenant_admin"
+    return "user"
+
+
 class RpcNotConfiguredError(Exception):
     """Raised when the RPC client is not configured."""
 
@@ -114,7 +128,7 @@ class InsBaseAuthProvider(AuthProvider):
                 "id": user_id,
                 "email": f"{username}@ins-base",
                 "password_hash": None,
-                "system_role": "user",
+                "system_role": _map_system_role(username),
                 "needs_setup": False,
                 "token_version": 0,
                 "tenant_id": "default",
@@ -167,7 +181,7 @@ class InsBaseAuthProvider(AuthProvider):
                 "id": user_id,
                 "email": user_data.get("email", f"user@{user_data.get('userId', 'unknown')}"),
                 "password_hash": None,
-                "system_role": "user",
+                "system_role": _map_system_role(user_data.get("username", "")),
                 "needs_setup": False,
                 "token_version": 0,
                 "tenant_id": "default",
