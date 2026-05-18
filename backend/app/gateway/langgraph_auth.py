@@ -4,8 +4,11 @@ Loaded by LangGraph Server via langgraph.json ``auth.path``.
 Reuses the same ``decode_token`` / ``get_auth_config`` as Gateway,
 so both modes validate tokens with the same secret and rules.
 
+For ins_base provider, validates tokens via InsBaseAuthProvider.get_user()
+instead of local JWT decoding.
+
 Two layers:
-  1. @auth.authenticate — validates JWT cookie, extracts user_id,
+  1. @auth.authenticate — validates token, extracts user_id,
      and enforces CSRF on state-changing methods (POST/PUT/DELETE/PATCH)
   2. @auth.on — returns metadata filter so each user only sees own threads
 
@@ -17,9 +20,7 @@ import secrets
 
 from langgraph_sdk import Auth
 
-from app.gateway.auth.errors import TokenError
-from app.gateway.auth.jwt import decode_token
-from app.gateway.deps import get_local_provider
+from deerflow.config.auth_config import get_auth_config
 
 auth = Auth()
 
@@ -78,14 +79,14 @@ def _check_csrf(request) -> None:
 
 @auth.authenticate
 async def authenticate(request):
-    """Validate the session cookie, decode JWT, and check token_version.
+    """Validate the session cookie against the configured auth provider.
 
-    Same validation chain as Gateway's get_current_user_from_request:
-      cookie → decode JWT → DB lookup → token_version match
+    For ins_base provider: validates via InsBaseAuthProvider.get_user().
+    For local provider: decodes JWT, checks DB and token_version.
     Also enforces CSRF on state-changing methods.
     """
     # CSRF check before authentication so forged cross-site requests
-    # are rejected early, even if the cookie carries a valid JWT.
+    # are rejected early, even if the cookie carries a valid token.
     _check_csrf(request)
 
     token = request.cookies.get("access_token")
@@ -95,6 +96,31 @@ async def authenticate(request):
             detail="Not authenticated",
         )
 
+    config = get_auth_config()
+    if config.provider == "ins_base":
+        from app.gateway.deps import get_ins_base_provider
+
+        ins_provider = get_ins_base_provider()
+        if ins_provider is None:
+            raise Auth.exceptions.HTTPException(
+                status_code=503,
+                detail="ins-base auth provider not available",
+            )
+
+        user = await ins_provider.get_user(token)
+        if user is None:
+            raise Auth.exceptions.HTTPException(
+                status_code=401,
+                detail="Invalid or expired token",
+            )
+
+        user_data = getattr(user, "ins_base_user_data", {})
+        user_id = str(user_data.get("userId", user.id))
+        return user_id
+
+    from app.gateway.auth.errors import TokenError
+    from app.gateway.auth.jwt import decode_token
+
     payload = decode_token(token)
     if isinstance(payload, TokenError):
         raise Auth.exceptions.HTTPException(
@@ -103,6 +129,8 @@ async def authenticate(request):
         )
 
     await _ensure_engine()
+    from app.gateway.deps import get_local_provider
+
     user = await get_local_provider().get_user(payload.sub)
     if user is None:
         raise Auth.exceptions.HTTPException(

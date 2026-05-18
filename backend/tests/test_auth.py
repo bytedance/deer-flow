@@ -445,6 +445,9 @@ def test_token_version_mismatch_rejects():
     import os
 
     os.environ["AUTH_JWT_SECRET"] = "test-secret-key-for-jwt-testing-minimum-32-chars"
+    from deerflow.config.auth_config import load_auth_config_from_dict
+
+    load_auth_config_from_dict({"provider": "local", "jwt_secret": "test-secret-key-for-jwt-testing-minimum-32-chars"})
 
     user_id = str(uuid4())
     token = create_access_token(user_id, token_version=0)

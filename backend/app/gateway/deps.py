@@ -321,11 +321,14 @@ async def get_current_user_from_request(request: Request):
     """Get the current authenticated user from the request cookie.
 
     Raises HTTPException 401 if not authenticated.
+
+    For the ``ins_base`` provider, validates the token via
+    ``InsBaseAuthProvider.get_user()`` instead of decoding as a local JWT.
     """
     import logging
 
-    from app.gateway.auth import decode_token
-    from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError, token_error_to_code
+    from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+    from deerflow.config.auth_config import get_auth_config
 
     logger = logging.getLogger(__name__)
     request_path = getattr(getattr(request, "url", None), "path", "<unknown>")
@@ -337,6 +340,32 @@ async def get_current_user_from_request(request: Request):
             status_code=401,
             detail=AuthErrorResponse(code=AuthErrorCode.NOT_AUTHENTICATED, message="Not authenticated").model_dump(),
         )
+
+    config = get_auth_config()
+    if config.provider == "ins_base":
+        from app.gateway.deps import get_ins_base_provider
+
+        ins_provider = get_ins_base_provider()
+        if ins_provider is None:
+            raise HTTPException(
+                status_code=503,
+                detail=AuthErrorResponse(code=AuthErrorCode.PROVIDER_NOT_FOUND, message="ins-base auth provider not available").model_dump(),
+            )
+
+        user = await ins_provider.get_user(access_token)
+        if user is None:
+            raise HTTPException(
+                status_code=401,
+                detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Invalid or expired token").model_dump(),
+            )
+
+        from deerflow.config.tenant import set_current_tenant_id
+
+        set_current_tenant_id(user.tenant_id)
+        return user
+
+    from app.gateway.auth import decode_token
+    from app.gateway.auth.errors import TokenError, token_error_to_code
 
     payload = decode_token(access_token)
     if isinstance(payload, TokenError):

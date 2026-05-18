@@ -64,6 +64,8 @@ def _persistence_engine(tmp_path):
 
 def _setup_config():
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
+    from deerflow.config.auth_config import load_auth_config_from_dict
+    load_auth_config_from_dict({"provider": "local", "jwt_secret": _TEST_SECRET})
 
 
 # ── CSRF Middleware Path Matching ────────────────────────────────────

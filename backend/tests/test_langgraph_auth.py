@@ -31,8 +31,23 @@ _JWT_SECRET = "test-secret-key-for-langgraph-auth-testing-min-32"
 @pytest.fixture(autouse=True)
 def _setup_auth_config():
     set_auth_config(AuthConfig(jwt_secret=_JWT_SECRET))
+    from deerflow.config.auth_config import load_auth_config_from_dict
+    load_auth_config_from_dict({"provider": "local", "jwt_secret": _JWT_SECRET})
     yield
     set_auth_config(AuthConfig(jwt_secret=_JWT_SECRET))
+
+
+@pytest.fixture(autouse=True)
+def _mock_ensure_engine():
+    """Prevent _ensure_engine from trying to load real config.yaml.
+
+    These tests mock the local provider, so the persistence engine is not
+    needed. Without this mock, _ensure_engine -> get_app_config() would
+    fail because config.yaml references env vars (e.g. $RSA_PUBLIC) that
+    are not set in the test environment.
+    """
+    with patch("app.gateway.langgraph_auth._ensure_engine", AsyncMock()):
+        yield
 
 
 def _req(cookies=None, method="GET", headers=None):
@@ -75,7 +90,7 @@ def test_expired_jwt_raises_401():
 
 def test_user_not_found_raises_401():
     token = create_access_token("ghost")
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(None)):
+    with patch("app.gateway.deps.get_local_provider", return_value=_mock_provider(None)):
         with pytest.raises(Auth.exceptions.HTTPException) as exc:
             asyncio.run(authenticate(_req({"access_token": token})))
         assert exc.value.status_code == 401
@@ -85,7 +100,7 @@ def test_user_not_found_raises_401():
 def test_token_version_mismatch_raises_401():
     user = _user(token_version=2)
     token = create_access_token(str(user.id), token_version=1)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
+    with patch("app.gateway.deps.get_local_provider", return_value=_mock_provider(user)):
         with pytest.raises(Auth.exceptions.HTTPException) as exc:
             asyncio.run(authenticate(_req({"access_token": token})))
         assert exc.value.status_code == 401
@@ -95,7 +110,7 @@ def test_token_version_mismatch_raises_401():
 def test_valid_token_returns_user_id():
     user = _user(token_version=0)
     token = create_access_token(str(user.id), token_version=0)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
+    with patch("app.gateway.deps.get_local_provider", return_value=_mock_provider(user)):
         result = asyncio.run(authenticate(_req({"access_token": token})))
     assert result == str(user.id)
 
@@ -103,7 +118,7 @@ def test_valid_token_returns_user_id():
 def test_valid_token_matching_version():
     user = _user(token_version=5)
     token = create_access_token(str(user.id), token_version=5)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
+    with patch("app.gateway.deps.get_local_provider", return_value=_mock_provider(user)):
         result = asyncio.run(authenticate(_req({"access_token": token})))
     assert result == str(user.id)
 
@@ -116,7 +131,7 @@ def test_provider_exception_propagates():
     token = create_access_token("user-1")
     p = AsyncMock()
     p.get_user = AsyncMock(side_effect=RuntimeError("DB down"))
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=p):
+    with patch("app.gateway.deps.get_local_provider", return_value=p):
         with pytest.raises(RuntimeError, match="DB down"):
             asyncio.run(authenticate(_req({"access_token": token})))
 
@@ -128,7 +143,7 @@ def test_jwt_missing_ver_defaults_to_zero():
     uid = str(uuid4())
     raw = pyjwt.encode({"sub": uid, "exp": 9999999999, "iat": 1000000000}, _JWT_SECRET, algorithm="HS256")
     user = _user(user_id=uid, token_version=0)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
+    with patch("app.gateway.deps.get_local_provider", return_value=_mock_provider(user)):
         result = asyncio.run(authenticate(_req({"access_token": raw})))
     assert result == uid
 
@@ -140,7 +155,7 @@ def test_jwt_missing_ver_rejected_when_user_version_nonzero():
     uid = str(uuid4())
     raw = pyjwt.encode({"sub": uid, "exp": 9999999999, "iat": 1000000000}, _JWT_SECRET, algorithm="HS256")
     user = _user(user_id=uid, token_version=1)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
+    with patch("app.gateway.deps.get_local_provider", return_value=_mock_provider(user)):
         with pytest.raises(Auth.exceptions.HTTPException) as exc:
             asyncio.run(authenticate(_req({"access_token": raw})))
         assert exc.value.status_code == 401
