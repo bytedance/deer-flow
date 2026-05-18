@@ -1,4 +1,10 @@
-## ADDED Requirements
+# a2ui-device-selector
+
+## Purpose
+
+Provides A2UI interactive components for device selection within the industrial monitoring platform. Users browse an organization tree and select one or multiple devices, with the selection communicated back to the agent via `onInteraction` callbacks. Tree data is fetched at runtime from the Gateway proxy endpoint.
+
+## Requirements
 
 ### Requirement: 设备单选选择器组件注册
 系统 SHALL 在 A2UI 组件注册表中注册 `device-selector` 组件，类型为交互式组件。
@@ -22,16 +28,16 @@
 系统 SHALL 以左右分栏布局展示设备选择器：左侧为可折叠的组织树，右侧为选中组织节点下的设备列表。
 
 #### Scenario: 渲染完整布局
-- **WHEN** 设备选择器收到有效的 treeData（包含多层嵌套的组织和设备节点）
+- **WHEN** 设备选择器挂载并完成组织树 API 调用
 - **THEN** 左侧显示可折叠的组织树（仅展示 type>=10 的组织节点），右侧显示"请选择组织节点"占位提示
 
 #### Scenario: 左侧组织树展开折叠
 - **WHEN** 用户点击左侧组织树中一个折叠的组织节点
 - **THEN** 该节点展开显示子组织节点，右侧设备列表切换为该组织节点下的设备
 
-#### Scenario: 空数据
-- **WHEN** treeData 为空数组
-- **THEN** 系统显示"无数据"占位提示
+#### Scenario: API 加载失败
+- **WHEN** 组织树 API 请求失败
+- **THEN** 系统显示错误信息并提供重试按钮
 
 #### Scenario: 组织节点右侧设备类型过滤
 - **WHEN** 左侧选中某组织节点
@@ -90,12 +96,38 @@
 - **THEN** sanitizeProps 静默丢弃这些键，组件仅使用白名单内的 props
 
 #### Scenario: 无效 props 类型
-- **WHEN** treeData 不是数组或节点缺少必填字段
+- **WHEN** queryParams 不是合法的对象格式
 - **THEN** Zod 校验失败，GenUIRenderer 显示校验错误信息
 
 #### Scenario: 校验通过
-- **WHEN** props 包含合法的 treeData、title 等字段
+- **WHEN** props 包含合法的 queryParams、title 等字段
 - **THEN** Zod 校验通过，组件正常渲染
+
+### Requirement: 前端调用组织树 API
+设备选择器组件 SHALL 在挂载时通过 Gateway 代理端点自行获取组织树数据，而非接收后端注入的 treeData。
+
+#### Scenario: 组件挂载时获取数据
+- **WHEN** DeviceSelectorBlock 或 DeviceSelectorMultiBlock 组件挂载
+- **THEN** 组件从 `/api/organize/tree` 发起 GET 请求，携带 queryParams 中的参数，在加载完成后渲染组织树
+
+#### Scenario: 使用默认查询参数
+- **WHEN** props 中未提供 queryParams 或其字段缺失
+- **THEN** 使用默认值 userId=1、orgId=0、treeType=1
+
+### Requirement: 后端组织树 Gateway 代理端点
+系统 SHALL 提供 `GET /api/organize/tree` 端点代理 ins-bus-rpc 服务的组织树查询。
+
+#### Scenario: 代理设备树查询
+- **WHEN** 前端请求 `GET /api/organize/tree?userId=1&orgId=0&treeType=1`
+- **THEN** Gateway 通过 OrganizeServiceClient 向 ins-bus-rpc 发起请求，返回组织树数据
+
+#### Scenario: 携带搜索条件
+- **WHEN** 请求携带 content="常减压"
+- **THEN** 返回过滤后的树节点
+
+#### Scenario: 后端服务不可用
+- **WHEN** ins-bus-rpc 服务返回错误
+- **THEN** Gateway 返回 502 状态码及错误详情
 
 ### Requirement: 后端组织树 RPC 客户端
 系统 SHALL 提供 OrganizeServiceClient 封装 ins-bus-rpc 服务的 `/organize/getOrgTreeByUserIdAndOrgId` 接口调用。
@@ -107,10 +139,3 @@
 #### Scenario: 携带搜索条件
 - **WHEN** 调用时传入 content="常减压"
 - **THEN** 请求参数包含 content 过滤条件，返回过滤后的树节点
-
-### Requirement: 组件默认参数
-设备选择器组件的默认查询参数 SHALL 为 userId=1、orgId=0、treeType=1。
-
-#### Scenario: 使用默认参数
-- **WHEN** 后端构建 UIBlock 时未显式指定 userId / orgId / treeType
-- **THEN** 使用默认值 userId=1、orgId=0、treeType=1 查询组织树
