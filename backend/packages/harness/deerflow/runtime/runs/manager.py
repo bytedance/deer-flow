@@ -139,8 +139,13 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    async def get(self, run_id: str) -> RunRecord | None:
-        """Return a run record by ID, or ``None``."""
+    async def get(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+        """Return a run record by ID, or ``None``.
+
+        Args:
+            run_id: The run ID to look up.
+            user_id: Optional user ID for permission filtering when hydrating from store.
+        """
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
@@ -148,7 +153,7 @@ class RunManager:
         if self._store is None:
             return None
         try:
-            row = await self._store.get(run_id)
+            row = await self._store.get(run_id, user_id=user_id)
         except Exception:
             logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
             return None
@@ -166,12 +171,24 @@ class RunManager:
             logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
             return None
 
-    async def list_by_thread(self, thread_id: str, *, limit: int = 100) -> list[RunRecord]:
+    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+        """Return a run record by ID, checking the persistent store as fallback.
+
+        Alias for :meth:`get` for backward compatibility.
+        """
+        return await self.get(run_id, user_id=user_id)
+
+    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
 
         In-memory runs take precedence only when the same ``run_id`` exists in both
         memory and the backing store. The merged result is then sorted newest-first
         by ``created_at`` and trimmed to ``limit`` (default 100).
+
+        Args:
+            thread_id: The thread ID to filter by.
+            user_id: Optional user ID for permission filtering when hydrating from store.
+            limit: Maximum number of runs to return.
         """
         async with self._lock:
             # Dict insertion order gives deterministic results when timestamps tie.
@@ -180,7 +197,7 @@ class RunManager:
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}
         try:
-            rows = await self._store.list_by_thread(thread_id, limit=limit)
+            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=limit)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]

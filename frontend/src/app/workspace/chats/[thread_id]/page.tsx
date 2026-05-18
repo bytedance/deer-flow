@@ -109,7 +109,11 @@ export default function ChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      void sendMessage(threadId, message);
+      const sendPromise = sendMessage(threadId, message);
+      if (message.files.length > 0) {
+        return sendPromise;
+      }
+      void sendPromise;
     },
     [sendMessage, threadId],
   );

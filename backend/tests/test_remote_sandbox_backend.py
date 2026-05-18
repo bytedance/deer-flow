@@ -144,7 +144,11 @@ def test_provisioner_create_returns_sandbox_info(monkeypatch):
 
     def mock_post(url: str, json: dict, timeout: int):
         assert url == "http://provisioner:8002/api/sandboxes"
-        assert json == {"sandbox_id": "abc123", "thread_id": "thread-1"}
+        assert json == {
+            "sandbox_id": "abc123",
+            "thread_id": "thread-1",
+            "user_id": "test-user-autouse",
+        }
         assert timeout == 30
         return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
 
