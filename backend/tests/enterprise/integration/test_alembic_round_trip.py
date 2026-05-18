@@ -54,6 +54,47 @@ def _tables(db_path: Path) -> set[str]:
         engine.dispose()
 
 
+def _seed_audit_row(db_path: Path, *, audit_id: str) -> None:
+    """Seed a representative ``audit_events`` row.
+
+    Exception-safe: ``engine.dispose()`` runs even if the INSERT raises,
+    so a failed seed cannot leave an open SQLite handle that locks the
+    file against subsequent ``downgrade()`` calls or tmp_path teardown
+    on Windows.
+    """
+    eng = create_engine(f"sqlite:///{db_path}")
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text("INSERT INTO audit_events (id, event_type, timestamp, user_id, resource, action, details, signature) VALUES (:id, :et, :ts, :uid, :res, :act, :det, :sig)"),
+                {
+                    "id": audit_id,
+                    "et": "agent_task_started",
+                    "ts": "2026-05-18T00:00:00+00:00",
+                    "uid": "alice",
+                    "res": "agent",
+                    "act": "start",
+                    "det": "{}",
+                    "sig": "deadbeef",
+                },
+            )
+    finally:
+        eng.dispose()
+
+
+def _count_audit_row(db_path: Path, audit_id: str) -> int:
+    """Count ``audit_events`` rows with the given id. Exception-safe."""
+    eng = create_engine(f"sqlite:///{db_path}")
+    try:
+        with eng.begin() as conn:
+            return conn.execute(
+                text("SELECT COUNT(*) FROM audit_events WHERE id = :id"),
+                {"id": audit_id},
+            ).scalar()
+    finally:
+        eng.dispose()
+
+
 @pytest.fixture
 def db(tmp_path: Path) -> Iterator[Path]:
     """A scratch SQLite file path per test."""
@@ -93,22 +134,7 @@ def test_m2_audit_round_trip(db: Path) -> None:
     # the data (a downgrade that left tables but truncated rows would
     # also be a bug). The sync engine here is for inspection only —
     # opened AFTER alembic finishes, so it doesn't need an async driver.
-    eng = create_engine(f"sqlite:///{db}")
-    with eng.begin() as conn:
-        conn.execute(
-            text("INSERT INTO audit_events (id, event_type, timestamp, user_id, resource, action, details, signature) VALUES (:id, :et, :ts, :uid, :res, :act, :det, :sig)"),
-            {
-                "id": str(uuid4()),
-                "et": "agent_task_started",
-                "ts": "2026-05-18T00:00:00+00:00",
-                "uid": "alice",
-                "res": "agent",
-                "act": "start",
-                "det": "{}",
-                "sig": "deadbeef",
-            },
-        )
-    eng.dispose()
+    _seed_audit_row(db, audit_id=str(uuid4()))
 
     command.downgrade(cfg, "base")
     assert "audit_events" not in _tables(db)
@@ -125,22 +151,7 @@ def test_m3_approval_round_trip_preserves_m2_data(db: Path) -> None:
     # Up to m2; seed one audit row that must survive an m3 downgrade.
     command.upgrade(cfg, "20260518_m2_audit")
     audit_id = str(uuid4())
-    eng = create_engine(f"sqlite:///{db}")
-    with eng.begin() as conn:
-        conn.execute(
-            text("INSERT INTO audit_events (id, event_type, timestamp, user_id, resource, action, details, signature) VALUES (:id, :et, :ts, :uid, :res, :act, :det, :sig)"),
-            {
-                "id": audit_id,
-                "et": "agent_task_started",
-                "ts": "2026-05-18T00:00:00+00:00",
-                "uid": "alice",
-                "res": "agent",
-                "act": "start",
-                "det": "{}",
-                "sig": "deadbeef",
-            },
-        )
-    eng.dispose()
+    _seed_audit_row(db, audit_id=audit_id)
 
     # Up to m3.
     command.upgrade(cfg, "20260518_m3_approval")
@@ -158,10 +169,7 @@ def test_m3_approval_round_trip_preserves_m2_data(db: Path) -> None:
     assert "audit_events" in tables_after_down, "m3 downgrade WRONGLY dropped audit_events (m2 data lost!)"
 
     # Confirm the seeded row is still there.
-    eng = create_engine(f"sqlite:///{db}")
-    with eng.begin() as conn:
-        row_count = conn.execute(text("SELECT COUNT(*) FROM audit_events WHERE id = :id"), {"id": audit_id}).scalar()
-    eng.dispose()
+    row_count = _count_audit_row(db, audit_id)
     assert row_count == 1, "audit row was lost during m3 downgrade"
 
     # Bring it back up. m2 data survives; m3 tables are empty (expected).
@@ -171,10 +179,12 @@ def test_m3_approval_round_trip_preserves_m2_data(db: Path) -> None:
     # raises ``MultipleHeads``. Walking only the m2→m3 chain matches
     # the test's contract anyway.
     command.upgrade(cfg, "20260518_m3_approval")
+    survived = _count_audit_row(db, audit_id)
     eng = create_engine(f"sqlite:///{db}")
-    with eng.begin() as conn:
-        survived = conn.execute(text("SELECT COUNT(*) FROM audit_events WHERE id = :id"), {"id": audit_id}).scalar()
-        approvals_empty = conn.execute(text("SELECT COUNT(*) FROM approvals")).scalar()
-    eng.dispose()
+    try:
+        with eng.begin() as conn:
+            approvals_empty = conn.execute(text("SELECT COUNT(*) FROM approvals")).scalar()
+    finally:
+        eng.dispose()
     assert survived == 1
     assert approvals_empty == 0
