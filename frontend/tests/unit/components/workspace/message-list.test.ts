@@ -1,12 +1,10 @@
 /* @vitest-environment jsdom */
 
-import React from "react";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
+import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentThreadState } from "@/core/threads";
-import { useBlockStore, type UIBlock } from "@/core/genui/store";
 
 vi.mock("@/components/ai-elements/conversation", () => ({
   Conversation: ({
@@ -155,6 +153,8 @@ vi.mock("@/components/workspace/streaming-indicator", () => ({
 
 import { MessageList } from "@/components/workspace/messages/message-list";
 import { fetchResolvedBlockHistory } from "@/core/genui/history";
+import { useBlockStore, type UIBlock } from "@/core/genui/store";
+import type { AgentThreadState } from "@/core/threads";
 
 function makeBlock(block_id: string, overrides?: Partial<UIBlock>): UIBlock {
   return {

@@ -1,0 +1,141 @@
+dsl_version: "1"
+name: monthly-equipment
+display_name: "设备月度报告"
+description: "月度运行报告：覆盖 KPI 达成、MTBF/MTTR、环比同比、重大事件、改进跟踪。复用日报/周报的设备/KPI 体系，时间窗口聚合到月度。"
+visibility: builtin
+
+form_steps:
+  - id: scope
+    title: 生成设备月度报告
+    description: 请选择报告月份、设备类型和对比基准。
+    fields:
+      - name: report_month
+        label: 报告月份
+        type: text
+        required: true
+        placeholder: "YYYY-MM"
+        validation:
+          pattern: "^\\d{4}-\\d{2}$"
+      - name: equipment_type
+        label: 设备类型
+        type: select
+        required: true
+        default: all
+        options:
+          - { label: 全部, value: all }
+          - { label: 静设备, value: static_equipment }
+          - { label: 旋转机组, value: rotating_machinery }
+          - { label: 机泵, value: pump }
+          - { label: 往复机组, value: reciprocating_machinery }
+      - name: compare_with
+        label: 对比基准
+        type: multi-select
+        required: true
+        options:
+          - { label: 环比 (MoM), value: mom }
+          - { label: 同比 (YoY), value: yoy }
+          - { label: 不对比, value: none }
+    next: equipment
+
+  - id: equipment
+    title: 选择设备
+    description: 请勾选本月报告覆盖的设备。
+    before_step:
+      id: equipment_catalog
+      kind: script
+      name: data-analyst/list_equipment
+      args:
+        type: "{{ $.form.scope.equipment_type }}"
+        scope: all
+        limit: 10000
+    fields:
+      - name: equipment_ids
+        label: 设备列表
+        type: multi-select
+        required: true
+        searchable: true
+        options_source:
+          step: equipment_catalog
+          path: equipment
+          label: id
+          value: id
+          group: area
+          description: name
+    next: kpis
+
+  - id: kpis
+    title: 选择 KPI
+    description: 请选择月度关注的指标（建议包含 runtime_rate / MTBF / MTTR）。
+    fields:
+      - name: kpi_keys
+        label: KPI 指标
+        type: multi-select
+        required: true
+        options_source:
+          step: equipment_catalog
+          path: available_kpis
+          label: label
+          value: key
+          description: description
+    next: generate
+
+data_steps:
+  - id: monthly_data
+    kind: script
+    name: data-analyst/query_monthly
+    args:
+      report_month: "{{ $.form.scope.report_month }}"
+      type: "{{ $.form.scope.equipment_type }}"
+      equipment: "{{ $.form.equipment.equipment_ids }}"
+      kpis: "{{ $.form.kpis.kpi_keys }}"
+      compare: "{{ $.form.scope.compare_with }}"
+    outputs:
+      monthly_data: monthly_data.json
+
+transforms:
+  - id: monthly_kpi
+    kind: script
+    name: data-analyst/monthly_kpi
+    input: monthly_data.monthly_data
+    outputs:
+      monthly_kpi: monthly_kpi.json
+
+sections:
+  - id: overview
+    title: 月度总览
+    component: markdown
+    source: $.steps.monthly_kpi.monthly_kpi.overall_status.summary
+
+  - id: kpi_achievement
+    title: KPI 达成情况
+    component: card_group
+    source: $.steps.monthly_kpi.monthly_kpi.kpi_summary
+
+  - id: mtbf_mttr
+    title: MTBF / MTTR 分析
+    component: card_group
+    source: $.steps.monthly_kpi.monthly_kpi.reliability_summary
+
+  - id: events
+    title: 重大异常与事件
+    component: table
+    source: $.steps.monthly_kpi.monthly_kpi.major_events
+
+  - id: compare
+    title: 环比 / 同比分析
+    component: card_group
+    source: $.steps.monthly_kpi.monthly_kpi.compare_summary
+
+  - id: improvements
+    title: 改进措施跟踪
+    component: table
+    source: $.steps.monthly_kpi.monthly_kpi.improvements
+
+  - id: next_plan
+    title: 下月计划
+    component: markdown
+    source: $.steps.monthly_kpi.monthly_kpi.next_plan
+
+export:
+  formats: [md, pdf]
+  renderer: generic_report

@@ -1,0 +1,545 @@
+# Report Script Registry — data-analyst
+# Contract surface for the AI Report Custom Template platform
+# (see docs/plans/2026-05-14-ai-report-custom-template-design.md §9.1.1).
+#
+# - Each entry below is the canonical declaration of one report script's
+#   CLI args, output files, and resource limits.
+# - The platform's Script Registry loader (Phase 3 of the custom-template
+#   design) discovers this file at skill enablement time, validates it,
+#   and exposes the scripts to DSL templates under the namespace
+#   "data-analyst/{script_name}" (e.g. "data-analyst/query_weekly").
+# - When a DSL data_step / transform references one of these scripts, the
+#   runtime resolves {run_output_dir} to the ReportRun's scoped output
+#   directory and injects it into the script invocation environment
+#   (currently via WEEKLY_REPORT_OUTPUT_DIR for the weekly path).
+# - Adding daily script entries (query_daily, daily_kpi, list_equipment,
+#   export_report) is intentionally out of scope for this Sprint to keep
+#   the weekly delivery focused. They will be added when the custom
+#   template platform's Phase 3 lands and the daily fallback path is
+#   migrated to DSL.
+
+schema_version: "1"
+
+scripts:
+  query_weekly:
+    entry: scripts/query_weekly.py
+    kind: [data_step]
+    description: "查询 7 天聚合运行数据（设备 KPI + 告警事件 + 同期对比）"
+    args_schema:
+      week_start:
+        type: date
+        required: true
+        description: "周开始日期 YYYY-MM-DD（建议周一）"
+      type:
+        type: enum
+        values: [all, static_equipment, rotating_machinery, pump, reciprocating_machinery]
+        default: all
+        description: "设备类型"
+      equipment:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 10000
+        description: "设备 ID 列表（逗号分隔，与 --scope 二选一）"
+      scope:
+        type: enum
+        values: [all, area, specific]
+        description: "设备查询模式（与 --equipment 二选一）"
+      scope_filter:
+        type: string
+        max_length: 200
+        description: "区域名称或设备 ID 过滤条件"
+      kpis:
+        type: csv
+        items: {pattern: "^[a-z_]+$"}
+        max_items: 50
+        required: true
+        description: "关注的 KPI key 列表"
+      compare:
+        type: enum
+        values: [previous_week, previous_year, none]
+        default: previous_week
+        description: "对比基准"
+      aggregate:
+        type: flag
+        description: "聚合模式（跳过每日明细，仅返回 7 日聚合统计）"
+    output_files:
+      - id: weekly_data
+        path: "{run_output_dir}/data/weekly_data.json"
+        description: "7 日运行数据（design doc §6.1 schema）"
+    timeout_seconds: 120
+    max_output_bytes: 52428800   # 50 MB
+
+  weekly_kpi:
+    entry: scripts/weekly_kpi.py
+    kind: [transform]
+    description: "计算周 KPI / 日趋势 ECharts option / 异常 TopN / 下周关注"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "weekly_data.json 路径（query_weekly 输出）"
+      output:
+        type: file_path
+        description: "输出 weekly_kpi.json 路径（runtime 注入）"
+    output_files:
+      - id: weekly_kpi
+        path: "{run_output_dir}/data/weekly_kpi.json"
+        description: "周 KPI 与渲染就绪数据（design doc §6.2 schema）"
+    timeout_seconds: 60
+    max_output_bytes: 10485760   # 10 MB
+
+  list_equipment:
+    entry: scripts/list_equipment.py
+    kind: [form_options]
+    description: "查询设备目录、区域分组、可用 KPI（用于动态 options_source）"
+    args_schema:
+      type:
+        type: enum
+        values: [all, static_equipment, rotating_machinery, pump, reciprocating_machinery]
+        default: all
+        description: "设备类型"
+      scope:
+        type: enum
+        values: [all, area, specific]
+        default: all
+        description: "查询模式"
+      filter:
+        type: string
+        max_length: 200
+        description: "区域名称或设备 ID 过滤条件（CSV）"
+      limit:
+        type: integer
+        min: 1
+        max: 10000
+        default: 50
+        description: "返回设备数量上限"
+    outputs_schema:
+      equipment:
+        type: array
+        description: "设备列表，每条含 id/name/area/type"
+      available_kpis:
+        type: array
+        description: "可用 KPI 描述符列表"
+      area_counts:
+        type: object
+        description: "按 area 聚合的设备数量"
+    timeout_seconds: 30
+    max_output_bytes: 10485760   # 10 MB
+
+  query_daily:
+    entry: scripts/query_daily.py
+    kind: [data_step]
+    description: "生成日报原始数据（设备运行 + 告警 + 对比）"
+    args_schema:
+      date:
+        type: date
+        required: true
+        description: "日报日期 YYYY-MM-DD"
+      type:
+        type: enum
+        values: [all, static_equipment, rotating_machinery, pump, reciprocating_machinery]
+        default: all
+        description: "设备类型过滤"
+      equipment:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 1000
+        description: "设备 ID 列表（与 scope 二选一）"
+      scope:
+        type: enum
+        values: [all, area, specific]
+        description: "设备查询模式"
+      scope_filter:
+        type: string
+        max_length: 200
+        description: "区域名称或设备 ID 过滤条件"
+      kpis:
+        type: csv
+        items: {pattern: "^[a-z_]+$"}
+        max_items: 50
+        description: "关注的 KPI key 列表"
+      compare:
+        type: enum
+        values: [previous_day, previous_week, none]
+        default: previous_day
+        description: "对比基准"
+      aggregate:
+        type: flag
+        description: "聚合模式（仅返回日聚合统计）"
+    output_files:
+      - id: daily_data
+        path: "{run_output_dir}/data/daily_data.json"
+        description: "日报原始数据（design doc daily schema）"
+    timeout_seconds: 120
+    max_output_bytes: 52428800   # 50 MB
+
+  daily_kpi:
+    entry: scripts/daily_kpi.py
+    kind: [transform]
+    description: "计算日 KPI / 24h 趋势 / 异常 TopN / 处置建议"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "daily_data.json 路径（query_daily 输出）"
+      output:
+        type: file_path
+        description: "输出 daily_kpi.json 路径（runtime 注入）"
+    output_files:
+      - id: daily_kpi
+        path: "{run_output_dir}/data/daily_kpi.json"
+        description: "日 KPI 与渲染就绪数据"
+    timeout_seconds: 60
+    max_output_bytes: 10485760   # 10 MB
+
+  query_monthly:
+    entry: scripts/query_monthly.py
+    kind: [data_step]
+    description: "查询月度运行数据（KPI + 维修 + 缺陷 + 能耗，含环比/同比）"
+    # alias map: DSL templates may use the short names ``mom``/``yoy`` for
+    # ``compare``. The platform's Script Registry loader MUST translate them to
+    # the canonical long names below before invoking the script — the script
+    # itself only accepts ``previous_month`` / ``previous_year_month`` / ``none``
+    # (matches design doc §3.3 + sprint plan M6).
+    args_aliases:
+      compare:
+        mom: previous_month
+        yoy: previous_year_month
+    args_schema:
+      report_month:
+        type: string
+        required: true
+        pattern: "^\\d{4}-\\d{2}$"
+        description: "月份 YYYY-MM"
+      type:
+        type: enum
+        values: [all, static_equipment, rotating_machinery, pump, reciprocating_machinery]
+        default: all
+        description: "设备类型"
+      equipment:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 10000
+        description: "设备 ID 列表（与 scope 二选一）"
+      scope:
+        type: enum
+        values: [all, area, specific]
+        description: "设备查询模式（与 --equipment 二选一）"
+      scope_filter:
+        type: string
+        max_length: 200
+        description: "区域名称或设备 ID 过滤条件"
+      kpis:
+        type: csv
+        items: {pattern: "^[a-z_]+$"}
+        max_items: 50
+        description: "关注的 KPI key 列表（含月度专属 mtbf/mttr/target_rate）"
+      compare:
+        type: csv
+        # Long-name canonical enum; DSL ``mom``/``yoy`` short names are mapped
+        # via ``args_aliases`` above.
+        items: {pattern: "^(previous_month|previous_year_month|none)$"}
+        default: "previous_month"
+        description: "对比基准（CSV 多选；none 必须独立。DSL 短名 mom/yoy 由 args_aliases 翻译）"
+      aggregate:
+        type: flag
+        description: "聚合模式（跳过每桶告警明细，仅返回聚合 + 月级统计）"
+      include_daily:
+        type: flag
+        description: "保留每日序列（MVP 默认关闭，预留给 V2 趋势分析）"
+    output_files:
+      - id: monthly_data
+        path: "{run_output_dir}/data/monthly_data.json"
+        description: "月度运行数据（design doc §6.1 schema）"
+    timeout_seconds: 180
+    max_output_bytes: 104857600   # 100 MB
+
+  monthly_kpi:
+    entry: scripts/monthly_kpi.py
+    kind: [transform]
+    description: "计算月度 KPI / MTBF / MTTR / 周维度趋势 / 月环比+同比 / 重大事件 / 改进跟踪 / 下月计划"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "monthly_data.json 路径（query_monthly 输出）"
+      output:
+        type: file_path
+        description: "输出 monthly_kpi.json 路径（runtime 注入）"
+    output_files:
+      - id: monthly_kpi
+        path: "{run_output_dir}/data/monthly_kpi.json"
+        description: "月度 KPI 与渲染就绪数据（design doc §6.2 schema；不含 summary_markdown，全文渲染交给 export_report.render_monthly_markdown）"
+    timeout_seconds: 60
+    max_output_bytes: 10485760   # 10 MB
+
+  # ---------------------------------------------------------------------------
+  # Phase 6 — Trend / Diagnosis / Failure / Closure / Inspection
+  # All scripts below are demo stubs delivering deterministic synthetic data so
+  # the builtin DSL templates can be exercised end-to-end. They will be replaced
+  # by real data-source integrations as those become available.
+  # ---------------------------------------------------------------------------
+
+  query_trend:
+    entry: scripts/query_trend.py
+    kind: [data_step]
+    description: "查询指定指标的时间序列 + 预测窗口（趋势分析输入）"
+    args_schema:
+      metric_keys:
+        type: csv
+        items: {pattern: "^[a-z_]+$"}
+        max_items: 50
+        required: true
+        description: "关注的指标 key 列表"
+      date_range:
+        type: string
+        required: true
+        max_length: 64
+        description: "时间窗口（如 2026-04-01..2026-05-01）"
+      aggregation:
+        type: enum
+        values: [hourly, daily, weekly]
+        default: daily
+        description: "时间粒度"
+      forecast_horizon:
+        type: integer
+        min: 0
+        max: 90
+        default: 7
+        description: "预测窗口（天）"
+    output_files:
+      - id: trend_data
+        path: "{run_output_dir}/data/trend_data.json"
+        description: "时间序列样本 + 预测序列"
+    timeout_seconds: 90
+    max_output_bytes: 20971520   # 20 MB
+
+  trend_analysis:
+    entry: scripts/trend_analysis.py
+    kind: [transform]
+    description: "趋势分解、异常检测、斜率/波动率计算、预测，输出 §13.2 证据"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: trend_analysis
+        path: "{run_output_dir}/data/trend_analysis.json"
+        description: "趋势分析结论（findings/evidence/forecast/recommendations）"
+    timeout_seconds: 60
+    max_output_bytes: 10485760
+
+  query_fault_context:
+    entry: scripts/query_fault_context.py
+    kind: [data_step]
+    description: "查询故障前后运行数据、告警、工单、维护记录"
+    args_schema:
+      fault_time:
+        type: date
+        required: true
+        description: "故障发生日 YYYY-MM-DD"
+      equipment_id:
+        type: string
+        required: true
+        max_length: 64
+        pattern: "^[A-Za-z0-9_-]+$"
+        description: "故障对象 ID"
+      symptom:
+        type: string
+        max_length: 200
+        description: "现象描述"
+      include_related_equipment:
+        type: flag
+        description: "是否包含关联设备"
+    output_files:
+      - id: fault_context
+        path: "{run_output_dir}/data/fault_context.json"
+        description: "故障上下文（operations/alarms/work_orders/maintenance_records）"
+    timeout_seconds: 120
+    max_output_bytes: 52428800
+
+  build_fault_timeline:
+    entry: scripts/build_fault_timeline.py
+    kind: [transform]
+    description: "按时间排序事件，生成故障时间线"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "fault_context.json 路径"
+    output_files:
+      - id: fault_timeline
+        path: "{run_output_dir}/data/fault_timeline.json"
+        description: "已排序的事件时间线"
+    timeout_seconds: 30
+    max_output_bytes: 10485760
+
+  diagnosis_analysis:
+    entry: scripts/diagnosis_analysis.py
+    kind: [transform]
+    description: "生成候选原因、证据链、影响评估和建议（§13.2 证据）"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "fault_context.json 路径"
+      timeline:
+        type: file_path
+        description: "fault_timeline.json 路径（可选，runtime 注入）"
+    output_files:
+      - id: diagnosis_analysis
+        path: "{run_output_dir}/data/diagnosis_analysis.json"
+        description: "诊断结果（findings/evidence/impact/recommendations）"
+    timeout_seconds: 60
+    max_output_bytes: 10485760
+
+  query_failure_data:
+    entry: scripts/query_failure_data.py
+    kind: [data_step]
+    description: "查询失效对象相关运行、维修、检验、备件和环境数据"
+    args_schema:
+      asset_id:
+        type: string
+        required: true
+        max_length: 64
+        pattern: "^[A-Za-z0-9_-]+$"
+      failure_mode:
+        type: string
+        required: true
+        max_length: 200
+        description: "失效模式描述"
+      analysis_method:
+        type: enum
+        values: [five_why, fishbone, fmea]
+        default: five_why
+        description: "分析方法"
+      evidence_range:
+        type: string
+        max_length: 64
+        description: "证据时间范围"
+    output_files:
+      - id: failure_data
+        path: "{run_output_dir}/data/failure_data.json"
+        description: "失效分析输入数据"
+    timeout_seconds: 120
+    max_output_bytes: 52428800
+
+  failure_analysis:
+    entry: scripts/failure_analysis.py
+    kind: [transform]
+    description: "基于指定方法（5Why/鱼骨图/FMEA）生成根因分析结构"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "failure_data.json 路径"
+    output_files:
+      - id: failure_analysis
+        path: "{run_output_dir}/data/failure_analysis.json"
+        description: "根因/改进措施/验证计划（§13.2 证据）"
+    timeout_seconds: 60
+    max_output_bytes: 10485760
+
+  query_closure_items:
+    entry: scripts/query_closure_items.py
+    kind: [data_step]
+    description: "查询问题单、整改措施、责任人、计划和完成状态"
+    args_schema:
+      issue_ids:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$"}
+        max_items: 500
+        required: true
+        description: "问题单 ID 列表"
+      owner_department:
+        type: string
+        max_length: 100
+        description: "责任部门"
+      verification_period:
+        type: string
+        max_length: 64
+        description: "验证周期（如 2026-04-01..2026-05-01）"
+    output_files:
+      - id: closure_items
+        path: "{run_output_dir}/data/closure_items.json"
+        description: "问题单及整改措施明细"
+    timeout_seconds: 60
+    max_output_bytes: 20971520
+
+  closure_summary:
+    entry: scripts/closure_summary.py
+    kind: [transform]
+    description: "汇总执行情况、验证结果、未闭项和闭环结论"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "closure_items.json 路径"
+    output_files:
+      - id: closure_summary
+        path: "{run_output_dir}/data/closure_summary.json"
+        description: "闭环报告渲染数据"
+    timeout_seconds: 30
+    max_output_bytes: 10485760
+
+  query_inspection:
+    entry: scripts/query_inspection.py
+    kind: [data_step]
+    description: "查询指定日期、路线、区域的巡检记录"
+    args_schema:
+      inspection_date:
+        type: date
+        required: true
+        description: "巡检日期 YYYY-MM-DD"
+      route:
+        type: string
+        max_length: 100
+        description: "巡检路线"
+      area:
+        type: string
+        max_length: 100
+        description: "巡检区域"
+      severity_min:
+        type: enum
+        values: [low, medium, high]
+        default: low
+        description: "异常等级下限"
+    output_files:
+      - id: inspection_data
+        path: "{run_output_dir}/data/inspection_data.json"
+        description: "巡检原始数据 (records + attachments)"
+    timeout_seconds: 60
+    max_output_bytes: 20971520
+
+  inspection_summary:
+    entry: scripts/inspection_summary.py
+    kind: [transform]
+    description: "汇总异常等级、设备分布、整改建议"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "inspection_data.json 路径"
+    output_files:
+      - id: inspection_summary
+        path: "{run_output_dir}/data/inspection_summary.json"
+        description: "巡检概况与异常清单"
+    timeout_seconds: 30
+    max_output_bytes: 10485760
+
+  inspection_attachment_summary:
+    entry: scripts/inspection_attachment_summary.py
+    kind: [transform]
+    description: "汇总照片、附件和备注信息"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "inspection_data.json 路径"
+    output_files:
+      - id: inspection_attachments
+        path: "{run_output_dir}/data/inspection_attachments.json"
+        description: "照片/备注汇总"
+    timeout_seconds: 30
+    max_output_bytes: 10485760

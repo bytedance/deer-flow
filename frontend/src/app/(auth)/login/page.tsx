@@ -1,9 +1,11 @@
 "use client";
 
+import { LockIcon, MailIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { IndustrialBackdrop } from "@/components/auth/industrial-backdrop";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -19,13 +21,9 @@ function validateNextParam(next: string | null): string | null {
   if (!next) {
     return null;
   }
-
-  // Need start with / (relative path)
   if (!next.startsWith("/")) {
     return null;
   }
-
-  // Disallow protocol-relative URLs
   if (
     next.startsWith("//") ||
     next.startsWith("http://") ||
@@ -33,13 +31,9 @@ function validateNextParam(next: string | null): string | null {
   ) {
     return null;
   }
-
-  // Disallow URLs with different protocols (e.g., javascript:, data:, etc)
   if (next.includes(":") && !next.startsWith("/")) {
     return null;
   }
-
-  // Valid relative path
   return next;
 }
 
@@ -57,21 +51,17 @@ export default function LoginPage() {
     { tenant_id: string; email: string }[]
   >([]);
 
-  // Get next parameter for validated redirect
   const nextParam = searchParams.get("next");
   const redirectPath = validateNextParam(nextParam) ?? "/workspace";
 
-  // Redirect if already authenticated (client-side, post-login)
   useEffect(() => {
     if (isAuthenticated) {
       router.push(redirectPath);
     }
   }, [isAuthenticated, redirectPath, router]);
 
-  // Redirect to setup if the system has no users yet
   useEffect(() => {
     let cancelled = false;
-
     void fetch("/api/v1/auth/setup-status")
       .then((r) => r.json())
       .then((data: { needs_setup?: boolean }) => {
@@ -79,10 +69,7 @@ export default function LoginPage() {
           router.push("/setup");
         }
       })
-      .catch(() => {
-        // Ignore errors; user stays on login page
-      });
-
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -100,7 +87,6 @@ export default function LoginPage() {
       const body = isLogin
         ? `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`
         : JSON.stringify({ email, password });
-
       const headers: HeadersInit = isLogin
         ? { "Content-Type": "application/x-www-form-urlencoded" }
         : { "Content-Type": "application/json" };
@@ -109,7 +95,7 @@ export default function LoginPage() {
         method: "POST",
         headers,
         body,
-        credentials: "include", // Important: include HttpOnly cookie
+        credentials: "include",
       });
 
       if (!res.ok) {
@@ -127,7 +113,6 @@ export default function LoginPage() {
         return;
       }
 
-      // Sync tenant store from the authenticated user's profile
       const meRes = await fetch("/api/v1/auth/me", { credentials: "include" });
       if (meRes.ok) {
         const userData = await meRes.json();
@@ -135,8 +120,6 @@ export default function LoginPage() {
           setCurrentTenantId(userData.tenant_id);
         }
       }
-
-      // Both login and register set a cookie — redirect to workspace
       router.push(redirectPath);
     } catch {
       setError("Network error. Please try again.");
@@ -176,116 +159,166 @@ export default function LoginPage() {
     }
   };
 
+  const subtitle =
+    tenantChoices.length > 0
+      ? "请选择登录到的组织"
+      : isLogin
+        ? "登录到设备健康管理工作台"
+        : "创建账号以开始使用";
+
   return (
-    <div className="bg-background flex min-h-screen items-center justify-center">
-      <div className="border-border/20 bg-card w-full max-w-md space-y-6 rounded-2xl border p-8 shadow-sm">
-        <div className="text-center">
-          <h1 className="text-foreground text-3xl font-semibold tracking-tight">
-            EHM AI 工作台
-          </h1>
-          <p className="text-muted-foreground mt-2">
-            {tenantChoices.length > 0
-              ? "Select your organization"
-              : isLogin
-                ? "Sign in to your account"
-                : "Create a new account"}
-          </p>
-        </div>
+    <div className="bg-background grid min-h-screen lg:grid-cols-[3fr_2fr]">
+      <IndustrialBackdrop />
 
-        {tenantChoices.length > 0 ? (
-          <div className="space-y-3">
-            <p className="text-muted-foreground text-center text-sm">
-              Your account exists in multiple organizations. Please select one:
-            </p>
-            <div className="space-y-2">
-              {tenantChoices.map((t) => (
-                <Button
-                  key={t.tenant_id}
-                  variant="outline"
-                  className="w-full justify-start"
-                  disabled={loading}
-                  onClick={() => handleTenantSelect(t.tenant_id)}
-                >
-                  {t.tenant_id}
-                </Button>
-              ))}
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setTenantChoices([]);
-                setError("");
-              }}
-              className="text-muted-foreground block w-full text-center text-sm hover:underline"
+      <main className="flex h-screen items-center justify-center px-6 py-12 lg:px-12">
+        <div className="w-full max-w-sm space-y-8">
+          <div className="space-y-2 lg:hidden">
+            <span
+              className="bg-primary inline-flex h-8 w-8 items-center justify-center rounded text-sm font-bold text-white"
+              aria-hidden="true"
             >
-              ← Back to login
-            </button>
-          </div>
-        ) : (
-        <form onSubmit={handleSubmit} className="space-y-2">
-          <div className="flex flex-col space-y-1">
-            <label htmlFor="email" className="text-sm font-medium">
-              Email
-            </label>
-            <Input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              required
-            />
-          </div>
-          <div className="flex flex-col space-y-1">
-            <label htmlFor="password" className="text-sm font-medium">
-              Password
-            </label>
-            <Input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="•••••••"
-              required
-              minLength={isLogin ? 6 : 8}
-            />
+              E
+            </span>
+            <h1 className="text-foreground text-2xl font-semibold tracking-tight">
+              EHM AI 工作台
+            </h1>
           </div>
 
-          {error && <p className="text-sm text-red-500">{error}</p>}
+          <div className="space-y-1.5">
+            <h2 className="text-foreground text-xl font-semibold tracking-tight">
+              {tenantChoices.length > 0
+                ? "选择组织"
+                : isLogin
+                  ? "欢迎回来"
+                  : "新建账号"}
+            </h2>
+            <p className="text-muted-foreground text-sm">{subtitle}</p>
+          </div>
 
-          <Button type="submit" className="w-full" disabled={loading}>
-            {loading
-              ? "Please wait..."
-              : isLogin
-                ? "Sign In"
-                : "Create Account"}
-          </Button>
-        </form>
-        )}
+          {tenantChoices.length > 0 ? (
+            <div className="space-y-3">
+              <p className="text-muted-foreground text-xs">
+                你的账号属于多个组织，请选择本次登录的组织。
+              </p>
+              <div className="space-y-2">
+                {tenantChoices.map((t) => (
+                  <Button
+                    key={t.tenant_id}
+                    variant="outline"
+                    className="w-full justify-start font-mono text-xs"
+                    disabled={loading}
+                    onClick={() => handleTenantSelect(t.tenant_id)}
+                  >
+                    {t.tenant_id}
+                  </Button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setTenantChoices([]);
+                  setError("");
+                }}
+                className="text-muted-foreground hover:text-foreground block w-full text-left text-xs underline-offset-2 transition-colors hover:underline"
+              >
+                ← 返回登录
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="email"
+                  className="text-foreground text-xs font-medium tracking-wide"
+                >
+                  邮箱
+                </label>
+                <div className="relative">
+                  <MailIcon
+                    className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                    aria-hidden="true"
+                  />
+                  <Input
+                    id="email"
+                    type="email"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    className="pl-9"
+                    required
+                  />
+                </div>
+              </div>
 
-        {tenantChoices.length === 0 && (
-        <div className="text-center text-sm">
-          <button
-            type="button"
-            onClick={() => {
-              setIsLogin(!isLogin);
-              setError("");
-            }}
-            className="text-blue-500 hover:underline"
-          >
-            {isLogin
-              ? "Don't have an account? Sign up"
-              : "Already have an account? Sign in"}
-          </button>
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="password"
+                  className="text-foreground text-xs font-medium tracking-wide"
+                >
+                  密码
+                </label>
+                <div className="relative">
+                  <LockIcon
+                    className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                    aria-hidden="true"
+                  />
+                  <Input
+                    id="password"
+                    type="password"
+                    autoComplete={isLogin ? "current-password" : "new-password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="•••••••"
+                    className="pl-9"
+                    required
+                    minLength={isLogin ? 6 : 8}
+                  />
+                </div>
+              </div>
+
+              {error && (
+                <p
+                  className="text-alarm-high text-xs"
+                  role="alert"
+                  aria-live="polite"
+                >
+                  {error}
+                </p>
+              )}
+
+              <Button type="submit" className="w-full" disabled={loading}>
+                {loading ? "请稍候..." : isLogin ? "登录" : "创建账号"}
+              </Button>
+            </form>
+          )}
+
+          {tenantChoices.length === 0 && (
+            <div className="text-muted-foreground text-xs">
+              {isLogin ? "还没有账号？" : "已有账号？"}{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsLogin(!isLogin);
+                  setError("");
+                }}
+                className="text-primary underline-offset-2 hover:underline"
+              >
+                {isLogin ? "立即注册" : "去登录"}
+              </button>
+            </div>
+          )}
+
+          <div className="border-border/60 border-t pt-6">
+            <Link
+              href="/"
+              className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs transition-colors"
+            >
+              ← 返回首页
+            </Link>
+          </div>
         </div>
-        )}
-
-        <div className="text-muted-foreground text-center text-xs">
-          <Link href="/" className="hover:underline">
-            ← Back to home
-          </Link>
-        </div>
-      </div>
+      </main>
     </div>
   );
 }

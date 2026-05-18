@@ -3,6 +3,7 @@
 > **范围**：分析当前 AI 日报智能体和其它报告功能，重新设计“自定义模板”能力。
 > **修订重点**：本版修正了初版设计中运行边界、存储路径、动态 DSL、GenUI 回调安全、多租户权限、ReportRun 与现有 thread/run 关系不清等问题。
 > **核心结论**：MVP 不新建独立报告执行引擎，而是在现有 Agent / SOUL / GenUI / ThreadRun / artifact 架构内增加“可校验、可版本化、可运行”的报告模板能力。
+> **与当前代码基线对齐（2026-05-17）**：本文以仓库当前实现为基线；其中 GenUI `InteractionStore` 已按 `(thread_id, callback_id)` 复合 key 工作，后续章节不再把它当作待设计能力，而是当作既有约束与回归范围。
 
 ---
 
@@ -18,13 +19,13 @@
 | 模板运行 MVP | 继续走现有 Agent thread/run | 保留 GenUI streaming、sandbox、artifact、取消、历史能力 |
 | **Runtime 物理实现** | **LLM 驱动**：SOUL 指引 LLM 调用 `report_template_*` 工具，由工具内部模块推进状态机 | 复用现有 agent/SOUL/tool 编排，不新建独立 runner 进程 |
 | ReportRun | 作为报告维度索引，绑定现有 `thread_id` / `run_id` | 不重复实现 RunManager |
-| **Thread 删除级联** | **用户选择**：删除 thread 时弹出确认，可选连带删除关联 ReportRun 或保留为孤儿记录 | 兼顾数据一致性和历史回溯 |
+| **Thread 删除级联** | **MVP 级联删除**：thread 仍是 ReportRun 与 artifact 的生命周期根；删除 thread 时同步删除关联 ReportRun 索引与 run-scoped 输出，不保留孤儿记录 | 当前 artifact 路由绑定 thread，先保证数据与权限闭环；“脱离 thread 保留历史”放到 V2 再立项 |
 | **模板存储** | **MVP 文件存储**（`{DEER_FLOW_HOME}/report-templates/`）→ **V2 迁移 PostgreSQL** | MVP 降低实现成本，V2 升级以支持检索/分页 |
 | **DSL 序列化格式** | **YAML**（含注释，便于人类阅读和手写） | 与文档示例、SOUL.md 风格一致 |
 | 报告产物 | 使用 run-scoped output 目录，并通过现有 artifact 路由暴露 | 避免并发覆盖，复用权限模型 |
 | DSL v1 | 支持多步动态表单 `form_steps` 和 `options_source` | 才能复刻日报"范围 → 设备 → KPI → 生成"的核心体验 |
 | **DSL 占位符表达式** | **裁剪后的 JSONPath 子集**（仅支持路径访问，禁用过滤器/函数） | 安全可控，表达力够用 |
-| **callback_id 安全** | **底层改造 `InteractionStore` 为 `(thread_id, callback_id)` 复合 key** | 一次性根治跨线程冲突，所有 GenUI 业务受益 |
+| **callback_id 安全** | **沿用现有 `(thread_id, callback_id)` 复合 key 实现**，本立项只补回归和命名约束 | 当前代码已落地，设计不应重复计入 Phase 1 新开发 |
 | 脚本执行 | 只能通过 allowlist registry，使用参数数组执行 | 防止命令注入和任意代码执行 |
 | **Script Registry 维护** | **由 skill 插件贡献**：每个 skill 声明导出的脚本 registry | 与现有 skill 架构同构，安装 skill = 注册脚本 |
 | **导出格式** | **Markdown 必需，PDF 可选降级** | 复用现有 `export_report.py` 行为，避免引入 chromium 依赖 |
@@ -32,9 +33,9 @@
 | **平台管理员** | **复用现有 `superadmin` / `tenant_admin` 角色** | 与 `tenant_agents.py` 现有权限模型一致 |
 | **发布版本化** | **强制版本迭代**：published 不可改，编辑生成新草稿 / 新版本 | 保证 ReportRun 可复现 |
 | **MVP 日报迁移** | **重写为 DSL 模板**，旧 `ai-report--daily/SOUL.md` 保留作为 fallback | 验证 DSL 表达力，保留兜底 |
-| **Builtin 预置模板** | **MVP 交付 daily/weekly/monthly**，其余 5 种随 Phase 6 | 覆盖最高频报告类型，控制 MVP 工作量 |
+| **Builtin 预置模板** | **MVP 交付 daily**；`weekly/monthly` 作为 MVP+1（Phase 5）；其余 5 种作为后续增量路线图 | 先验证模板平台成立，再扩展报告覆盖面 |
 | **报告历史 UI** | **嵌入现有对话历史**，不新建独立"报告中心" | 复用现有侧边栏和列表组件 |
-| **Phase 6 范围** | **本立项交付全部 8 种报告类型**（含通用分析报告 V2 仍单独立项） | 完整模板平台一次到位 |
+| **Phase 6 范围** | **作为路线图，不纳入本次立项承诺**；如需启动，按单报告类型拆分排期与验收 | 避免平台能力尚未验证就一次性承诺全部报告类型 |
 
 ---
 
@@ -693,7 +694,10 @@ ReportTemplateVersion
 - template_id
 - version
 - dsl
+- dsl_yaml
 - checksum
+- source_template_id
+- source_template_version
 - created_by
 - created_at
 - changelog
@@ -702,7 +706,9 @@ ReportTemplateVersion
 约束：
 
 - 版本快照不可变。
+- `dsl` 是解析后结构化内容，`dsl_yaml` 保留原始文本与注释，二者一起构成可复现快照。
 - ReportRun 必须绑定具体 `template_id + version`。
+- `version` 对 user/tenant 模板是递增整数；builtin 模板不走这里的版本目录，而是在 ReportRun 侧记录不可变 `template_version_ref`（如 `git_sha[:8]-dsl_version`）。
 - fork 时必须记录源模板 ID 和源版本。
 
 ### 6.3 ReportRun
@@ -712,13 +718,15 @@ ReportRun
 - id
 - template_id
 - template_version
+- template_version_ref
 - thread_id
 - run_id
 - user_id
 - tenant_id
 - idempotency_key
 - status: pending | running | succeeded | failed | canceled
-- parameters
+- parameters_summary
+- parameters_path
 - report_payload_path
 - artifact_paths
 - data_snapshot_paths
@@ -729,7 +737,7 @@ ReportRun
 - completed_at
 ```
 
-MVP 中 `ReportRun` 不是独立执行引擎，只是绑定现有 thread/run 的报告索引。
+MVP 中 `ReportRun` 不是独立执行引擎，只是绑定现有 thread/run 的报告索引；其生命周期跟随所属 thread，删除 thread 时同步删除对应索引与产物。对 user/tenant 模板，`template_version` 记录数值版号、`template_version_ref` 可取 `v{n}`；对 builtin 模板，`template_version` 可为空，`template_version_ref` 记录不可变源码引用。
 
 ---
 
@@ -795,7 +803,7 @@ Builtin 模板的加载机制：
 - 普通用户调用 `report_template_get(visibility=builtin, id=...)` 时，repository 从内存索引返回。
 - 普通用户**不能写**任何 builtin 路径——`FileSystemReportTemplateRepository` 对 builtin scope 只暴露读接口。
 - 平台管理员若要修改 builtin 模板，必须**通过代码 PR**修改仓库源文件后重启加载，而非通过 API 写文件。
-- Builtin 模板没有 `versions/` 目录概念，版本号即代码 commit / release 版本；ReportRun 绑定时记录 `template_version = "{git_sha[:8]}-{dsl_version}"`。
+- Builtin 模板没有 `versions/` 目录概念，版本号即代码 commit / release 版本；ReportRun 绑定时记录 `template_version_ref = "{git_sha[:8]}-{dsl_version}"`。
 
 #### 7.1.2 文件格式
 
@@ -841,13 +849,15 @@ Builtin 模板的加载机制：
   "id": "rr_01H...",
   "template_id": "tpl_01H...",
   "template_version": 1,
+  "template_version_ref": "v1",
   "thread_id": "...",
   "run_id": "...",
   "user_id": "u_xxx",
   "tenant_id": "t_xxx",
   "idempotency_key": "...",
   "status": "succeeded",
-  "parameters_summary": {"report_date": "2026-05-14", ...},   # 仅摘要，原文在 thread_output_dir
+  "parameters_summary": {"report_date": "2026-05-14", ...},   # 仅摘要，原文在 parameters.json
+  "parameters_path": "{thread_output_dir}/report-runs/rr_xxx/parameters.json",
   "report_payload_path": "{thread_output_dir}/report-runs/rr_xxx/report_payload.json",
   "artifact_paths": {"md": "...", "pdf": null},
   "data_snapshot_paths": ["..."],
@@ -950,6 +960,7 @@ Builtin 模板的加载机制：
 - artifact 只暴露相对安全路径（通过 `/api/threads/{thread_id}/artifacts/...`）。
 - 产物下载继续走现有 artifact 权限模型。
 - `status.json` 是 Runtime 唯一的状态源，重启会话能从它恢复未完成的 run。
+- `thread_id` 是产物生命周期根：MVP 中删除 thread 必须同步删除其 `report-runs/` 子树和 ReportRun 索引；若用户需要长期保留，必须先导出 Markdown/PDF。
 
 ---
 
@@ -1025,6 +1036,8 @@ PUT    /api/report-templates/{template_id}
 POST   /api/report-templates/{template_id}/validate
 POST   /api/report-templates/{template_id}/publish
 POST   /api/report-templates/{template_id}/fork
+POST   /api/report-templates/{template_id}/archive
+DELETE /api/report-templates/{template_id}
 GET    /api/report-templates/{template_id}/versions
 GET    /api/report-runs
 GET    /api/report-runs/{report_run_id}
@@ -1226,7 +1239,7 @@ MVP 中 Runtime 不直接发明新的前端渲染协议，应继续使用现有 
 
 ### 10.2 callback_id 策略
 
-> **决策**：底层一次性改造 `InteractionStore` 为 `(thread_id, callback_id)` 复合 key，所有 GenUI 业务受益（不止报告模板）。
+> **决策**：沿用当前代码基线中的 `(thread_id, callback_id)` 复合 key 机制；本立项不重复设计这一能力，只在新流程接入时补回归与命名约束。
 
 #### 10.2.1 业务层 callback_id 命名
 
@@ -1249,83 +1262,51 @@ custom-report:{template_id}:{report_run_id}:{step_id}
 - `step_id` 等于 `status.json` 中的 expected_step，防止乱序提交。
 - 同一 step 已提交过则返回 `STEP_ALREADY_SUBMITTED`，避免重复执行。
 
-### 10.3 InteractionStore 复合 key 迁移方案
+### 10.3 InteractionStore 当前基线与回归要求
 
-底层改造影响所有现有 GenUI 业务（日报、周报、自定义模板等），需要独立评估和回归测试。
+当前仓库已经实现 thread-scoped callback 机制，本立项应**复用现有能力**，而不是再次发起底层改造。
 
-#### 10.3.1 现状
+#### 10.3.1 当前代码基线
 
-[backend/packages/harness/deerflow/agents/genui_persistence.py](../../backend/packages/harness/deerflow/agents/genui_persistence.py) 中 `InteractionStore` 以 `callback_id` 为全局 key：
-
-```python
-_interactions: dict[str, InteractionRecord] = {}
-```
-
-跨 thread 共享同一字典，不同 thread 不能复用相同 callback_id。
-
-#### 10.3.2 目标
+当前实现位于 [backend/packages/harness/deerflow/agents/middlewares/genui_middleware.py](../../backend/packages/harness/deerflow/agents/middlewares/genui_middleware.py)：
 
 ```python
-_interactions: dict[tuple[str, str], InteractionRecord] = {}
-# key: (thread_id, callback_id)
+def _make_key(thread_id: str, callback_id: str) -> str:
+    return f"{thread_id}\x1f{callback_id}"
 ```
 
-不同 thread 可以使用相同 callback_id（语义上是同一类交互），互不干扰。
+已落地的关键行为：
 
-#### 10.3.3 影响面
+- `InteractionStore` 按 `(thread_id, callback_id)` 组合键存储交互记录。
+- `render_ui_tool.py` 在注册交互和检测重复表单时已使用当前 `thread_id`。
+- `/api/threads/{thread_id}/ui-interaction` 提交接口已经按 thread 维度查询 callback。
+- 现有测试已覆盖“不同 thread 相同 callback_id 不串扰”。
 
-需要修改的代码：
+#### 10.3.2 本立项要求
 
-| 文件 | 修改内容 |
-| ---- | ---- |
-| `backend/packages/harness/deerflow/agents/genui_persistence.py` | `InteractionStore` 内部存储 + 所有 get/set/delete API |
-| `backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py` | 写入 InteractionStore 时传入 `thread_id` |
-| `backend/app/gateway/routers/threads.py` 或类似 | submit interaction 接口从 path/body 提取 `thread_id` |
-| `frontend/src/core/genui/store.ts` | 提交回调时附带 `thread_id`（从当前 thread context 取） |
-| `frontend/src/core/genui/sse-recovery.ts` | 恢复 block 时按 `(thread_id, callback_id)` 还原 |
-| `frontend/src/core/genui/visibility.ts` | `filterSupersededInteractiveBlockIds` 改为按 `(thread_id, callback_id)` 维度比较 |
+报告模板运行时必须遵守以下接入约束：
 
-需要回归测试的现有业务：
+- 所有 `report_template_*` 交互都走现有 `render_ui` / `ui-interaction` 链路，不自行维护第二套 callback store。
+- `callback_id` 继续使用语义化命名，但必须可追踪到 `template_id / report_run_id / step_id`。
+- `report_template_submit_step` 除 thread-scoped callback 校验外，还必须校验 `report_run_id`、`expected_step` 和 `status.json` 的状态一致性。
+- 不引入旧 key 兼容迁移逻辑；如发现新流程绕开现有 helper，直接修正新流程，而不是再设计适配层。
 
-- ai-report--daily 的 3 轮表单（scope / equipment / kpis）
-- ai-report--custom 当前的对话流（虽然功能空，但测试覆盖要保留）
-- 任何使用 `render_ui_tool` 的 agent
+#### 10.3.3 回归范围
 
-#### 10.3.4 兼容性策略
+本立项需要新增或复用的回归测试：
 
-历史 thread 中已经存在的 InteractionRecord（key 为单 string）：
+- ai-report--daily 的 3 轮表单（scope / equipment / kpis）行为不变。
+- ai-report--custom 新增的模板创建与运行表单支持跨 thread 同名 callback。
+- `render_ui_tool` 重复表单保护仍然只在同一 thread 内生效。
+- thread 删除时，该 thread 下的 InteractionRecord 与 report-run 输出一并清理。
 
-- 启动时迁移：扫描 `_interactions`，对每条记录从关联的 ToolMessage 推断 `thread_id`，重新组 key。无法推断的记录丢弃。
-- 由于 InteractionStore 是内存存储且 TTL 86400s，迁移影响窗口短，简单丢弃即可。
+#### 10.3.4 callback_id 命名约束
 
-#### 10.3.5 迁移工作项（Phase 1 优先做）
+虽然底层已做 thread-scoped 隔离，业务侧仍需保持可读性和可排障性：
 
-> **小计：约 0.75 人月**（Phase 1 总 2 人月中占 38%，是 Phase 1 最大单项）。Phase 0 第 2 项尖刺确认范围后，可上下浮动 ±0.25 人月。
-
-| 工作项 | 估时 | 说明 |
-| ---- | ---- | ---- |
-| 1. 修改 `InteractionStore` 接口，所有方法新增 `thread_id` 参数 | 1 天 | 含 dataclass 定义、内部存储、TTL 清理逻辑 |
-| 2. 修改 `render_ui_tool` 在 `RunnableConfig` 中提取 `thread_id` 并传入 | 0.5 天 | 同步改 `tools/builtins/render_ui_tool.py` |
-| 3. 修改 Gateway 的 submit interaction 路由，从 thread context 提取 `thread_id` 并校验 | 1 天 | 含权限校验补强 |
-| 4. 修改前端 store / visibility / sse-recovery 的 key 比较逻辑 | 1.5 天 | 三处独立修改，需同步更新前端单测 |
-| 5. 编写测试套件（4 项 case） | 1.5 天 | 同 thread 多 callback、不同 thread 同 callback、thread 删除清理、日报回归 |
-| 6. 启动迁移逻辑（旧 records 推断 thread_id 或丢弃） | 1 天 | 含日志和监控埋点 |
-| 7. 文档更新（backend/CLAUDE.md GenUI 章节、迁移说明） | 0.5 天 | 同步现有文档结构 |
-| 8. 联调缓冲（含日报、周报等回归 bug 修复） | 2 天 | 经验缓冲 |
-
-**测试 case（详细）**：
-
-- 同一 thread 多个 callback_id 不冲突
-- 不同 thread 相同 callback_id 不串扰
-- thread 删除后该 thread 的 records 全部清理
-- 现有 ai-report--daily 3 轮表单回归测试通过
-
-#### 10.3.6 兜底：复合 callback_id 命名约束
-
-即使底层完成复合 key 改造，业务侧 callback_id 仍需保持唯一性最佳实践：
-
-- 不要在 ai-report--custom 中使用与 ai-report--daily 同名的 callback_id（即使现在不冲突，可读性混乱）。
-- 推荐格式：`{agent-prefix}:{purpose}` 或 `{agent-prefix}:{purpose}:{instance_id}`。
+- 不要在 ai-report--custom 中使用与 ai-report--daily 同语义但不可区分的 callback_id。
+- 推荐格式：`custom-report:{template_id}:{report_run_id}:{step_id}`。
+- 对于非报告模板业务，继续使用 `{agent-prefix}:{purpose}` 或 `{agent-prefix}:{purpose}:{instance_id}`。
 
 ---
 
@@ -1538,6 +1519,8 @@ PDF 路径里 ECharts 不能依赖前端浏览器渲染。处理方案：
 ### 12.3 历史查询
 
 历史以 `ReportRun` 为索引，不依赖聊天消息反向解析。
+
+MVP 中历史仍然依附于存活的 thread：删除 thread 后，对应 ReportRun 索引与产物一并删除；如需长期保留，用户需先导出 Markdown/PDF。
 
 列表字段：
 
@@ -2041,14 +2024,14 @@ agents/builtin/report-templates/
 
 ## 15. 实施计划
 
-> **说明**：工程量为 1 名后端 + 0.5 名前端工程师参与的保守估算（含设计 review、测试、文档、bug 修复缓冲）。Phase 之间存在依赖：必须按序执行，**Phase 0 不通过则后续作废**。
+> **说明**：本次立项承诺范围为 **Phase 0-5**；Phase 6-7 作为路线图，不纳入当前里程碑承诺。工程量按 **1 名后端主力 + 1 名前端阶段性投入** 估算（含设计 review、测试、文档、bug 修复缓冲）。Phase 之间存在依赖：必须按序执行，**Phase 0 不通过则后续作废**。
 
 ### Phase 0：技术尖刺与边界确认（0.5 人月，~1 周）
 
 > **目标**：验证 6 个潜在 blocker，决定是否进入正式实施。任何一项未通过都触发设计回退或调整。
 
 1. **render_ui 程序化推送验证**：实现一个最小 `report_template_render_step` 工具，能从工具内部把 GenUI block 推送到当前 thread 的 SSE 流，前端能正常接收并渲染。
-2. **InteractionStore 复合 key 改造范围确认**：清点所有依赖 callback_id 全局唯一性的代码路径，给出改造工作量（属于 Phase 1 但需提前确认范围）。
+2. **InteractionStore 当前实现对账**：核对现有 `(thread_id, callback_id)` 机制、`render_ui_tool`、Gateway 提交路由与前端交互链路，确认报告模板可以直接复用，不再把它作为待开发大项。
 3. **JSONPath 子集解析器原型**：实现一个 ≤200 行的解析器原型，跑通 §5.6 白名单和黑名单测试用例。
 4. **run-scoped 输出目录注入链路**：验证 runtime 在调用脚本时能正确创建 `{run_output_dir}` 并替换占位符；验证 artifact 路由能下载到该路径下文件。
 5. **export_report.py generic 路径技术验证**：复制现有 `render_markdown` 改造为 `render_markdown_generic`，跑通最简单 sections 数组到 Markdown 的转换。
@@ -2056,7 +2039,7 @@ agents/builtin/report-templates/
 
 **Phase 0 验收**：以上 6 项全部通过，输出一份《Phase 0 技术尖刺报告》，确认或调整下游 Phase 的工作量估算。
 
-### Phase 1：DSL + Registry + Validator + InteractionStore 改造（2 人月，~4 周）
+### Phase 1：DSL + Registry + Validator + GenUI 回归补强（2 人月，~4 周）
 
 1. **DSL Pydantic schema**（`schema.py`）：覆盖 `form_steps`、`fields`、`options_source`、`before_step`、`data_steps`、`transforms`、`sections`、`export`。
 2. **JSONPath 子集解析器**（`source_resolver.py`）：基于 Phase 0 原型完成，覆盖完整的白名单语法和单元测试。
@@ -2067,10 +2050,10 @@ agents/builtin/report-templates/
 4. **Script Registry**（`script_registry.py`）：
    - 定义 `report_scripts.yaml` 加载逻辑
    - 实现 `data-analyst` skill 的 `report_scripts.yaml`，覆盖 `list_equipment`、`query_daily`、`daily_kpi`
-5. **InteractionStore 复合 key 改造**：按 §10.3 完成底层、render_ui_tool、Gateway 路由、前端 store/visibility/sse-recovery 的修改。
+5. **GenUI 回归补强**：围绕现有 `(thread_id, callback_id)` 机制补齐报告模板接入所需测试与约束；若发现新流程绕开现有 helper，仅修正接入点，不重启底层改造。
 6. **回归测试**：现有 `ai-report--daily` 硬编码流程在改造后行为不变。
 
-**Phase 1 验收**：所有单元测试通过；DSL 示例（§5.2 重点机泵日报）通过 validator；现有日报回归测试通过；新增覆盖率 ≥ 80%。
+**Phase 1 验收**：所有单元测试通过；DSL 示例（§5.2 重点机泵日报）通过 validator；现有日报回归测试通过；报告模板相关 GenUI 回归通过；新增覆盖率 ≥ 80%。
 
 ### Phase 2：模板存储与权限（1.5 人月，~3 周）
 
@@ -2080,28 +2063,29 @@ agents/builtin/report-templates/
 4. **权限矩阵校验**：在 Gateway 路由层实现 §11.1 矩阵，复用 `superadmin` / `tenant_admin` 角色。
 5. **模板生命周期**：`save_draft`、`publish`（强制版本迭代）、`fork`、`archive`、`delete`。
 
-**Phase 2 验收**：模板可创建/编辑/发布/fork；权限矩阵单元测试覆盖；并发写入不丢数据；fork 后版本绑定正确。
+**Phase 2 验收**：模板可创建/编辑/发布/fork/archive/delete；权限矩阵单元测试覆盖；并发写入不丢数据；fork 后版本绑定正确。
 
 ### Phase 3：受控工具 + ai-report--custom SOUL.md（1 人月，~2 周）
 
-1. **新增 14 个内置工具**（详见 §8.2）：
+1. **先交付模板生命周期工具**（详见 §8.2）：
    - 模板生命周期（6 个）：`list / get / validate / save_draft / publish / fork`
-   - 运行时（8 个）：`prepare_run / render_step / submit_step / run_data_steps / assemble_payload / render_report / export / resume_run`
-   所有工具是**薄壳**（≤50 行），核心逻辑委托 §3.4 中的 `runtime/` 模块（在 Phase 4 完成）。
+   - 运行时工具名在接口层保留设计，但实现放到 Phase 4 交付
+   生命周期工具是**薄壳**（≤50 行），核心逻辑委托 repository / validator 模块。
 2. **改造 ai-report--custom SOUL.md**：完整的工具调用流程、错误处理指引、状态恢复说明。
 3. **禁止 LLM 直接 bash 写模板**：通过 `BUILTIN_TOOLS` 而非允许 bash 实现，从工具列表层面隔离。
 4. **创建模板向导**：通过 GenUI 多步表单（创建方式 → 基本信息 → 参数流程 → 数据步骤 → 章节 → 预览）完成。
 
-**Phase 3 验收**：用户能通过 ai-report--custom 创建一个 private 模板草稿、发布、运行；所有 LLM 输出能被结构化工具替代，无 bash 模板写入。
+**Phase 3 验收**：用户能通过 ai-report--custom 创建一个 private 模板草稿并发布；所有模板生命周期操作都通过结构化工具完成；无 bash 模板写入。
 
 ### Phase 4：运行时 MVP + daily 重写为 DSL 模板（2.5 人月，~5 周）
 
 1. **Runtime 各模块**：`state.py`（status.json 状态机）、`step_renderer.py`、`step_submitter.py`、`data_runner.py`、`payload_builder.py`、`report_renderer.py`、`exporter.py`。
-2. **报告章节渲染**：sections → GenUI blocks 转换（markdown / card / card_group / echart / table）。
-3. **Markdown/PDF 导出**：扩展 `export_report.py` 增加 generic 路径，PDF 可选降级。
-4. **builtin 模板：daily-equipment**：完整 DSL 复刻现有日报流程，通过 validator，能跑通最少一个 ReportRun。
-5. **ai-report--daily 双轨**：SOUL.md 增加 DSL 路径优先 + fallback 兜底（按 §11.4）。
-6. **回归测试**：旧日报硬编码路径与新 DSL 路径的产物对比测试，章节字段一致。
+2. **交付 8 个运行时工具**：`prepare_run / render_step / submit_step / run_data_steps / assemble_payload / render_report / export / resume_run`，作为 Phase 3 预留接口的正式实现。
+3. **报告章节渲染**：sections → GenUI blocks 转换（markdown / card / card_group / echart / table）。
+4. **Markdown/PDF 导出**：扩展 `export_report.py` 增加 generic 路径，PDF 可选降级。
+5. **builtin 模板：daily-equipment**：完整 DSL 复刻现有日报流程，通过 validator，能跑通最少一个 ReportRun。
+6. **ai-report--daily 双轨**：SOUL.md 增加 DSL 路径优先 + fallback 兜底（按 §11.4）。
+7. **回归测试**：旧日报硬编码路径与新 DSL 路径的产物对比测试，章节字段一致。
 
 **Phase 4 验收**：用户从 ai-report--daily 入口生成的报告与 ai-report--custom 运行 daily-equipment 模板的报告完全一致；fallback 触发率 < 1%。
 
@@ -2116,7 +2100,7 @@ agents/builtin/report-templates/
 
 **Phase 5 验收**：所有历史 UI / 模板管理 UI 在 desktop / responsive 下正常；权限矩阵在 UI 中正确反映；新建 weekly/monthly 模板能跑通运行。
 
-### Phase 6：扩展剩余 5 种报告类型（4 人月，~8 周）
+### Phase 6：扩展剩余 5 种报告类型（路线图，不纳入当前里程碑承诺）（4 人月，~8 周）
 
 1. **趋势分析**（P2）：交付 `trend-equipment` builtin 模板 + `data-analyst` skill 新增 `query_trend`、`trend_analysis` 脚本。
 2. **诊断报告**（P2）：交付 `diagnosis-fault` builtin 模板 + `query_fault_context`、`build_fault_timeline`、`diagnosis_analysis` 脚本。
@@ -2128,7 +2112,7 @@ agents/builtin/report-templates/
 
 **Phase 6 验收**：5 种 builtin 模板都通过 §13.14 全部 11 项验收；7 种报告类型（含日报、周报、月报）都至少有 1 个成功 ReportRun 样例。
 
-### Phase 7：监控、告警与运维（独立小立项，0.5 人月）
+### Phase 7：监控、告警与运维（独立小立项，路线图）（0.5 人月）
 
 1. ReportRun 运行成功率、错误码分布的 Prometheus 指标。
 2. fallback 触发率告警（连续 N 次或日累计超过阈值）。
@@ -2138,7 +2122,9 @@ agents/builtin/report-templates/
 
 ### 总工程量与时间窗
 
-| 阶段 | 人月 | 自然日（按 1 全职工程师） |
+**当前立项承诺（Phase 0-5）**
+
+| 阶段 | 人月 | 关键路径周数（按 1 名后端主力 + 1 名前端阶段性投入） |
 | ---- | ---- | ---- |
 | Phase 0 | 0.5 | 1 周 |
 | Phase 1 | 2 | 4 周 |
@@ -2146,11 +2132,17 @@ agents/builtin/report-templates/
 | Phase 3 | 1 | 2 周 |
 | Phase 4 | 2.5 | 5 周 |
 | Phase 5 | 2 | 4 周 |
+| **小计** | **9.5 人月** | **约 19 周（约 4.5-5 个月）** |
+
+**后续路线图（不纳入当前承诺）**
+
+| 阶段 | 人月 | 关键路径周数 |
+| ---- | ---- | ---- |
 | Phase 6 | 4 | 8 周 |
 | Phase 7 | 0.5 | 1 周 |
-| **总计** | **14 人月** | **约 28 周（7 个月）** |
+| **小计** | **4.5 人月** | **约 9 周** |
 
-> **关键路径**：Phase 0 → 1 → 2 → 3 → 4 是 MVP 关键路径（约 7.5 人月，15 周）。Phase 5 可与 Phase 4 末尾并行启动（前端独立工作）。Phase 6 各报告类型可在 Phase 5 完成后并行推进（每种 0.5-1 人月）。
+> **关键路径**：Phase 0 → 1 → 2 → 3 → 4 是 MVP 关键路径（约 7.5 人月，15 周）。Phase 5 可与 Phase 4 末尾并行启动（前端独立工作）。Phase 6-7 仅在 Phase 5 验收后另行立项。
 
 ---
 
@@ -2164,9 +2156,9 @@ agents/builtin/report-templates/
 | 模板存储放错位置 | 模板跨会话不可控，权限混乱 | 使用 DeerFlow home 用户/租户目录，V2 迁 DB | 中 |
 | DSL 无法描述动态日报流程 | MVP 无法复刻现有日报体验 | DSL v1 支持 `form_steps` 和 `options_source`；Phase 4 复刻 daily 验证 | 高 |
 | **render_ui 程序化推送路径不存在** | Phase 4 直接卡住 | Phase 0 技术尖刺第 1 项强制验证；不通过则方案回退到 LLM 调用 render_ui | **高** |
-| **InteractionStore 改造影响所有 GenUI 业务** | 改造范围爆炸，回归风险高 | Phase 0 第 2 项清点改造范围；Phase 1 含完整回归测试套件 | **高** |
+| **报告模板接入绕开现有 InteractionStore / render_ui 链路** | 新流程与现有 GenUI 机制分叉，造成回归或维护成本上升 | Phase 0 第 2 项完成代码对账；Phase 1 只补接入测试与约束，不重复做底层改造 | **中** |
 | **JSONPath 表达式解析器实现复杂度被低估** | 安全或表达力不足 | Phase 0 第 3 项原型验证；自实现，禁用第三方库 | 中 |
-| 固定 callback_id 冲突 | 跨用户/线程误提交 | 底层改造为 `(thread_id, callback_id)` 复合 key | 中 |
+| 固定 callback_id 冲突 | 跨用户/线程误提交 | 复用现有 `(thread_id, callback_id)` 复合 key，并在新模板流程上补回归测试 | 低 |
 | 脚本任意执行 | 命令注入、数据泄漏 | registry allowlist + 参数数组执行 + schema 双重校验 | 高 |
 | 固定输出文件覆盖 | 并发运行互相污染 | run-scoped 输出目录；不同 ReportRun 完全隔离 | 中 |
 | 租户权限不清 | 共享模板或历史报告泄漏 | 完整权限矩阵 + route-level authz | 高 |
@@ -2174,14 +2166,14 @@ agents/builtin/report-templates/
 | DSL 过度复杂 | 难实现、难维护 | v1 只支持多步表单、allowlist steps、sections、export | 中 |
 | **现有日报 fallback 长期保留导致维护双轨** | 代码膨胀，行为差异 | §11.4.3 明确下线条件（30 天 0 fallback + 99% 成功率） | 中 |
 | **PostgreSQL vs 文件存储未决** | Phase 2 反复返工 | 决策已定：MVP 文件存储，V2 迁 DB；MVP 文件 schema 预先对齐 DB schema | 低 |
-| **Phase 6 单种报告脚本工作量被低估** | 项目延期 | Phase 6 每种报告独立验收；可裁剪 P3 报告范围 | 中 |
+| **Phase 6 单种报告脚本工作量被低估** | 后续扩展延期，拖累平台口碑 | Phase 6 改为路线图；每种报告独立立项、独立验收，不占用当前 MVP 承诺 | 中 |
 | **用户已有日报记录 UX 断层** | 历史报告在新 UI 里找不到 | Phase 5 的历史 UI 同时支持旧硬编码路径产物（按 thread 索引）和新 ReportRun 路径产物 | 中 |
-| **ReportRun 与 LangGraph thread 删除级联未定** | 数据一致性 bug | §0 决策"用户选择"；删除 thread 时弹确认；保留为孤儿记录可后台清理 | 低 |
+| **thread 删除后历史不可保留** | 用户误删 thread 后无法继续在线查看报告 | MVP 明确 thread 是生命周期根；删除前提供导出提示；V2 再评估脱离 thread 的长期归档能力 | 中 |
 | **LLM 误调用工具顺序** | 流程乱序、状态错乱 | §3.4 中所有工具校验 `report_run_id` + `expected_step`，不一致直接报错并提示 LLM 正确顺序 | 中 |
 | **Skill disable 后引用它的模板失效** | 已发布模板突然不可运行 | Validator 在运行前检查 skill 状态；失效时返回清晰的"前置 skill 不可用"错误，不静默失败 | 中 |
 | **YAML 注释在版本化时丢失** | 用户编辑历史不完整 | 版本快照同时保存 `dsl`（解析后 JSON）和 `dsl_yaml`（原始文本） | 低 |
 | **builtin 模板因新增 validator 规则被判非法** | 业务被动停摆 | 所有新增 validator 规则必须先在 builtin 上测试通过；CI 加 builtin 模板 validator 校验 | 中 |
-| **InteractionStore 复合 key 改造的兼容性** | 现有未完成的 InteractionRecord 丢失 | §10.3.4 启动时迁移 + TTL 86400s 自然过期；预先公告维护窗口 | 低 |
+| **callback 约束理解不一致** | 新增模板步骤使用了不可追踪或冲突的 callback_id，排障困难 | §10.3.4 明确命名规范；PR review 必须检查 callback_id 可读性 | 低 |
 | **LLM 在长流程中超出上下文窗口** | Phase 4 的多步表单 + 多脚本执行 + 多次 GenUI 推送可能让单 thread 上下文超长 | 工具返回值精简化（不回流脚本完整输出，仅回流 ReportRun ID + 摘要 + 下一步指引）；超长时由 SOUL.md 引导用户开新会话调用 `report_template_resume_run` 续跑；纳入 SummarizationMiddleware 触发条件 | 中 |
 | **ai-report--custom 无 fallback 时的可用性** | 后端故障期间 custom agent 完全不可用 | §11.4.6 决策不引入 custom fallback；通过 §16.3 触发回退条件监控 + 工具内部充分错误处理保证错误信息明确，不静默卡死 | 中 |
 
@@ -2198,12 +2190,15 @@ agents/builtin/report-templates/
 
 ### 16.3 触发回退条件
 
-任一条件触发立即回退到 fallback 路径并告警：
+任一条件触发时：
+
+- 对具备 fallback 的 agent（当前仅 `ai-report--daily`）立即切回 fallback 路径并告警。
+- 对 `ai-report--custom` 这类无 fallback 的入口，立即返回明确错误并告警，不做静默降级。
 
 - 单 thread 内连续 3 次 ReportRun 失败
 - 全平台 ReportRun 5 分钟成功率 < 80%
 - DSL validator 报错率 > 50%（疑似 builtin 模板被 validator 误判）
-- InteractionStore 提交失败率 > 5%（疑似复合 key 改造 bug）
+- GenUI 交互提交失败率 > 5%（疑似报告模板接入链路 bug）
 
 ---
 
@@ -2212,7 +2207,7 @@ agents/builtin/report-templates/
 ### 17.1 Phase 0 验收
 
 1. render_ui 程序化推送 demo 跑通：从工具内部注入 GenUI block 到 SSE 流，前端正常渲染。
-2. InteractionStore 改造范围清单产出，工作量评估更新到 Phase 1。
+2. InteractionStore / render_ui / ui-interaction 当前实现对账完成，确认报告模板接入边界。
 3. JSONPath 子集解析器原型通过白/黑名单测试用例。
 4. run-scoped 输出目录 + artifact 下载链路验证通过。
 5. `render_markdown_generic` 最小 demo 跑通。
@@ -2226,7 +2221,7 @@ agents/builtin/report-templates/
 4. 模板存储在 `{DEER_FLOW_HOME}/report-templates/`，符合 §7.1 文件结构和并发控制要求。
 5. 用户运行模板时仍在现有 agent thread 内完成，**不新增独立 runner 进程**。
 6. 动态流程能复刻日报：范围选择 → 设备选择 → KPI 选择 → 报告生成。
-7. callback_id 走 `(thread_id, callback_id)` 复合 key，跨 thread 不冲突。
+7. 复用现有 `(thread_id, callback_id)` 复合 key 机制，跨 thread 不冲突，且报告模板接入无回归。
 8. 脚本只能从 skill 提供的 registry allowlist 执行，使用参数数组方式调用，无 shell 注入风险。
 9. 每次运行使用独立 `report-runs/{report_run_id}/` 输出目录，不覆盖其它运行。
 10. 生成 `report_payload.json`、Markdown artifact（必需）和 ReportRun 索引；PDF 在 weasyprint 不可用时优雅降级。
@@ -2236,7 +2231,7 @@ agents/builtin/report-templates/
 14. JSONPath 子集解析器禁用所有黑名单语法，深度限制 ≤ 8 层。
 15. **现有日报 ai-report--daily 走 DSL 路径优先 + SOUL.md fallback 兜底**，DSL 路径产物与旧路径完全一致。
 16. Builtin 模板 daily-equipment 通过 §13.14 全部 11 项验收标准。
-17. 现有日报、周报等 agent 的 GenUI 表单回归测试全部通过（InteractionStore 改造无回归）。
+17. 现有日报、周报等 agent 的 GenUI 表单回归测试全部通过（报告模板接入无回归）。
 
 ### 17.3 Phase 5 验收
 
@@ -2247,7 +2242,7 @@ agents/builtin/report-templates/
 5. Builtin 模板 weekly-equipment、monthly-equipment 通过 §13.14 验收。
 6. 所有 UI 在 desktop / responsive 下表现正常。
 
-### 17.4 Phase 6 验收
+### 17.4 Phase 6 验收（后续增量，不纳入当前里程碑承诺）
 
 1. 5 种新 builtin 模板（trend / diagnosis / failure-analysis / closure / inspection）全部通过 §13.14 全部 11 项标准。
 2. 解释性报告（trend / diagnosis / failure-analysis）输出包含 evidence、confidence、data_coverage、human_review_required 字段。
@@ -2276,7 +2271,9 @@ agents/builtin/report-templates/
 6. 报告产物使用 run-scoped output 并复用 artifact 下载；**Markdown 必需，PDF 可选降级**。
 7. DSL v1 必须支持动态多步表单，才能复用日报的核心体验。
 8. **现有日报重写为 DSL 模板，旧 SOUL.md 保留作为 fallback**，下线条件见 §11.4.3。
-9. **InteractionStore 改造为 `(thread_id, callback_id)` 复合 key**，所有 GenUI 业务受益。
+9. **复用现有 `(thread_id, callback_id)` 复合 key 实现**，把重点放在报告模板接入回归，而不是重复发起底层改造。
 10. **Script Registry 由 skill 插件贡献**，与现有 skill 架构同构。
+
+当前最稳妥的执行方式是：先完成 **Phase 0-4 的 MVP（含 daily）**，再以 **Phase 5 的管理 UI + weekly/monthly** 作为下一里程碑。剩余 5 种报告类型保留在路线图中，待平台能力与 daily 路径稳定后逐个立项推进。
 
 按这个路线实现，可以最大化复用 DeerFlow 当前 Agent / SOUL / GenUI / Skill / artifact 架构，同时避免安全、权限、并发和可追溯性风险。

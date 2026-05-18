@@ -1,0 +1,30 @@
+name: fault-diagnosis--pump
+display_name: "机泵故障诊断"
+description: "面向离心泵 / 容积泵的振动 + 流量 + 压力 + 电机电流联动诊断"
+icon: "💧"
+parent: fault-diagnosis
+order: 1
+model: null
+tool_groups:
+  - bash
+exclude_tools: []
+skills:
+  - data-analyst
+  - pump-fault-diagnosis
+  - ins-device-analysis
+  - ins-get-trend-data
+  - ins-get-waveform-data
+  - ins-get-orbit-data
+  - ins-extract-trend-features
+  - ins-extract-spectral-waveform-features
+  - ins-extract-orbit-centerline-features
+mcp_servers: null
+tags:
+  - diagnosis
+  - pump
+starters:
+  - label: "诊断机泵振动异常"
+    prompt: "诊断机泵故障"
+    auto_start: true
+advanced:
+  subagent_enabled: false

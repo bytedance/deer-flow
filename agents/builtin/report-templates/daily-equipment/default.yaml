@@ -1,0 +1,134 @@
+dsl_version: "1"
+name: daily-equipment
+display_name: "设备运行日报"
+description: "面向单日运行的设备日报：范围 → 设备 → KPI → 生成。复刻 ai-report--daily 的硬编码流程，作为模板平台的首个 builtin 样板。"
+visibility: builtin
+
+form_steps:
+  - id: scope
+    title: 生成设备运行日报
+    description: 请选择日报日期、设备类型和对比基准。
+    fields:
+      - name: report_date
+        label: 日报日期
+        type: date
+        required: true
+      - name: equipment_type
+        label: 设备类型
+        type: select
+        required: true
+        default: all
+        options:
+          - { label: 全部, value: all }
+          - { label: 静设备, value: static_equipment }
+          - { label: 旋转机组, value: rotating_machinery }
+          - { label: 机泵, value: pump }
+          - { label: 往复机组, value: reciprocating_machinery }
+      - name: compare_with
+        label: 对比基准
+        type: select
+        required: true
+        default: previous_day
+        options:
+          - { label: 前一日, value: previous_day }
+          - { label: 上周同日, value: previous_week }
+          - { label: 不对比, value: none }
+    next: equipment
+
+  - id: equipment
+    title: 选择设备
+    description: 请勾选本次报告覆盖的设备。可取消勾选不需要的项。
+    before_step:
+      id: equipment_catalog
+      kind: script
+      name: data-analyst/list_equipment
+      args:
+        type: "{{ $.form.scope.equipment_type }}"
+        scope: all
+        limit: 10000
+    fields:
+      - name: equipment_ids
+        label: 设备列表
+        type: multi-select
+        required: true
+        searchable: true
+        options_source:
+          step: equipment_catalog
+          path: equipment
+          label: id
+          value: id
+          group: area
+          description: name
+    next: kpis
+
+  - id: kpis
+    title: 选择 KPI
+    description: 请选择本次报告关注的指标。
+    fields:
+      - name: kpi_keys
+        label: KPI 指标
+        type: multi-select
+        required: true
+        options_source:
+          step: equipment_catalog
+          path: available_kpis
+          label: label
+          value: key
+          description: description
+    next: generate
+
+data_steps:
+  - id: daily_data
+    kind: script
+    name: data-analyst/query_daily
+    args:
+      date: "{{ $.form.scope.report_date }}"
+      type: "{{ $.form.scope.equipment_type }}"
+      equipment: "{{ $.form.equipment.equipment_ids }}"
+      kpis: "{{ $.form.kpis.kpi_keys }}"
+      compare: "{{ $.form.scope.compare_with }}"
+    outputs:
+      daily_data: daily_data.json
+
+transforms:
+  - id: daily_kpi
+    kind: script
+    name: data-analyst/daily_kpi
+    input: daily_data.daily_data
+    outputs:
+      daily_kpi: daily_kpi.json
+
+sections:
+  - id: overview
+    title: 总览
+    component: markdown
+    source: $.steps.daily_kpi.daily_kpi.overall_status.summary
+
+  - id: kpi_cards
+    title: 核心 KPI
+    component: card_group
+    source: $.steps.daily_kpi.daily_kpi.kpi_summary
+
+  - id: trend
+    title: 24 小时趋势
+    component: echart
+    source: $.steps.daily_kpi.daily_kpi.trend_chart
+
+  - id: anomalies
+    title: 异常排行
+    component: table
+    source: $.steps.daily_kpi.daily_kpi.top_anomalies
+
+  - id: alarms
+    title: 告警事件
+    component: table
+    source: $.steps.daily_kpi.daily_kpi.alarm_table
+
+  - id: recommendations
+    title: 处置建议
+    component: markdown
+    source: $.steps.daily_kpi.daily_kpi.recommendations
+
+export:
+  formats: [md, pdf]
+  renderer: generic_report

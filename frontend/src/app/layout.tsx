@@ -40,12 +40,6 @@ export default async function RootLayout({
             "industrial-light",
             "industrial-dark",
           ]}
-          value={{
-            light: "light",
-            dark: "dark",
-            "industrial-light": "industrial-light",
-            "industrial-dark": "industrial-dark",
-          }}
           enableSystem
           disableTransitionOnChange
         >

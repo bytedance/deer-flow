@@ -1,0 +1,11 @@
+id: builtin-weekly-equipment
+display_name: "设备运行周报"
+description: |
+  面向自然周或自定义 7 天窗口的设备周报。
+  复用日报的设备/KPI 选择体系，仅扩展时间窗口和聚合逻辑。
+  章节：周概览 / 核心 KPI / 每日趋势 / 异常 TopN / 周对比 / 下周关注。
+dsl_version: "1"
+tags:
+  - weekly
+  - equipment
+  - kpi

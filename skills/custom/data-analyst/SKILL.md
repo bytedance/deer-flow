@@ -84,6 +84,73 @@ python /mnt/skills/custom/data-analyst/scripts/export_report.py \
 
 Currently supports Markdown only; PDF is deferred (Sprint plan Story 6).
 
+### query_diagnosis.py — Query diagnosis trend features (fault-diagnosis MVP)
+
+```bash
+python /mnt/skills/custom/data-analyst/scripts/query_diagnosis.py \
+  --kind centrifugal_pump \
+  --equipment "PUMP-A-001,PUMP-A-002" \
+  --start "2026-05-12T00:00:00" \
+  --end "2026-05-13T00:00:00" \
+  --mode oneoff \
+  --compare previous_period
+```
+
+Stage 1 (aggregate trend pull) for the `fault-diagnosis--{pump,rotating,reciprocating}`
+agents. Internally invokes `ins-extract-trend-features` and falls back to deterministic
+demo data when the InS toolchain is unavailable. Writes
+`/mnt/user-data/outputs/query_diagnosis.json` per design doc §7.1. Waveform / spectrum /
+orbit are not pulled here — the LLM handles those sparsely as Stage 2 against the
+`anomaly_time_ms` returned in `points[].trend_summary`.
+
+### diagnosis_features.py — Compute diagnosis features + rule matches
+
+```bash
+python /mnt/skills/custom/data-analyst/scripts/diagnosis_features.py \
+  --input /mnt/user-data/outputs/query_diagnosis.json \
+  --focus "unbalance,cavitation,min_flow_violation" \
+  --rules-skill pump-fault-diagnosis \
+  --output /mnt/user-data/outputs/diagnosis_features.json
+```
+
+Stage 2 of the fault-diagnosis pipeline. Reads `query_diagnosis.json`, optionally
+picks up `spectrum_*.json` / `orbit_*.json` deep-sample files written by the LLM
+during Stage 2, loads the corresponding rule book SKILL.md / references, runs a
+best-effort rule match against `--focus` codes, and writes
+`diagnosis_features.json` per design doc §7.2 (containing `evidence_chain` with
+`verdict ∈ {exceed, marginal, normal}`, `rule_matches`, ECharts options, demo
+historical cases, recommendations). Reciprocating kinds skip orbit charts.
+
+### export_report.py + export_diagnosis_report.py — Export diagnosis report
+
+Diagnosis exports go through the existing `export_report.py` with
+`report_type="diagnosis"` (registered alongside daily/weekly/monthly):
+
+```python
+# In-process import inside SOUL.md (preferred):
+from export_report import write_report
+write_report(payload, "md", report_type="diagnosis")
+try:
+    write_report(payload, "pdf", report_type="diagnosis")
+except ImportError:
+    pdf_available = False  # weasyprint not installed in current sandbox
+```
+
+CLI is supported for local testing:
+
+```bash
+python /mnt/skills/custom/data-analyst/scripts/export_report.py \
+  --input /mnt/user-data/outputs/diagnosis_features.json \
+  --report-type diagnosis \
+  --format md
+```
+
+The diagnosis Markdown follows the 6-section template aligned with
+`vibration-fault-diagnosis/SKILL.md` (设备与任务 / 异常发现 / 证据链 /
+诊断结论 / 差异诊断 / 处置建议) plus optional 同类故障历史 + 执行告警
+sections. PDF is wired through the same `_write_pdf` path used by daily /
+weekly / monthly — install `weasyprint` in the sandbox to enable it.
+
 ## Output Convention
 
 - All scripts output JSON to stdout

@@ -32,6 +32,9 @@ from app.gateway.routers import (
     models,
     organize,
     rag,
+    report_runs,
+    report_template_telemetry,
+    report_templates,
     runs,
     skills,
     suggestions,
@@ -630,6 +633,11 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Tenant Agents CRUD API
     app.include_router(tenant_agents.router)
+
+    # Report Templates platform (Phase 5)
+    app.include_router(report_templates.router)
+    app.include_router(report_runs.router)
+    app.include_router(report_template_telemetry.router)
 
     # Tenant MCP Servers CRUD API
     app.include_router(tenant_mcp_servers.router)

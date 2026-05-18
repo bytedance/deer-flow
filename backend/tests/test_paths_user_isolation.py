@@ -67,7 +67,10 @@ class TestUserAgentDir:
 
 class TestUserThreadDir:
     def test_user_thread_dir(self, paths: Paths):
-        expected = paths.base_dir / "users" / "u1" / "threads" / "t1"
+        # Architecture changed: ``user_id`` is now ignored; threads are
+        # tenant-scoped, not user-scoped. The ``user_id`` keyword survives
+        # for backward-compatible call sites but is a no-op.
+        expected = paths.base_dir / "threads" / "t1"
         assert paths.thread_dir("t1", user_id="u1") == expected
 
     def test_thread_dir_no_user_id_falls_back_to_legacy(self, paths: Paths):
@@ -76,24 +79,26 @@ class TestUserThreadDir:
 
 
 class TestUserSandboxDirs:
+    """``user_id`` is accepted but ignored — paths are tenant-scoped."""
+
     def test_sandbox_work_dir(self, paths: Paths):
-        expected = paths.base_dir / "users" / "u1" / "threads" / "t1" / "user-data" / "workspace"
+        expected = paths.base_dir / "threads" / "t1" / "user-data" / "workspace"
         assert paths.sandbox_work_dir("t1", user_id="u1") == expected
 
     def test_sandbox_uploads_dir(self, paths: Paths):
-        expected = paths.base_dir / "users" / "u1" / "threads" / "t1" / "user-data" / "uploads"
+        expected = paths.base_dir / "threads" / "t1" / "user-data" / "uploads"
         assert paths.sandbox_uploads_dir("t1", user_id="u1") == expected
 
     def test_sandbox_outputs_dir(self, paths: Paths):
-        expected = paths.base_dir / "users" / "u1" / "threads" / "t1" / "user-data" / "outputs"
+        expected = paths.base_dir / "threads" / "t1" / "user-data" / "outputs"
         assert paths.sandbox_outputs_dir("t1", user_id="u1") == expected
 
     def test_sandbox_user_data_dir(self, paths: Paths):
-        expected = paths.base_dir / "users" / "u1" / "threads" / "t1" / "user-data"
+        expected = paths.base_dir / "threads" / "t1" / "user-data"
         assert paths.sandbox_user_data_dir("t1", user_id="u1") == expected
 
     def test_acp_workspace_dir(self, paths: Paths):
-        expected = paths.base_dir / "users" / "u1" / "threads" / "t1" / "acp-workspace"
+        expected = paths.base_dir / "threads" / "t1" / "acp-workspace"
         assert paths.acp_workspace_dir("t1", user_id="u1") == expected
 
     def test_legacy_sandbox_work_dir(self, paths: Paths):
@@ -102,10 +107,10 @@ class TestUserSandboxDirs:
 
 
 class TestHostPathsWithUserId:
+    """``user_id`` is accepted but ignored — host paths are tenant-scoped."""
+
     def test_host_thread_dir_with_user_id(self, paths: Paths):
         result = paths.host_thread_dir("t1", user_id="u1")
-        assert "users" in result
-        assert "u1" in result
         assert "threads" in result
         assert "t1" in result
 
@@ -117,7 +122,6 @@ class TestHostPathsWithUserId:
 
     def test_host_sandbox_user_data_dir_with_user_id(self, paths: Paths):
         result = paths.host_sandbox_user_data_dir("t1", user_id="u1")
-        assert "users" in result
         assert "user-data" in result
 
     def test_host_sandbox_work_dir_with_user_id(self, paths: Paths):
@@ -138,6 +142,8 @@ class TestHostPathsWithUserId:
 
 
 class TestEnsureAndDeleteWithUserId:
+    """``user_id`` is accepted but ignored — directory ops are tenant-scoped."""
+
     def test_ensure_thread_dirs_creates_user_scoped(self, paths: Paths):
         paths.ensure_thread_dirs("t1", user_id="u1")
         assert paths.sandbox_work_dir("t1", user_id="u1").is_dir()
@@ -158,15 +164,11 @@ class TestEnsureAndDeleteWithUserId:
         paths.ensure_thread_dirs("t1")
         assert paths.sandbox_work_dir("t1").is_dir()
 
-    def test_user_scoped_and_legacy_are_independent(self, paths: Paths):
+    def test_user_scoped_and_legacy_resolve_to_same_dir(self, paths: Paths):
+        # Since ``user_id`` is ignored, both calls touch the same directory.
+        # The original "independence" test no longer holds.
         paths.ensure_thread_dirs("t1", user_id="u1")
-        paths.ensure_thread_dirs("t1")
-        # Both exist independently
-        assert paths.thread_dir("t1", user_id="u1").exists()
-        assert paths.thread_dir("t1").exists()
-        # Delete one doesn't affect the other
-        paths.delete_thread_dir("t1", user_id="u1")
-        assert not paths.thread_dir("t1", user_id="u1").exists()
+        assert paths.thread_dir("t1", user_id="u1") == paths.thread_dir("t1")
         assert paths.thread_dir("t1").exists()
 
 

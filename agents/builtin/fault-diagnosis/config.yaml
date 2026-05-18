@@ -1,7 +1,8 @@
 name: fault-diagnosis
 display_name: "故障诊断"
-description: "擅长设备故障分析、根因定位、诊断建议"
+description: "擅长机泵、旋转机组、往复机的振动与工艺联动诊断、根因定位与处置建议"
 icon: "🔮"
+type: group
 order: 1
 model: null
 tool_groups:
@@ -12,5 +13,6 @@ mcp_servers: null
 tags:
   - diagnosis
   - fault
+  - vibration
 advanced:
   subagent_enabled: false

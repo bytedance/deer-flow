@@ -38,7 +38,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes: `/` (landing), `/workspace/chats/[thread_id]` (chat).
+- **`app/`** — Next.js App Router. Routes: `/` (landing), `/workspace/chats/[thread_id]` (chat), `/workspace/agents/[agent_name]/chats/[thread_id]` (agent chat), `/workspace/report-templates` + `/workspace/report-templates/[template_id]` (template management), `/workspace/report-runs` + `/workspace/report-runs/[run_id]` (report history).
 - **`components/`** — React components split into:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
@@ -56,6 +56,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `genui/` — Dynamic UI block store, history recovery, and render_ui component helpers
   - `mcp/` — Model Context Protocol integration
   - `models/` — TypeScript types and data models
+  - `report-templates/` — Report Template Platform: TanStack Query hooks (`useReportTemplates`, `useReportTemplate`, `useReportTemplateVersion`, `usePublishReportTemplate`, `useForkReportTemplate`, `useReportRuns`, `useReportRunPayload` …), REST client (`api.ts`), and shared types (`types.ts`). See [docs/plans/2026-05-14-ai-report-custom-template-design.md](../docs/plans/2026-05-14-ai-report-custom-template-design.md) for the backend contract.
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
 - **`server/`** — Server-side code (better-auth, not yet active)
@@ -93,6 +94,34 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:2024
 ```
 
 Requires Node.js 22+ and pnpm 10.26.2+.
+
+## Report Template Platform
+
+Frontend surface for the AI Report Custom Template platform (backend design: [docs/plans/2026-05-14-ai-report-custom-template-design.md](../docs/plans/2026-05-14-ai-report-custom-template-design.md)).
+
+**Routes** (App Router, all under `/workspace`):
+
+| Path                              | Purpose                                                                                          |
+| --------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `report-templates/`               | List view, filterable by `visibility` (private / tenant / builtin)                               |
+| `report-templates/[template_id]/` | Detail: metadata, version list, YAML viewer, fork / publish / archive actions                    |
+| `report-runs/`                    | Report history embedded in the workspace sidebar — runs across the user's threads                |
+| `report-runs/[run_id]/`           | Run detail: parameters, sections (GenUI re-render), artifact download links                      |
+
+Sidebar entry points live in [src/components/workspace/workspace-nav-chat-list.tsx](src/components/workspace/workspace-nav-chat-list.tsx) — the design's "report history embedded in chat history" decision is implemented as additional sidebar items (not a separate global nav).
+
+**Components** (under [src/components/workspace/report-templates/](src/components/workspace/report-templates/)):
+
+- `report-templates-page.tsx` — list page (filter, search, create-from-fork)
+- `report-template-detail-page.tsx` — metadata + version selector + YAML viewer + actions
+- `report-runs-page.tsx` — history list with status badges
+- `report-run-detail-page.tsx` — re-renders `report_payload.json` via GenUI primitives + artifact links
+
+**State + API**: [src/core/report-templates/](src/core/report-templates/) wraps the 11 REST endpoints. All hooks are TanStack Query mutations / queries keyed by `template_id` / `report_run_id`; cache invalidation on publish / archive / fork follows the standard pattern.
+
+**Form rendering during a run**: report runs happen inside an existing thread/run. The backend pushes GenUI `form` blocks (one per `form_step`) via the standard SSE stream — the frontend reuses the existing [FormBlock.tsx](src/components/genui/FormBlock.tsx) and `render_ui` interaction infrastructure. There is **no separate form runtime** on the frontend.
+
+**Artifacts**: report exports (`report.md`, optional `report.pdf`) are downloaded through the existing `/api/threads/{thread_id}/artifacts/...` route. Markdown is always available; PDF may be absent when the backend's `weasyprint` is unavailable — the UI should hide the PDF button gracefully when `artifact_paths.pdf` is null.
 
 ## Design System
 

@@ -232,8 +232,31 @@ class TestGetMemoryStorage:
         import deerflow.agents.memory.storage as storage_mod
 
         storage_mod._storage_instance = None
+        # Also reset the store factory — production code now defaults to
+        # StoreMemoryStorage via a sync store provider. Tests that target
+        # FileMemoryStorage must opt out of that path explicitly.
+        storage_mod._store_factory = None
         yield
         storage_mod._storage_instance = None
+        storage_mod._store_factory = None
+
+    @pytest.fixture(autouse=True)
+    def disable_sync_store(self, monkeypatch):
+        """Force ``get_memory_storage()`` past the Store-backed branch so the
+        tests below can assert on the legacy ``storage_class`` codepath.
+
+        Production order is now: explicit instance → store factory →
+        sync-store import → config.storage_class. The first three are infra-
+        level and not what this test class is asserting; we make the
+        ``StoreMemoryStorage`` constructor raise so the config-based fallback
+        runs deterministically.
+        """
+        import deerflow.agents.memory.storage as storage_mod
+
+        def _raise(*_a, **_kw):
+            raise RuntimeError("StoreMemoryStorage disabled in test")
+
+        monkeypatch.setattr(storage_mod, "StoreMemoryStorage", _raise)
 
     def test_returns_file_memory_storage_by_default(self):
         """Should return FileMemoryStorage by default."""
