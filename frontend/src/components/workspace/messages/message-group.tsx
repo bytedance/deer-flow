@@ -673,6 +673,18 @@ function ToolCall({
   } else {
     const description: string | undefined = (args as { description: string })
       ?.description;
+    if (name === "render_ui") {
+      // The render_ui tool is implementation plumbing for GenUI blocks —
+      // operators don't need to see the tool name, only that the agent is
+      // preparing an interactive form.
+      return (
+        <ChainOfThoughtStep
+          key={id}
+          label={resolveLabel(description ?? t.toolCalls.preparingForm)}
+          icon={WrenchIcon}
+        ></ChainOfThoughtStep>
+      );
+    }
     return (
       <ChainOfThoughtStep
         key={id}

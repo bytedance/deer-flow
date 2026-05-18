@@ -804,8 +804,8 @@ export function InputBox({
   return (
     <div ref={promptRootRef} className="relative flex flex-col gap-4">
       {showFollowups && (
-        <div className="flex items-center justify-center pb-2">
-          <div className="flex items-center gap-2">
+        <div className="from-background/0 via-background/85 to-background/95 pointer-events-none flex items-center justify-center bg-gradient-to-b pt-4 pb-2">
+          <div className="pointer-events-auto flex items-center gap-2">
             {followupsLoading ? (
               <div className="text-muted-foreground bg-background/80 rounded-full border px-4 py-2 text-xs backdrop-blur-sm">
                 {t.inputBox.followupLoading}
@@ -1368,7 +1368,7 @@ export function InputBox({
       </PromptInput>
 
       {isNewThread && searchParams.get("mode") !== "skill" && (
-        <div className="flex items-center justify-center pt-2">
+        <div className="flex items-center justify-center">
           <SuggestionList />
         </div>
       )}
@@ -1422,7 +1422,7 @@ function SuggestionList() {
     [textInput],
   );
   return (
-    <Suggestions className="min-h-16 w-fit items-start">
+    <Suggestions className="w-fit items-start py-1">
       {t.inputBox.suggestions.map((suggestion) => (
         <Suggestion
           key={suggestion.suggestion}

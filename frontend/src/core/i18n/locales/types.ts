@@ -273,6 +273,7 @@ export interface Translations {
     contactUs: string;
     about: string;
     logout: string;
+    guestUser: string;
   };
 
   // Conversation
@@ -302,6 +303,7 @@ export interface Translations {
     presentFiles: string;
     needYourHelp: string;
     useTool: (toolName: string) => string;
+    preparingForm: string;
     searchForRelatedInfo: string;
     searchForRelatedImages: string;
     searchFor: (query: string) => string;
