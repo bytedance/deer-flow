@@ -157,13 +157,18 @@ class InsBaseAuthProvider(AuthProvider):
         data = response.get("data") or {}
         user_data = data.get("user") or {}
         permissions = data.get("permissions") or []
+        # Extract the real userId from ins-base response data instead of
+        # using the raw token string as the identity.  The token is opaque
+        # and contains dots / special chars that violate the user_id
+        # filesystem-path validation in deerflow/config/paths.py.
+        real_user_id = str(user_data.get("userId", user_id))
 
         user = type(
             "InsBaseUser",
             (),
             {
-                "id": user_id,
-                "email": user_data.get("email", f"user@{user_data.get('userId', 'unknown')}"),
+                "id": real_user_id,
+                "email": user_data.get("email", f"user@{real_user_id}"),
                 "password_hash": None,
                 "system_role": _map_system_role(user_data.get("username", "")),
                 "needs_setup": False,

@@ -136,6 +136,7 @@ def create_auth_middleware():
                                 return error
                             ctx_token = set_current_tenant_id(tenant_id)
                             request.state.user = {
+                                "id": getattr(user, "id", tenant_id),
                                 "username": getattr(user, "email", "ins-base-user"),
                                 "tenant_id": tenant_id,
                                 "role": "member",
