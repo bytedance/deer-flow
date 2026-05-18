@@ -11,6 +11,7 @@ from app.gateway.auth.providers import AuthProvider
 from app.gateway.auth.rsa_utils import rsa_encrypt
 from deerflow.config.auth_config import get_auth_config
 from deerflow.rpc.ins_base_auth_service import InsBaseAuthServiceClient
+from deerflow.rpc.rpc_client import RpcClient
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +51,13 @@ class InsBaseAuthProvider(AuthProvider):
       2. Return new token
     """
 
+    def __init__(self, rpc_client: RpcClient | None = None):
+        self._rpc_client = rpc_client
+
     @property
     def _auth_service(self) -> InsBaseAuthServiceClient:
         try:
-            return InsBaseAuthServiceClient()
+            return InsBaseAuthServiceClient(rpc_client=self._rpc_client)
         except RuntimeError as e:
             raise RpcNotConfiguredError(str(e)) from e
 
