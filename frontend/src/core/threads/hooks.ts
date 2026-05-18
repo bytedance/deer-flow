@@ -213,7 +213,11 @@ export function useThreadStream({
       listeners.current.onStart?.(_threadId, _runId);
       startedRef.current = true;
     }
-    setOnStreamThreadId(_threadId);
+    // Do NOT set onStreamThreadId here — the parent's onStart callback already
+    // calls setThreadId + setIsNewThread, which triggers a re-render with the
+    // new threadId prop.  Updating onStreamThreadId mid-stream would change the
+    // threadId passed to useStreamLGP, causing its internal useEffect to call
+    // stream.clear() and abort the active SSE connection.
   }, []);
 
   const queryClient = useQueryClient();
