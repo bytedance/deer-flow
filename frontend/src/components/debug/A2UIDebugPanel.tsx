@@ -118,6 +118,124 @@ const DEFAULT_PROPS: Record<string, string> = {
     2,
   ),
   status: JSON.stringify({ status: "normal", tag: "系统", label: "运行中" }, null, 2),
+  "device-selector": JSON.stringify(
+    {
+      title: "选择设备",
+      treeData: [
+        {
+          id: "100",
+          label: "因思科技",
+          type: 14,
+          path: "因思科技",
+          parentId: "0",
+          displayOrder: 1,
+          children: [
+            {
+              id: "200",
+              label: "海科瑞林",
+              type: 13,
+              path: "因思科技/海科瑞林",
+              parentId: "100",
+              displayOrder: 1,
+              children: [
+                {
+                  id: "300",
+                  label: "机泵在线监测系统",
+                  type: 12,
+                  path: "因思科技/海科瑞林/机泵系统",
+                  parentId: "200",
+                  displayOrder: 1,
+                  children: [
+                    {
+                      id: "400",
+                      label: "运行一部",
+                      type: 11,
+                      path: "因思科技/海科瑞林/机泵系统/运行一部",
+                      parentId: "300",
+                      displayOrder: 1,
+                      children: [
+                        { id: "d1", label: "焦化装置-泵A", type: 4, path: ".../焦化装置-泵A", parentId: "400", displayOrder: 1 },
+                        { id: "d2", label: "常减压装置-泵B", type: 4, path: ".../常减压装置-泵B", parentId: "400", displayOrder: 2 },
+                        { id: "d3", label: "催化裂化压缩机组", type: 1, path: ".../催化裂化压缩机组", parentId: "400", displayOrder: 3 },
+                      ],
+                    },
+                    {
+                      id: "401",
+                      label: "运行二部",
+                      type: 11,
+                      path: "因思科技/海科瑞林/机泵系统/运行二部",
+                      parentId: "300",
+                      displayOrder: 2,
+                      children: [
+                        { id: "d4", label: "气分装置-泵C", type: 4, path: ".../气分装置-泵C", parentId: "401", displayOrder: 1 },
+                        { id: "d5", label: "TMP装置-泵D", type: 4, path: ".../TMP装置-泵D", parentId: "401", displayOrder: 2 },
+                        { id: "d6", label: "加氢反应器R-101", type: 6, path: ".../加氢反应器R-101", parentId: "401", displayOrder: 3 },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    null,
+    2,
+  ),
+  "device-selector-multi": JSON.stringify(
+    {
+      title: "选择设备（可多选）",
+      maxSelect: 5,
+      treeData: [
+        {
+          id: "100",
+          label: "因思科技",
+          type: 14,
+          path: "因思科技",
+          parentId: "0",
+          displayOrder: 1,
+          children: [
+            {
+              id: "200",
+              label: "海科瑞林",
+              type: 13,
+              path: "因思科技/海科瑞林",
+              parentId: "100",
+              displayOrder: 1,
+              children: [
+                {
+                  id: "500",
+                  label: "大机组在线监测系统",
+                  type: 12,
+                  path: "因思科技/海科瑞林/大机组系统",
+                  parentId: "200",
+                  displayOrder: 1,
+                  children: [
+                    {
+                      id: "600",
+                      label: "运行四部",
+                      type: 11,
+                      path: "因思科技/海科瑞林/大机组系统/运行四部",
+                      parentId: "500",
+                      displayOrder: 1,
+                      children: [
+                        { id: "m1", label: "15万吨液化气项目机组", type: 1, path: ".../15万吨液化气", parentId: "600", displayOrder: 1 },
+                        { id: "m2", label: "润滑油联产芳烃机组", type: 1, path: ".../润滑油联产芳烃", parentId: "600", displayOrder: 2 },
+                        { id: "m3", label: "往复压缩机K-201", type: 9, path: ".../往复压缩机K-201", parentId: "600", displayOrder: 3 },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    null,
+    2,
+  ),
 };
 
 export function A2UIDebugPanel() {
