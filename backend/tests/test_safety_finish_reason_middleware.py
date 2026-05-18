@@ -470,6 +470,132 @@ class TestFromConfig:
 # ---------------------------------------------------------------------------
 
 
+class TestAuditEvent:
+    """Verify SafetyFinishReasonMiddleware records a `middleware:safety_termination`
+    audit event via RunJournal.record_middleware when the run-scoped journal is
+    exposed under runtime.context["__run_journal"].
+
+    Background: review on PR #3035 — SSE custom event handles live consumers,
+    but post-run audit needs a row in run_events that can be queried with one
+    SQL statement (no JOIN against message body).
+    """
+
+    def _runtime_with_journal(self, journal):
+        runtime = MagicMock()
+        runtime.context = {"thread_id": "t-audit", "__run_journal": journal}
+        return runtime
+
+    def test_records_audit_event_when_journal_present(self):
+        journal = MagicMock()
+        mw = SafetyFinishReasonMiddleware()
+        tc = _write_call(1)
+        state = {
+            "messages": [
+                _ai(
+                    content="partial",
+                    tool_calls=[tc],
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+        result = mw._apply(state, self._runtime_with_journal(journal))
+        assert result is not None
+
+        journal.record_middleware.assert_called_once()
+        call = journal.record_middleware.call_args
+        # tag is positional or kwarg depending on call style; we use kwargs.
+        assert call.kwargs["tag"] == "safety_termination"
+        assert call.kwargs["name"] == "SafetyFinishReasonMiddleware"
+        assert call.kwargs["hook"] == "after_model"
+        assert call.kwargs["action"] == "suppress_tool_calls"
+
+        changes = call.kwargs["changes"]
+        assert changes["detector"] == "openai_compatible_content_filter"
+        assert changes["reason_field"] == "finish_reason"
+        assert changes["reason_value"] == "content_filter"
+        assert changes["suppressed_tool_call_count"] == 1
+        assert changes["suppressed_tool_call_names"] == ["write_file"]
+        assert changes["suppressed_tool_call_ids"] == ["call_write_1"]
+        assert "message_id" in changes
+        assert isinstance(changes["extras"], dict)
+
+    def test_audit_event_never_carries_tool_arguments(self):
+        """PR #3035 review IMPORTANT: tool args are the filtered content itself
+        and must NOT be persisted to run_events under any circumstance."""
+        journal = MagicMock()
+        mw = SafetyFinishReasonMiddleware()
+        sensitive_tc = {
+            "id": "call_x",
+            "name": "write_file",
+            "args": {"path": "/x", "content": "FILTERED_CONTENT_DO_NOT_PERSIST"},
+        }
+        state = {
+            "messages": [
+                _ai(
+                    tool_calls=[sensitive_tc],
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+        mw._apply(state, self._runtime_with_journal(journal))
+        flat = repr(journal.record_middleware.call_args)
+        assert "FILTERED_CONTENT_DO_NOT_PERSIST" not in flat, "tool arguments must not leak into audit event"
+        assert "args" not in journal.record_middleware.call_args.kwargs["changes"]
+
+    def test_no_journal_in_runtime_context_is_silently_skipped(self):
+        """Subagent runtime / unit tests / no-event-store paths have no journal.
+        Middleware must still intervene and clear tool_calls — only the audit
+        event is skipped."""
+        mw = SafetyFinishReasonMiddleware()
+        runtime = MagicMock()
+        runtime.context = {"thread_id": "t-noj"}  # no __run_journal
+        state = {
+            "messages": [
+                _ai(
+                    tool_calls=[_write_call()],
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+        # Should not raise; should still clear tool_calls.
+        result = mw._apply(state, runtime)
+        assert result is not None
+        assert result["messages"][0].tool_calls == []
+
+    def test_journal_record_exception_does_not_break_run(self):
+        """Buggy journal must never propagate an exception into the agent loop."""
+        journal = MagicMock()
+        journal.record_middleware.side_effect = RuntimeError("db down")
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    tool_calls=[_write_call()],
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+        # Must not raise.
+        result = mw._apply(state, self._runtime_with_journal(journal))
+        assert result is not None
+        assert result["messages"][0].tool_calls == []
+
+    def test_no_record_when_passthrough(self):
+        """When the middleware does NOT intervene, no audit event is written."""
+        journal = MagicMock()
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    tool_calls=[_write_call()],
+                    response_metadata={"finish_reason": "tool_calls"},  # healthy
+                )
+            ]
+        }
+        assert mw._apply(state, self._runtime_with_journal(journal)) is None
+        journal.record_middleware.assert_not_called()
+
+
 class TestStreamEvent:
     def test_emits_event_when_writer_available(self, monkeypatch):
         captured: list = []

@@ -204,6 +204,63 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         except Exception:  # noqa: BLE001
             logger.debug("Failed to emit safety_termination stream event", exc_info=True)
 
+    def _record_audit_event(
+        self,
+        termination: SafetyTermination,
+        message,
+        tool_calls: list[dict],
+        runtime: Runtime,
+    ) -> None:
+        """Write a ``middleware:safety_termination`` record to RunEventStore
+        for post-run auditability.
+
+        The custom stream event in ``_emit_event`` is consumed by live SSE
+        clients and disappears after the run; this event is persisted so an
+        operator can answer "which runs were safety-suppressed today?" from
+        a single SQL query without joining the message body. Worker exposes
+        the run-scoped ``RunJournal`` via ``runtime.context["__run_journal"]``;
+        absent in unit-test / subagent / no-event-store paths, in which case
+        we silently skip.
+
+        Tool **arguments** are deliberately **not** recorded — those are the
+        very content the provider filtered; persisting them would defeat the
+        purpose of the safety filter. Names / count / ids are sufficient for
+        audit and debugging (issue #3028 review).
+        """
+        journal = None
+        if runtime is not None and getattr(runtime, "context", None):
+            context = runtime.context
+            if isinstance(context, dict):
+                journal = context.get("__run_journal")
+        if journal is None:
+            return
+
+        suppressed_names = [tc.get("name") or "unknown" for tc in tool_calls]
+        suppressed_ids = [tc.get("id") for tc in tool_calls if tc.get("id")]
+
+        changes = {
+            "detector": termination.detector,
+            "reason_field": termination.reason_field,
+            "reason_value": termination.reason_value,
+            "suppressed_tool_call_count": len(tool_calls),
+            "suppressed_tool_call_names": suppressed_names,
+            "suppressed_tool_call_ids": suppressed_ids,
+            "message_id": getattr(message, "id", None),
+            "extras": dict(termination.extras) if termination.extras else {},
+        }
+
+        try:
+            journal.record_middleware(
+                tag="safety_termination",
+                name=type(self).__name__,
+                hook="after_model",
+                action="suppress_tool_calls",
+                changes=changes,
+            )
+        except Exception:  # noqa: BLE001
+            # Audit-event persistence must never break agent execution.
+            logger.debug("Failed to record middleware:safety_termination event", exc_info=True)
+
     # ----- main apply ------------------------------------------------------
 
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -245,6 +302,7 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         )
 
         self._emit_event(termination, [tc.get("name") or "unknown" for tc in tool_calls], runtime)
+        self._record_audit_event(termination, last, list(tool_calls), runtime)
 
         return {"messages": [patched]}
 
