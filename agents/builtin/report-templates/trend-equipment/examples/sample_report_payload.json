@@ -1,0 +1,131 @@
+{
+  "schema_version": "1",
+  "title": "设备趋势分析报告",
+  "template": {
+    "id": "builtin-trend-equipment",
+    "version_ref": "builtin-1",
+    "name": "trend-equipment"
+  },
+  "run": {
+    "id": "rr_EXAMPLETREND000000000000",
+    "thread_id": "thread-example",
+    "generated_at": "2026-05-18T10:00:00+00:00"
+  },
+  "parameters": {
+    "date_range": "2026-04-18..2026-05-18",
+    "aggregation": "daily",
+    "forecast_horizon": 7,
+    "metric_keys": ["runtime_rate", "vibration_avg"]
+  },
+  "sections": [
+    {
+      "id": "review_banner",
+      "component": "card",
+      "title": "人工复核提示",
+      "props": {
+        "style": "warning",
+        "content": "本报告为 §13.2 解释性报告，结论需人工复核后方可作为正式输出。",
+        "value": true
+      }
+    },
+    {
+      "id": "overview",
+      "component": "card",
+      "title": "趋势概览",
+      "props": {
+        "title": "趋势概览",
+        "value": "近 30 天 vibration_avg 呈缓慢上升（slope=+0.0027/day）；runtime_rate 平稳。"
+      }
+    },
+    {
+      "id": "findings",
+      "component": "table",
+      "title": "趋势发现 (Findings)",
+      "props": {
+        "columns": [
+          {"key": "id", "label": "编号"},
+          {"key": "metric_name", "label": "指标"},
+          {"key": "kind", "label": "类型"},
+          {"key": "severity", "label": "严重度"},
+          {"key": "headline", "label": "说明"}
+        ],
+        "data": [
+          {"id": "F-1", "metric_name": "vibration_avg", "kind": "slope_up", "severity": "medium", "headline": "30 天斜率 +0.0027 mm/s/day，逼近预警阈值"},
+          {"id": "F-2", "metric_name": "runtime_rate", "kind": "stable", "severity": "low", "headline": "30 天均值稳定在 95% 区间"}
+        ]
+      }
+    },
+    {
+      "id": "evidence",
+      "component": "table",
+      "title": "证据链 (Evidence Trail)",
+      "props": {
+        "columns": [
+          {"key": "finding_id", "label": "关联发现"},
+          {"key": "source_type", "label": "来源类型"},
+          {"key": "source_id", "label": "来源 ID"},
+          {"key": "snapshot_path", "label": "快照路径"},
+          {"key": "checksum", "label": "校验和"}
+        ],
+        "data": [
+          {"finding_id": "F-1", "source_type": "timeseries", "source_id": "vibration_avg", "snapshot_path": "data/trend_data.json", "checksum": "sha256:abcd1234efgh5678"},
+          {"finding_id": "F-2", "source_type": "timeseries", "source_id": "runtime_rate", "snapshot_path": "data/trend_data.json", "checksum": "sha256:1111222233334444"}
+        ]
+      }
+    },
+    {
+      "id": "trend_chart",
+      "component": "echart",
+      "title": "指标趋势 + 预测",
+      "props": {
+        "option": {
+          "xAxis": {"type": "category", "data": ["04-18", "04-25", "05-02", "05-09", "05-16"]},
+          "yAxis": {"type": "value"},
+          "series": [
+            {"name": "vibration_avg", "type": "line", "data": [0.40, 0.41, 0.42, 0.43, 0.44]},
+            {"name": "runtime_rate", "type": "line", "data": [0.95, 0.94, 0.95, 0.96, 0.95]}
+          ]
+        }
+      }
+    },
+    {
+      "id": "alerts",
+      "component": "table",
+      "title": "高严重度告警",
+      "props": {
+        "columns": [
+          {"key": "metric_name", "label": "指标"},
+          {"key": "kind", "label": "类型"},
+          {"key": "severity", "label": "严重度"},
+          {"key": "headline", "label": "说明"}
+        ],
+        "data": []
+      }
+    },
+    {
+      "id": "data_coverage",
+      "component": "card",
+      "title": "数据覆盖",
+      "props": {
+        "title": "数据覆盖",
+        "value": "30 / 30 天，缺口 0 天；预测窗口 7 天"
+      }
+    },
+    {
+      "id": "confidence",
+      "component": "markdown",
+      "title": "置信度与假设",
+      "props": {
+        "content": "**confidence: medium**\n\n- 数据来源单一（仅 TSDB），未交叉验证现场记录\n- 预测基于线性外推，未考虑工艺切换\n- 阈值 0.05 为内部经验值"
+      }
+    },
+    {
+      "id": "recommendations",
+      "component": "markdown",
+      "title": "改进建议",
+      "props": {
+        "content": "1. 安排现场振动复测，验证趋势真实性。\n2. 评估轴承润滑加注频次。\n3. 若 7 天后 vibration_avg 持续上升，触发停机检查。"
+      }
+    }
+  ]
+}

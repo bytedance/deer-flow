@@ -375,6 +375,54 @@ def _compute_confidence(findings: list[dict], evidence: list[dict]) -> str:
     return "low"
 
 
+def _flatten_method_block(method_block: dict) -> list[dict]:
+    """Project the nested ``method_block`` dict into a flat list of rows so
+    DSL templates can render it via ``component: table`` regardless of method.
+
+    Row shape (uniform across 5why / fishbone / fmea):
+        {position, label, detail, evidence_hint}
+    """
+    method = method_block.get("method")
+    rows: list[dict] = []
+    if method == "five_why":
+        for lvl in method_block.get("why_chain") or []:
+            rows.append(
+                {
+                    "position": f"Level {lvl.get('level')}",
+                    "label": lvl.get("why", ""),
+                    "detail": lvl.get("candidate_cause", ""),
+                    "evidence_hint": lvl.get("finding_id", ""),
+                }
+            )
+    elif method == "fishbone":
+        for branch in method_block.get("branches") or []:
+            cat = branch.get("category", "")
+            for item in branch.get("items") or []:
+                rows.append(
+                    {
+                        "position": cat,
+                        "label": item.get("label", ""),
+                        "detail": f"weight={item.get('weight', 'low')}",
+                        "evidence_hint": item.get("evidence_hint", ""),
+                    }
+                )
+    elif method == "fmea":
+        for row in method_block.get("fmea_rows") or []:
+            rows.append(
+                {
+                    "position": row.get("id", ""),
+                    "label": row.get("mode", ""),
+                    "detail": (
+                        f"effect={row.get('effect', '')} | cause={row.get('cause', '')} | "
+                        f"S={row.get('severity', '?')} O={row.get('occurrence', '?')} "
+                        f"D={row.get('detection', '?')} RPN={row.get('rpn', '?')}"
+                    ),
+                    "evidence_hint": row.get("evidence_hint", ""),
+                }
+            )
+    return rows
+
+
 def main() -> int:
     parser = base_parser("Interpretive failure analysis (§13.2)")
     parser.add_argument("--input", required=True, help="failure_data.json path")
@@ -413,6 +461,12 @@ def main() -> int:
         )[:80],
     }
 
+    # Flattened table-friendly view of method_block. The DSL can render this
+    # as a single ``component: table`` regardless of which method ran — the
+    # ``method_block`` itself stays as a dict for callers who want the raw
+    # nested structure.
+    method_table = _flatten_method_block(method_block)
+
     output = {
         "schema_version": SCHEMA_VERSION,
         "metadata": {
@@ -427,6 +481,7 @@ def main() -> int:
         "findings": findings,
         "evidence": evidence,
         "method_block": method_block,
+        "method_table": method_table,
         "corrective_actions": corrective_actions,
         "validation_plan": validation_plan,
         "confidence": confidence,

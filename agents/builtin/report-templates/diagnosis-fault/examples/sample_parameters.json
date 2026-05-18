@@ -1,0 +1,8 @@
+{
+  "scope": {
+    "equipment_id": "P-001",
+    "fault_time": "2026-05-18",
+    "symptom": "振动突增并触发停机保护",
+    "include_related": false
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "scope": {
+    "asset_id": "P-001",
+    "failure_mode": "轴承卡死",
+    "analysis_method": "five_why",
+    "evidence_range": "2026-04-01..2026-05-18"
+  }
+}

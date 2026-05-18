@@ -73,3 +73,37 @@ def test_at_least_one_builtin_template_exists():
     assert any(d.name == "daily-equipment" for d in dirs), (
         "daily-equipment builtin template missing — required by Phase 4"
     )
+
+
+@pytest.mark.parametrize("template_dir", _all_builtin_template_dirs(), ids=lambda p: p.name)
+def test_builtin_template_has_examples(template_dir: Path):
+    """Per design §13.11: every builtin must ship ``examples/sample_parameters.json``
+    and ``examples/sample_report_payload.json`` so admins can verify behavior
+    against a known-good fixture (also drives the §13.14 #4 acceptance —
+    'at least one successful ReportRun sample')."""
+    import json
+
+    examples = template_dir / "examples"
+    assert examples.is_dir(), (
+        f"builtin template {template_dir.name!r} is missing examples/ — "
+        f"design §13.11 requires examples/sample_parameters.json + "
+        f"sample_report_payload.json"
+    )
+
+    params_path = examples / "sample_parameters.json"
+    payload_path = examples / "sample_report_payload.json"
+    assert params_path.exists(), f"missing {params_path}"
+    assert payload_path.exists(), f"missing {payload_path}"
+
+    # Must be parseable JSON.
+    params = json.loads(params_path.read_text(encoding="utf-8"))
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert isinstance(params, dict), f"{params_path} must be a JSON object"
+    assert isinstance(payload, dict), f"{payload_path} must be a JSON object"
+
+    # Payload must follow §12.1 envelope.
+    for required in ("schema_version", "template", "run", "parameters", "sections"):
+        assert required in payload, f"{payload_path} missing top-level key {required!r}"
+    assert isinstance(payload["sections"], list) and payload["sections"], (
+        f"{payload_path} sections[] must be a non-empty list"
+    )

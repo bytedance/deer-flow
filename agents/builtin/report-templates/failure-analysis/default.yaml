@@ -74,11 +74,25 @@ sections:
     component: card
     source: $.steps.failure_analysis.failure_analysis.overall_status
 
-  # Section 3: method_block — structurally distinct per method (5why/fishbone/fmea)
-  - id: method_block
-    title: 分析过程 (Method Block)
+  # Section 3a: method label — current analysis method (5why/fishbone/fmea).
+  - id: method_label
+    title: 分析方法
+    component: card
+    source: $.steps.failure_analysis.failure_analysis.method_block.method
+
+  # Section 3b: method_table — flattened table view of the method-specific
+  # chain/branches/rows. ``method_table`` is a uniform [{position,label,detail,
+  # evidence_hint}] list produced by failure_analysis._flatten_method_block().
+  - id: method_table
+    title: 分析过程
     component: table
-    source: $.steps.failure_analysis.failure_analysis.method_block
+    source: $.steps.failure_analysis.failure_analysis.method_table
+    props:
+      columns:
+        - { key: position, label: 位置 }
+        - { key: label, label: 内容 }
+        - { key: detail, label: 详情 }
+        - { key: evidence_hint, label: 关联证据 }
 
   # Section 4: findings (root causes)
   - id: findings

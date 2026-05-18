@@ -196,17 +196,63 @@ def _render_cards(props: dict[str, Any], *, group: bool) -> list[str]:
     for item in items:
         if not isinstance(item, dict):
             raise RenderError("card items must be dicts")
-        item_title = _safe_str(item.get("title", ""))
-        value = _safe_str(item.get("value", ""))
-        description = _safe_str(item.get("description", ""))
-        if item_title:
-            lines.append(f"- **{item_title}**: {value}" if value else f"- **{item_title}**")
-        elif value:
-            lines.append(f"- {value}")
-        if description:
-            lines.append(f"  {description}")
+        item_lines = _render_single_card(item)
+        lines.extend(item_lines)
     if not lines:
         lines.append("_(no cards)_")
+    return lines
+
+
+# Keys that are author-supplied metadata (not data to display). When the
+# source-resolved card is a generic dict like ``{level, summary, ...}``, these
+# keys are dropped from the fallback key-value render so we don't show
+# ``style: warning`` to the user.
+_CARD_META_KEYS = frozenset({"style", "template", "icon", "color"})
+
+
+def _render_single_card(item: dict[str, Any]) -> list[str]:
+    """Render one card. Three paths in priority order:
+
+    1. **Canonical**: ``{title, value, description?}`` → ``- **title**: value``
+    2. **Title-only**: ``{title}`` (no value) → ``- **title**``
+    3. **Generic dict fallback**: any other dict → render each key/value pair
+       as a sub-bullet so callers get readable output instead of ``_(no cards)_``.
+       Useful for sources like ``overall_status: {level, summary, ...}`` or
+       ``data_coverage: {requested_metrics, covered_metrics, ...}``.
+    """
+    item_title = _safe_str(item.get("title", ""))
+    value = _safe_str(item.get("value", ""))
+    description = _safe_str(item.get("description", ""))
+
+    if item_title:
+        head = f"- **{item_title}**: {value}" if value else f"- **{item_title}**"
+        lines = [head]
+        if description:
+            lines.append(f"  {description}")
+        return lines
+    if value:
+        lines = [f"- {value}"]
+        if description:
+            lines.append(f"  {description}")
+        return lines
+
+    # Generic dict fallback — render every non-meta key as ``- **key**: value``.
+    # Lists/dicts inside the value are JSON-stringified for compactness;
+    # primitives go through ``_safe_str``.
+    payload_keys = [k for k in item if k not in _CARD_META_KEYS]
+    if not payload_keys:
+        return []
+    lines: list[str] = []
+    for k in payload_keys:
+        v = item[k]
+        if isinstance(v, (dict, list)):
+            import json as _json
+            rendered = _safe_str(_json.dumps(v, ensure_ascii=False))
+        else:
+            rendered = _safe_str(v)
+        # Format the bare key into a label: ``data_source`` → ``data source``
+        label = _safe_str(str(k).replace("_", " "))
+        lines.append(f"- **{label}**: {rendered}")
     return lines
 
 

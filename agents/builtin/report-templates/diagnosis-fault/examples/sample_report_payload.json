@@ -1,0 +1,156 @@
+{
+  "schema_version": "1",
+  "title": "故障诊断报告",
+  "template": {
+    "id": "builtin-diagnosis-fault",
+    "version_ref": "builtin-1",
+    "name": "diagnosis-fault"
+  },
+  "run": {
+    "id": "rr_EXAMPLEDIAGNOSIS00000000",
+    "thread_id": "thread-example",
+    "generated_at": "2026-05-18T16:00:00+00:00"
+  },
+  "parameters": {
+    "equipment_id": "P-001",
+    "fault_time": "2026-05-18",
+    "symptom": "振动突增并触发停机保护",
+    "include_related": false
+  },
+  "sections": [
+    {
+      "id": "review_banner",
+      "component": "card",
+      "title": "人工复核提示",
+      "props": {
+        "style": "warning",
+        "content": "本报告为 §13.2 解释性报告，诊断结论需现场专家复核后方可作为正式输出。",
+        "value": true
+      }
+    },
+    {
+      "id": "overview",
+      "component": "card",
+      "title": "故障概述",
+      "props": {
+        "title": "故障概述",
+        "value": "P-001 于 2026-05-18 08:02 振动从 0.42 飙升至 0.81 mm/s，触发停机保护；4.5h 停机。"
+      }
+    },
+    {
+      "id": "impact",
+      "component": "card",
+      "title": "影响评估",
+      "props": {
+        "title": "影响评估",
+        "downtime_hours": 4.5,
+        "production_loss_estimate": "≈ 80 t",
+        "affected_equipment": ["P-001"]
+      }
+    },
+    {
+      "id": "timeline",
+      "component": "table",
+      "title": "事件时间线",
+      "props": {
+        "columns": [
+          {"key": "t", "label": "时间"},
+          {"key": "type", "label": "类型"},
+          {"key": "level", "label": "级别"},
+          {"key": "label", "label": "说明"},
+          {"key": "source_type", "label": "来源类型"},
+          {"key": "source_id", "label": "来源 ID"}
+        ],
+        "data": [
+          {"t": "2026-05-11", "type": "work_order", "level": "info", "label": "前一周轴承点检", "source_type": "work_order", "source_id": "WO-2026-0512"},
+          {"t": "2026-05-18T07:55:12", "type": "alarm", "level": "warning", "label": "振动超阈值", "source_type": "alarm", "source_id": "ALM-0001"},
+          {"t": "2026-05-18T08:02:08", "type": "alarm", "level": "critical", "label": "停机保护", "source_type": "alarm", "source_id": "ALM-0002"}
+        ]
+      }
+    },
+    {
+      "id": "alarms",
+      "component": "table",
+      "title": "关联告警",
+      "props": {
+        "columns": [
+          {"key": "id", "label": "告警 ID"},
+          {"key": "time", "label": "时间"},
+          {"key": "equipment", "label": "设备"},
+          {"key": "level", "label": "级别"},
+          {"key": "message", "label": "描述"}
+        ],
+        "data": [
+          {"id": "ALM-0001", "time": "07:55:12", "equipment": "P-001", "level": "warning", "message": "振动超阈值"},
+          {"id": "ALM-0002", "time": "08:02:08", "equipment": "P-001", "level": "critical", "message": "停机保护"}
+        ]
+      }
+    },
+    {
+      "id": "findings",
+      "component": "table",
+      "title": "候选根因 (Findings)",
+      "props": {
+        "columns": [
+          {"key": "id", "label": "编号"},
+          {"key": "label", "label": "根因"},
+          {"key": "likelihood", "label": "可能性"},
+          {"key": "severity", "label": "严重度"},
+          {"key": "is_primary", "label": "优先排查"},
+          {"key": "rationale", "label": "推理依据"}
+        ],
+        "data": [
+          {"id": "RC-1", "label": "轴承磨损", "likelihood": "high", "severity": "high", "is_primary": true, "rationale": "故障前 24h 振动从 0.42→0.81，且前一周点检工单异常"},
+          {"id": "RC-2", "label": "润滑不足", "likelihood": "medium", "severity": "medium", "is_primary": false, "rationale": "上次换油 30 天前；振动趋势与缺油迹象一致，但无温升直接证据"},
+          {"id": "RC-3", "label": "动不平衡", "likelihood": "low", "severity": "low", "is_primary": false, "rationale": "未观察到周期性峰值，振动谱未提供"}
+        ]
+      }
+    },
+    {
+      "id": "evidence",
+      "component": "table",
+      "title": "证据链 (Evidence Trail)",
+      "props": {
+        "columns": [
+          {"key": "finding_id", "label": "关联根因"},
+          {"key": "source_type", "label": "来源类型"},
+          {"key": "source_id", "label": "来源 ID"},
+          {"key": "snapshot_path", "label": "快照路径"},
+          {"key": "checksum", "label": "校验和"}
+        ],
+        "data": [
+          {"finding_id": "RC-1", "source_type": "timeseries", "source_id": "vibration", "snapshot_path": "data/fault_context.json", "checksum": "sha256:aaa1"},
+          {"finding_id": "RC-1", "source_type": "alarm", "source_id": "ALM-0001", "snapshot_path": "data/fault_context.json", "checksum": "sha256:aaa2"},
+          {"finding_id": "RC-1", "source_type": "work_order", "source_id": "WO-2026-0512", "snapshot_path": "data/fault_context.json", "checksum": "sha256:aaa3"},
+          {"finding_id": "RC-2", "source_type": "maintenance_record", "source_id": "MR-2026-0418", "snapshot_path": "data/fault_context.json", "checksum": "sha256:bbb1"},
+          {"finding_id": "RC-2", "source_type": "timeseries", "source_id": "vibration", "snapshot_path": "data/fault_context.json", "checksum": "sha256:bbb2"}
+        ]
+      }
+    },
+    {
+      "id": "data_coverage",
+      "component": "card",
+      "title": "数据覆盖",
+      "props": {
+        "title": "数据覆盖",
+        "value": "operations 24h ✓ / alarms 2 ✓ / work_orders 1 ✓ / maintenance 1 ✓ / spectrum ✗"
+      }
+    },
+    {
+      "id": "assumptions",
+      "component": "markdown",
+      "title": "分析假设",
+      "props": {
+        "content": "**confidence: medium**\n\n- 数据来源为 stub 合成场景\n- 未引入振动频谱分析\n- 假设润滑周期为 30 天"
+      }
+    },
+    {
+      "id": "recommendations",
+      "component": "markdown",
+      "title": "处置建议",
+      "props": {
+        "content": "1. 立即停机检查 P-001 轴承游隙与温度。\n2. 复核润滑油牌号与加注量。\n3. 对关联机泵开展同步检测。"
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "scope": {
+    "report_month": "2026-04",
+    "equipment_type": "pump",
+    "compare_with": ["mom", "yoy"]
+  },
+  "equipment": {
+    "equipment_ids": ["P-001", "P-002", "P-003"]
+  },
+  "kpis": {
+    "kpi_keys": ["runtime_rate", "mtbf", "mttr", "alarm_count"]
+  }
+}

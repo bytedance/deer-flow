@@ -26,6 +26,10 @@ from __future__ import annotations
 from typing import Any
 
 from deerflow.report_templates.records import now_iso
+from deerflow.report_templates.runtime.echart_sanitizer import (
+    EchartsSanitizeError,
+    sanitize_echart_option,
+)
 from deerflow.report_templates.runtime.state import RuntimeState
 from deerflow.report_templates.source_resolver import (
     JSONPathError,
@@ -131,6 +135,13 @@ def _wrap_props(component: str, value: Any, extra_props: dict | None) -> dict[st
             raise PayloadBuildError(
                 f"echart source must be an ECharts option object, got {type(value).__name__}"
             )
+        # §11.3 — reject function bodies / HTML / external URLs before shipping.
+        try:
+            sanitize_echart_option(value)
+        except EchartsSanitizeError as exc:
+            raise PayloadBuildError(
+                f"echart option failed safety scan: {exc.reason} at {exc.path}"
+            ) from exc
         base["option"] = value
         return base
     if component == "table":

@@ -1,0 +1,95 @@
+{
+  "schema_version": "1",
+  "title": "设备运行周报",
+  "template": {
+    "id": "builtin-weekly-equipment",
+    "version_ref": "builtin-1",
+    "name": "weekly-equipment"
+  },
+  "run": {
+    "id": "rr_EXAMPLEWEEKLY0000000000",
+    "thread_id": "thread-example",
+    "generated_at": "2026-05-18T10:00:00+00:00"
+  },
+  "parameters": {
+    "week_start": "2026-05-12",
+    "equipment_type": "pump",
+    "equipment_ids": ["P-001", "P-002", "P-003"],
+    "kpi_keys": ["runtime_rate", "alarm_count", "vibration_avg"],
+    "compare_with": "previous_week"
+  },
+  "sections": [
+    {
+      "id": "overview",
+      "component": "markdown",
+      "title": "本周运行概览",
+      "props": {
+        "content": "2026-05-12 至 2026-05-18，3 台机泵周运行率 94.7%（环比 +0.8pp），告警合计 28 条（环比 -6）。"
+      }
+    },
+    {
+      "id": "kpi_cards",
+      "component": "card_group",
+      "title": "核心 KPI 周统计",
+      "props": {
+        "items": [
+          {"title": "周运行率", "value": "94.7%", "delta": "+0.8pp", "trend": "up"},
+          {"title": "周告警数", "value": "28", "delta": "-6", "trend": "down"},
+          {"title": "周振动均值", "value": "0.43 mm/s", "delta": "+0.02", "trend": "up"}
+        ]
+      }
+    },
+    {
+      "id": "daily_trend",
+      "component": "echart",
+      "title": "每日趋势",
+      "props": {
+        "option": {
+          "xAxis": {"type": "category", "data": ["05-12", "05-13", "05-14", "05-15", "05-16", "05-17", "05-18"]},
+          "yAxis": {"type": "value"},
+          "series": [
+            {"name": "运行率", "type": "line", "data": [0.94, 0.95, 0.93, 0.96, 0.94, 0.95, 0.95]},
+            {"name": "告警数", "type": "bar", "data": [4, 3, 5, 4, 6, 3, 3]}
+          ]
+        }
+      }
+    },
+    {
+      "id": "anomalies",
+      "component": "table",
+      "title": "异常 TopN",
+      "props": {
+        "columns": [
+          {"key": "equipment", "label": "设备"},
+          {"key": "metric", "label": "指标"},
+          {"key": "peak", "label": "周峰值"},
+          {"key": "occurrences", "label": "次数"}
+        ],
+        "data": [
+          {"equipment": "P-001", "metric": "振动", "peak": "0.83", "occurrences": 4},
+          {"equipment": "P-003", "metric": "电流", "peak": "32.1A", "occurrences": 2}
+        ]
+      }
+    },
+    {
+      "id": "compare",
+      "component": "card_group",
+      "title": "与上一周对比",
+      "props": {
+        "items": [
+          {"title": "运行率环比", "value": "+0.8pp", "trend": "up"},
+          {"title": "告警数环比", "value": "-6", "trend": "down"},
+          {"title": "停机时长环比", "value": "-1.2h", "trend": "down"}
+        ]
+      }
+    },
+    {
+      "id": "next_focus",
+      "component": "markdown",
+      "title": "下周关注重点",
+      "props": {
+        "content": "1. 持续监控 P-001 振动趋势，必要时安排停机点检。\n2. 复核 P-003 电流偏高的工艺背景。"
+      }
+    }
+  ]
+}

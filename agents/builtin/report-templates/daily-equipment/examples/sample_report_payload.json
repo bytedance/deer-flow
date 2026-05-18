@@ -1,0 +1,96 @@
+{
+  "schema_version": "1",
+  "title": "设备运行日报",
+  "template": {
+    "id": "builtin-daily-equipment",
+    "version_ref": "builtin-1",
+    "name": "daily-equipment"
+  },
+  "run": {
+    "id": "rr_EXAMPLEDAILY00000000000",
+    "thread_id": "thread-example",
+    "generated_at": "2026-05-18T10:00:00+00:00"
+  },
+  "parameters": {
+    "report_date": "2026-05-18",
+    "equipment_type": "pump",
+    "equipment_ids": ["P-001", "P-002", "P-003"],
+    "kpi_keys": ["runtime_rate", "alarm_count", "vibration_avg"],
+    "compare_with": "previous_day"
+  },
+  "sections": [
+    {
+      "id": "overview",
+      "component": "markdown",
+      "title": "总览",
+      "props": {
+        "content": "2026-05-18 选定 3 台机泵；运行率 95.3%，告警 4 条，相对前一日运行率 +1.2pp、告警 -2。"
+      }
+    },
+    {
+      "id": "kpi_cards",
+      "component": "card_group",
+      "title": "核心 KPI",
+      "props": {
+        "items": [
+          {"title": "运行率", "value": "95.3%", "delta": "+1.2pp", "trend": "up"},
+          {"title": "告警数", "value": "4", "delta": "-2", "trend": "down"},
+          {"title": "振动均值", "value": "0.42 mm/s", "delta": "+0.01", "trend": "up"}
+        ]
+      }
+    },
+    {
+      "id": "trend",
+      "component": "echart",
+      "title": "24 小时趋势",
+      "props": {
+        "option": {
+          "xAxis": {"type": "category", "data": ["00", "04", "08", "12", "16", "20"]},
+          "yAxis": {"type": "value"},
+          "series": [{"type": "line", "data": [0.40, 0.41, 0.43, 0.42, 0.44, 0.42]}]
+        }
+      }
+    },
+    {
+      "id": "anomalies",
+      "component": "table",
+      "title": "异常排行",
+      "props": {
+        "columns": [
+          {"key": "equipment", "label": "设备"},
+          {"key": "metric", "label": "指标"},
+          {"key": "value", "label": "值"}
+        ],
+        "data": [
+          {"equipment": "P-001", "metric": "振动峰值", "value": "0.81"},
+          {"equipment": "P-003", "metric": "运行时长", "value": "21.4h"}
+        ]
+      }
+    },
+    {
+      "id": "alarms",
+      "component": "table",
+      "title": "告警事件",
+      "props": {
+        "columns": [
+          {"key": "id", "label": "告警 ID"},
+          {"key": "time", "label": "时间"},
+          {"key": "level", "label": "级别"},
+          {"key": "message", "label": "描述"}
+        ],
+        "data": [
+          {"id": "ALM-2026-0518-0001", "time": "07:55:12", "level": "warning", "message": "P-001 振动超阈值"},
+          {"id": "ALM-2026-0518-0002", "time": "14:02:08", "level": "info", "message": "P-002 启停事件"}
+        ]
+      }
+    },
+    {
+      "id": "recommendations",
+      "component": "markdown",
+      "title": "处置建议",
+      "props": {
+        "content": "1. 排查 P-001 振动峰值原因，复核轴承游隙。\n2. 监控 P-002 启停频次，确认是否存在工艺扰动。"
+      }
+    }
+  ]
+}

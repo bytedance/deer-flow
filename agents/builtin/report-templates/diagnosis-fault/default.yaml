@@ -56,8 +56,12 @@ transforms:
     kind: script
     name: data-analyst/diagnosis_analysis
     input: fault_context.fault_context
-    args:
-      timeline: "{{ $.steps.fault_timeline.fault_timeline }}"
+    # NOTE: --timeline is an optional CLI flag of diagnosis_analysis. The
+    # natural DSL expression "{{ $.steps.fault_timeline.fault_timeline }}"
+    # resolves to the parsed JSON dict (not a file path) — the runtime would
+    # then pass a stringified dict as --timeline, which the script can't
+    # open. Until placeholder→path coercion is implemented, omit the flag;
+    # diagnosis_analysis derives its own timeline view from fault_context.
     outputs:
       diagnosis_analysis: diagnosis_analysis.json
 
