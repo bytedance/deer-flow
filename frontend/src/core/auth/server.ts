@@ -17,7 +17,6 @@ export async function getServerSideUser(): Promise<AuthResult> {
         id: "e2e-user",
         email: "e2e@test.local",
         system_role: "superadmin",
-        needs_setup: false,
         tenant_id: "default",
       },
     };
@@ -34,31 +33,6 @@ export async function getServerSideUser(): Promise<AuthResult> {
   }
 
   if (!sessionCookie) {
-    // No session — check whether the system has been initialised yet.
-    const setupController = new AbortController();
-    const setupTimeout = setTimeout(
-      () => setupController.abort(),
-      SSR_AUTH_TIMEOUT_MS,
-    );
-    try {
-      const setupRes = await fetch(
-        `${internalGatewayUrl}/api/v1/auth/setup-status`,
-        {
-          cache: "no-store",
-          signal: setupController.signal,
-        },
-      );
-      clearTimeout(setupTimeout);
-      if (setupRes.ok) {
-        const setupData = (await setupRes.json()) as { needs_setup?: boolean };
-        if (setupData.needs_setup) {
-          return { tag: "system_setup_required" };
-        }
-      }
-    } catch {
-      clearTimeout(setupTimeout);
-      // If setup-status is unreachable/times out, fall through to unauthenticated.
-    }
     return { tag: "unauthenticated" };
   }
 
@@ -71,16 +45,13 @@ export async function getServerSideUser(): Promise<AuthResult> {
       cache: "no-store",
       signal: controller.signal,
     });
-    clearTimeout(timeout); // Clear immediately — covers all response branches
+    clearTimeout(timeout);
 
     if (res.ok) {
       const parsed = userSchema.safeParse(await res.json());
       if (!parsed.success) {
         console.error("[SSR auth] Malformed /auth/me response:", parsed.error);
         return { tag: "gateway_unavailable" };
-      }
-      if (parsed.data.needs_setup) {
-        return { tag: "needs_setup", user: parsed.data };
       }
       return { tag: "authenticated", user: parsed.data };
     }

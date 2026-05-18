@@ -29,12 +29,12 @@ export default async function WorkspaceLayout({
 
   const authResult = await getServerSideUser();
   let initialUser: User | null = null;
-  if (authResult.tag === "authenticated" || authResult.tag === "needs_setup") {
+  if (authResult.tag === "authenticated") {
     initialUser = authResult.user;
   } else if (authResult.tag === "unauthenticated") {
     redirect(buildLoginUrl("/workspace"));
   }
-  // gateway_unavailable / config_error / system_setup_required: render with null user
+  // gateway_unavailable / config_error: render with null user
   // (backend middleware handles auth enforcement; we just show no user info)
 
   return (

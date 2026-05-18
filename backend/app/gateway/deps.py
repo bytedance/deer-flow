@@ -8,6 +8,7 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -17,6 +18,8 @@ from fastapi import FastAPI, HTTPException, Request
 from deerflow.config.app_config import AppConfig
 
 from deerflow.runtime import RunContext
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
@@ -262,6 +265,7 @@ def get_run_context(request: Request) -> RunContext:
 # Cached singletons to avoid repeated instantiation per request
 _cached_local_provider: LocalAuthProvider | None = None
 _cached_repo: SQLiteUserRepository | None = None
+_cached_ins_base_provider: object | None = None
 
 
 def get_local_provider() -> LocalAuthProvider:
@@ -284,6 +288,33 @@ def get_local_provider() -> LocalAuthProvider:
 
         _cached_local_provider = LocalAuthProvider(repository=_cached_repo)
     return _cached_local_provider
+
+
+def get_ins_base_provider():
+    """Get or create the cached InsBaseAuthProvider singleton.
+
+    Returns None if RPC is not configured or the provider is not enabled.
+    """
+    global _cached_ins_base_provider
+
+    from deerflow.config.auth_config import get_auth_config
+    from app.gateway.auth.ins_base_provider import InsBaseAuthProvider
+    from deerflow.rpc.rpc_client import get_rpc_client
+
+    auth_config = get_auth_config()
+    if auth_config.provider != "ins_base":
+        return None
+
+    if _cached_ins_base_provider is not None:
+        return _cached_ins_base_provider
+
+    rpc_client = get_rpc_client()
+    if rpc_client is None:
+        logger.warning("RPC client is not configured — InsBaseAuthProvider not available")
+        return None
+
+    _cached_ins_base_provider = InsBaseAuthProvider(rpc_client=rpc_client)
+    return _cached_ins_base_provider
 
 
 async def get_current_user_from_request(request: Request):

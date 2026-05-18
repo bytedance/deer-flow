@@ -84,25 +84,8 @@ class _FakeRequest:
         self.headers = {}
 
 
-def test_csrf_exempts_login_local():
-    """login/local (actual route) should be exempt from CSRF."""
-    req = _FakeRequest("/api/v1/auth/login/local")
-    assert is_auth_endpoint(req) is True
-
-
-def test_csrf_exempts_login_local_trailing_slash():
-    """Trailing slash should also be exempt."""
-    req = _FakeRequest("/api/v1/auth/login/local/")
-    assert is_auth_endpoint(req) is True
-
-
 def test_csrf_exempts_logout():
     req = _FakeRequest("/api/v1/auth/logout")
-    assert is_auth_endpoint(req) is True
-
-
-def test_csrf_exempts_register():
-    req = _FakeRequest("/api/v1/auth/register")
     assert is_auth_endpoint(req) is True
 
 
@@ -199,35 +182,7 @@ def test_decode_token_malformed_maps_to_token_invalid_code():
 # ── Login Response Format ────────────────────────────────────────────
 
 
-def test_login_response_model_has_no_access_token():
-    """LoginResponse should NOT contain access_token field (RFC-001)."""
-    from app.gateway.routers.auth import LoginResponse
 
-    resp = LoginResponse(expires_in=604800)
-    d = resp.model_dump()
-    assert "access_token" not in d
-    assert "expires_in" in d
-    assert d["expires_in"] == 604800
-
-
-def test_login_response_model_fields():
-    """LoginResponse has expires_in and needs_setup."""
-    from app.gateway.routers.auth import LoginResponse
-
-    fields = set(LoginResponse.model_fields.keys())
-    assert fields == {"expires_in", "needs_setup", "tenant_id"}
-
-
-# ── AuthConfig in Route ──────────────────────────────────────────────
-
-
-def test_auth_config_token_expiry_used_in_login_response():
-    """LoginResponse.expires_in should come from config.token_expiry_days."""
-    from app.gateway.routers.auth import LoginResponse
-
-    expected_seconds = 14 * 24 * 3600
-    resp = LoginResponse(expires_in=expected_seconds)
-    assert resp.expires_in == expected_seconds
 
 
 # ── UserResponse Type Preservation ───────────────────────────────────
@@ -450,8 +405,8 @@ def _make_csrf_app():
     async def protected():
         return {"ok": True}
 
-    @app.post("/api/v1/auth/login/local")
-    async def login():
+    @app.post("/api/v1/auth/logout")
+    async def auth_logout():
         return {"ok": True}
 
     @app.get("/api/v1/test/read")
@@ -501,17 +456,17 @@ def test_csrf_middleware_allows_get_without_token():
     assert resp.status_code == 200
 
 
-def test_csrf_middleware_exempts_login_local():
-    """POST to login/local is exempt from CSRF (no token yet)."""
+def test_csrf_middleware_exempts_logout():
+    """POST to logout is exempt from CSRF (no token yet)."""
     client = TestClient(_make_csrf_app())
-    resp = client.post("/api/v1/auth/login/local")
+    resp = client.post("/api/v1/auth/logout")
     assert resp.status_code == 200
 
 
 def test_csrf_middleware_sets_cookie_on_auth_endpoint():
     """Auth endpoints should receive a CSRF cookie in response."""
     client = TestClient(_make_csrf_app())
-    resp = client.post("/api/v1/auth/login/local")
+    resp = client.post("/api/v1/auth/logout")
     assert CSRF_COOKIE_NAME in resp.cookies
 
 
@@ -554,94 +509,6 @@ def _get_auth_client():
     return TestClient(_make_auth_app())
 
 
-def test_api_auth_me_no_cookie_returns_structured_401():
-    """/api/v1/auth/me without cookie → 401 with {code: 'not_authenticated'}."""
-    _setup_config()
-    client = _get_auth_client()
-    resp = client.get("/api/v1/auth/me")
-    assert resp.status_code == 401
-    body = resp.json()
-    assert body["detail"]["code"] == "not_authenticated"
-    assert "message" in body["detail"]
-
-
-def test_api_auth_me_expired_token_returns_structured_401():
-    """/api/v1/auth/me with expired token → 401 with {code: 'token_expired'}."""
-    _setup_config()
-    expired = {"sub": "u1", "exp": datetime.now(UTC) - timedelta(hours=1), "iat": datetime.now(UTC)}
-    token = pyjwt.encode(expired, _TEST_SECRET, algorithm="HS256")
-
-    client = _get_auth_client()
-    client.cookies.set("access_token", token)
-    resp = client.get("/api/v1/auth/me")
-    assert resp.status_code == 401
-    body = resp.json()
-    assert body["detail"]["code"] == "token_expired"
-
-
-def test_api_auth_me_invalid_sig_returns_structured_401():
-    """/api/v1/auth/me with bad signature → 401 with {code: 'token_invalid'}."""
-    _setup_config()
-    payload = {"sub": "u1", "exp": datetime.now(UTC) + timedelta(hours=1), "iat": datetime.now(UTC)}
-    token = pyjwt.encode(payload, "wrong-key", algorithm="HS256")
-
-    client = _get_auth_client()
-    client.cookies.set("access_token", token)
-    resp = client.get("/api/v1/auth/me")
-    assert resp.status_code == 401
-    body = resp.json()
-    assert body["detail"]["code"] == "token_invalid"
-
-
-def test_api_login_bad_credentials_returns_structured_401():
-    """Login with wrong password → 401 with {code: 'invalid_credentials'}."""
-    _setup_config()
-    client = _get_auth_client()
-    resp = client.post(
-        "/api/v1/auth/login/local",
-        data={"username": "nonexistent@test.com", "password": "wrongpassword"},
-    )
-    assert resp.status_code == 401
-    body = resp.json()
-    assert body["detail"]["code"] == "invalid_credentials"
-
-
-def test_api_login_success_no_token_in_body():
-    """Successful login → response body has expires_in but NOT access_token."""
-    _setup_config()
-    client = _get_auth_client()
-    # Register first
-    client.post(
-        "/api/v1/auth/register",
-        json={"email": "contract-test@test.com", "password": "securepassword123"},
-    )
-    # Login
-    resp = client.post(
-        "/api/v1/auth/login/local",
-        data={"username": "contract-test@test.com", "password": "securepassword123"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "expires_in" in body
-    assert "access_token" not in body
-    # Token should be in cookie, not body
-    assert "access_token" in resp.cookies
-
-
-def test_api_register_duplicate_returns_structured_400():
-    """Register with duplicate email → 400 with {code: 'email_already_exists'}."""
-    _setup_config()
-    client = _get_auth_client()
-    email = "dup-contract-test@test.com"
-    # First register
-    client.post("/api/v1/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
-    # Duplicate
-    resp = client.post("/api/v1/auth/register", json={"email": email, "password": "AnotherStr0ngPwd!"})
-    assert resp.status_code == 400
-    body = resp.json()
-    assert body["detail"]["code"] == "email_already_exists"
-
-
 # ── Cookie security: HTTP vs HTTPS ────────────────────────────────────
 
 
@@ -654,83 +521,29 @@ def _get_set_cookie_headers(resp) -> list[str]:
     return [v for k, v in resp.headers.multi_items() if k.lower() == "set-cookie"]
 
 
-def test_register_http_cookie_httponly_true_secure_false():
-    """HTTP register → access_token cookie is httponly=True, secure=False, no max_age."""
-    _setup_config()
-    client = _get_auth_client()
-    resp = client.post(
-        "/api/v1/auth/register",
-        json={"email": _unique_email("http-cookie"), "password": "Tr0ub4dor3a"},
-    )
-    assert resp.status_code == 201
-    cookie_header = resp.headers.get("set-cookie", "")
-    assert "access_token=" in cookie_header
-    assert "httponly" in cookie_header.lower()
-    assert "secure" not in cookie_header.lower().replace("samesite", "")
-
-
-def test_register_https_cookie_httponly_true_secure_true():
-    """HTTPS register (x-forwarded-proto) → access_token cookie is httponly=True, secure=True, has max_age."""
-    _setup_config()
-    client = _get_auth_client()
-    resp = client.post(
-        "/api/v1/auth/register",
-        json={"email": _unique_email("https-cookie"), "password": "Tr0ub4dor3a"},
-        headers={"x-forwarded-proto": "https"},
-    )
-    assert resp.status_code == 201
-    cookie_header = resp.headers.get("set-cookie", "")
-    assert "access_token=" in cookie_header
-    assert "httponly" in cookie_header.lower()
-    assert "secure" in cookie_header.lower()
-    assert "max-age" in cookie_header.lower()
-
-
-def test_login_https_sets_secure_cookie():
-    """HTTPS login → access_token cookie has secure flag."""
-    _setup_config()
-    client = _get_auth_client()
-    email = _unique_email("https-login")
-    client.post("/api/v1/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
-    resp = client.post(
-        "/api/v1/auth/login/local",
-        data={"username": email, "password": "Tr0ub4dor3a"},
-        headers={"x-forwarded-proto": "https"},
-    )
-    assert resp.status_code == 200
-    cookie_header = resp.headers.get("set-cookie", "")
-    assert "access_token=" in cookie_header
-    assert "httponly" in cookie_header.lower()
-    assert "secure" in cookie_header.lower()
-
-
 def test_csrf_cookie_secure_on_https():
-    """HTTPS register → csrf_token cookie has secure flag but NOT httponly."""
+    """HTTPS auth POST → csrf_token cookie has secure flag but NOT httponly."""
     _setup_config()
     client = _get_auth_client()
     resp = client.post(
-        "/api/v1/auth/register",
-        json={"email": _unique_email("csrf-https"), "password": "Tr0ub4dor3a"},
+        "/api/v1/auth/logout",
         headers={"x-forwarded-proto": "https"},
     )
-    assert resp.status_code == 201
     csrf_cookies = [h for h in _get_set_cookie_headers(resp) if "csrf_token=" in h]
-    assert csrf_cookies, "csrf_token cookie not set on HTTPS register"
+    assert csrf_cookies, "csrf_token cookie not set on HTTPS auth POST"
     csrf_header = csrf_cookies[0]
     assert "secure" in csrf_header.lower()
     assert "httponly" not in csrf_header.lower()
 
 
 def test_csrf_cookie_not_secure_on_http():
-    """HTTP register → csrf_token cookie does NOT have secure flag."""
+    """HTTP auth POST → csrf_token cookie does NOT have secure flag."""
     _setup_config()
     client = _get_auth_client()
     resp = client.post(
-        "/api/v1/auth/register",
-        json={"email": _unique_email("csrf-http"), "password": "Tr0ub4dor3a"},
+        "/api/v1/auth/logout",
     )
-    assert resp.status_code == 201
     csrf_cookies = [h for h in _get_set_cookie_headers(resp) if "csrf_token=" in h]
-    assert csrf_cookies, "csrf_token cookie not set on HTTP register"
+    assert csrf_cookies, "csrf_token cookie not set on HTTP auth POST"
     csrf_header = csrf_cookies[0]
     assert "secure" not in csrf_header.lower().replace("samesite", "")

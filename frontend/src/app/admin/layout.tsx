@@ -11,7 +11,7 @@ export default async function AdminLayout({
   const authResult = await getServerSideUser();
   let initialUser: User | null = null;
 
-  if (authResult.tag === "authenticated" || authResult.tag === "needs_setup") {
+  if (authResult.tag === "authenticated") {
     initialUser = authResult.user;
   } else if (authResult.tag === "unauthenticated") {
     redirect(buildLoginUrl("/admin"));

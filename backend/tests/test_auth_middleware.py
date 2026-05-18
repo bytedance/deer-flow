@@ -18,10 +18,10 @@ from deerflow.config.auth_config import load_auth_config_from_dict, reset_auth_c
         "/docs/",
         "/redoc",
         "/openapi.json",
-        "/api/v1/auth/login/local",
-        "/api/v1/auth/register",
+        "/api/v1/auth/ins-base/login",
+        "/api/v1/auth/ins-base/refresh",
+        "/api/v1/auth/ins-base/authenticate",
         "/api/v1/auth/logout",
-        "/api/v1/auth/setup-status",
     ],
 )
 def test_public_paths(path: str):
@@ -55,10 +55,10 @@ def test_protected_paths(path: str):
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/v1/auth/login/local/",
-        "/api/v1/auth/register/",
+        "/api/v1/auth/ins-base/login/",
+        "/api/v1/auth/ins-base/refresh/",
+        "/api/v1/auth/ins-base/authenticate/",
         "/api/v1/auth/logout/",
-        "/api/v1/auth/setup-status/",
     ],
 )
 def test_public_auth_paths_with_trailing_slash(path: str):
@@ -91,7 +91,7 @@ def _make_fail_closed_app():
     """Create a minimal FastAPI app with AuthMiddleware for testing."""
     from fastapi import FastAPI
 
-    load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret"})
+    load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret", "provider": "local"})
 
     app = FastAPI()
     app.add_middleware(AuthMiddleware)
@@ -104,9 +104,9 @@ def _make_fail_closed_app():
     async def auth_me():
         return {"id": "1", "email": "test@test.com"}
 
-    @app.get("/api/v1/auth/setup-status")
-    async def setup_status():
-        return {"needs_setup": False}
+    @app.get("/api/v1/auth/ins-base/authenticate")
+    async def ins_base_auth():
+        return {"authenticated": True}
 
     @app.get("/api/models")
     async def models_get():
@@ -146,13 +146,13 @@ def test_public_path_no_cookie(client):
 
 
 def test_public_auth_path_no_cookie(client):
-    """Public auth endpoints (login/register) pass without cookie."""
-    res = client.get("/api/v1/auth/setup-status")
+    """Public auth endpoints (ins-base auth) pass without cookie."""
+    res = client.get("/api/v1/auth/ins-base/authenticate")
     assert res.status_code == 200
 
 
 def test_protected_auth_path_no_cookie(client):
-    """/auth/me requires cookie even though it's under /api/v1/auth/."""
+    """Non-public auth paths (me, change-password) require cookie."""
     res = client.get("/api/v1/auth/me")
     assert res.status_code == 401
 
@@ -290,25 +290,25 @@ def _make_app(tenant_store=None) -> FastAPI:
 
 class TestWhitelist:
     def test_health_is_whitelisted(self):
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s", "provider": "local"})
         client = TestClient(_make_app())
         resp = client.get("/health")
         assert resp.status_code == 200
 
     def test_docs_are_whitelisted(self):
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s", "provider": "local"})
         client = TestClient(_make_app())
         resp = client.get("/docs")
         assert resp.status_code == 200
 
     def test_openapi_json_is_whitelisted(self):
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s", "provider": "local"})
         client = TestClient(_make_app())
         resp = client.get("/openapi.json")
         assert resp.status_code == 200
 
     def test_auth_login_is_whitelisted(self):
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s", "provider": "local"})
         client = TestClient(_make_app())
         resp = client.post("/api/auth/login", json={"username": "admin", "password": "x"})
         # 401 is fine — it means the route was reached (auth not blocking it)
@@ -339,13 +339,13 @@ class TestDisabledMode:
 
 class TestJwtAuth:
     def test_missing_auth_header_returns_401(self):
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret", "provider": "local"})
         client = TestClient(_make_app())
         resp = client.get("/api/protected")
         assert resp.status_code == 401
 
     def test_valid_jwt_sets_tenant(self):
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret", "provider": "local"})
         token = create_access_token(tenant_id="acme", username="admin", role="admin")
         client = TestClient(_make_app())
         resp = client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
@@ -353,13 +353,13 @@ class TestJwtAuth:
         assert resp.json()["tenant"] == "acme"
 
     def test_invalid_jwt_returns_401(self):
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret", "provider": "local"})
         client = TestClient(_make_app())
         resp = client.get("/api/protected", headers={"Authorization": "Bearer invalid.token.here"})
         assert resp.status_code == 401
 
     def test_wrong_secret_jwt_returns_401(self):
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret", "provider": "local"})
         token = create_access_token(tenant_id="acme", username="admin")
         # Change secret
         load_auth_config_from_dict({"enabled": True, "jwt_secret": "different-secret"})
@@ -368,7 +368,7 @@ class TestJwtAuth:
         assert resp.status_code == 401
 
     def test_refresh_token_rejected_for_api_access(self):
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret", "provider": "local"})
         from app.gateway.auth.jwt_handler import create_refresh_token
         refresh = create_refresh_token(tenant_id="acme", username="admin")
         client = TestClient(_make_app())
@@ -381,7 +381,7 @@ class TestApiKeyAuth:
         monkeypatch.setattr("app.gateway.auth.api_key_handler._api_keys_file", lambda: tmp_path / "api_keys.json")
         from app.gateway.auth.api_key_handler import create_api_key
 
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s", "provider": "local"})
         result = create_api_key(name="test-key")
         client = TestClient(_make_app())
         resp = client.get(
@@ -395,7 +395,7 @@ class TestApiKeyAuth:
 
     def test_invalid_api_key_returns_401(self, tmp_path, monkeypatch):
         monkeypatch.setattr("app.gateway.auth.api_key_handler._api_keys_file", lambda: tmp_path / "api_keys.json")
-        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s"})
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "s", "provider": "local"})
         client = TestClient(_make_app())
         resp = client.get(
             "/api/protected",
