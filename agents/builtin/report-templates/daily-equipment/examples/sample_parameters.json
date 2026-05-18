@@ -1,0 +1,13 @@
+{
+  "scope": {
+    "report_date": "2026-05-18",
+    "equipment_type": "pump",
+    "compare_with": "previous_day"
+  },
+  "equipment": {
+    "equipment_ids": ["P-001", "P-002", "P-003"]
+  },
+  "kpis": {
+    "kpi_keys": ["runtime_rate", "alarm_count", "vibration_avg"]
+  }
+}

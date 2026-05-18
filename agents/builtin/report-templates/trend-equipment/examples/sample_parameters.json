@@ -1,0 +1,10 @@
+{
+  "scope": {
+    "date_range": "2026-04-18..2026-05-18",
+    "aggregation": "daily",
+    "forecast_horizon": 7
+  },
+  "kpis": {
+    "metric_keys": ["runtime_rate", "vibration_avg"]
+  }
+}

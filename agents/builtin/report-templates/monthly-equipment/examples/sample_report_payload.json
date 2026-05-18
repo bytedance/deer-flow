@@ -1,0 +1,108 @@
+{
+  "schema_version": "1",
+  "title": "设备月度报告",
+  "template": {
+    "id": "builtin-monthly-equipment",
+    "version_ref": "builtin-1",
+    "name": "monthly-equipment"
+  },
+  "run": {
+    "id": "rr_EXAMPLEMONTHLY000000000",
+    "thread_id": "thread-example",
+    "generated_at": "2026-05-01T10:00:00+00:00"
+  },
+  "parameters": {
+    "report_month": "2026-04",
+    "equipment_type": "pump",
+    "equipment_ids": ["P-001", "P-002", "P-003"],
+    "kpi_keys": ["runtime_rate", "mtbf", "mttr", "alarm_count"],
+    "compare_with": ["mom", "yoy"]
+  },
+  "sections": [
+    {
+      "id": "overview",
+      "component": "markdown",
+      "title": "月度总览",
+      "props": {
+        "content": "2026 年 4 月，3 台机泵月运行率 93.8%，MTBF 312h，MTTR 4.6h；环比小幅波动、同比改善明显。"
+      }
+    },
+    {
+      "id": "kpi_achievement",
+      "component": "card_group",
+      "title": "KPI 达成情况",
+      "props": {
+        "items": [
+          {"title": "运行率", "value": "93.8%", "target": "95.0%", "status": "warning"},
+          {"title": "告警合规率", "value": "97.4%", "target": "98.0%", "status": "warning"}
+        ]
+      }
+    },
+    {
+      "id": "mtbf_mttr",
+      "component": "card_group",
+      "title": "MTBF / MTTR 分析",
+      "props": {
+        "items": [
+          {"title": "MTBF", "value": "312h", "delta_mom": "-8h", "delta_yoy": "+24h"},
+          {"title": "MTTR", "value": "4.6h", "delta_mom": "+0.3h", "delta_yoy": "-1.1h"}
+        ]
+      }
+    },
+    {
+      "id": "events",
+      "component": "table",
+      "title": "重大异常与事件",
+      "props": {
+        "columns": [
+          {"key": "date", "label": "日期"},
+          {"key": "equipment", "label": "设备"},
+          {"key": "event", "label": "事件"},
+          {"key": "impact_hours", "label": "停机 (h)"}
+        ],
+        "data": [
+          {"date": "2026-04-08", "equipment": "P-001", "event": "轴承温升保护停机", "impact_hours": 6.5},
+          {"date": "2026-04-21", "equipment": "P-003", "event": "电机过流跳闸", "impact_hours": 3.2}
+        ]
+      }
+    },
+    {
+      "id": "compare",
+      "component": "card_group",
+      "title": "环比 / 同比分析",
+      "props": {
+        "items": [
+          {"title": "运行率 MoM", "value": "-0.4pp"},
+          {"title": "运行率 YoY", "value": "+2.1pp"},
+          {"title": "告警数 MoM", "value": "+4"},
+          {"title": "告警数 YoY", "value": "-12"}
+        ]
+      }
+    },
+    {
+      "id": "improvements",
+      "component": "table",
+      "title": "改进措施跟踪",
+      "props": {
+        "columns": [
+          {"key": "id", "label": "ID"},
+          {"key": "topic", "label": "主题"},
+          {"key": "status", "label": "状态"},
+          {"key": "owner", "label": "责任人"}
+        ],
+        "data": [
+          {"id": "IMP-2026-03-002", "topic": "P-001 振动监测加密", "status": "进行中", "owner": "运行部"},
+          {"id": "IMP-2026-04-001", "topic": "P-003 启停策略优化", "status": "未开始", "owner": "工艺部"}
+        ]
+      }
+    },
+    {
+      "id": "next_plan",
+      "component": "markdown",
+      "title": "下月计划",
+      "props": {
+        "content": "完成 P-001 振动监测加密上线；推进 P-003 启停策略评审。"
+      }
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+{
+  "schema_version": "1",
+  "title": "问题闭环报告",
+  "template": {
+    "id": "builtin-closure-summary",
+    "version_ref": "builtin-1",
+    "name": "closure-summary"
+  },
+  "run": {
+    "id": "rr_EXAMPLECLOSURE000000000",
+    "thread_id": "thread-example",
+    "generated_at": "2026-05-18T17:00:00+00:00"
+  },
+  "parameters": {
+    "issue_ids": ["ISSUE-2026-001", "ISSUE-2026-002", "ISSUE-2026-003"],
+    "owner_department": "运行部",
+    "verification_period": "2026-04-01..2026-05-18"
+  },
+  "sections": [
+    {
+      "id": "overview",
+      "component": "card",
+      "title": "闭环总览",
+      "props": {
+        "title": "闭环总览",
+        "value": "3 个问题单：已闭环 2 / 进行中 1 / 未闭 0；闭环率 67%。"
+      }
+    },
+    {
+      "id": "status_distribution",
+      "component": "table",
+      "title": "状态分布",
+      "props": {
+        "columns": [
+          {"key": "status", "label": "状态"},
+          {"key": "count", "label": "数量"}
+        ],
+        "data": [
+          {"status": "closed", "count": 2},
+          {"status": "in_progress", "count": 1},
+          {"status": "open", "count": 0},
+          {"status": "overdue", "count": 0},
+          {"status": "reopened", "count": 0}
+        ]
+      }
+    },
+    {
+      "id": "unclosed_items",
+      "component": "table",
+      "title": "未闭项明细",
+      "props": {
+        "columns": [
+          {"key": "id", "label": "编号"},
+          {"key": "title", "label": "标题"},
+          {"key": "status", "label": "状态"},
+          {"key": "owner", "label": "负责人"},
+          {"key": "department", "label": "部门"},
+          {"key": "due_date", "label": "截止"},
+          {"key": "notes", "label": "备注"}
+        ],
+        "data": [
+          {"id": "ISSUE-2026-002", "title": "P-002 启停频繁", "status": "in_progress", "owner": "张三", "department": "运行部", "due_date": "2026-05-25", "notes": "等待工艺评审"}
+        ]
+      }
+    },
+    {
+      "id": "risk_items",
+      "component": "table",
+      "title": "风险检查",
+      "props": {
+        "columns": [
+          {"key": "id", "label": "编号"},
+          {"key": "kind", "label": "风险类型"},
+          {"key": "status", "label": "状态"},
+          {"key": "due_date", "label": "截止"},
+          {"key": "owner", "label": "负责人"},
+          {"key": "note", "label": "备注"}
+        ],
+        "data": []
+      }
+    },
+    {
+      "id": "conclusion",
+      "component": "markdown",
+      "title": "闭环结论",
+      "props": {
+        "content": "2/3 问题已闭环验证通过；ISSUE-2026-002 仍在进行中，无超期/复发。建议下周复盘 ISSUE-2026-002 进展。"
+      }
+    }
+  ]
+}
