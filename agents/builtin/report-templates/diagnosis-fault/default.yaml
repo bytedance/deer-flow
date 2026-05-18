@@ -56,12 +56,14 @@ transforms:
     kind: script
     name: data-analyst/diagnosis_analysis
     input: fault_context.fault_context
-    # NOTE: --timeline is an optional CLI flag of diagnosis_analysis. The
-    # natural DSL expression "{{ $.steps.fault_timeline.fault_timeline }}"
-    # resolves to the parsed JSON dict (not a file path) — the runtime would
-    # then pass a stringified dict as --timeline, which the script can't
-    # open. Until placeholder→path coercion is implemented, omit the flag;
-    # diagnosis_analysis derives its own timeline view from fault_context.
+    args:
+      # ``{{ $.steps.<step>.<output> }}`` placeholders that resolve to a dict
+      # are automatically coerced to the corresponding
+      # ``{run_output_dir}/data/<output>.json`` file path when that file
+      # exists on disk. Lets us pass fault_timeline as the optional
+      # ``--timeline`` arg without manually writing out the path. See
+      # docs/plans/2026-05-18-custom-e2e-handoff.md §"已知遗留 2".
+      timeline: "{{ $.steps.fault_timeline.fault_timeline }}"
     outputs:
       diagnosis_analysis: diagnosis_analysis.json
 
