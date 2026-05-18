@@ -124,13 +124,12 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     # ``threads_meta`` does not. Without a metadata row these threads are
     # invisible in /threads/search and cannot pass strict delete owner checks.
     try:
-        from app.gateway.checkpoint_maintenance import migrate_app_checkpoint_threads_to_thread_meta
+        from app.gateway.checkpoint_maintenance import schedule_app_checkpoint_thread_migration
 
-        migrated = await migrate_app_checkpoint_threads_to_thread_meta(app, admin_id)
-        if migrated:
-            logger.info("Migrated %d legacy checkpoint thread(s) to admin thread metadata", migrated)
+        if schedule_app_checkpoint_thread_migration(app, admin_id):
+            logger.info("Scheduled legacy checkpoint thread migration")
     except Exception:
-        logger.exception("Legacy checkpoint thread migration failed (non-fatal)")
+        logger.exception("Could not schedule legacy checkpoint thread migration (non-fatal)")
 
 
 async def _iter_store_items(store, namespace, *, page_size: int = 500):

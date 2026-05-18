@@ -5,6 +5,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.memory import InMemoryStore
 
+from app.gateway import checkpoint_maintenance
 from app.gateway.checkpoint_maintenance import (
     compact_sqlite_checkpointer,
     migrate_checkpoint_threads_to_thread_meta,
@@ -47,6 +48,65 @@ async def test_migrate_checkpoint_threads_to_thread_meta_assigns_missing_rows_to
     assert legacy["metadata"] == {"migrated_from": "legacy_checkpointer"}
     assert existing is not None
     assert existing["user_id"] == "existing-owner"
+
+
+@pytest.mark.anyio
+async def test_migrate_checkpoint_threads_skips_non_sqlite_saver_with_conn():
+    class FakeConn:
+        async def execute(self, _statement):
+            raise AssertionError("non-sqlite saver connection should not be queried")
+
+        async def commit(self):
+            raise AssertionError("non-sqlite saver connection should not be committed")
+
+    class FakeSaver:
+        conn = FakeConn()
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+
+    migrated = await migrate_checkpoint_threads_to_thread_meta(
+        FakeSaver(),
+        thread_store,
+        "admin-user-id",
+    )
+
+    assert migrated == 0
+
+
+@pytest.mark.anyio
+async def test_migrate_checkpoint_threads_uses_completion_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "runtime-home"))
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoints.db")) as saver:
+        await saver.setup()
+        await saver.aput(
+            {"configurable": {"thread_id": "legacy-thread", "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}},
+            {},
+        )
+
+        migrated = await migrate_checkpoint_threads_to_thread_meta(
+            saver,
+            thread_store,
+            "admin-user-id",
+        )
+
+        assert migrated == 1
+
+        async def fail_if_scanned(_checkpointer):
+            raise AssertionError("completed migration should not rescan checkpoints")
+
+        monkeypatch.setattr(checkpoint_maintenance, "_sqlite_checkpoint_thread_ids", fail_if_scanned)
+
+        migrated_again = await checkpoint_maintenance.migrate_checkpoint_threads_to_thread_meta(
+            saver,
+            thread_store,
+            "admin-user-id",
+        )
+
+    assert migrated_again == 0
 
 
 @pytest.mark.anyio
