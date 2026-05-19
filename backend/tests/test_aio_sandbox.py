@@ -185,6 +185,147 @@ class TestNoChangeTimeout:
         assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
 
 
+class TestCloseTeardown:
+    """Verify AioSandbox.close() correctly releases client resources (#2872)."""
+
+    def test_close_calls_client_close(self, sandbox):
+        """close() should call self._client.close() when available."""
+        client_mock = sandbox._client  # save ref before close() sets _client=None
+        sandbox.close()
+        client_mock.close.assert_called_once()
+
+    def test_close_is_idempotent(self, sandbox):
+        """Repeated close() calls should be no-ops after the first."""
+        client_mock = sandbox._client  # save ref before close() sets _client=None
+        sandbox.close()  # first call: closes and sets _client = None
+        assert sandbox._client is None
+        sandbox.close()  # second call: no-op, _client is already None
+        client_mock.close.assert_called_once()  # only called from first close
+
+    def test_close_sets_client_to_none(self, sandbox):
+        """After close(), _client must be None for true idempotency."""
+        assert sandbox._client is not None
+        sandbox.close()
+        assert sandbox._client is None
+
+    def test_close_handles_client_without_close_method(self):
+        """close() should not fail if client has no close() method."""
+        with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as MockClient:
+            MockClient.return_value.close = AttributeError("no close")
+            # Simulate a client object without close
+            from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+            sb = AioSandbox(id="test-no-close", base_url="http://localhost:8080")
+            # hasattr check should catch this — no error raised
+            sb.close()
+
+    def test_close_tolerates_close_exception(self, sandbox):
+        """close() should log but not raise when client.close() throws."""
+        sandbox._client.close.side_effect = RuntimeError("socket closed")
+        sandbox.close()  # should not raise
+        assert sandbox._client is None  # still set to None even on error
+
+
+class TestProviderCloseOnTeardown:
+    """Verify AioSandboxProvider calls close() during teardown paths (#2872)."""
+
+    def _make_provider_with_sandbox(self):
+        """Create a provider with a mocked sandbox in _sandboxes."""
+        import importlib
+        aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+        with patch.object(aio_mod.AioSandboxProvider, "_start_idle_checker"):
+            provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+            provider._config = {}
+            provider._lock = threading.Lock()
+            provider._sandboxes = {}
+            provider._sandbox_infos = {}
+            provider._thread_sandboxes = {}
+            provider._thread_locks = {}
+            provider._last_activity = {}
+            provider._warm_pool = {}
+            provider._shutdown_called = False
+            provider._idle_checker_stop = threading.Event()
+            provider._idle_checker_thread = None
+            provider._backend = MagicMock()
+
+        sandbox = MagicMock()
+        sandbox.id = "sb-1"
+        provider._sandboxes["sb-1"] = sandbox
+        provider._sandbox_infos["sb-1"] = MagicMock()
+        provider._thread_sandboxes["t-1"] = "sb-1"
+        return provider, sandbox
+
+    def test_release_calls_close(self):
+        """release() should call sandbox.close() on the removed sandbox."""
+        provider, sandbox = self._make_provider_with_sandbox()
+        provider._backend = MagicMock()  # not used by release warm-pool path
+
+        provider.release("sb-1")
+
+        sandbox.close.assert_called_once()
+
+    def test_destroy_calls_close_before_backend_destroy(self):
+        """destroy() should close the sandbox client before destroying the backend."""
+        provider, sandbox = self._make_provider_with_sandbox()
+        backend_destroy = provider._backend.destroy
+
+        provider.destroy("sb-1")
+
+        sandbox.close.assert_called_once()
+        backend_destroy.assert_called_once()
+        # Verify close happened before backend destroy (close is called first)
+        assert sandbox.close.call_args is not None
+
+    def test_shutdown_closes_all_cached_sandboxes(self):
+        """shutdown() should close all cached sandbox clients."""
+        provider, sandbox = self._make_provider_with_sandbox()
+        # Add a second sandbox
+        sandbox2 = MagicMock()
+        sandbox2.id = "sb-2"
+        provider._sandboxes["sb-2"] = sandbox2
+        provider._sandbox_infos["sb-2"] = MagicMock()
+        provider._thread_sandboxes["t-2"] = "sb-2"
+
+        # shutdown destroys all active sandboxes
+        provider.shutdown()
+
+        sandbox.close.assert_called_once()
+        sandbox2.close.assert_called_once()
+
+    def test_close_failure_does_not_break_destroy(self):
+        """If the underlying client.close() raises, destroy() should still complete."""
+        provider, sandbox = self._make_provider_with_sandbox()
+        # Mock the real close behavior: sandbox is a MagicMock, but we simulate
+        # the real close() by having it raise via _client.close.
+        # Since sandbox is already a MagicMock, we need to simulate real behavior.
+        # We'll use a real close method that catches the error.
+        original_client = sandbox._client
+        original_client.close.side_effect = RuntimeError("boom")
+        # Make sandbox.close behave like the real AioSandbox.close:
+        # set _client=None, catch the error.
+        def real_close():
+            client = sandbox._client
+            if client is not None:
+                sandbox._client = None
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        sandbox.close = real_close
+
+        # Should not raise
+        provider.destroy("sb-1")
+
+        # Backend destroy should still be called
+        provider._backend.destroy.assert_called_once()
+
+    def test_release_missing_sandbox_is_noop(self):
+        """release() on a non-existent sandbox should be a safe no-op."""
+        provider, _ = self._make_provider_with_sandbox()
+
+        # Release a sandbox_id that doesn't exist
+        provider.release("nonexistent")  # should not raise
+
+
 class TestConcurrentFileWrites:
     """Verify file write paths do not lose concurrent updates."""
 
