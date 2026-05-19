@@ -47,6 +47,15 @@ class SubagentStatus(Enum):
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
 
+    @property
+    def is_terminal(self) -> bool:
+        return self in {
+            type(self).COMPLETED,
+            type(self).FAILED,
+            type(self).CANCELLED,
+            type(self).TIMED_OUT,
+        }
+
 
 @dataclass
 class SubagentResult:
@@ -74,11 +83,47 @@ class SubagentResult:
     token_usage_records: list[dict[str, int | str]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.ai_messages is None:
             self.ai_messages = []
+
+    def try_set_terminal(
+        self,
+        status: SubagentStatus,
+        *,
+        result: str | None = None,
+        error: str | None = None,
+        completed_at: datetime | None = None,
+        ai_messages: list[dict[str, Any]] | None = None,
+        token_usage_records: list[dict[str, int | str]] | None = None,
+    ) -> bool:
+        """Set a terminal status exactly once.
+
+        Background timeout/cancellation and the execution worker can race on the
+        same result holder.  The first terminal transition wins; late terminal
+        writes must not change status or payload fields.
+        """
+        if not status.is_terminal:
+            raise ValueError(f"Status {status} is not terminal")
+
+        with self._state_lock:
+            if self.status.is_terminal:
+                return False
+
+            if result is not None:
+                self.result = result
+            if error is not None:
+                self.error = error
+            if ai_messages is not None:
+                self.ai_messages = ai_messages
+            if token_usage_records is not None:
+                self.token_usage_records = token_usage_records
+            self.completed_at = completed_at or datetime.now()
+            self.status = status
+            return True
 
 
 # Global storage for background task results
@@ -459,13 +504,11 @@ class SubagentExecutor:
             # Pre-check: bail out immediately if already cancelled before streaming starts
             if result.cancel_event.is_set():
                 logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming")
-                with _background_tasks_lock:
-                    if result.status == SubagentStatus.RUNNING:
-                        result.status = SubagentStatus.CANCELLED
-                        result.error = "Cancelled by user"
-                        result.completed_at = datetime.now()
-                if collector is not None:
-                    result.token_usage_records = collector.snapshot_records()
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    token_usage_records=collector.snapshot_records(),
+                )
                 return result
 
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
@@ -475,12 +518,11 @@ class SubagentExecutor:
                 # interrupted until the next chunk is yielded.
                 if result.cancel_event.is_set():
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
-                    with _background_tasks_lock:
-                        if result.status == SubagentStatus.RUNNING:
-                            result.status = SubagentStatus.CANCELLED
-                            result.error = "Cancelled by user"
-                            result.completed_at = datetime.now()
-                    result.token_usage_records = collector.snapshot_records()
+                    result.try_set_terminal(
+                        SubagentStatus.CANCELLED,
+                        error="Cancelled by user",
+                        token_usage_records=collector.snapshot_records(),
+                    )
                     return result
 
                 final_state = chunk
@@ -507,11 +549,12 @@ class SubagentExecutor:
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
-            result.token_usage_records = collector.snapshot_records()
+            token_usage_records = collector.snapshot_records()
+            final_result: str | None = None
 
             if final_state is None:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no final state")
-                result.result = "No response generated"
+                final_result = "No response generated"
             else:
                 # Extract the final message - find the last AIMessage
                 messages = final_state.get("messages", [])
@@ -528,7 +571,7 @@ class SubagentExecutor:
                     content = last_ai_message.content
                     # Handle both str and list content types for the final result
                     if isinstance(content, str):
-                        result.result = content
+                        final_result = content
                     elif isinstance(content, list):
                         # Extract text from list of content blocks for final result only.
                         # Concatenate raw string chunks directly, but preserve separation
@@ -547,16 +590,16 @@ class SubagentExecutor:
                                     text_parts.append(text_val)
                         if pending_str_parts:
                             text_parts.append("".join(pending_str_parts))
-                        result.result = "\n".join(text_parts) if text_parts else "No text content in response"
+                        final_result = "\n".join(text_parts) if text_parts else "No text content in response"
                     else:
-                        result.result = str(content)
+                        final_result = str(content)
                 elif messages:
                     # Fallback: use the last message if no AIMessage found
                     last_message = messages[-1]
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no AIMessage found, using last message: {type(last_message)}")
                     raw_content = last_message.content if hasattr(last_message, "content") else str(last_message)
                     if isinstance(raw_content, str):
-                        result.result = raw_content
+                        final_result = raw_content
                     elif isinstance(raw_content, list):
                         parts = []
                         pending_str_parts = []
@@ -572,23 +615,29 @@ class SubagentExecutor:
                                     parts.append(text_val)
                         if pending_str_parts:
                             parts.append("".join(pending_str_parts))
-                        result.result = "\n".join(parts) if parts else "No text content in response"
+                        final_result = "\n".join(parts) if parts else "No text content in response"
                     else:
-                        result.result = str(raw_content)
+                        final_result = str(raw_content)
                 else:
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no messages in final state")
-                    result.result = "No response generated"
+                    final_result = "No response generated"
 
-            result.status = SubagentStatus.COMPLETED
-            result.completed_at = datetime.now()
+            if final_result is None:
+                final_result = "No response generated"
+
+            result.try_set_terminal(
+                SubagentStatus.COMPLETED,
+                result=final_result,
+                token_usage_records=token_usage_records,
+            )
 
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
-            result.status = SubagentStatus.FAILED
-            result.error = str(e)
-            result.completed_at = datetime.now()
-            if collector is not None:
-                result.token_usage_records = collector.snapshot_records()
+            result.try_set_terminal(
+                SubagentStatus.FAILED,
+                error=str(e),
+                token_usage_records=collector.snapshot_records() if collector is not None else None,
+            )
 
         return result
 
@@ -667,11 +716,9 @@ class SubagentExecutor:
                 result = SubagentResult(
                     task_id=str(uuid.uuid4())[:8],
                     trace_id=self.trace_id,
-                    status=SubagentStatus.FAILED,
+                    status=SubagentStatus.RUNNING,
                 )
-            result.status = SubagentStatus.FAILED
-            result.error = str(e)
-            result.completed_at = datetime.now()
+            result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
             return result
 
     def execute_async(self, task: str, task_id: str | None = None) -> str:
@@ -718,29 +765,21 @@ class SubagentExecutor:
                 )
                 try:
                     # Wait for execution with timeout
-                    exec_result = execution_future.result(timeout=self.config.timeout_seconds)
-                    with _background_tasks_lock:
-                        _background_tasks[task_id].status = exec_result.status
-                        _background_tasks[task_id].result = exec_result.result
-                        _background_tasks[task_id].error = exec_result.error
-                        _background_tasks[task_id].completed_at = datetime.now()
-                        _background_tasks[task_id].ai_messages = exec_result.ai_messages
+                    execution_future.result(timeout=self.config.timeout_seconds)
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
-                    with _background_tasks_lock:
-                        if _background_tasks[task_id].status == SubagentStatus.RUNNING:
-                            _background_tasks[task_id].status = SubagentStatus.TIMED_OUT
-                            _background_tasks[task_id].error = f"Execution timed out after {self.config.timeout_seconds} seconds"
-                            _background_tasks[task_id].completed_at = datetime.now()
                     # Signal cooperative cancellation and cancel the future
                     result_holder.cancel_event.set()
+                    result_holder.try_set_terminal(
+                        SubagentStatus.TIMED_OUT,
+                        error=f"Execution timed out after {self.config.timeout_seconds} seconds",
+                    )
                     execution_future.cancel()
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
                 with _background_tasks_lock:
-                    _background_tasks[task_id].status = SubagentStatus.FAILED
-                    _background_tasks[task_id].error = str(e)
-                    _background_tasks[task_id].completed_at = datetime.now()
+                    task_result = _background_tasks[task_id]
+                task_result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
 
         _scheduler_pool.submit(run_task)
         return task_id
@@ -811,13 +850,7 @@ def cleanup_background_task(task_id: str) -> None:
 
         # Only clean up tasks that are in a terminal state to avoid races with
         # the background executor still updating the task entry.
-        is_terminal_status = result.status in {
-            SubagentStatus.COMPLETED,
-            SubagentStatus.FAILED,
-            SubagentStatus.CANCELLED,
-            SubagentStatus.TIMED_OUT,
-        }
-        if is_terminal_status or result.completed_at is not None:
+        if result.status.is_terminal or result.completed_at is not None:
             del _background_tasks[task_id]
             logger.debug("Cleaned up background task: %s", task_id)
         else:

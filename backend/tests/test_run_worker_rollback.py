@@ -88,7 +88,9 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
 
     assert captured["factory_context"]["app_config"] is app_config
     assert captured["astream_context"]["app_config"] is app_config
-    assert run_manager.get(record.run_id).status == RunStatus.success
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
     bridge.publish_end.assert_awaited_once_with(record.run_id)
     bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
 
