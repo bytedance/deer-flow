@@ -108,6 +108,12 @@ def _find_usage_recorder(runtime: Any) -> Any | None:
     callbacks = config.get("callbacks", [])
     if not callbacks:
         return None
+    # LangChain may pass a CallbackManager object rather than a plain list;
+    # extract the concrete handler list so the for-loop below never raises TypeError.
+    if hasattr(callbacks, "handlers"):
+        callbacks = callbacks.handlers
+    if not isinstance(callbacks, (list, tuple)):
+        return None
     for cb in callbacks:
         if hasattr(cb, "record_external_llm_usage_records"):
             return cb

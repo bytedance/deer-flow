@@ -1285,3 +1285,60 @@ def test_subagent_usage_cache_is_cleared_when_polling_raises(monkeypatch):
         )
 
     assert task_tool_module.pop_cached_subagent_usage("tc-error") is None
+
+
+class TestFindUsageRecorder:
+    """_find_usage_recorder must not crash when callbacks is a CallbackManager."""
+
+    _fn = staticmethod(task_tool_module._find_usage_recorder)
+
+    def _make_runtime(self, callbacks):
+        return SimpleNamespace(config={"callbacks": callbacks})
+
+    def _recorder(self):
+        # SimpleNamespace so hasattr only returns True for explicitly set attributes.
+        return SimpleNamespace(record_external_llm_usage_records=MagicMock())
+
+    def _plain_handler(self):
+        # No record_external_llm_usage_records attribute → hasattr returns False.
+        return SimpleNamespace()
+
+    def test_returns_none_when_runtime_is_none(self):
+        assert self._fn(None) is None
+
+    def test_returns_none_when_config_not_dict(self):
+        runtime = SimpleNamespace(config="not-a-dict")
+        assert self._fn(runtime) is None
+
+    def test_returns_none_when_callbacks_empty_list(self):
+        assert self._fn(self._make_runtime([])) is None
+
+    def test_finds_recorder_in_plain_list(self):
+        recorder = self._recorder()
+        runtime = self._make_runtime([self._plain_handler(), recorder, self._plain_handler()])
+        assert self._fn(runtime) is recorder
+
+    def test_returns_none_when_no_matching_handler_in_plain_list(self):
+        runtime = self._make_runtime([self._plain_handler(), self._plain_handler()])
+        assert self._fn(runtime) is None
+
+    def test_finds_recorder_when_callbacks_is_callback_manager(self):
+        """LangChain AsyncCallbackManager has .handlers; must not raise TypeError."""
+        recorder = self._recorder()
+        manager = SimpleNamespace(handlers=[self._plain_handler(), recorder])
+        runtime = self._make_runtime(manager)
+        assert self._fn(runtime) is recorder
+
+    def test_returns_none_when_callback_manager_handlers_empty(self):
+        manager = SimpleNamespace(handlers=[])
+        runtime = self._make_runtime(manager)
+        assert self._fn(runtime) is None
+
+    def test_returns_none_when_callbacks_is_non_iterable_object(self):
+        """A non-list, non-manager object must not raise — return None instead."""
+
+        class _Opaque:
+            pass
+
+        runtime = self._make_runtime(_Opaque())
+        assert self._fn(runtime) is None
