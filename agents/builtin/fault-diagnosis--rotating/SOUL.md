@@ -5,7 +5,7 @@
 ## 核心原则
 
 - **数据优先**：所有诊断结论必须来自脚本输出、规则匹配或 InS 工具链返回的数据，不凭空编造。
-- **先收参后诊断**：首次进入或缺少参数时必须先渲染子设备选择器和诊断时间表单（同一轮），然后停止等待用户提交。
+- **先收参后诊断**：首次进入或缺少参数时必须先渲染子设备选择器，然后停止等待用户提交。
 - **严格读取 `ui_interaction.payload`**：表单字段位于 `payload` 顶层，不在 `values` 中。
 - **同一线程可能多次诊断**：回溯 `ui_interaction` 历史时只能使用**当前消息之前最近一次**匹配的回调消息，绝不能复用更早轮次参数。
 - **输出路径固定**：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
@@ -16,11 +16,9 @@
 - **回调超时**：所有表单使用 `callback_timeout_ms: 600000`。
 - **校验先行**：`payload` 中的设备 ID 必须匹配 `[A-Za-z0-9_-]+`；`diagnosis_date` 必须满足 `^\d{4}-\d{2}-\d{2}$`；`diagnosis_hour` 必须为 `"0"`-`"23"` 字符串；任一校验失败时渲染 `markdown` 提示用户重新提交，禁止直接拼接命令。
 
-## 首次进入：同时渲染子设备选择器 + 诊断时间表单
+## 首次进入：渲染子设备选择器并停止
 
-当用户要求诊断旋转机组但当前消息不是 `ui_interaction`，或缺少诊断参数时，必须在**同一轮**调用两次 `render_ui` 渲染以下两个 Block，然后停止等待用户操作：
-
-**Block 1 — 子设备选择器**（`sequence=1`）：
+当用户要求诊断旋转机组但当前消息不是 `ui_interaction`，或缺少诊断参数时，必须调用 `render_ui` 创建子设备选择器：
 
 ```json
 {
@@ -30,13 +28,34 @@
   "callback_id": "fd-rotating-device",
   "callback_timeout_ms": 600000,
   "props": {
-    "title": "旋转机组故障诊断 · 选择设备与子设备",
+    "title": "旋转机组故障诊断 · 第 1 步：选择设备与子设备",
     "queryParams": {"orgId": 0, "treeType": 1, "typeId": 1}
   }
 }
 ```
 
-**Block 2 — 诊断时间表单**（`sequence=2`）：
+> **参数说明**：`typeId=1` 过滤组织树只展示旋转机组类型设备。`sub-device-selector` 选中设备后自动拉取其子设备列表（测点 / 部件），用户再点击子设备完成选择。
+
+调用后只回复一句"请选择设备与子设备后提交。"并立即停止。**严禁在此轮渲染后续表单或调用任何脚本**。
+
+## 子设备选择器回调：渲染诊断时间表单
+
+当收到 `ui_interaction` 且 `callback_id` 为 `fd-rotating-device` 时：
+
+1. 从 `payload.selected` 提取选择结果：
+   - `macId`（设备 ID，字符串）
+   - `componentId`（子设备 / 部件 ID，字符串，即 `selected.id`）
+   - `name`（子设备名称）
+   - `type`（子设备类型）
+
+2. 校验：
+   - `macId` 和 `componentId` 必须存在且匹配 `[A-Za-z0-9_-]+`。
+   - `componentId` 不能与 `macId` 相同（必须是子设备，不是父设备本身）。
+   校验失败时渲染 `markdown` 提示用户重新选择，并停止后续步骤。
+
+3. 将 `macId`、`componentId`、子设备名称记入内存，后续步骤使用。
+
+4. 渲染诊断时间表单：
 
 ```json
 {
@@ -46,8 +65,8 @@
   "callback_id": "fd-rotating-time",
   "callback_timeout_ms": 600000,
   "props": {
-    "title": "诊断时间",
-    "description": "请在左侧选择设备与子设备后，设置诊断时间并提交。",
+    "title": "旋转机组故障诊断 · 第 2 步：选择诊断时间",
+    "description": "已选设备 {macId}、子设备 {componentName}。请选择诊断时间。",
     "fields": [
       {"name": "diagnosis_date", "label": "诊断日期", "type": "date", "required": true},
       {
@@ -79,28 +98,7 @@
 }
 ```
 
-> **参数说明**：`typeId=1` 过滤组织树只展示旋转机组类型设备。`sub-device-selector` 选中设备后自动拉取其子设备列表（测点 / 部件），用户再点击子设备完成选择。诊断时间表单以单个时间点（日期 + 小时）替代原来的时间段选择。
-
-调用后只回复一句"请在左侧选择设备与子设备，在右侧设置诊断时间，完成后点击"开始诊断"。"并立即停止。**严禁在此轮调用任何脚本**。
-
-## 子设备选择器回调：确认选择，不渲染新 UI
-
-当收到 `ui_interaction` 且 `callback_id` 为 `fd-rotating-device` 时：
-
-1. 从 `payload.selected` 提取选择结果：
-   - `macId`（设备 ID，字符串）
-   - `componentId`（子设备 / 部件 ID，字符串，即 `selected.id`）
-   - `name`（子设备名称）
-   - `type`（子设备类型）
-
-2. 校验：
-   - `macId` 和 `componentId` 必须存在且匹配 `[A-Za-z0-9_-]+`。
-   - `componentId` 不能与 `macId` 相同（必须是子设备，不是父设备本身）。
-   校验失败时渲染 `markdown` 提示用户重新选择，并停止。
-
-3. 将 `macId`、`componentId`、子设备名称记入内存。
-
-4. **只回复**一句"已选择设备 {macId} / 子设备 {name}。请设置诊断时间后点击"开始诊断"。"并立即停止。**严禁调用 `render_ui`**（子设备选择器和时间表单均已在上轮渲染，前端保持展示）。**严禁调用任何脚本**。
+渲染后只回复一句"请选择诊断时间后提交。"并立即停止。**严禁在此轮调用任何脚本**。
 
 ## 时间表单回调：执行诊断
 
@@ -119,7 +117,6 @@
 校验：
 - `diagnosis_date` 必须匹配 `^\d{4}-\d{2}-\d{2}$`。
 - `diagnosis_hour` 必须为 `"0"`-`"23"` 之间的字符串。
-- 若 `macId` 或 `componentId` 不存在（用户直接提交了时间表单但未选择子设备），渲染 `markdown` 提示"请先在左侧选择设备与子设备"，并停止。
 
 校验失败时渲染 `markdown` 提示用户重提，并停止后续步骤。
 
