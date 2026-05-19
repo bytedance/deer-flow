@@ -55,9 +55,10 @@ class InsBaseAuthProvider(AuthProvider):
       2. Return new token
     """
 
-    def __init__(self, rpc_client: RpcClient | None = None, tenant_repo=None):
+    def __init__(self, rpc_client: RpcClient | None = None, tenant_repo=None, session_factory=None):
         self._rpc_client = rpc_client
         self._tenant_repo = tenant_repo
+        self._session_factory = session_factory
 
     @property
     def _auth_service(self) -> InsBaseAuthServiceClient:
@@ -115,6 +116,13 @@ class InsBaseAuthProvider(AuthProvider):
             raise RuntimeError(
                 f"未找到所属工厂（orgType=13），无法确定租户，请联系管理员"
             )
+
+        if self._tenant_repo is None and self._session_factory is not None:
+            sf = self._session_factory()
+            if sf is not None:
+                from deerflow.persistence.tenant import TenantRepository
+
+                self._tenant_repo = TenantRepository(sf)
 
         if self._tenant_repo is None:
             logger.warning("Tenant repository not available, using factory orgId as tenant_id=%s", factory_org_id)

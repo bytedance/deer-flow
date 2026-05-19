@@ -319,7 +319,9 @@ def get_ins_base_provider():
     sf = get_session_factory()
     tenant_repo = TenantRepository(sf) if sf else None
 
-    _cached_ins_base_provider = InsBaseAuthProvider(rpc_client=rpc_client, tenant_repo=tenant_repo)
+    _cached_ins_base_provider = InsBaseAuthProvider(
+        rpc_client=rpc_client, tenant_repo=tenant_repo, session_factory=get_session_factory
+    )
     return _cached_ins_base_provider
 
 
