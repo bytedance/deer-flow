@@ -127,6 +127,10 @@ def test_approval_without_audit_raises() -> None:
 
 def test_oidc_without_rbac_warns(caplog) -> None:
     """OIDC writes user.roles, but with no RBAC nothing consumes them."""
+    # Defensive: a sibling test that constructed Alembic Config may have triggered
+    # logging.config.fileConfig() and (if env.py ever drops disable_existing_loggers=False)
+    # silently disabled this logger. Reset so caplog can capture WARNING records.
+    logging.getLogger("deerflow.enterprise.config").disabled = False
     with caplog.at_level(logging.WARNING, logger="deerflow.enterprise.config"):
         EnterpriseConfig(
             enabled=True,
@@ -141,6 +145,9 @@ def test_oidc_without_rbac_warns(caplog) -> None:
 def test_disabled_root_with_submodule_warns(caplog) -> None:
     """When the master switch is off but a submodule is on, the submodule
     is silently inert. Loudly warn so operators don't think audit is on."""
+    # Defensive: see note in test_oidc_without_rbac_warns above. Guards against
+    # cross-test fileConfig() side-effects that would silently no-op caplog.
+    logging.getLogger("deerflow.enterprise.config").disabled = False
     with caplog.at_level(logging.WARNING, logger="deerflow.enterprise.config"):
         EnterpriseConfig(
             enabled=False,

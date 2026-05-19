@@ -43,6 +43,10 @@ def _cfg(db_path: Path) -> Config:
     # Use ``sqlite+aiosqlite://`` so the test exercises the same codepath
     # production startup uses.
     cfg.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path}")
+    # Contract reminder: env.py's fileConfig() call MUST pass
+    # disable_existing_loggers=False. If that ever regresses, every caplog
+    # assertion in tests that run after this one will silently no-op.
+    # See: deerflow.persistence.migrations.env:49.
     return cfg
 
 
