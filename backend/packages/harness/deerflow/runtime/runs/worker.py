@@ -306,11 +306,6 @@ async def run_agent(
 
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
-        # Accumulate AIMessageChunk content per message-id for partial-response capture.
-        # Only populated when "messages" mode is in the stream — the same path that feeds
-        # the SSE bridge, so the IDs here are identical to what the frontend already saw.
-        partial_ai_content: dict[str, list[str]] = {}
-
         # 7. Stream using graph.astream
         if len(lg_modes) == 1 and not stream_subgraphs:
             # Single mode, no subgraphs: astream yields raw chunks
