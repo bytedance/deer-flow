@@ -509,3 +509,69 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
     runs = await mgr.list_by_thread("thread-1", user_id="user-1")
     assert [r.run_id for r in runs] == ["run-1"]
+
+
+# ---------------------------------------------------------------------------
+# Lock-during-persist tests (#3020 — TOCTOU window closed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_create_holds_lock_during_store_put():
+    """store.put must be called while the manager's asyncio lock is held in create()."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    lock_held_snapshots: list[bool] = []
+    original_put = store.put
+
+    async def spying_put(run_id, **kwargs):
+        lock_held_snapshots.append(manager._lock.locked())
+        return await original_put(run_id, **kwargs)
+
+    store.put = spying_put
+
+    await manager.create("thread-1")
+
+    assert lock_held_snapshots == [True], "store.put should be called while the lock is held"
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_holds_lock_during_store_put():
+    """store.put for the new run must be called while the manager's lock is held in create_or_reject()."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    lock_held_snapshots: list[bool] = []
+    original_put = store.put
+
+    async def spying_put(run_id, **kwargs):
+        lock_held_snapshots.append(manager._lock.locked())
+        return await original_put(run_id, **kwargs)
+
+    store.put = spying_put
+
+    await manager.create_or_reject("thread-1")
+
+    assert lock_held_snapshots == [True], "store.put should be called while the lock is held"
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_interrupt_holds_lock_for_new_run_put():
+    """Even after interrupting an inflight run, the new run's store.put must run inside the lock."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    new_run_put_lock_state: list[bool] = []
+    original_put = store.put
+
+    async def spying_put(run_id, **kwargs):
+        if run_id != old.run_id:
+            new_run_put_lock_state.append(manager._lock.locked())
+        return await original_put(run_id, **kwargs)
+
+    store.put = spying_put
+
+    await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
+
+    assert new_run_put_lock_state == [True], "New run's store.put should be called while the lock is held"
