@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 
 def _make_model(**kwargs):
@@ -184,3 +184,72 @@ def test_positional_fallback_when_count_differs():
 
     assistant_msg = next(m for m in payload["messages"] if m["role"] == "assistant")
     assert assistant_msg["reasoning_content"] == "My reasoning"
+
+
+def test_reasoning_content_injected_when_assistant_has_tool_calls():
+    """reasoning_content is preserved on assistant messages that also carry tool_calls.
+
+    Regression for issues #3043 and #3050: APIs like Kimi K2.5 and DeepSeek Chat (thinking
+    mode) reject the request with 'reasoning_content missing in assistant tool call message'
+    when reasoning_content is dropped from a tool-call turn.
+    """
+    model = _make_model()
+
+    human = HumanMessage(content="Search for X")
+    ai_with_tools = AIMessage(
+        content="",
+        tool_calls=[{"id": "call_1", "name": "search", "args": {"q": "X"}, "type": "tool_call"}],
+        additional_kwargs={"reasoning_content": "I need to search for X"},
+    )
+
+    tool_calls_payload = [{"id": "call_1", "type": "function", "function": {"name": "search", "arguments": '{"q": "X"}'}}]
+    base_payload = {
+        "messages": [
+            _make_payload_message("user", "Search for X"),
+            _make_payload_message("assistant", "", tool_calls=tool_calls_payload),
+        ]
+    }
+
+    with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
+        with patch.object(model, "_convert_input") as mock_convert:
+            mock_convert.return_value = MagicMock(to_messages=lambda: [human, ai_with_tools])
+            payload = model._get_request_payload([human, ai_with_tools])
+
+    assistant_msg = next(m for m in payload["messages"] if m["role"] == "assistant")
+    assert assistant_msg["reasoning_content"] == "I need to search for X"
+    assert assistant_msg["tool_calls"] == tool_calls_payload
+
+
+def test_reasoning_content_preserved_across_tool_call_turn():
+    """reasoning_content survives a full tool-call round-trip (assistant → tool → next turn).
+
+    The payload for the follow-up model call still includes the assistant tool-call message
+    from turn 1; that message must carry reasoning_content or the API rejects the request.
+    """
+    model = _make_model()
+
+    human = HumanMessage(content="Search for X")
+    ai_with_tools = AIMessage(
+        content="",
+        tool_calls=[{"id": "call_1", "name": "search", "args": {"q": "X"}, "type": "tool_call"}],
+        additional_kwargs={"reasoning_content": "I need to search for X"},
+    )
+    tool_result = ToolMessage(content="Found results for X", tool_call_id="call_1")
+
+    tool_calls_payload = [{"id": "call_1", "type": "function", "function": {"name": "search", "arguments": '{"q": "X"}'}}]
+    base_payload = {
+        "messages": [
+            _make_payload_message("user", "Search for X"),
+            _make_payload_message("assistant", "", tool_calls=tool_calls_payload),
+            {"role": "tool", "content": "Found results for X", "tool_call_id": "call_1"},
+        ]
+    }
+
+    with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
+        with patch.object(model, "_convert_input") as mock_convert:
+            mock_convert.return_value = MagicMock(to_messages=lambda: [human, ai_with_tools, tool_result])
+            payload = model._get_request_payload([human, ai_with_tools, tool_result])
+
+    assistant_msg = next(m for m in payload["messages"] if m["role"] == "assistant")
+    assert assistant_msg["reasoning_content"] == "I need to search for X"
+    assert assistant_msg["tool_calls"] == tool_calls_payload

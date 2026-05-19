@@ -171,9 +171,9 @@ models:
   #       thinking:
   #         type: disabled
 
-  # Example: DeepSeek model (with thinking support)
-  # - name: deepseek-v3
-  #   display_name: DeepSeek V3 (Thinking)
+  # Example: DeepSeek Reasoner (deepseek-reasoner / R1) with thinking support
+  # - name: deepseek-reasoner
+  #   display_name: DeepSeek Reasoner
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: deepseek-reasoner
   #   api_key: $DEEPSEEK_API_KEY
@@ -181,7 +181,30 @@ models:
   #   max_retries: 2
   #   max_tokens: 8192
   #   supports_thinking: true
-  #   supports_vision: false  # DeepSeek V3 does not support vision
+  #   supports_vision: false  # DeepSeek Reasoner does not support vision
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
+  # Example: DeepSeek Chat (deepseek-chat) with thinking enabled
+  # Use PatchedChatDeepSeek — NOT langchain_deepseek:ChatDeepSeek — to avoid
+  # "reasoning_content must be passed back to the API" errors in multi-turn
+  # tool-call conversations (affects DeepSeek Chat, DeepSeek V4 Flash, etc.).
+  # - name: deepseek-chat
+  #   display_name: DeepSeek Chat
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: deepseek-chat
+  #   api_key: $DEEPSEEK_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   supports_thinking: true
+  #   supports_vision: false
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
