@@ -129,3 +129,42 @@ The daily report feature follows the visual and interaction design spec at
 [docs/plans/2026-05-16-daily-report-visual-and-interaction-design.md](../docs/plans/2026-05-16-daily-report-visual-and-interaction-design.md).
 All font choices, colors, spacing, component states, and interaction flows for the daily report
 are defined there. Do not deviate without explicit user approval.
+
+## Document Upload Error Codes (Sprint C.1.3)
+
+Document conversion failures (PDF/DOCX/PPTX/XLSX → Markdown) come back from the gateway as a `422` with body `{code, message, filename}`. The frontend keys off the stable `code` enum so toast text is localised on this side — the server's `message` is English-only, intended for logs.
+
+**Source of truth**: [src/core/uploads/conversion-errors.ts](src/core/uploads/conversion-errors.ts).
+
+- `ConversionError` — typed error subclass thrown by `uploadFiles` ([core/uploads/api.ts](src/core/uploads/api.ts)) and `uploadDocument` ([core/knowledge-base/api.ts](src/core/knowledge-base/api.ts)).
+- `conversionErrorToastText(code, locale, filename?)` — code → bilingual toast string.
+
+**Codes**: `EMPTY_RESULT`, `ENCRYPTED_PDF`, `UNSUPPORTED_FORMAT`, `MARKITDOWN_UNAVAILABLE`, `INTERNAL_ERROR`. Adding a new code requires touching both [conversion-errors.ts](src/core/uploads/conversion-errors.ts) and the matching backend enum in `packages/harness/deerflow/utils/file_conversion.py:ConversionErrorCode`. Tests in [tests/unit/core/uploads/conversion-errors.test.ts](tests/unit/core/uploads/conversion-errors.test.ts) fail loudly when the table drifts.
+
+**Calling pattern** (any component triggering an upload):
+
+```ts
+import { ConversionError, conversionErrorToastText } from "@/core/uploads";
+
+try {
+  await uploadDocument(kbId, file);
+} catch (err) {
+  if (err instanceof ConversionError) {
+    toast.error(conversionErrorToastText(err.code, locale, err.filename));
+    return;
+  }
+  toast.error((err as Error).message);
+}
+```
+
+Non-conversion 4xx/5xx still throw a plain `Error` with the server's `detail` string — surface it as-is.
+
+## Knowledge Base Selector Cleanup Invariants (Sprint C.2.1)
+
+[knowledge-base-selector.tsx](src/components/workspace/knowledge-base-selector.tsx) drops `selected_ids` that no longer correspond to any visible KB. The cleanup effect:
+
+- Re-runs whenever the **set of visible KB IDs** changes (computed via the pure `knowledgeBaseIdSignature` helper, exported under `__test_only`). A fresh array reference with identical IDs is a no-op — important because TanStack Query returns a new reference on every poll.
+- Skips the `onSelectionChange` call when `cleanSelection(...)` returns the input by reference. This prevents the live-loop the previous `hasCleaned` ref was working around.
+- Forces `enabled=false` when every selected ID disappears, so the next chat turn doesn't try to retrieve from an empty set and silently produce zero results.
+
+Parents passing `onSelectionChange` should still wrap it in `useCallback`, but the selector keeps a ref to the latest callback so an unstable identity won't refire cleanup.

@@ -402,6 +402,7 @@ Each skill may ship a `report_scripts.yaml` at its root. The registry scans enab
    - `http_connector` - Call pre-configured HTTP endpoints by name (async, with retry/truncation/structured logging). Config-driven via `config.yaml` `http_connectors` section, keyed by tenant_id
    - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
+   - `create_closure_ticket` / `list_closure_tickets` / `update_closure_ticket` / `close_closure_ticket` - Closed-loop ticket workflows. Thin shells over `closed_loop.service`; resolve `tenant_id` / `actor_id` from the runnable config (never from LLM args). `update_closure_ticket` rejects `status` writes with `STATUS_FORBIDDEN` — status moves go through `close_closure_ticket` (verify-close / reject) or the `/api/closure/tickets/{id}/transition` route. `close_closure_ticket` requires `closure:verify`, granted to `is_superadmin` / `is_tenant_admin` principals.
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type, max_turns)
 
@@ -488,6 +489,24 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 - Explicit `collection` names are no longer trusted as raw vector-store handles; retrieval is allowed only when the collection belongs to an active knowledge base owned by the current `tenant_id` and `user_id`.
 - In no-auth mode, KB access remains blocked unless `rag.allow_no_auth_kb` is explicitly enabled.
 - Tool failures return a generic error message while detailed diagnostics stay in server logs.
+
+### KB Indexing — Sprint B (dispatcher / async middleware / KB-bound embedding)
+
+The KB pipeline runs writes through an async dispatcher and binds each KB to the embedding model that produced its vectors. Full design + sprint plan: [docs/plans/2026-05-19-knowledge-base-usability-improvement-design.md](../docs/plans/2026-05-19-knowledge-base-usability-improvement-design.md), [docs/plans/2026-05-19-knowledge-base-usability-improvement-sprint-plan.md](../docs/plans/2026-05-19-knowledge-base-usability-improvement-sprint-plan.md).
+
+**Dispatcher** (`packages/harness/deerflow/knowledge_base/dispatcher.py`): `IndexingDispatcher` is an `asyncio.Queue`-backed worker pool that drains `IndexJobRequest` items into `IndexingService.execute_index_job`. Started/stopped via the gateway lifespan. `submit()` is non-blocking and idempotent — duplicate `(kb_id, doc_id, version)` collapse via an in-memory `_inflight` set. `recover()` re-enqueues docs left in `pending` / `indexing` after a crash. Workers wrap each job in `with_kb_context(tenant_id=..., user_id=...)` (B.4.2) so the submitter's tenant context is restored — ContextVars do **not** propagate across `asyncio.Task` boundaries by themselves. Configure via `rag.indexing_workers` (0 disables; service falls back to inline execution via `KnowledgeBaseService._run_index_job`), `rag.indexing_queue_max`, `rag.indexing_shutdown_timeout`.
+
+**KB-bound embedding** (Sprint B.3): each `KnowledgeBase` row stores `embedding_model` + `embedding_dim`. New documents always use the KB's stored model (resolved via `get_embedding_provider(model_spec)` which now accepts a per-call override). On the first successful index, `KnowledgeBaseRepository.update_embedding_binding(kb_id, embedding_dim=...)` lazily backfills `embedding_dim`. Subsequent ingests pass `expected_dim` to `DocumentIngestor`; a mismatch raises `EmbeddingDimensionMismatchError` *before* any chunks land in Chroma. Cross-KB retrieval (`multi_kb_retrieve`) builds a per-spec embedder cache (one provider per unique model spec) and stamps `metadata["embedding_model"]` on every result. Admin-only `POST /api/knowledge-bases/{kb_id}/reindex-all` (B.3.5) drops the Chroma collection, clears `embedding_dim`, bumps document versions, and re-dispatches the lot.
+
+**`with_kb_context`** (`packages/harness/deerflow/rag/job_context.py`): the `@asynccontextmanager` background workers use to restore tenant + user contextvars. Refuses empty / `"default"` tenants up-front so a misconfigured caller doesn't silently fall back to the global tenant collection.
+
+**Chroma default-tenant guard** (`packages/harness/deerflow/rag/backends/chroma.py`): `ChromaVectorStore._collection_name()` raises `RuntimeError` when the resolved tenant is `"default"` and `rag.allow_no_auth_kb=False`. Without this, a worker that lost its context would silently mix every tenant's vectors into the `default_*` collection.
+
+### Document Conversion Error Codes — Sprint C.1 / C.3
+
+`packages/harness/deerflow/utils/file_conversion.py:convert_file_to_markdown` returns a `ConversionResult` instead of `Path | None`. On failure the result carries a stable `ConversionErrorCode` (`EMPTY_RESULT`, `ENCRYPTED_PDF`, `UNSUPPORTED_FORMAT`, `MARKITDOWN_UNAVAILABLE`, `INTERNAL_ERROR`) plus an English `error_detail`. The upload routers (`POST /api/threads/{thread_id}/uploads`, `POST /api/knowledge-bases/{kb_id}/documents/upload`) map failures to `422` with body `{code, message, filename}` so the frontend can switch on the stable code for localised toasts. The `_EMPTY_RESULT_CHAR_THRESHOLD = 200` guard inside `convert_file_to_markdown` short-circuits scanned/image PDFs that produce sub-threshold text — no `.md` is written and `EMPTY_RESULT` is reported.
+
+`resolve_pdf_converter()` (Sprint C.3.1) returns a `ResolvedPdfConverter` snapshot of `configured` vs `effective` converter plus per-package availability and a human-readable `warning` when the configuration is broken. Gateway lifespan calls `log_pdf_converter_status()` once at boot. `GET /api/system/pdf-converter` (Sprint C.3.3, admin-only) exposes the same snapshot for runtime introspection.
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 

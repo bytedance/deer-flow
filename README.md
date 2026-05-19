@@ -705,6 +705,20 @@ All dict-returning methods are validated against Gateway Pydantic response model
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
+- [RAG / Knowledge Base Operations](backend/docs/RAG.md) - Cross-KB retrieval, dispatcher tuning, and reindex SOP
+
+### RAG Configuration Flags
+
+The `rag` section in `config.yaml` controls how the knowledge-base pipeline indexes and retrieves documents. Defaults are safe; tune these when scaling write throughput or when migrating embedding models.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `rag.allow_no_auth_kb` | `false` | When `true`, KB access is permitted in no-auth mode (dev / demo only). Production must keep this `false` so the Chroma default-tenant guard refuses to write cross-tenant collections. |
+| `rag.indexing_workers` | `2` | Async dispatcher worker count. `0` disables the dispatcher and falls back to inline `IndexingService.execute_index_job` (handy for tests / bare-bones dev). Raise for higher write throughput. |
+| `rag.indexing_queue_max` | `256` | Back-pressure bound on the dispatcher queue. Hitting it surfaces as a `503` to the upload caller. |
+| `rag.indexing_shutdown_timeout` | `30.0` (seconds) | Bound on `aclose()`; jobs still running at the deadline are reset to `pending` and reclaimed by `recover()` on the next start. |
+| `rag.embedding_model` | provider-specific | Default embedding model spec. Each KB's `embedding_model` column is bound at create time and used for all subsequent indexing — switching the global default does **not** retroactively change existing KBs. Use `POST /api/knowledge-bases/{kb_id}/reindex-all` to migrate. |
+| `rag.cross_kb_score_strategy` | `comparable` | How `multi_kb_retrieve` merges scores from KBs that may use different embedding models. See [backend/docs/RAG.md](backend/docs/RAG.md) for the full tradeoff between `comparable` (post-hoc rescaling) and `raw` (preserve provider scores). |
 
 ## ⚠️ Security Notice
 
