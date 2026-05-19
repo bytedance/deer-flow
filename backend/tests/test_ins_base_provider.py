@@ -1,5 +1,6 @@
 """Tests for InsBaseAuthProvider."""
 
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -266,3 +267,79 @@ class TestInsBaseAuthProvider:
         """create_user raises NotImplementedError."""
         with pytest.raises(NotImplementedError):
             await provider.create_user("test@example.com", "password")
+
+    @pytest.mark.asyncio
+    async def test_get_user_caches_result(self, provider, mock_rpc_client):
+        """Repeated get_user calls within TTL hit the cache, not the RPC."""
+        mock_rpc_client.call_raw.return_value = {
+            "code": 200,
+            "data": {
+                "user": {"userId": 12345, "email": "user@example.com"},
+                "permissions": ["read"],
+            },
+        }
+
+        first = await provider.get_user("token-A")
+        rpc_calls_after_first = mock_rpc_client.call_raw.call_count
+
+        second = await provider.get_user("token-A")
+
+        assert first is second  # same cached object
+        assert mock_rpc_client.call_raw.call_count == rpc_calls_after_first
+
+    @pytest.mark.asyncio
+    async def test_get_user_cache_expires(self, provider, mock_rpc_client):
+        """Cache entries past TTL are evicted and trigger a fresh RPC."""
+        from app.gateway.auth import ins_base_provider as mod
+
+        mock_rpc_client.call_raw.return_value = {
+            "code": 200,
+            "data": {"user": {"userId": 1}, "permissions": []},
+        }
+
+        await provider.get_user("token-B")
+        first_calls = mock_rpc_client.call_raw.call_count
+
+        provider._user_cache["token-B"] = (
+            time.monotonic() - 1.0,
+            provider._user_cache["token-B"][1],
+        )
+
+        await provider.get_user("token-B")
+
+        assert mock_rpc_client.call_raw.call_count == first_calls + 1
+        # And caching kicks back in for the refreshed entry
+        assert "token-B" in provider._user_cache
+
+    @pytest.mark.asyncio
+    async def test_get_user_cache_does_not_share_across_tokens(
+        self, provider, mock_rpc_client
+    ):
+        """Different tokens are cached independently."""
+        mock_rpc_client.call_raw.return_value = {
+            "code": 200,
+            "data": {"user": {"userId": 1}, "permissions": []},
+        }
+
+        await provider.get_user("token-X")
+        await provider.get_user("token-Y")
+
+        assert mock_rpc_client.call_raw.call_count == 2
+        assert {"token-X", "token-Y"}.issubset(provider._user_cache.keys())
+
+    @pytest.mark.asyncio
+    async def test_invalidate_token_clears_cache(self, provider, mock_rpc_client):
+        """invalidate_token forces the next get_user to hit the RPC again."""
+        mock_rpc_client.call_raw.return_value = {
+            "code": 200,
+            "data": {"user": {"userId": 1}, "permissions": []},
+        }
+
+        await provider.get_user("token-Z")
+        first_calls = mock_rpc_client.call_raw.call_count
+
+        provider.invalidate_token("token-Z")
+        await provider.get_user("token-Z")
+
+        assert mock_rpc_client.call_raw.call_count == first_calls + 1
+

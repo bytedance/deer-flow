@@ -7,6 +7,7 @@ token authentication, and token refresh.
 from __future__ import annotations
 
 import logging
+import time
 from uuid import uuid4
 
 from app.gateway.auth.providers import AuthProvider
@@ -16,6 +17,16 @@ from deerflow.rpc.ins_base_auth_service import InsBaseAuthServiceClient
 from deerflow.rpc.rpc_client import RpcClient
 
 logger = logging.getLogger(__name__)
+
+# Short TTL cache for token-based authentication results.
+# Each authenticated request hits ins-base /auth/authentication +
+# /org/getAllParentOrg + a tenant lookup. Without caching, every API call
+# from the frontend (including 30-60s polls) re-runs the full chain.
+# A short TTL keeps the perceived freshness while collapsing bursts.
+_TOKEN_CACHE_TTL_SECONDS = 60.0
+_TENANT_CACHE_TTL_SECONDS = 300.0
+_TOKEN_CACHE_MAX_SIZE = 4096
+_TENANT_CACHE_MAX_SIZE = 4096
 
 
 class RpcNotConfiguredError(Exception):
@@ -59,6 +70,42 @@ class InsBaseAuthProvider(AuthProvider):
         self._rpc_client = rpc_client
         self._tenant_repo = tenant_repo
         self._session_factory = session_factory
+        # token -> (expires_at, user_object)
+        self._user_cache: dict[str, tuple[float, object]] = {}
+        # org_id -> (expires_at, tenant_id)
+        self._tenant_cache: dict[str, tuple[float, str]] = {}
+
+    def _cache_get(self, cache: dict[str, tuple[float, object]], key: str):
+        entry = cache.get(key)
+        if entry is None:
+            return None
+        expires_at, value = entry
+        if expires_at < time.monotonic():
+            cache.pop(key, None)
+            return None
+        return value
+
+    def _cache_set(
+        self,
+        cache: dict,
+        key: str,
+        value,
+        ttl: float,
+        max_size: int,
+    ) -> None:
+        if len(cache) >= max_size:
+            # Drop the oldest insertion-order entry; dict preserves insertion order.
+            try:
+                oldest_key = next(iter(cache))
+                cache.pop(oldest_key, None)
+            except StopIteration:
+                pass
+        cache[key] = (time.monotonic() + ttl, value)
+
+    def invalidate_token(self, token: str) -> None:
+        """Drop a cached token entry (e.g., after refresh / logout)."""
+        if token:
+            self._user_cache.pop(token, None)
 
     @property
     def _auth_service(self) -> InsBaseAuthServiceClient:
@@ -93,9 +140,16 @@ class InsBaseAuthProvider(AuthProvider):
         - orgId != "0" → call getAllParentOrg, find orgType==13 node,
           get-or-create tenant in database.
         - RPC failure or no factory found → raise RuntimeError
+
+        Results are cached in-memory for ``_TENANT_CACHE_TTL_SECONDS`` to
+        avoid hammering the org RPC + DB on every authenticated request.
         """
         if org_id == "0":
             return "default"
+
+        cached = self._cache_get(self._tenant_cache, org_id)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
 
         from deerflow.rpc.ins_base_org_service import InsBaseOrgServiceClient
 
@@ -133,15 +187,30 @@ class InsBaseAuthProvider(AuthProvider):
                 self._session_factory,
                 self._session_factory() if self._session_factory else "N/A",
             )
+            self._cache_set(
+                self._tenant_cache,
+                org_id,
+                factory_org_id,
+                _TENANT_CACHE_TTL_SECONDS,
+                _TENANT_CACHE_MAX_SIZE,
+            )
             return factory_org_id
 
-        return await self._get_or_create_tenant(factory_org_id, factory_org_name)
+        tenant_id = await self._get_or_create_tenant(factory_org_id, factory_org_name)
+        self._cache_set(
+            self._tenant_cache,
+            org_id,
+            tenant_id,
+            _TENANT_CACHE_TTL_SECONDS,
+            _TENANT_CACHE_MAX_SIZE,
+        )
+        return tenant_id
 
     async def _get_or_create_tenant(self, tenant_id: str, org_name: str | None = None) -> str:
         """Get existing tenant or create a new one with zero limits."""
         existing = await self._tenant_repo.get(tenant_id)
         if existing is not None:
-            logger.info("_get_or_create_tenant: tenant %s already exists in DB", tenant_id)
+            logger.debug("_get_or_create_tenant: tenant %s already exists in DB", tenant_id)
             return tenant_id
 
         from datetime import UTC, datetime
@@ -249,9 +318,18 @@ class InsBaseAuthProvider(AuthProvider):
         since all user management lives on the Java side.
 
         Returns a dict-like user object with token-based identity.
+
+        Results are memoised in a short-TTL in-memory cache so bursty
+        frontend traffic (parallel API calls + 30-60s polling) doesn't
+        trigger an authentication RPC + org lookup + DB hit on every
+        single request.
         """
         if not user_id:
             return None
+
+        cached = self._cache_get(self._user_cache, user_id)
+        if cached is not None:
+            return cached
 
         try:
             response = await self._auth_service.authenticate(user_id)
@@ -321,6 +399,13 @@ class InsBaseAuthProvider(AuthProvider):
                 "ins_base_user_data": user_data,
             },
         )()
+        self._cache_set(
+            self._user_cache,
+            user_id,
+            user,
+            _TOKEN_CACHE_TTL_SECONDS,
+            _TOKEN_CACHE_MAX_SIZE,
+        )
         return user
 
     async def refresh_token(self, refresh_token: str) -> str | None:
