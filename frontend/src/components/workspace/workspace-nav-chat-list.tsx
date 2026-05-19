@@ -48,6 +48,9 @@ export function WorkspaceNavChatList() {
   const enabledAgents = agents
     .filter((a) => a.enabled && !a.parent)
     .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
+  const defectClosureEnabled = agents.some(
+    (a) => a.name === "defect-closure" && a.enabled,
+  );
 
   const [agentsOpen, setAgentsOpen] = useState(() => {
     if (typeof window === "undefined") return true;
@@ -157,7 +160,9 @@ export function WorkspaceNavChatList() {
           </SidebarMenuButton>
         </SidebarMenuItem>
 
-        <ClosedLoopNavItem active={pathname.startsWith("/workspace/closed-loop")} />
+        {defectClosureEnabled && (
+          <ClosedLoopNavItem active={pathname.startsWith("/workspace/closed-loop")} />
+        )}
 
         {dynamicNavItems.map((item) => {
           const Icon = NAV_ICON_MAP[item.icon] ?? FileTextIcon;
