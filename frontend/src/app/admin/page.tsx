@@ -63,11 +63,11 @@ export default function AdminDashboardPage() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <StatsCard
           title={t.admin.costToday}
-          value={`$${(stats?.total_cost_today ?? 0).toFixed(4)}`}
+          value={`$${(stats?.total_cost_today ?? 0).toFixed(2)}`}
         />
         <StatsCard
           title={t.admin.costThisMonth}
-          value={`$${(stats?.total_cost_month ?? 0).toFixed(4)}`}
+          value={`$${(stats?.total_cost_month ?? 0).toFixed(2)}`}
         />
         <StatsCard
           title={t.admin.totalThreads}
