@@ -249,6 +249,11 @@ const deviceSelectorMultiPropsSchema = z.object({
   filterDeviceType: z.number().optional(),
 });
 
+const subDeviceSelectorPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  queryParams: deviceQueryParamsSchema.optional(),
+});
+
 const propsSchemas: Record<string, z.ZodType> = {
   chart: chartPropsSchema,
   echart: echartPropsSchema,
@@ -267,6 +272,7 @@ const propsSchemas: Record<string, z.ZodType> = {
   status: statusPropsSchema,
   "device-selector": deviceSelectorPropsSchema,
   "device-selector-multi": deviceSelectorMultiPropsSchema,
+  "sub-device-selector": subDeviceSelectorPropsSchema,
 };
 
 export function validateProps(

@@ -54,6 +54,9 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   "device-selector-multi": new Set([
     "title", "queryParams", "maxSelect", "filterDeviceType",
   ]),
+  "sub-device-selector": new Set([
+    "title", "queryParams",
+  ]),
 };
 
 function sanitizeValue(value: unknown, depth = 0): unknown {

@@ -28,6 +28,7 @@ from app.gateway.routers import (
     genui_telemetry,
     ins_base_auth,
     knowledge_bases,
+    machine,
     mcp,
     memory,
     models,
@@ -663,6 +664,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Organize tree API (proxy to ins-bus-rpc)
     app.include_router(organize.router)
+    app.include_router(machine.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

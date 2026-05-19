@@ -90,3 +90,40 @@ class TestMachineServiceClient:
         with patch.object(client._rpc, "call_raw", mock_raw):
             result = asyncio.run(client.get_machine_info_by_ids([99]))
             assert result is None
+
+    def test_get_component_info_by_machine_id(self):
+        client = MachineServiceClient()
+        mock_raw = AsyncMock()
+        mock_raw.return_value = {
+            "code": 0, "msg": "success",
+            "data": [{"id": 101, "type": 80, "name": "测点-A", "machineId": 12345}],
+        }
+
+        with patch.object(client._rpc, "call_raw", mock_raw):
+            result = asyncio.run(client.get_component_info_by_machine_id(12345))
+            assert result == [{"id": 101, "type": 80, "name": "测点-A", "machineId": 12345}]
+            call_args = mock_raw.call_args
+            assert call_args.args[0] == "ins-bus-rpc"
+            assert call_args.args[1] == "/ins-bus-rpc/machineModel/getComponentInfoByMachineId"
+            assert call_args.args[2] == "GET"
+            assert call_args.args[3]["machineId"] == 12345
+            assert "hiddenIfValid" not in call_args.args[3]
+
+    def test_get_component_info_by_machine_id_with_hidden(self):
+        client = MachineServiceClient()
+        mock_raw = AsyncMock()
+        mock_raw.return_value = {"code": 0, "msg": "success", "data": []}
+
+        with patch.object(client._rpc, "call_raw", mock_raw):
+            result = asyncio.run(client.get_component_info_by_machine_id(12345, hidden_if_valid=True))
+            assert result == []
+            assert mock_raw.call_args.args[3]["hiddenIfValid"] is True
+
+    def test_get_component_info_by_machine_id_empty(self):
+        client = MachineServiceClient()
+        mock_raw = AsyncMock()
+        mock_raw.return_value = {"code": 0, "msg": "success", "data": []}
+
+        with patch.object(client._rpc, "call_raw", mock_raw):
+            result = asyncio.run(client.get_component_info_by_machine_id(99999))
+            assert result == []
