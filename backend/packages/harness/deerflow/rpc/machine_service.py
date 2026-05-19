@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "ins-bus-rpc"
 PATH_PREFIX = "/ins-bus-rpc/machineModel"
+COMPONENT_PATH_PREFIX = "/ins-bus-rpc/componentModel"
 
 
 class MachineServiceClient:
@@ -154,7 +155,7 @@ class MachineServiceClient:
             params["hiddenIfValid"] = True
         result = await self._rpc.call_raw(
             SERVICE_NAME,
-            f"{PATH_PREFIX}/getComponentInfoByMachineId",
+            f"{COMPONENT_PATH_PREFIX}/getComponentInfoByMachineId",
             "GET",
             params,
         )

@@ -104,7 +104,7 @@ class TestMachineServiceClient:
             assert result == [{"id": 101, "type": 80, "name": "测点-A", "machineId": 12345}]
             call_args = mock_raw.call_args
             assert call_args.args[0] == "ins-bus-rpc"
-            assert call_args.args[1] == "/ins-bus-rpc/machineModel/getComponentInfoByMachineId"
+            assert call_args.args[1] == "/ins-bus-rpc/componentModel/getComponentInfoByMachineId"
             assert call_args.args[2] == "GET"
             assert call_args.args[3]["machineId"] == 12345
             assert "hiddenIfValid" not in call_args.args[3]
