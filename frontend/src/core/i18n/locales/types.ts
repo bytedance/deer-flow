@@ -521,6 +521,7 @@ export interface Translations {
 
   // Admin
   admin: {
+    title: string;
     dashboard: string;
     tenants: string;
     usage: string;

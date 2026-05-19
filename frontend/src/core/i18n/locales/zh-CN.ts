@@ -588,6 +588,7 @@ export const zhCN: Translations = {
 
   // Admin
   admin: {
+    title: "管理后台",
     dashboard: "仪表盘",
     tenants: "租户管理",
     usage: "用量报表",

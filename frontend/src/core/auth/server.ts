@@ -18,6 +18,8 @@ export async function getServerSideUser(): Promise<AuthResult> {
         email: "e2e@test.local",
         system_role: "superadmin",
         tenant_id: "default",
+        user_name: "e2e",
+        real_name: "E2E User",
       },
     };
   }
