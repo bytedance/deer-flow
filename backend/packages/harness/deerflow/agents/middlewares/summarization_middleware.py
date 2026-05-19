@@ -110,6 +110,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self.model = self.model.with_config(tags=["nostream"])
         self._skills_container_path = skills_container_path or "/mnt/skills"
         self._skill_file_read_tool_names = frozenset(skill_file_read_tool_names or {"read_file", "read", "view", "cat"})
         self._before_summarization_hooks = before_summarization or []
