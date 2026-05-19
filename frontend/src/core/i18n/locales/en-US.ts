@@ -625,6 +625,7 @@ export const enUS: Translations = {
 
   // Admin
   admin: {
+    title: "Admin",
     dashboard: "Dashboard",
     tenants: "Tenants",
     usage: "Usage",

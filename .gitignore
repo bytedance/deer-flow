@@ -40,8 +40,11 @@ coverage/
 .claude/
 # skills/custom/*
 logs/
+!frontend/src/app/admin/logs/
+!frontend/src/app/admin/logs/**
 log/
 debug.log
+*.log
 
 # Local git hooks (keep only on this machine, do not push)
 .githooks/

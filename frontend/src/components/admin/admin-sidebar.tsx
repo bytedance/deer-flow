@@ -1,6 +1,13 @@
 "use client";
 
-import { LogOutIcon } from "lucide-react";
+import {
+  ClipboardListIcon,
+  GaugeIcon,
+  LayoutDashboardIcon,
+  LogOutIcon,
+  type LucideIcon,
+  UsersIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -16,42 +23,71 @@ export function AdminSidebar() {
   const { user, logout } = useAuth();
   const isSystemAdmin = isSystemAdminView(user);
 
-  const links = [
-    { href: "/admin", label: t.admin.dashboard },
-    { href: "/admin/tenants", label: t.admin.tenants },
-    { href: "/admin/usage", label: t.admin.usage },
-    { href: "/admin/logs", label: t.admin.logs },
+  const links: { href: string; label: string; icon: LucideIcon }[] = [
+    { href: "/admin", label: t.admin.dashboard, icon: LayoutDashboardIcon },
+    { href: "/admin/tenants", label: t.admin.tenants, icon: UsersIcon },
+    { href: "/admin/usage", label: t.admin.usage, icon: GaugeIcon },
+    { href: "/admin/logs", label: t.admin.logs, icon: ClipboardListIcon },
   ];
 
   return (
-    <aside className="flex w-56 flex-col gap-1 border-r bg-muted/30 p-4">
-      <h2 className="mb-4 text-lg font-semibold tracking-tight">Admin</h2>
-      {links.map((link) => (
-        <Link
-          key={link.href}
-          href={link.href}
-          className={cn(
-            "rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted",
-            pathname === link.href && "bg-muted font-medium",
-          )}
+    <aside className="bg-sidebar text-sidebar-foreground flex w-56 shrink-0 flex-col border-r">
+      {/* Brand mark — same lockup as the workspace + auth pages */}
+      <div className="border-sidebar-border/60 flex h-14 items-center gap-2 border-b px-4">
+        <span
+          aria-hidden="true"
+          className="bg-primary text-primary-foreground inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-[11px] font-bold tracking-tight"
         >
-          {link.label}
-        </Link>
-      ))}
+          E
+        </span>
+        <span className="text-foreground truncate text-sm font-semibold tracking-tight">
+          {t.admin.title}
+        </span>
+      </div>
+
+      <nav className="flex flex-col gap-0.5 p-2">
+        {links.map((link) => {
+          const Icon = link.icon;
+          const active = pathname === link.href;
+          return (
+            <Link
+              key={link.href}
+              href={link.href}
+              className={cn(
+                "group relative flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors",
+                active
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground",
+              )}
+              aria-current={active ? "page" : undefined}
+            >
+              {active && (
+                <span
+                  aria-hidden="true"
+                  className="bg-primary absolute top-1 bottom-1 left-0 w-0.5 rounded-r"
+                />
+              )}
+              <Icon className="size-4 shrink-0" />
+              <span className="truncate">{link.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
+
       {user && (
-        <div className="mt-auto border-t pt-4">
-          <div className="mb-3 min-w-0">
-            <p className="truncate text-sm font-medium">
+        <div className="border-sidebar-border/60 mt-auto border-t p-3">
+          <div className="mb-2 min-w-0">
+            <p className="text-foreground truncate text-sm font-medium">
               {user.real_name || user.user_name || user.email}
             </p>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="text-muted-foreground mt-0.5 truncate text-xs">
               {t.admin.currentTenant}: {user.tenant_id}
             </p>
-            <div className="mt-1 flex items-center gap-1.5">
-              <span className="shrink-0 rounded bg-blue-100 px-1 py-px text-[10px] font-medium text-blue-700 dark:bg-blue-900 dark:text-blue-200">
+            <div className="mt-1.5 flex items-center gap-1.5">
+              <span className="bg-primary/15 text-primary border-primary/20 inline-flex shrink-0 items-center rounded border px-1.5 py-px text-[10px] font-medium">
                 {user.system_role}
               </span>
-              <span className="shrink-0 rounded bg-emerald-100 px-1 py-px text-[10px] font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
+              <span className="bg-muted text-muted-foreground border-border/60 inline-flex shrink-0 items-center rounded border px-1.5 py-px text-[10px] font-medium">
                 {isSystemAdmin ? t.admin.globalScope : t.admin.tenantScope}
               </span>
             </div>
@@ -60,7 +96,7 @@ export function AdminSidebar() {
             variant="ghost"
             size="sm"
             onClick={() => void logout()}
-            className="w-full justify-start gap-2 px-2"
+            className="text-muted-foreground hover:text-foreground w-full justify-start gap-2 px-2"
           >
             <LogOutIcon className="size-4" />
             {t.settings.account.signOut}
