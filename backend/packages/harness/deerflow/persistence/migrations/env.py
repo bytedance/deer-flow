@@ -47,7 +47,9 @@ for _enterprise_module in (
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Preserve loggers configured by callers (app code, pytest, test runners); the stdlib default
+    # disable_existing_loggers=True silently turns prior loggers into no-ops and breaks caplog tests.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
