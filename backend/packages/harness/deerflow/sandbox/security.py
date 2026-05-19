@@ -33,11 +33,20 @@ def uses_local_sandbox_provider(config=None) -> bool:
 
 
 def is_host_bash_allowed(config=None) -> bool:
-    """Return whether host bash execution is explicitly allowed."""
+    """Return whether host bash execution is explicitly allowed.
+
+    When *config* lacks a ``.sandbox`` attribute (e.g. a ``SubagentsAppConfig``
+    slice), fall back to the ambient ``get_app_config()`` so callers never need
+    to guard the call with ``hasattr(config, "sandbox")`` checks.
+    """
     if config is None:
         config = get_app_config()
 
     sandbox_cfg = getattr(config, "sandbox", None)
+    if sandbox_cfg is None:
+        # Config is a narrow slice (no .sandbox) — retry with the full app config.
+        config = get_app_config()
+        sandbox_cfg = getattr(config, "sandbox", None)
     if sandbox_cfg is None:
         return False
     if not uses_local_sandbox_provider(config):
