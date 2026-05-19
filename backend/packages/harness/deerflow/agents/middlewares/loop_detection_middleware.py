@@ -30,6 +30,12 @@ Why the warning is injected at ``wrap_model_call`` instead of
   every prior ToolMessage is already present in the request's message
   list and the warning is appended at the end — pairing intact, no
   ``AIMessage`` semantics are mutated.
+
+Queued warnings are intentionally transient. If a run ends before the
+next model request drains a queued warning, ``after_agent`` drops it
+instead of carrying it into a later invocation for the same thread. The
+hard-stop path still forces termination when the configured safety limit
+is reached.
 """
 
 from __future__ import annotations
