@@ -159,3 +159,19 @@ class TestSubagentTokenCollector:
         collector.on_llm_end(response, run_id=uuid4())
         records = collector.snapshot_records()
         assert len(records) == 0
+
+    def test_multi_generation_response_sums_all_valid_usages(self):
+        """Multiple generations with valid usage in one response are aggregated into one record."""
+        collector = SubagentTokenCollector(caller="subagent:test")
+        response = _make_llm_response_from_usages(
+            [
+                {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+            ]
+        )
+        collector.on_llm_end(response, run_id=uuid4())
+        records = collector.snapshot_records()
+        assert len(records) == 1
+        assert records[0]["input_tokens"] == 30
+        assert records[0]["output_tokens"] == 15
+        assert records[0]["total_tokens"] == 45
