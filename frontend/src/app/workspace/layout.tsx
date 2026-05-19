@@ -5,6 +5,7 @@ import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
 
+import { LogoutResetButton } from "./logout-reset-button";
 import { WorkspaceContent } from "./workspace-content";
 
 export const dynamic = "force-dynamic";
@@ -43,14 +44,7 @@ export default async function WorkspaceLayout({
             >
               Retry
             </Link>
-            <form action="/api/v1/auth/logout" method="post">
-              <button
-                type="submit"
-                className="text-muted-foreground hover:bg-muted rounded-md border px-4 py-2 text-sm"
-              >
-                Logout &amp; Reset
-              </button>
-            </form>
+            <LogoutResetButton />
           </div>
         </div>
       );
