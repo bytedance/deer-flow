@@ -13,7 +13,7 @@
 | 4 | GuardrailMiddleware | | | | | | ✓ | ✓ | ✓ | *Phase 2 纳入* |
 | 5 | ToolErrorHandlingMiddleware | | | | | | ✓ | ✓ | ✓ | 始终开启 |
 | 6 | SummarizationMiddleware | | ✓ | | | | | ✓ | ✗ | `summarization` |
-| 7 | TodoMiddleware | | ✓ | ✓ | | | | ✓ | ✗ | `plan_mode` 参数 |
+| 7 | TodoMiddleware | | ✓ | ✓ | | ✓ | | ✓ | ✗ | `plan_mode` 参数 |
 | 8 | TitleMiddleware | | | ✓ | | | | ✓ | ✗ | `auto_title` |
 | 9 | MemoryMiddleware | | | | ✓ | | | ✓ | ✗ | `memory` |
 | 10 | ViewImageMiddleware | | ✓ | | | | | ✓ | ✗ | `vision` |
