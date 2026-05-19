@@ -27,6 +27,15 @@ class RagConfig(BaseModel):
         description="Custom base URL for the embedding API (e.g. 'https://api.openai-proxy.com/v1'). "
         "Empty = use provider default.",
     )
+    embedding_batch_size: int = Field(
+        default=64,
+        ge=1,
+        le=2048,
+        description="Maximum number of texts sent per embedding API request. "
+        "OpenAI accepts up to 2048, but DashScope-style proxies (e.g. 'text-embedding-v4' "
+        "via aliyun) cap this at 10. Lower this when the provider rejects with "
+        "'batch size is invalid'.",
+    )
     vector_store_backend: str = Field(
         default="chroma",
         description="Vector store backend: 'chroma' or 'pgvector'",

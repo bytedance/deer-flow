@@ -31,10 +31,17 @@ class EmbeddingProvider(abc.ABC):
 class OpenAIEmbeddingProvider(EmbeddingProvider):
     """OpenAI-compatible embedding API provider."""
 
-    def __init__(self, model: str, api_key: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        base_url: str | None = None,
+        batch_size: int = 2048,
+    ) -> None:
         self._model = model
         self._api_key = api_key
         self._base_url = base_url
+        self._batch_size = max(1, int(batch_size))
         self._client: Any = None
         self._dimension: int | None = None
 
@@ -64,9 +71,12 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         client = self._get_client()
-        # OpenAI supports up to 2048 inputs per batch
+        # Batch size is provider-dependent: OpenAI accepts up to 2048
+        # per request, but DashScope-compatible proxies (e.g. aliyun
+        # 'text-embedding-v4') cap at 10. Configured via
+        # rag.embedding_batch_size.
         all_embeddings: list[list[float]] = []
-        batch_size = 2048
+        batch_size = self._batch_size
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
             resp = client.embeddings.create(model=self._model, input=batch)
@@ -130,7 +140,12 @@ def get_embedding_provider(model_spec: str | None = None) -> EmbeddingProvider:
     base_url = config.embedding_base_url or None
 
     if provider_name == "openai":
-        return OpenAIEmbeddingProvider(model=model, api_key=api_key, base_url=base_url)
+        return OpenAIEmbeddingProvider(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            batch_size=config.embedding_batch_size,
+        )
     if provider_name == "local":
         return LocalEmbeddingProvider(model_name=model)
 

@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 11
+config_version: 12
 
 # ============================================================================
 # Logging
@@ -815,6 +815,8 @@ rag:
   enabled: false
   embedding_model: openai:text-embedding-3-small  # provider:model format
   embedding_api_key: $OPENAI_API_KEY              # $ENV_VAR or literal value
+  # embedding_base_url: ""                        # Custom base URL (e.g. for OpenAI-compatible proxies); empty = provider default
+  # embedding_batch_size: 64                      # Texts per embed request. OpenAI accepts ≤2048; DashScope-style proxies (aliyun text-embedding-v4) cap at 10.
   vector_store_backend: chroma                    # 'chroma' or 'pgvector'
   # chroma_persist_dir: ""                        # Empty = auto-resolve to tenant base dir
   # pgvector_connection_string: ""                # PostgreSQL connection string for pgvector

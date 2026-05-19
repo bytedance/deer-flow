@@ -204,6 +204,7 @@ rag:
   embedding_model: openai:text-embedding-v4
   embedding_api_key: $OPENAI_API_KEY
   embedding_base_url: https://aiapi.shenguyun.com/v1
+  embedding_batch_size: 10
   vector_store_backend: chroma
   chunk_size: 1000
   chunk_overlap: 200
