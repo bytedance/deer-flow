@@ -145,7 +145,8 @@ class DeviceSelectorConfig(BaseModel):
     When ``component: device-selector-multi``, the step renders a browser-side
     org-tree device picker instead of a traditional form. The ``type_id_from``
     field references a prior form field (e.g. ``scope.equipment_type``) whose
-    value is mapped to an organize-tree ``typeId`` query parameter at render time.
+    value is mapped to both an organize-tree ``typeId`` query parameter and a
+    ``filterDeviceType`` prop at render time.
     """
 
     model_config = ConfigDict(extra="forbid")

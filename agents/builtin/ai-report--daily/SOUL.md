@@ -104,13 +104,13 @@
    任一校验失败时渲染 `markdown` 提示用户重新提交，并停止后续步骤。
 3. 根据 `equipment_type` 计算 `typeId`（为 `device-selector-multi` 提供过滤参数）：
 
-   | equipment_type | typeId |
-   | -------------- | ------ |
-   | static_equipment | 6 |
-   | rotating_machinery | 1 |
-   | pump | 4 |
-   | reciprocating_machinery | 9 |
-   | all | 省略（不设置 typeId，前端展示所有类型） |
+   | equipment_type | typeId | filterDeviceType |
+   | -------------- | ------ | ---------------- |
+   | static_equipment | 6 | 6 |
+   | rotating_machinery | 1 | 1 |
+   | pump | 4 | 4 |
+   | reciprocating_machinery | 9 | 9 |
+   | all | 省略 | 省略（前端展示所有类型） |
 
 4. 渲染 `device-selector-multi` 组件，让用户从真实组织树中选择设备。**严禁**调用 `list_equipment.py` 或任何本地脚本拉取设备列表——设备数据由前端通过 `/api/organize/tree` 直接拉取。
 
@@ -125,13 +125,14 @@
     "title": "选择设备",
     "description": "请在左侧组织树中选择本次日报覆盖的设备，点击「确认选择」提交。",
     "queryParams": {"orgId": 0, "treeType": 1, "typeId": 4},
+    "filterDeviceType": 4,
     "maxSelect": 100
   }
 }
 ```
 
 > **参数说明**：
-> - `queryParams.typeId` 按上表映射；`equipment_type == "all"` 时**省略** `typeId` 字段（不要传 `0` 或 `null`）。
+> - `queryParams.typeId` 和 `filterDeviceType` 按上表映射；`equipment_type == "all"` 时**省略**这两个字段（不要传 `0` 或 `null`）。
 > - `maxSelect=100` 限制最多选 100 台。
 > - `orgId: 0` / `treeType: 1` 与故障诊断保持一致。
 

@@ -150,13 +150,14 @@ def build_device_selector_props(
     """Build the props dict for a ``component="device-selector-multi"`` GenUI block.
 
     Resolves ``device_filter.type_id_from`` against the current form state to
-    set the ``typeId`` query parameter so the browser-side component only shows
-    devices of the selected equipment type.
+    set the ``typeId`` query parameter and ``filterDeviceType`` prop so the
+    browser-side component only shows devices of the selected equipment type.
     """
     query_params: dict[str, Any] = {"orgId": 0, "treeType": 1}
 
     device_filter = (step.get("device_filter") or {})
     type_id_from: str | None = device_filter.get("type_id_from")
+    filter_device_type: int | None = None
     if type_id_from:
         parts = type_id_from.split(".")
         value: Any = state.form_state
@@ -170,12 +171,15 @@ def build_device_selector_props(
             type_id = _EQUIPMENT_TYPE_TO_TYPE_ID.get(value)
             if type_id is not None:
                 query_params["typeId"] = type_id
+                filter_device_type = type_id
 
     props: dict[str, Any] = {
         "title": step.get("title", step["id"]),
         "queryParams": query_params,
         "maxSelect": step.get("max_select", 100),
     }
+    if filter_device_type is not None:
+        props["filterDeviceType"] = filter_device_type
     if step.get("description"):
         props["description"] = step["description"]
     return props
