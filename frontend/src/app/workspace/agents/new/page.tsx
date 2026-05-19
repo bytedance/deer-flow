@@ -146,6 +146,14 @@ export default function NewAgentPage() {
         err.reason === "backend_unreachable"
       ) {
         setNameError(t.agents.nameStepNetworkError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "request_failed"
+      ) {
+        // Surface the backend-provided detail (e.g. validation error) instead
+        // of swallowing it into the generic fallback. The detail is already
+        // carried as `err.message` by `checkAgentName` in core/agents/api.ts.
+        setNameError(err.message || t.agents.nameStepCheckError);
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
