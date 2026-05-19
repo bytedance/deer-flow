@@ -283,6 +283,23 @@ class TestDownloadFile:
         with pytest.raises(OSError, match="disk error"):
             sandbox.download_file("/tmp/file.bin")
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/mnt/workspace/../../etc/passwd",
+            "../secret",
+            "/a/b/../../../etc/shadow",
+        ],
+    )
+    def test_rejects_path_traversal(self, sandbox, path):
+        """download_file must reject paths containing '..' before calling the client."""
+        sandbox._client.file.download_file = MagicMock()
+
+        with pytest.raises(PermissionError, match="path traversal"):
+            sandbox.download_file(path)
+
+        sandbox._client.file.download_file.assert_not_called()
+
     def test_single_chunk(self, sandbox):
         """download_file should work correctly with a single-chunk response."""
         sandbox._client.file.download_file = MagicMock(return_value=[b"single-chunk"])

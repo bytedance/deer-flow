@@ -106,8 +106,17 @@ class AioSandbox(Sandbox):
         """Download file bytes from the sandbox.
 
         Raises:
+            PermissionError: If the path contains '..' traversal segments.
             OSError: If the file cannot be retrieved from the sandbox.
         """
+        # Reject path traversal before sending to the container API.
+        # LocalSandbox gets this implicitly via _resolve_path_with_mapping;
+        # here the path is forwarded verbatim so we must check explicitly.
+        normalised = path.replace("\\", "/")
+        for segment in normalised.split("/"):
+            if segment == "..":
+                raise PermissionError(f"Access denied: path traversal detected in '{path}'")
+
         with self._lock:
             try:
                 return b"".join(self._client.file.download_file(path=path))
