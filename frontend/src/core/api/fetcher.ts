@@ -1,4 +1,5 @@
 import { buildLoginUrl } from "@/core/auth/types";
+import { EHM_TOKEN_COOKIE } from "@/core/auth/ehm-auth";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
 export type StateChangingMethod = "POST" | "PUT" | "DELETE" | "PATCH";
@@ -37,6 +38,23 @@ export function readCsrfCookie(): string | null {
 }
 
 /**
+ * Read the EHM token cookie for auto-login users.
+ * Returns null if not present or running on the server.
+ */
+function readEhmTokenCookie(): string | null {
+  if (typeof document === "undefined") return null;
+  for (const pair of document.cookie.split("; ")) {
+    if (pair.startsWith(`${EHM_TOKEN_COOKIE}=`)) {
+      const raw = pair.slice(EHM_TOKEN_COOKIE.length + 1);
+      console.log("[EHM fetcher] found ehm_token cookie, length:", raw.length);
+      return decodeURIComponent(raw);
+    }
+  }
+  console.log("[EHM fetcher] ehm_token cookie NOT found, cookies:", document.cookie);
+  return null;
+}
+
+/**
  * Fetch with credentials and automatic CSRF protection.
  *
  * Two centralized contracts every API call needs:
@@ -49,8 +67,11 @@ export function readCsrfCookie(): string | null {
  *    403 if the header is missing — silently breaking every call site
  *    that uses raw ``fetch()`` instead of this wrapper.
  *
+ * 3. If an EHM token cookie is present (iframed auto-login), it is sent
+ *    as ``Authorization: Bearer <ehm_token>`` header.
+ *
  * Auto-redirects to ``/login`` on 401. Caller-supplied headers are
- * preserved; the helper only ADDS the CSRF header when it isn't already
+ * preserved; the helper only ADDS headers when they aren't already
  * present, so explicit overrides win.
  */
 export async function fetch(
@@ -64,28 +85,38 @@ export async function fetch(
         ? input.toString()
         : input.url;
 
+  const merged = new Headers(init?.headers);
+
+  // Inject EHM token as Bearer if using EHM auto-login
+  if (!merged.has("Authorization")) {
+    const ehmToken = readEhmTokenCookie();
+    if (ehmToken) {
+      console.log("[EHM fetcher] injecting Authorization Bearer header for:", url);
+      merged.set("Authorization", `Bearer ${ehmToken}`);
+    }
+  }
+
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
-  let headers = init?.headers;
   if (isStateChangingMethod(init?.method ?? "GET")) {
     const token = readCsrfCookie();
-    if (token) {
-      // Fresh Headers instance so we don't mutate caller-supplied objects.
-      const merged = new Headers(headers);
-      if (!merged.has("X-CSRF-Token")) {
-        merged.set("X-CSRF-Token", token);
-      }
-      headers = merged;
+    if (token && !merged.has("X-CSRF-Token")) {
+      merged.set("X-CSRF-Token", token);
     }
   }
 
   const res = await globalThis.fetch(url, {
     ...init,
-    headers,
+    headers: merged,
     credentials: "include",
   });
 
   if (res.status === 401) {
+    // Skip refresh for EHM auto-login users (no backend session)
+    if (readEhmTokenCookie()) {
+      return res;
+    }
+
     // A refresh attempt is about to be made — set a flag to avoid infinite loops
     // when the refresh endpoint itself returns 401.
     const isRefreshRequest = url.includes("/api/v1/auth/refresh");
@@ -97,7 +128,7 @@ export async function fetch(
         });
         if (refreshRes.ok) {
           // Token refreshed successfully — retry the original request
-          return globalThis.fetch(input, { ...init, headers, credentials: "include" });
+          return globalThis.fetch(input, { ...init, headers: merged, credentials: "include" });
         }
       } catch {
         // Refresh failed, fall through to redirect
