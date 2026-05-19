@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import type { OrgTreeNode } from "./device-selector-types";
 
@@ -11,18 +11,37 @@ interface OrgTreePanelProps {
   disabled?: boolean;
 }
 
+function matchNode(node: OrgTreeNode, lower: string): boolean {
+  if (node.label.toLowerCase().includes(lower)) return true;
+  if (node.children) {
+    return node.children.some((c) => matchNode(c, lower));
+  }
+  return false;
+}
+
+function filterTree(nodes: OrgTreeNode[], lower: string): OrgTreeNode[] {
+  return nodes
+    .filter((n) => matchNode(n, lower))
+    .map((n) => ({
+      ...n,
+      children: n.children ? filterTree(n.children, lower) : undefined,
+    }));
+}
+
 function OrgTreeNodeItem({
   node,
   depth,
   onSelect,
   selectedOrgId,
   disabled,
+  searchText,
 }: {
   node: OrgTreeNode;
   depth: number;
   onSelect: (node: OrgTreeNode) => void;
   selectedOrgId?: string;
   disabled?: boolean;
+  searchText: string;
 }) {
   const hasOrgChildren = node.children?.some((c) => c.type >= 10) ?? false;
   const [expanded, setExpanded] = useState(true);
@@ -50,7 +69,7 @@ function OrgTreeNodeItem({
           </span>
         )}
         {!hasOrgChildren && <span className="w-4 shrink-0" />}
-        <span className="truncate">{node.label}</span>
+        <HighlightLabel text={node.label} highlight={searchText} />
       </button>
       {expanded && node.children
         ?.filter((c) => c.type >= 10)
@@ -63,33 +82,71 @@ function OrgTreeNodeItem({
             onSelect={onSelect}
             selectedOrgId={selectedOrgId}
             disabled={disabled}
+            searchText={searchText}
           />
         ))}
     </div>
   );
 }
 
-export default function OrgTreePanel({ treeData, onSelectOrgNode, selectedOrgId, disabled }: OrgTreePanelProps) {
-  const rootOrgNodes = treeData.filter((n) => n.type >= 10);
+function HighlightLabel({ text, highlight }: { text: string; highlight: string }) {
+  if (!highlight) return <span className="truncate">{text}</span>;
+  const lower = highlight.toLowerCase();
+  const idx = text.toLowerCase().indexOf(lower);
+  if (idx === -1) return <span className="truncate">{text}</span>;
+  return (
+    <span className="truncate">
+      {text.slice(0, idx)}
+      <span className="bg-yellow-200 dark:bg-yellow-800 rounded-sm">
+        {text.slice(idx, idx + highlight.length)}
+      </span>
+      {text.slice(idx + highlight.length)}
+    </span>
+  );
+}
 
-  if (rootOrgNodes.length === 0) {
-    return <div className="p-4 text-center text-xs text-muted-foreground">无组织数据</div>;
-  }
+export default function OrgTreePanel({ treeData, onSelectOrgNode, selectedOrgId, disabled }: OrgTreePanelProps) {
+  const [searchText, setSearchText] = useState("");
+
+  const rootOrgNodes = useMemo(() => {
+    const roots = treeData.filter((n) => n.type >= 10);
+    const lower = searchText.trim().toLowerCase();
+    if (!lower) return roots;
+    return filterTree(roots, lower);
+  }, [treeData, searchText]);
 
   return (
-    <div className="h-full overflow-y-auto">
-      {rootOrgNodes
-        .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0))
-        .map((node) => (
-          <OrgTreeNodeItem
-            key={node.id}
-            node={node}
-            depth={0}
-            onSelect={onSelectOrgNode}
-            selectedOrgId={selectedOrgId}
-            disabled={disabled}
-          />
-        ))}
+    <div className="flex h-full flex-col">
+      <div className="border-b px-2 py-1.5">
+        <input
+          type="text"
+          className="w-full rounded border bg-background px-2 py-1 text-xs outline-none focus:border-primary/50"
+          placeholder="搜索..."
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+        />
+      </div>
+      <div className="flex-1 overflow-y-auto">
+        {rootOrgNodes.length === 0 ? (
+          <div className="p-4 text-center text-xs text-muted-foreground">
+            {searchText ? "无匹配结果" : "无组织数据"}
+          </div>
+        ) : (
+          rootOrgNodes
+            .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0))
+            .map((node) => (
+              <OrgTreeNodeItem
+                key={node.id}
+                node={node}
+                depth={0}
+                onSelect={onSelectOrgNode}
+                selectedOrgId={selectedOrgId}
+                disabled={disabled}
+                searchText={searchText.trim()}
+              />
+            ))
+        )}
+      </div>
     </div>
   );
 }

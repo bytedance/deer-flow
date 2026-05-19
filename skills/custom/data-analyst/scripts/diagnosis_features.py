@@ -28,7 +28,7 @@ import json
 import os
 import re
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
@@ -574,7 +574,7 @@ def build_features(
         "report_meta": {
             "kind": query_payload.get("kind", ""),
             "rules_skill": rules_skill,
-            "generated_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "data_source": query_payload.get("data_source", ""),
         },
         "equipment_summary": equipment_summary,

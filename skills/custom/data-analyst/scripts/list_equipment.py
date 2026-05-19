@@ -4,16 +4,20 @@
 Returns matched equipment list and available KPIs by equipment type,
 scope (all/area/specific), and optional filter.
 
-When no real API is configured the script returns deterministic demo
-data (4 types, 4 areas, ~2200 devices total).
+Data source priority:
+  1. Organize tree API (when DEER_FLOW_EFFECTIVE_USER_ID is set)
+  2. Demo fallback (deterministic synthetic data, always available)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import urllib.error
+import urllib.request
 
 VALID_TYPES = {"all", "static_equipment", "rotating_machinery", "pump", "reciprocating_machinery"}
 VALID_SCOPES = {"all", "area", "specific"}
@@ -43,6 +47,21 @@ TYPE_COUNT = {
 }
 
 AREAS = ["A区", "B区", "C区", "D区"]
+
+# Map organize tree device type numbers → equipment type keys
+_ORG_TYPE_MAP: dict[int, str] = {
+    1: "rotating_machinery",
+    4: "pump",
+    6: "static_equipment",
+    9: "reciprocating_machinery",
+}
+
+_SUB_TYPE_NAMES: dict[int, str] = {
+    1: "旋转机组",
+    4: "机泵",
+    6: "静设备",
+    9: "往复机组",
+}
 
 EQUIPMENT_TYPE_KPIS: dict[str, list[str]] = {
     "all": [
@@ -87,6 +106,142 @@ SUB_TYPES: dict[str, list[str]] = {
     "pump": ["离心泵", "柱塞泵", "螺杆泵", "齿轮泵"],
     "reciprocating_machinery": ["往复压缩机", "往复泵", "柴油机", "气缸"],
 }
+
+
+# ---------------------------------------------------------------------------
+# Organize API data fetch (real data path)
+# ---------------------------------------------------------------------------
+
+
+def _get_gateway_url() -> str:
+    return os.environ.get("DEER_FLOW_GATEWAY_URL", "http://localhost:8001")
+
+
+def _collect_devices(node: dict, parent_area: str) -> list[dict]:
+    """Recursively collect type<10 device nodes from an organize tree node."""
+    devices: list[dict] = []
+    node_type = node.get("type", 0)
+    node_label = node.get("label", "")
+    area = node_label if node_type >= 10 else parent_area
+
+    if node_type < 10:
+        eq_type = _ORG_TYPE_MAP.get(node_type, "static_equipment")
+        sub_type = _SUB_TYPE_NAMES.get(node_type, "未知")
+        devices.append({
+            "id": str(node.get("id", "")),
+            "name": node_label,
+            "area": parent_area,
+            "sub_type": sub_type,
+            "org_type": eq_type,
+        })
+
+    for child in node.get("children", []) or []:
+        devices.extend(_collect_devices(child, area))
+
+    return devices
+
+
+def _fetch_org_tree(user_id: str) -> list[dict] | None:
+    """Fetch the organize device tree from Gateway for the given user."""
+    url = f"{_get_gateway_url()}/api/organize/tree?userId={user_id}&orgId=0&treeType=1"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("Accept", "application/json")
+        internal_token = os.environ.get("DEER_FLOW_INTERNAL_AUTH_VALUE")
+        if internal_token:
+            req.add_header("X-DeerFlow-Internal-Token", internal_token)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read(1_048_576)
+            data = json.loads(raw.decode("utf-8"))
+            if isinstance(data, list):
+                return data
+            print(f"[list_equipment] Organize API returned non-list: {type(data).__name__}", file=sys.stderr)
+            return None
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read(4096).decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"[list_equipment] Organize API HTTP {e.code}: {body}", file=sys.stderr)
+        return None
+    except urllib.error.URLError as e:
+        print(f"[list_equipment] Organize API unreachable: {e.reason}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"[list_equipment] Organize API error: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+
+def _query_from_org_tree(
+    user_id: str,
+    eq_type: str = "all",
+    scope: str = "all",
+    filter_str: str = "",
+    limit: int = 50,
+) -> dict | None:
+    """Query equipment from the organize tree API.
+
+    Returns None when the API is unreachable (caller falls back to demo).
+    """
+    tree = _fetch_org_tree(user_id)
+    if tree is None:
+        return None
+
+    # Flatten tree: collect all type<10 device nodes.
+    all_devices: list[dict] = []
+    for root_node in tree:
+        all_devices.extend(_collect_devices(root_node, ""))
+
+    # Filter by equipment type.
+    if eq_type != "all":
+        all_devices = [d for d in all_devices if d.get("org_type") == eq_type]
+
+    # Filter by scope.
+    filter_values = _parse_csv(filter_str)
+    if scope == "area" and filter_values:
+        area_set = set(filter_values)
+        all_devices = [d for d in all_devices if d.get("area") in area_set]
+    elif scope == "specific" and filter_values:
+        id_set = set(filter_values)
+        all_devices = [d for d in all_devices if d["id"] in id_set]
+
+    total_matched = len(all_devices)
+    total_in_type = total_matched
+
+    truncated = total_matched > limit
+    display_equipment = all_devices[:limit]
+
+    filter_display = filter_str if filter_str else ("全部" if scope == "all" else "")
+
+    area_counts: dict[str, int] = {}
+    areas: list[str] = []
+    for d in all_devices:
+        area = d.get("area", "")
+        if area not in area_counts:
+            area_counts[area] = 0
+            areas.append(area)
+        area_counts[area] += 1
+
+    return {
+        "equipment_type": eq_type,
+        "type_display": TYPE_DISPLAY.get(eq_type, eq_type),
+        "scope": scope,
+        "filter_display": filter_display,
+        "total_matched": total_matched,
+        "total_in_type": total_in_type,
+        "areas": areas,
+        "area_counts": area_counts,
+        "equipment": display_equipment,
+        "equipment_truncated": truncated,
+        "available_kpis": _build_available_kpis(eq_type),
+        "data_source": "organize_api",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Demo data generators (fallback)
+# ---------------------------------------------------------------------------
 
 
 def _demo_equipment_for_type(eq_type: str) -> list[dict]:
@@ -187,9 +342,22 @@ def query_equipment(
 ) -> dict:
     """Query equipment catalog. Returns result dict matching design doc §4.1.
 
-    Data source priority: MCP data catalog → http_connector → demo fallback.
-    Currently only the demo fallback is implemented.
+    Data source priority: organize API (real) → demo fallback.
     """
+    # Try real organize API when user context is available.
+    user_id = os.environ.get("DEER_FLOW_EFFECTIVE_USER_ID")
+    if user_id:
+        result = _query_from_org_tree(
+            user_id=user_id,
+            eq_type=eq_type,
+            scope=scope,
+            filter_str=filter_str,
+            limit=limit,
+        )
+        if result is not None:
+            return result
+
+    # Demo fallback.
     all_equipment = _get_all_demo_equipment(eq_type)
     filter_values = _parse_csv(filter_str)
     matched = _filter_by_scope(all_equipment, scope, filter_values)
@@ -219,6 +387,8 @@ def query_equipment(
         "equipment": display_equipment,
         "equipment_truncated": truncated,
         "available_kpis": _build_available_kpis(eq_type),
+        "data_source": "demo_fallback",
+        "warning": "未设置 DEER_FLOW_EFFECTIVE_USER_ID 或组织树 API 不可达，使用演示数据",
     }
 
 

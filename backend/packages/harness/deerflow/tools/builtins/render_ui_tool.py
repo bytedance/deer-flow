@@ -9,7 +9,7 @@ from langgraph.config import get_config, get_stream_writer
 from deerflow.tools.render_ui_metrics import get_render_ui_metrics
 
 ALLOWED_COMPONENTS = frozenset(
-    {"chart", "echart", "table", "card", "form", "confirm", "code", "timeline", "markdown", "layout", "image"}
+    {"chart", "echart", "table", "card", "form", "confirm", "code", "timeline", "markdown", "layout", "image", "device-selector", "device-selector-multi"}
 )
 
 ALLOWED_ACTIONS = frozenset({"create", "update", "delete"})

@@ -230,9 +230,10 @@ const statusPropsSchema = z.object({
 // ─── Device selector schemas ──────────────────────────────────────
 
 const deviceQueryParamsSchema = z.object({
-  userId: z.number().optional(),
+  userId: z.string().optional(),
   orgId: z.number().optional(),
   treeType: z.number().optional(),
+  typeId: z.number().optional(),
 });
 
 const deviceSelectorPropsSchema = z.object({

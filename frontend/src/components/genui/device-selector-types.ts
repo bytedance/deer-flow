@@ -18,7 +18,8 @@ export interface SelectedDevice {
 }
 
 export interface DeviceQueryParams {
-  userId?: number;
+  userId?: string;
   orgId?: number;
   treeType?: number;
+  typeId?: number;
 }

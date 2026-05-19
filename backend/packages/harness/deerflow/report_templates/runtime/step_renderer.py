@@ -99,8 +99,11 @@ def build_form_props(
 def build_context(state: RuntimeState) -> dict[str, Any]:
     """Construct the JSONPath context for the current state.
 
-    Mirrors §5.6: keys are ``form`` / ``steps`` / ``run`` / ``template``.
+    Mirrors §5.6: keys are ``form`` / ``steps`` / ``run`` / ``template`` / ``auth``.
     """
+    from deerflow.config.tenant import get_current_tenant_id
+    from deerflow.runtime.user_context import get_effective_user_id
+
     return {
         "form": state.form_state,
         "steps": state.step_outputs,
@@ -113,6 +116,10 @@ def build_context(state: RuntimeState) -> dict[str, Any]:
             "id": state.template_id,
             "version": state.template_version,
             "name": "",  # set by tools that have the DSL handy
+        },
+        "auth": {
+            "user_id": get_effective_user_id(),
+            "tenant_id": get_current_tenant_id(),
         },
     }
 

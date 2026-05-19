@@ -431,7 +431,22 @@ def run_script(
     )
 
     # 4. Run with timeout + resource caps.
+    import os as _os
     import time
+
+    # Inject user context as env vars so scripts can call auth-aware Gateway endpoints.
+    subprocess_env = dict(_os.environ)
+    auth_ctx = context.get("auth") if isinstance(context, dict) else None
+    if isinstance(auth_ctx, dict):
+        effective_user_id = auth_ctx.get("user_id")
+        if effective_user_id is not None:
+            subprocess_env["DEER_FLOW_EFFECTIVE_USER_ID"] = str(effective_user_id)
+        tenant_id = auth_ctx.get("tenant_id")
+        if tenant_id is not None:
+            subprocess_env["DEER_FLOW_TENANT_ID"] = str(tenant_id)
+        internal_token = auth_ctx.get("_internal_token")
+        if internal_token is not None:
+            subprocess_env["DEER_FLOW_INTERNAL_AUTH_VALUE"] = str(internal_token)
 
     started = time.time()
     try:
@@ -439,16 +454,12 @@ def run_script(
             cli,
             capture_output=True,
             text=True,
-            # Force UTF-8 decoding so scripts emitting Chinese / non-ASCII output
-            # don't blow up on Windows (where the default locale codec is GBK).
-            # ``errors='replace'`` keeps stdout/stderr non-None even when the
-            # script emits invalid bytes — otherwise ``completed.stderr`` lands
-            # as ``None`` and the error-extraction path below ``TypeError``s.
             encoding="utf-8",
             errors="replace",
             timeout=descriptor.timeout_seconds,
             cwd=descriptor.skill_dir,
             check=False,
+            env=subprocess_env,
             preexec_fn=_make_resource_limit(descriptor.max_output_bytes) if _can_setrlimit() else None,
         )
     except subprocess.TimeoutExpired as e:

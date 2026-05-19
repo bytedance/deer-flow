@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from deerflow.rpc.organize_service import OrganizeServiceClient
 
@@ -22,9 +22,42 @@ def _get_client() -> OrganizeServiceClient:
     return _client
 
 
+def _resolve_user_id(request: Request, query_user_id: str | None) -> int:
+    """Resolve the effective user_id for the organize tree query.
+
+    Priority:
+    1. Explicit query param (admin override / API key scenarios)
+    2. Authenticated user from request.state.user
+    3. Fallback to 1 (backward compat)
+
+    Uses Python's int() for conversion so large IDs (exceeding JS
+    MAX_SAFE_INTEGER) are not truncated.
+    """
+    if query_user_id is not None:
+        try:
+            return int(query_user_id)
+        except (ValueError, TypeError):
+            pass
+
+    state_user = getattr(getattr(request, "state", None), "user", None)
+    if state_user is not None:
+        if isinstance(state_user, dict):
+            raw_id = state_user.get("id")
+        else:
+            raw_id = getattr(state_user, "id", None)
+        if raw_id is not None:
+            try:
+                return int(raw_id)
+            except (ValueError, TypeError):
+                pass
+
+    return 1
+
+
 @router.get("/tree")
 async def get_org_tree(
-    user_id: int = Query(1, alias="userId", description="用户id"),
+    request: Request,
+    user_id: str | None = Query(None, alias="userId", description="用户id（可选，默认从认证上下文获取）"),
     org_id: int = Query(0, alias="orgId", description="组织id"),
     tree_type: int = Query(1, alias="treeType", description="结构类型（0：结构树 1：设备树）"),
     content: str | None = Query(None, description="搜索内容"),
@@ -36,11 +69,14 @@ async def get_org_tree(
     """获取用户权限下某一组织的结构树。
 
     Proxies to ins-bus-rpc /organize/getOrgTreeByUserIdAndOrgId.
+    When ``userId`` is omitted the effective user is resolved from the
+    authenticated request context (cookie / Bearer token).
     """
+    resolved_user_id = _resolve_user_id(request, user_id)
     try:
         client = _get_client()
         return await client.get_org_tree_by_user_id_and_org_id(
-            user_id=user_id,
+            user_id=resolved_user_id,
             org_id=org_id,
             tree_type=tree_type,
             content=content,

@@ -9,7 +9,7 @@
 - **严格读取 `ui_interaction.payload`**：表单字段位于 `payload` 顶层，不在 `values` 中。
 - **同一线程可能多次诊断**：回溯 `ui_interaction` 历史时只能使用**当前消息之前最近一次**匹配的回调消息，绝不能复用更早轮次参数。
 - **输出路径固定**：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
-- 只使用已注册 GenUI 组件 `form` / `card` / `echart` / `table` / `markdown`，无后端路由、无前端组件变更。
+- 只使用已注册 GenUI 组件 `form` / `card` / `echart` / `table` / `markdown` / `device-selector-multi`，无后端路由、无前端组件变更。
 - **严禁输出结构化会话摘要**：不要输出 `SESSION INTENT` / `SUMMARY` / `ARTIFACTS` / `NEXT STEPS` 等章节标题。你的回复只应包含简短引导语（如"请填写参数后提交"）或诊断报告正文，不要附加任何结构化元信息。
 - **严禁对中间产物调用 `present_files`**：仅对 `diagnosis_report.md` / `diagnosis_report.pdf` 调用 `present_files`，不要暴露 `query_diagnosis.json` / `diagnosis_features.json` / `spectrum_*.json` / `orbit_*.json`。
 - **严禁套用日报全选惯例**：本诊断 Round 1.5 默认勾选最多 5 台（不是全选），避免 InS 深度采样 token 失控。
@@ -92,7 +92,7 @@
 
 调用后只回复一句"请填写诊断参数后提交。"并立即停止。**严禁在此轮渲染后续表单或调用任何脚本**。
 
-## Round 1 回调：查询设备并渲染 Round 1.5 设备 / 测点表单
+## Round 1 回调：渲染设备选择器
 
 当收到 `ui_interaction` 且 `callback_id` 为 `fd-pump-scope` 时：
 
@@ -107,17 +107,59 @@
 
    任一校验失败时渲染 `markdown` 提示用户重提，并停止后续步骤。
 
-3. 调用设备目录查询脚本（与日报共用）：
+3. 渲染 `device-selector-multi` 组件，让用户在真实组织树中浏览并选择诊断目标设备：
+
+```json
+{
+  "component": "device-selector-multi",
+  "action": "create",
+  "interactive": true,
+  "callback_id": "fd-pump-device",
+  "callback_timeout_ms": 600000,
+  "props": {
+    "title": "机泵故障诊断 · 第 2 步：选择诊断目标设备",
+    "queryParams": {"orgId": 0, "treeType": 1, "typeId": 4},
+    "maxSelect": 5
+  }
+}
+```
+
+> **参数说明**：`typeId=4` 过滤为机泵类型设备。`maxSelect=5` 限制最多选 5 台，避免 InS 深度采样 token 失控。
+
+渲染后只回复一句"请在左侧组织树中选择设备后提交。"并立即停止。**严禁在此轮渲染后续表单或调用任何脚本**。
+
+## Round 1.5a 回调：查询测点树并渲染测点选择表单
+
+当收到 `ui_interaction` 且 `callback_id` 为 `fd-pump-device` 时：
+
+1. 从 `payload.selected` 提取设备列表（`Array<{id: string, label: string, type: number, path: string}>`）。
+2. 校验：`selected` 至少 1 个，每个设备 `id` 必须匹配 `[A-Za-z0-9_-]+`。校验失败时渲染 `markdown` 提示用户重试。
+3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。
+4. 对每个设备调用 `ins-device-analysis` 获取子设备/测点树：
 
    ```bash
-   python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
-     --type "pump" \
-     --scope all \
-     --limit 10000
+   bash /mnt/skills/custom/ins-device-analysis/scripts/run.sh {device_id}
    ```
 
-4. 读取脚本输出的 `equipment` 列表，按 `equipment_kind` 过滤（容积泵 vs 离心泵）。如果脚本未返回 `kind` 字段，按设备 `name` 关键字粗略匹配（"离心" / "螺杆" / "齿轮" / "柱塞"），未识别的归入"未分类"分组。
-5. 动态生成 Round 1.5 表单。**默认勾选最多 5 台**（按 `area` 字段分组排序后取前 5）：
+   如果调用失败（脚本返回非 0 退出码或无 JSON 输出），记录到 warnings 但不中止流程——回退到标准机泵全量测点列表。
+
+5. 从每个设备的 `child_device_list` 中提取测点名称，按以下标准机泵测点映射去重合并：
+
+   | 测点关键字匹配 | value |
+   | ---- | ---- |
+   | 驱动端 X 向轴振 / DE X / 驱动端 X | `vib_de_x` |
+   | 驱动端 Y 向轴振 / DE Y / 驱动端 Y | `vib_de_y` |
+   | 非驱动端 X 向轴振 / NDE X / 非驱动端 X | `vib_nde_x` |
+   | 非驱动端 Y 向轴振 / NDE Y / 非驱动端 Y | `vib_nde_y` |
+   | 出口压力 / 排出压力 | `discharge_pressure` |
+   | 入口压力 / 吸入压力 | `suction_pressure` |
+   | 流量 | `flow_rate` |
+   | 电机电流 | `motor_current` |
+   | 轴承温度 | `bearing_temperature` |
+
+   **仅保留在任一设备 `child_device_list` 中实际匹配到的测点**。如果 `ins-device-analysis` 全部失败，回退到全量 9 项标准列表。
+
+6. 动态生成测点选择表单（默认全选所有可用测点）：
 
 ```json
 {
@@ -127,20 +169,9 @@
   "callback_id": "fd-pump-target",
   "callback_timeout_ms": 600000,
   "props": {
-    "title": "机泵故障诊断 · 第 2 步：选择设备与测点",
-    "description": "已匹配 {type_display} · {total_matched} 台。**默认勾选前 5 台**避免 InS 深度采样 token 失控；如需全选请手动确认。下一步将选择故障家族焦点。",
+    "title": "机泵故障诊断 · 第 3 步：选择关键测点",
+    "description": "已选 {count} 台设备：{labels_csv}。以下测点从 InS 设备树中动态提取，请确认需要采集的测点。",
     "fields": [
-      {
-        "name": "equipment_ids",
-        "label": "设备列表",
-        "type": "multi-select",
-        "searchable": true,
-        "max_visible": 10,
-        "options": [
-          {"label": "PUMP-A-001", "value": "PUMP-A-001", "group": "A 区", "description": "进料离心泵"},
-          {"label": "PUMP-A-002", "value": "PUMP-A-002", "group": "A 区", "description": "回流离心泵"}
-        ]
-      },
       {
         "name": "key_points",
         "label": "关键测点",
@@ -159,7 +190,6 @@
       }
     ],
     "default_values": {
-      "equipment_ids": ["PUMP-A-001", "PUMP-A-002", "PUMP-A-003", "PUMP-A-004", "PUMP-A-005"],
       "key_points": ["vib_de_x", "vib_de_y", "discharge_pressure", "suction_pressure", "flow_rate", "motor_current"]
     },
     "submit_label": "下一步：选择故障家族焦点"
@@ -167,18 +197,18 @@
 }
 ```
 
-渲染表单后停止，等待用户提交。**严禁在此轮渲染 Round 2 表单**，用户尚未确认设备 / 测点。
+> **`options` 和 `default_values` 都必须从实际匹配到的测点动态生成**——不要列出未匹配到的测点。上例为全量 9 项，实际使用时根据步骤 5 结果裁剪。
 
-## Round 1.5 回调：渲染 Round 2 故障家族焦点表单
+渲染表单后停止，等待用户提交。**严禁在此轮渲染 Round 2 表单**。
+
+## Round 1.5b 回调：渲染故障家族焦点表单
 
 当收到 `ui_interaction` 且 `callback_id` 为 `fd-pump-target` 时：
 
-1. 从 `payload` 顶层读取 `equipment_ids`（`string[]`）、`key_points`（`string[]`）。
-2. 校验：
-   - 每个设备 ID 必须匹配 `[A-Za-z0-9_-]+`。
-   - `equipment_ids` 至少一个；`key_points` 至少两个。
-   - 任一校验失败时渲染 `markdown` 提示用户重提，并停止后续步骤。
-3. 不需要回溯 Round 1 参数，直接渲染 Round 2 表单。**严禁在此轮直接调用脚本**。
+1. 从 `payload` 顶层读取 `key_points`（`string[]`）。
+2. 校验：`key_points` 至少两个。校验失败时渲染 `markdown` 提示用户重提，并停止后续步骤。
+3. 设备 ID 已在 Round 1.5a 步骤收集（从 `fd-pump-device` 回调的 `payload.selected`），本步骤不需要再次收集。
+4. 直接渲染 Round 2 故障家族焦点表单。**严禁在此轮直接调用脚本**。
 
 ```json
 {
@@ -221,10 +251,11 @@
 
 ### 步骤 1：回溯历史，组装参数
 
-**从对话历史中回溯找到"当前消息之前最近一次"的 `callback_id=fd-pump-scope` 和 `callback_id=fd-pump-target` 的 `ui_interaction` 消息**，分别提取参数：
+**从对话历史中回溯找到"当前消息之前最近一次"的 `callback_id=fd-pump-scope`、`callback_id=fd-pump-device` 和 `callback_id=fd-pump-target` 的 `ui_interaction` 消息**，分别提取参数：
 
 - Round 1 参数：`start_date`、`start_hour`、`end_date`、`end_hour`、`equipment_kind`、`mode`、`compare_with`
-- Round 1.5 参数：`equipment_ids`、`key_points`
+- Round 1.5a 参数：`selected`（`Array<{id, label, type, path}>`，提取 `equipment_ids = selected.map(s => s.id)`）
+- Round 1.5b 参数：`key_points`
 
 如果历史中存在更早轮次的同名回调，全部忽略，只使用最近一次匹配结果。
 

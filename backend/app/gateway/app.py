@@ -539,6 +539,12 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
     app.add_middleware(AuthMiddleware)
 
+    # Expose internal auth token so subprocess scripts (e.g. list_equipment.py)
+    # can call Gateway APIs without user credentials.
+    from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, create_internal_auth_headers
+
+    os.environ["DEER_FLOW_INTERNAL_AUTH_VALUE"] = create_internal_auth_headers()[INTERNAL_AUTH_HEADER_NAME]
+
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)
 

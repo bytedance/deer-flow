@@ -9,7 +9,7 @@
 - **严格读取 `ui_interaction.payload`**：表单字段位于 `payload` 顶层，不在 `values` 中。
 - **同一线程可能多次诊断**：回溯 `ui_interaction` 历史时只能使用**当前消息之前最近一次**匹配的回调消息，绝不能复用更早轮次参数。
 - **输出路径固定**：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
-- 只使用已注册 GenUI 组件 `form` / `card` / `echart` / `table` / `markdown`，无后端路由、无前端组件变更。
+- 只使用已注册 GenUI 组件 `form` / `card` / `echart` / `table` / `markdown` / `device-selector-multi`，无后端路由、无前端组件变更。
 - **严禁输出结构化会话摘要**：不要输出 `SESSION INTENT` / `SUMMARY` / `ARTIFACTS` / `NEXT STEPS` 等章节标题。你的回复只应包含简短引导语（如"请填写参数后提交"）或诊断报告正文，不要附加任何结构化元信息。
 - **严禁对中间产物调用 `present_files`**：仅对 `diagnosis_report.md` / `diagnosis_report.pdf` 调用 `present_files`，不要暴露 `query_diagnosis.json` / `diagnosis_features.json` / `spectrum_*.json`。
 - **严禁套用日报全选惯例**：本诊断 Round 1.5 默认勾选最多 5 台（不是全选），避免 InS 深度采样 token 失控。
@@ -94,7 +94,7 @@
 
 调用后只回复一句"请填写诊断参数后提交。"并立即停止。**严禁在此轮渲染后续表单或调用任何脚本**。
 
-## Round 1 回调：查询设备并渲染 Round 1.5 设备 / 测点表单
+## Round 1 回调：渲染设备选择器
 
 当收到 `ui_interaction` 且 `callback_id` 为 `fd-reciprocating-scope` 时：
 
@@ -109,17 +109,60 @@
 
    任一校验失败时渲染 `markdown` 提示用户重提，并停止后续步骤。
 
-3. 调用设备目录查询脚本（与日报共用）：
+3. 渲染 `device-selector-multi` 组件，让用户在真实组织树中浏览并选择诊断目标设备：
+
+```json
+{
+  "component": "device-selector-multi",
+  "action": "create",
+  "interactive": true,
+  "callback_id": "fd-reciprocating-device",
+  "callback_timeout_ms": 600000,
+  "props": {
+    "title": "往复机故障诊断 · 第 2 步：选择诊断目标设备",
+    "queryParams": {"orgId": 0, "treeType": 1, "typeId": 9},
+    "maxSelect": 5
+  }
+}
+```
+
+> **参数说明**：`typeId=9` 过滤为往复机组类型设备。`maxSelect=5` 限制最多选 5 台，避免 InS 深度采样 token 失控。
+
+渲染后只回复一句"请在左侧组织树中选择设备后提交。"并立即停止。**严禁在此轮渲染后续表单或调用任何脚本**。
+
+## Round 1.5a 回调：查询测点树并渲染测点选择表单
+
+当收到 `ui_interaction` 且 `callback_id` 为 `fd-reciprocating-device` 时：
+
+1. 从 `payload.selected` 提取设备列表（`Array<{id: string, label: string, type: number, path: string}>`）。
+2. 校验：`selected` 至少 1 个，每个设备 `id` 必须匹配 `[A-Za-z0-9_-]+`。校验失败时渲染 `markdown` 提示用户重试。
+3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。
+4. 对每个设备调用 `ins-device-analysis` 获取子设备/测点树：
 
    ```bash
-   python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
-     --type "reciprocating_machinery" \
-     --scope all \
-     --limit 10000
+   bash /mnt/skills/custom/ins-device-analysis/scripts/run.sh {device_id}
    ```
 
-4. 读取脚本输出的 `equipment` 列表，按 `equipment_kind` 过滤。如果脚本未返回 `kind` 字段，按设备 `name` 关键字粗略匹配（"往复" / "活塞" / "曲轴"），未识别的归入"未分类"分组。
-5. 动态生成 Round 1.5 表单。**默认勾选最多 5 台**：
+   如果调用失败（脚本返回非 0 退出码或无 JSON 输出），记录到 warnings 但不中止流程——回退到标准往复机全量测点列表。
+
+5. 从每个设备的 `child_device_list` 中提取测点名称，按以下标准往复机测点映射去重合并：
+
+   | 测点关键字匹配 | value |
+   | ---- | ---- |
+   | 缸盖振动 / 缸头振动 | `cylinder_head_vibration` |
+   | 曲轴箱振动 | `crankcase_vibration` |
+   | 缸内压力 / 缸压 / PV | `cylinder_pressure` |
+   | 曲轴角 / 曲轴参考 / 编码器 | `crank_angle` |
+   | 活塞杆下沉 / 杆沉降 | `piston_rod_droop` |
+   | 卸荷阀 / 卸荷器 | `unloader_state` |
+   | 阀盖温度 | `valve_cover_temperature` |
+   | 电机电流 | `motor_current` |
+
+   **仅保留在任一设备 `child_device_list` 中实际匹配到的测点**。如果 `ins-device-analysis` 全部失败，回退到全量 8 项标准列表。
+
+   > **特别注意**：如果 `crank_angle` 在所有设备的 `child_device_list` 中均未匹配到，必须在后续 Round 1.5b 表单的 `description` 中显式警告"未检测到曲轴角参考测点，诊断将退化为基于时域趋势的初判"。
+
+6. 动态生成测点选择表单（默认全选所有可用测点）：
 
 ```json
 {
@@ -129,20 +172,9 @@
   "callback_id": "fd-reciprocating-target",
   "callback_timeout_ms": 600000,
   "props": {
-    "title": "往复机故障诊断 · 第 2 步：选择设备与测点",
-    "description": "已匹配 {type_display} · {total_matched} 台。**默认勾选前 5 台**避免 InS 深度采样 token 失控；如需全选请手动确认。下一步将选择故障家族焦点。",
+    "title": "往复机故障诊断 · 第 3 步：选择关键测点",
+    "description": "已选 {count} 台设备：{labels_csv}。以下测点从 InS 设备树中动态提取，请确认需要采集的测点。{crank_angle_warning}",
     "fields": [
-      {
-        "name": "equipment_ids",
-        "label": "设备列表",
-        "type": "multi-select",
-        "searchable": true,
-        "max_visible": 10,
-        "options": [
-          {"label": "RC-101", "value": "RC-101", "group": "A 区", "description": "1# 往复式压缩机"},
-          {"label": "RC-102", "value": "RC-102", "group": "A 区", "description": "2# 往复式压缩机"}
-        ]
-      },
       {
         "name": "key_points",
         "label": "关键测点",
@@ -160,31 +192,25 @@
       }
     ],
     "default_values": {
-      "equipment_ids": ["RC-101", "RC-102", "RC-103", "RC-104", "RC-105"],
-      "key_points": [
-        "cylinder_head_vibration", "crankcase_vibration", "cylinder_pressure",
-        "crank_angle", "piston_rod_droop", "unloader_state", "motor_current"
-      ]
+      "key_points": ["cylinder_head_vibration", "crankcase_vibration", "cylinder_pressure", "crank_angle", "piston_rod_droop", "unloader_state", "motor_current"]
     },
     "submit_label": "下一步：选择故障家族焦点"
   }
 }
 ```
 
-> **测点缺失提示**：往复机诊断**强依赖** `crank_angle`（曲轴角参考）和 `cylinder_pressure`（缸内压力）。如目标设备 InS 树中缺失 `crank_angle`，最终诊断将退化为"基于时域趋势的初判"——SOUL 必须在最终报告 §3 证据链顶部明确说明"缺失曲轴角参考，阀门 / 缸压判据不可用"，不要给出阀门 / 活塞环 / 缸压相关结论。
+> **`options` 和 `default_values` 都必须从实际匹配到的测点动态生成**——不要列出未匹配到的测点。上例为全量 8 项，实际使用时根据步骤 5 结果裁剪。
 
-渲染表单后停止，等待用户提交。**严禁在此轮渲染 Round 2 表单**，用户尚未确认设备 / 测点。
+渲染表单后停止，等待用户提交。**严禁在此轮渲染 Round 2 表单**。
 
-## Round 1.5 回调：渲染 Round 2 故障家族焦点表单
+## Round 1.5b 回调：渲染故障家族焦点表单
 
-当收到 `ui_interaction` 且 `callback_id` 为 `fd-reciprocating-target` 时:
+当收到 `ui_interaction` 且 `callback_id` 为 `fd-reciprocating-target` 时：
 
-1. 从 `payload` 顶层读取 `equipment_ids`（`string[]`）、`key_points`（`string[]`）。
-2. 校验：
-   - 每个设备 ID 必须匹配 `[A-Za-z0-9_-]+`。
-   - `equipment_ids` 至少一个；`key_points` 至少两个。
-   - 任一校验失败时渲染 `markdown` 提示用户重提，并停止后续步骤。
-3. 不需要回溯 Round 1 参数，直接渲染 Round 2 表单。**严禁在此轮直接调用脚本**。
+1. 从 `payload` 顶层读取 `key_points`（`string[]`）。
+2. 校验：`key_points` 至少两个。校验失败时渲染 `markdown` 提示用户重提，并停止后续步骤。
+3. 设备 ID 已在 Round 1.5a 步骤收集（从 `fd-reciprocating-device` 回调的 `payload.selected`），本步骤不需要再次收集。
+4. 直接渲染 Round 2 故障家族焦点表单。**严禁在此轮直接调用脚本**。
 
 ```json
 {
@@ -229,10 +255,11 @@
 
 ### 步骤 1：回溯历史，组装参数
 
-**从对话历史中回溯找到"当前消息之前最近一次"的 `callback_id=fd-reciprocating-scope` 和 `callback_id=fd-reciprocating-target` 的 `ui_interaction` 消息**，分别提取参数：
+**从对话历史中回溯找到"当前消息之前最近一次"的 `callback_id=fd-reciprocating-scope`、`callback_id=fd-reciprocating-device` 和 `callback_id=fd-reciprocating-target` 的 `ui_interaction` 消息**，分别提取参数：
 
 - Round 1 参数：`start_date`、`start_hour`、`end_date`、`end_hour`、`equipment_kind`、`mode`、`compare_with`
-- Round 1.5 参数：`equipment_ids`、`key_points`
+- Round 1.5a 参数：`selected`（`Array<{id, label, type, path}>`，提取 `equipment_ids = selected.map(s => s.id)`）
+- Round 1.5b 参数：`key_points`
 
 如果历史中存在更早轮次的同名回调，全部忽略，只使用最近一次匹配结果。
 

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { useAuth } from "@/core/auth/AuthProvider";
 import type { InteractionState } from "@/core/genui/store";
 
 import type { DeviceQueryParams, OrgTreeNode, SelectedDevice } from "./device-selector-types";
@@ -57,6 +58,7 @@ function getBaseUrl(): string {
 export default function DeviceSelectorBlock({ block }: DeviceSelectorBlockProps) {
   const { block_id, props, callback_id, interactionState, onInteraction } = block;
   const { title, queryParams } = props;
+  const { user } = useAuth();
 
   const [treeData, setTreeData] = useState<OrgTreeNode[]>([]);
   const [loading, setLoading] = useState(true);
@@ -75,9 +77,13 @@ export default function DeviceSelectorBlock({ block }: DeviceSelectorBlockProps)
     setFetchError(null);
     try {
       const params = new URLSearchParams();
-      params.set("userId", String(queryParams?.userId ?? 1));
+      const userId = queryParams?.userId ?? user?.id ?? "1";
+      params.set("userId", userId);
       params.set("orgId", String(queryParams?.orgId ?? 0));
       params.set("treeType", String(queryParams?.treeType ?? 1));
+      if (queryParams?.typeId != null) {
+        params.set("typeId", String(queryParams.typeId));
+      }
       const baseUrl = getBaseUrl();
       const res = await fetch(`${baseUrl}/api/organize/tree?${params.toString()}`);
       if (!res.ok) {
@@ -90,7 +96,7 @@ export default function DeviceSelectorBlock({ block }: DeviceSelectorBlockProps)
     } finally {
       setLoading(false);
     }
-  }, [queryParams?.userId, queryParams?.orgId, queryParams?.treeType]);
+  }, [queryParams?.userId, queryParams?.orgId, queryParams?.treeType, queryParams?.typeId, user]);
 
   useEffect(() => {
     void fetchTree();
