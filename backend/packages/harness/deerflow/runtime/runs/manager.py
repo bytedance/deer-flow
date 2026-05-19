@@ -54,23 +54,20 @@ class RunManager:
         self._store = store
 
     async def _persist_to_store(self, record: RunRecord) -> None:
-        """Best-effort persist run record to backing store."""
+        """Persist a new run record to the backing store. Raises on failure."""
         if self._store is None:
             return
-        try:
-            await self._store.put(
-                record.run_id,
-                thread_id=record.thread_id,
-                assistant_id=record.assistant_id,
-                status=record.status.value,
-                multitask_strategy=record.multitask_strategy,
-                metadata=record.metadata or {},
-                kwargs=record.kwargs or {},
-                created_at=record.created_at,
-                model_name=record.model_name,
-            )
-        except Exception:
-            logger.warning("Failed to persist run %s to store", record.run_id, exc_info=True)
+        await self._store.put(
+            record.run_id,
+            thread_id=record.thread_id,
+            assistant_id=record.assistant_id,
+            status=record.status.value,
+            multitask_strategy=record.multitask_strategy,
+            metadata=record.metadata or {},
+            kwargs=record.kwargs or {},
+            created_at=record.created_at,
+            model_name=record.model_name,
+        )
 
     async def _persist_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Best-effort persist a status transition to the backing store."""
@@ -139,7 +136,13 @@ class RunManager:
         )
         async with self._lock:
             self._runs[run_id] = record
-        await self._persist_to_store(record)
+        try:
+            await self._persist_to_store(record)
+        except Exception:
+            async with self._lock:
+                self._runs.pop(run_id, None)
+            logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+            raise
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -344,7 +347,13 @@ class RunManager:
 
         for interrupted_run_id in interrupted_run_ids:
             await self._persist_status(interrupted_run_id, RunStatus.interrupted)
-        await self._persist_to_store(record)
+        try:
+            await self._persist_to_store(record)
+        except Exception:
+            async with self._lock:
+                self._runs.pop(run_id, None)
+            logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+            raise
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
