@@ -151,9 +151,18 @@ export default function NewAgentPage() {
         err.reason === "request_failed"
       ) {
         // Surface the backend-provided detail (e.g. validation error) instead
-        // of swallowing it into the generic fallback. The detail is already
-        // carried as `err.message` by `checkAgentName` in core/agents/api.ts.
-        setNameError(err.message || t.agents.nameStepCheckError);
+        // of swallowing it into the generic fallback. Wrap it in a localised
+        // prefix so zh-CN users don't see a bare English string next to the
+        // surrounding Chinese UI. Falls back to the generic fallback when
+        // detail is empty.
+        setNameError(
+          err.message
+            ? t.agents.nameStepCheckErrorWithDetail.replace(
+                "{detail}",
+                err.message,
+              )
+            : t.agents.nameStepCheckError,
+        );
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
@@ -180,6 +189,7 @@ export default function NewAgentPage() {
     t.agents.nameStepNetworkError,
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
+    t.agents.nameStepCheckErrorWithDetail,
     t.agents.nameStepInvalidError,
     threadId,
   ]);
