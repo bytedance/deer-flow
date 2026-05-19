@@ -5,6 +5,11 @@
 import { fetchGateway } from "../api";
 import { getBackendBaseURL } from "../config";
 
+import {
+  ConversionError,
+  type ConversionErrorBody,
+} from "./conversion-errors";
+
 export interface UploadedFileInfo {
   filename: string;
   size: number;
@@ -30,12 +35,29 @@ export interface ListFilesResponse {
   count: number;
 }
 
-async function readErrorDetail(
+/**
+ * Read a FastAPI error response. Conversion failures (Sprint C.1.2) carry
+ * a structured `{code, message, filename}` detail body so callers can
+ * branch on the stable `code` enum. Any other shape falls back to the
+ * legacy string `detail`.
+ */
+async function consumeErrorBody(
   response: Response,
   fallback: string,
-): Promise<string> {
-  const error = await response.json().catch(() => ({ detail: fallback }));
-  return error.detail ?? fallback;
+): Promise<{ conversion?: ConversionErrorBody; message: string }> {
+  const body = (await response.json().catch(() => null)) as
+    | { detail?: ConversionErrorBody | string }
+    | null;
+  const detail = body?.detail;
+  if (detail && typeof detail === "object" && "code" in detail) {
+    return {
+      conversion: detail,
+      message: detail.message ?? fallback,
+    };
+  }
+  return {
+    message: typeof detail === "string" ? detail : fallback,
+  };
 }
 
 /**
@@ -60,7 +82,14 @@ export async function uploadFiles(
   );
 
   if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Upload failed"));
+    const { conversion, message } = await consumeErrorBody(
+      response,
+      "Upload failed",
+    );
+    if (conversion) {
+      throw new ConversionError(conversion);
+    }
+    throw new Error(message);
   }
 
   return response.json();
@@ -77,9 +106,11 @@ export async function listUploadedFiles(
   );
 
   if (!response.ok) {
-    throw new Error(
-      await readErrorDetail(response, "Failed to list uploaded files"),
+    const { message } = await consumeErrorBody(
+      response,
+      "Failed to list uploaded files",
     );
+    throw new Error(message);
   }
 
   return response.json();
@@ -100,7 +131,11 @@ export async function deleteUploadedFile(
   );
 
   if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Failed to delete file"));
+    const { message } = await consumeErrorBody(
+      response,
+      "Failed to delete file",
+    );
+    throw new Error(message);
   }
 
   return response.json();

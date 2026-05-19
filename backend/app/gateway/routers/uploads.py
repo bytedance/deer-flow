@@ -26,7 +26,11 @@ from deerflow.uploads.manager import (
     upload_artifact_url,
     upload_virtual_path,
 )
-from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+from deerflow.utils.file_conversion import (
+    CONVERTIBLE_EXTENSIONS,
+    ConversionErrorCode,
+    convert_file_to_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +245,22 @@ async def upload_files(
 
             file_ext = file_path.suffix.lower()
             if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
-                md_path = await convert_file_to_markdown(file_path)
+                conv_result = await convert_file_to_markdown(file_path)
+                if conv_result.failed:
+                    # Surface a structured 4xx so the frontend can show an
+                    # actionable toast keyed off `code` instead of parsing
+                    # English prose. The original upload bytes are dropped
+                    # to keep the request all-or-nothing.
+                    _cleanup_uploaded_paths(written_paths)
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "code": conv_result.error.value,
+                            "message": conv_result.error_detail or "Failed to convert file",
+                            "filename": safe_filename,
+                        },
+                    )
+                md_path = conv_result.md_path
                 if md_path:
                     written_paths.append(md_path)
                     md_virtual_path = upload_virtual_path(md_path.name)

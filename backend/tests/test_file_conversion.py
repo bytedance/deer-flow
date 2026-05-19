@@ -11,6 +11,8 @@ from deerflow.utils.file_conversion import (
     _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
     MAX_OUTLINE_ENTRIES,
+    ConversionErrorCode,
+    ConversionResult,
     _do_convert,
     _get_pdf_converter,
     _pymupdf_output_too_sparse,
@@ -243,28 +245,32 @@ class TestConvertFileToMarkdown:
         """Small files (< 1 MB) are converted in the event loop thread."""
         pdf = tmp_path / "small.pdf"
         pdf.write_bytes(b"%PDF-1.4 " + b"x" * 100)  # well under 1 MB
+        dense = "# Small PDF\n" + "word " * 200  # > 200 chars after strip
 
         with (
             patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
             patch(
                 "deerflow.utils.file_conversion._do_convert",
-                return_value="# Small PDF",
+                return_value=dense,
             ) as mock_convert,
             patch("asyncio.to_thread") as mock_thread,
         ):
-            md_path = _run(convert_file_to_markdown(pdf))
+            result = _run(convert_file_to_markdown(pdf))
 
         # asyncio.to_thread must NOT have been called
         mock_thread.assert_not_called()
         mock_convert.assert_called_once()
-        assert md_path == pdf.with_suffix(".md")
-        assert md_path.read_text() == "# Small PDF"
+        assert isinstance(result, ConversionResult)
+        assert result.ok
+        assert result.md_path == pdf.with_suffix(".md")
+        assert result.md_path.read_text() == dense
 
     def test_large_file_offloaded_to_thread(self, tmp_path):
         """Large files (> 1 MB) are offloaded via asyncio.to_thread."""
         pdf = tmp_path / "large.pdf"
         # Write slightly more than the threshold
         pdf.write_bytes(b"%PDF-1.4 " + b"x" * (_ASYNC_THRESHOLD_BYTES + 1))
+        dense = "# Large PDF\n" + "word " * 200
 
         async def fake_to_thread(fn, *args, **kwargs):
             return fn(*args, **kwargs)
@@ -273,18 +279,19 @@ class TestConvertFileToMarkdown:
             patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
             patch(
                 "deerflow.utils.file_conversion._do_convert",
-                return_value="# Large PDF",
+                return_value=dense,
             ),
             patch("asyncio.to_thread", side_effect=fake_to_thread) as mock_thread,
         ):
-            md_path = _run(convert_file_to_markdown(pdf))
+            result = _run(convert_file_to_markdown(pdf))
 
         mock_thread.assert_called_once()
-        assert md_path == pdf.with_suffix(".md")
-        assert md_path.read_text() == "# Large PDF"
+        assert result.ok
+        assert result.md_path == pdf.with_suffix(".md")
+        assert result.md_path.read_text() == dense
 
-    def test_returns_none_on_conversion_error(self, tmp_path):
-        """If conversion raises, return None without propagating the exception."""
+    def test_returns_internal_error_on_conversion_exception(self, tmp_path):
+        """If conversion raises, return ConversionResult.failed with INTERNAL_ERROR."""
         pdf = tmp_path / "broken.pdf"
         pdf.write_bytes(b"%PDF-1.4 fake")
 
@@ -297,13 +304,61 @@ class TestConvertFileToMarkdown:
         ):
             result = _run(convert_file_to_markdown(pdf))
 
-        assert result is None
+        assert result.failed
+        assert result.error == ConversionErrorCode.INTERNAL_ERROR
+        assert "conversion failed" in (result.error_detail or "")
+
+    def test_returns_encrypted_pdf_when_password_message(self, tmp_path):
+        """Password / encrypted exception messages are mapped to ENCRYPTED_PDF."""
+        pdf = tmp_path / "secret.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch(
+                "deerflow.utils.file_conversion._do_convert",
+                side_effect=RuntimeError("file is encrypted; supply a password"),
+            ),
+        ):
+            result = _run(convert_file_to_markdown(pdf))
+
+        assert result.failed
+        assert result.error == ConversionErrorCode.ENCRYPTED_PDF
+
+    def test_returns_empty_result_for_short_output(self, tmp_path):
+        """When the converter produces < 200 chars, report EMPTY_RESULT."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch(
+                "deerflow.utils.file_conversion._do_convert",
+                return_value="x" * 50,  # well under 200
+            ),
+        ):
+            result = _run(convert_file_to_markdown(pdf))
+
+        assert result.failed
+        assert result.error == ConversionErrorCode.EMPTY_RESULT
+        # No .md file should be written for empty results
+        assert not pdf.with_suffix(".md").exists()
+
+    def test_returns_unsupported_format_for_unknown_ext(self, tmp_path):
+        """Files outside CONVERTIBLE_EXTENSIONS are rejected up-front."""
+        txt = tmp_path / "note.txt"
+        txt.write_text("hello", encoding="utf-8")
+
+        result = _run(convert_file_to_markdown(txt))
+
+        assert result.failed
+        assert result.error == ConversionErrorCode.UNSUPPORTED_FORMAT
 
     def test_writes_utf8_markdown_file(self, tmp_path):
         """Generated .md file is written with UTF-8 encoding."""
         pdf = tmp_path / "report.pdf"
         pdf.write_bytes(b"%PDF-1.4 fake")
-        chinese_content = "# 中文报告\n\n这是测试内容。"
+        chinese_content = "# 中文报告\n\n这是测试内容。" + "更多内容 " * 100  # > 200 chars
 
         with (
             patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
@@ -312,10 +367,40 @@ class TestConvertFileToMarkdown:
                 return_value=chinese_content,
             ),
         ):
-            md_path = _run(convert_file_to_markdown(pdf))
+            result = _run(convert_file_to_markdown(pdf))
 
-        assert md_path is not None
-        assert md_path.read_text(encoding="utf-8") == chinese_content
+        assert result.ok
+        assert result.md_path.read_text(encoding="utf-8") == chinese_content
+
+
+class TestConversionResult:
+    """Branchless helpers on the dataclass."""
+
+    def test_success_factory(self, tmp_path):
+        path = tmp_path / "x.md"
+        path.write_text("ok")
+        result = ConversionResult.success(path)
+        assert result.ok
+        assert not result.failed
+        assert result.error is None
+
+    def test_failure_factory(self):
+        result = ConversionResult.failure(
+            ConversionErrorCode.ENCRYPTED_PDF,
+            detail="password required",
+        )
+        assert result.failed
+        assert not result.ok
+        assert result.error == ConversionErrorCode.ENCRYPTED_PDF
+        assert result.error_detail == "password required"
+
+    def test_error_codes_are_strings(self):
+        # The enum values are the API contract — guard against accidental rename.
+        assert ConversionErrorCode.EMPTY_RESULT.value == "EMPTY_RESULT"
+        assert ConversionErrorCode.ENCRYPTED_PDF.value == "ENCRYPTED_PDF"
+        assert ConversionErrorCode.UNSUPPORTED_FORMAT.value == "UNSUPPORTED_FORMAT"
+        assert ConversionErrorCode.MARKITDOWN_UNAVAILABLE.value == "MARKITDOWN_UNAVAILABLE"
+        assert ConversionErrorCode.INTERNAL_ERROR.value == "INTERNAL_ERROR"
 
 
 # ---------------------------------------------------------------------------

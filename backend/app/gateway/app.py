@@ -363,6 +363,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
+    # Surface the active PDF converter (Sprint C.3.1). One INFO line at
+    # boot makes "why are my PDF uploads silently empty?" diagnosable
+    # without needing to grep through per-upload logs.
+    try:
+        from deerflow.utils.file_conversion import log_pdf_converter_status
+
+        log_pdf_converter_status()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("Failed to resolve pdf_converter status at startup: %s", exc)
+
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app):
         logger.info("LangGraph runtime initialised")

@@ -120,10 +120,12 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
     sandbox = MagicMock()
     provider.get.return_value = sandbox
 
-    async def fake_convert(file_path: Path) -> Path:
+    async def fake_convert(file_path: Path):
+        from deerflow.utils.file_conversion import ConversionResult
+
         md_path = file_path.with_suffix(".md")
         md_path.write_text("converted", encoding="utf-8")
-        return md_path
+        return ConversionResult.success(md_path)
 
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
@@ -158,10 +160,12 @@ def test_upload_files_makes_non_local_files_sandbox_writable(tmp_path):
     sandbox = MagicMock()
     provider.get.return_value = sandbox
 
-    async def fake_convert(file_path: Path) -> Path:
+    async def fake_convert(file_path: Path):
+        from deerflow.utils.file_conversion import ConversionResult
+
         md_path = file_path.with_suffix(".md")
         md_path.write_text("converted", encoding="utf-8")
-        return md_path
+        return ConversionResult.success(md_path)
 
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
@@ -352,19 +356,70 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     sandbox = MagicMock()
     provider.get.return_value = sandbox
 
+    from deerflow.utils.file_conversion import ConversionErrorCode, ConversionResult
+
+    async def fake_convert(file_path):
+        return ConversionResult.failure(
+            ConversionErrorCode.ENCRYPTED_PDF,
+            detail="file is password-protected",
+        )
+
     with (
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
         patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
-        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=RuntimeError("conversion failed"))),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+    ):
+        file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    # Conversion errors map to a 422 with a structured detail body so the
+    # frontend can switch on `code` for localised toasts.
+    assert exc_info.value.status_code == 422
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert detail["code"] == "ENCRYPTED_PDF"
+    assert detail["filename"] == "report.pdf"
+    assert "password" in detail["message"].lower()
+    provider.acquire.assert_called_once_with("thread-aio")
+    provider.get.assert_called_once_with("aio-1")
+    sandbox.update_file.assert_not_called()
+    assert not (thread_uploads_dir / "report.pdf").exists()
+
+
+def test_upload_files_returns_500_when_convert_helper_unexpectedly_raises(tmp_path):
+    """An exception escaping convert_file_to_markdown still bubbles as 500.
+
+    Inner converter exceptions are caught inside convert_file_to_markdown and
+    returned as ConversionResult.failure. But if the helper itself raises
+    (e.g. a programming bug), we don't want to silently 422 — fall through
+    to the generic 500 handler so it shows up in monitoring.
+    """
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire.return_value = "aio-1"
+    sandbox = MagicMock()
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(
+            uploads,
+            "convert_file_to_markdown",
+            AsyncMock(side_effect=RuntimeError("unexpected helper bug")),
+        ),
     ):
         file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
 
     assert exc_info.value.status_code == 500
-    provider.acquire.assert_called_once_with("thread-aio")
-    provider.get.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()
 
