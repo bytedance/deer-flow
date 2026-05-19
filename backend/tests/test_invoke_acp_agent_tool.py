@@ -257,6 +257,7 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
             Implementation=lambda **kwargs: kwargs,
             AgentMessageChunk=type("AgentMessageChunk", (), {}),
             AgentThoughtChunk=type("AgentThoughtChunk", (), {}),
+            ToolCallStart=type("ToolCallStart", (), {}),
             TextContentBlock=type(
                 "TextContentBlock",
                 (),
@@ -830,6 +831,7 @@ async def test_session_update_collects_only_agent_message_chunks(monkeypatch, tm
     TextContentBlock = type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)})
     AgentMessageChunk = type("AgentMessageChunk", (), {})
     AgentThoughtChunk = type("AgentThoughtChunk", (), {})
+    ToolCallStart = type("ToolCallStart", (), {"tool_call_id": "tc-1", "title": "read file", "kind": "read"})
     UserMessageChunk = type("UserMessageChunk", (), {})
 
     captured: dict[str, object] = {}
@@ -860,6 +862,7 @@ async def test_session_update_collects_only_agent_message_chunks(monkeypatch, tm
             thought = AgentThoughtChunk()
             thought.content = TextContentBlock("internal thought")
             await client.session_update("s1", thought)
+            await client.session_update("s1", ToolCallStart())
             user_echo = UserMessageChunk()
             user_echo.content = TextContentBlock("user prompt echo")
             await client.session_update("s1", user_echo)
@@ -901,6 +904,7 @@ async def test_session_update_collects_only_agent_message_chunks(monkeypatch, tm
             Implementation=lambda **kwargs: kwargs,
             AgentMessageChunk=AgentMessageChunk,
             AgentThoughtChunk=AgentThoughtChunk,
+            ToolCallStart=ToolCallStart,
             UserMessageChunk=UserMessageChunk,
             TextContentBlock=TextContentBlock,
         ),

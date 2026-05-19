@@ -190,13 +190,15 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
 
             async def session_update(self, session_id: str, update, **kwargs) -> None:  # type: ignore[override]
                 try:
-                    from acp.schema import AgentMessageChunk, AgentThoughtChunk, TextContentBlock
+                    from acp.schema import AgentMessageChunk, AgentThoughtChunk, TextContentBlock, ToolCallStart
 
                     if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
                         if isinstance(update, AgentMessageChunk):
                             self._chunks.append(update.content.text)
                         elif isinstance(update, AgentThoughtChunk):
                             logger.debug("ACP agent thought [session=%s]: %s", session_id, update.content.text)
+                    elif isinstance(update, ToolCallStart):
+                        logger.debug("ACP agent tool call [session=%s, id=%s, kind=%s]: %s", session_id, update.tool_call_id, update.kind, update.title)
                 except Exception:
                     pass
 
