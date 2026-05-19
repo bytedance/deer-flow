@@ -271,21 +271,18 @@ export function handleRunStream(route: Route) {
       data: { run_id: MOCK_RUN_ID, thread_id: MOCK_THREAD_ID },
     },
     {
-      event: "values",
-      data: {
-        messages: [
-          {
-            type: "human",
-            id: "msg-human-1",
-            content: [{ type: "text", text: "Hello" }],
-          },
-          {
-            type: "ai",
-            id: "msg-ai-1",
-            content: "Hello from DeerFlow!",
-          },
-        ],
-      },
+      event: "messages",
+      data: [
+        { type: "human", id: "msg-human-1", content: [{ type: "text", text: "Hello" }] },
+        { langgraph_node: "lead_agent" },
+      ],
+    },
+    {
+      event: "messages",
+      data: [
+        { type: "ai", id: "msg-ai-1", content: "Hello from DeerFlow!" },
+        { langgraph_node: "lead_agent" },
+      ],
     },
     { event: "end", data: {} },
   ];

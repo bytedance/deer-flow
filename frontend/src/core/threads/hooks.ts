@@ -587,6 +587,7 @@ export function useThreadStream({
             threadId: threadId,
             streamSubgraphs: true,
             streamResumable: true,
+            streamMode: ["messages-tuple", "updates", "custom"],
             config: {
               recursion_limit: 1000,
             },
