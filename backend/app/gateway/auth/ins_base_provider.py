@@ -107,9 +107,11 @@ class InsBaseAuthProvider(AuthProvider):
             raise RuntimeError(f"获取组织信息失败，无法完成登录") from e
 
         factory_org_id = None
+        factory_org_name = None
         for org in parent_orgs:
             if org.get("orgType") == 13:
                 factory_org_id = str(org.get("orgId", ""))
+                factory_org_name = org.get("orgName") or None
                 break
 
         if not factory_org_id:
@@ -128,9 +130,9 @@ class InsBaseAuthProvider(AuthProvider):
             logger.warning("Tenant repository not available, using factory orgId as tenant_id=%s", factory_org_id)
             return factory_org_id
 
-        return await self._get_or_create_tenant(factory_org_id)
+        return await self._get_or_create_tenant(factory_org_id, factory_org_name)
 
-    async def _get_or_create_tenant(self, tenant_id: str) -> str:
+    async def _get_or_create_tenant(self, tenant_id: str, org_name: str | None = None) -> str:
         """Get existing tenant or create a new one with zero limits."""
         existing = await self._tenant_repo.get(tenant_id)
         if existing is not None:
@@ -140,9 +142,10 @@ class InsBaseAuthProvider(AuthProvider):
 
         from deerflow.config.tenant_storage import TenantConfig
 
+        name = org_name or f"工厂-{tenant_id}"
         config = TenantConfig(
             tenant_id=tenant_id,
-            name=f"工厂-{tenant_id}",
+            name=name,
             created_at=datetime.now(UTC).isoformat(),
             is_active=True,
             daily_quota_usd=0,
