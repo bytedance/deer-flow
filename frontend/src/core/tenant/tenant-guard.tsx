@@ -7,12 +7,18 @@ import { useEffect, useState } from "react";
 import { fetchGateway } from "@/core/api";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
+import { EHM_TOKEN_COOKIE } from "@/core/auth/ehm-auth";
 
 interface TenantStatus {
   tenant_id: string;
   is_active: boolean;
   name: string;
   found: boolean;
+}
+
+function hasEhmCookie(): boolean {
+  if (typeof document === "undefined") return false;
+  return document.cookie.includes(`${EHM_TOKEN_COOKIE}=`);
 }
 
 async function getTenantStatus(): Promise<TenantStatus> {
@@ -33,6 +39,12 @@ export function useTenantGuard(): { result: TenantGuardResult | null } {
   const [result, setResult] = useState<TenantGuardResult | null>(null);
 
   useEffect(() => {
+    // Skip tenant check for EHM auto-login users (SSR already authenticated)
+    if (hasEhmCookie()) {
+      setResult({ allowed: true });
+      return;
+    }
+
     let cancelled = false;
     getTenantStatus()
       .then((status) => {

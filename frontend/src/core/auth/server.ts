@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 
 import { getGatewayConfig } from "./gateway-config";
 import { type AuthResult, userSchema } from "./types";
+import { getServerEhmToken, getServerEhmUser } from "./ehm-auth";
 
 const SSR_AUTH_TIMEOUT_MS = 5_000;
 
@@ -25,6 +26,16 @@ export async function getServerSideUser(): Promise<AuthResult> {
   }
 
   const cookieStore = await cookies();
+
+  // EHM token auto-login: bypass backend, read user info from cookies
+  const ehmToken = getServerEhmToken(cookieStore);
+  if (ehmToken) {
+    const ehmUser = getServerEhmUser(cookieStore);
+    if (ehmUser) {
+      return { tag: "authenticated", user: ehmUser };
+    }
+  }
+
   const sessionCookie = cookieStore.get("access_token");
 
   let internalGatewayUrl: string;
