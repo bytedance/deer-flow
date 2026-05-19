@@ -6,7 +6,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from deerflow.utils.time import now_iso as _now_iso
 
@@ -37,6 +37,7 @@ class RunRecord:
     abort_action: str = "interrupt"
     error: str | None = None
     model_name: str | None = None
+    store_only: bool = False
 
 
 class RunManager:
@@ -70,6 +71,38 @@ class RunManager:
             )
         except Exception:
             logger.warning("Failed to persist run %s to store", record.run_id, exc_info=True)
+
+    async def _persist_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
+        """Best-effort persist a status transition to the backing store."""
+        if self._store is None:
+            return
+        try:
+            await self._store.update_status(run_id, status.value, error=error)
+        except Exception:
+            logger.warning("Failed to persist status update for run %s", run_id, exc_info=True)
+
+    @staticmethod
+    def _record_from_store(row: dict[str, Any]) -> RunRecord:
+        """Build a read-only runtime record from a serialized store row.
+
+        NULL status/on_disconnect columns (e.g. from rows written before those
+        columns were added) default to ``pending`` and ``cancel`` respectively.
+        """
+        return RunRecord(
+            run_id=row["run_id"],
+            thread_id=row["thread_id"],
+            assistant_id=row.get("assistant_id"),
+            status=RunStatus(row.get("status") or RunStatus.pending.value),
+            on_disconnect=DisconnectMode(row.get("on_disconnect") or DisconnectMode.cancel.value),
+            multitask_strategy=row.get("multitask_strategy") or "reject",
+            metadata=row.get("metadata") or {},
+            kwargs=row.get("kwargs") or {},
+            created_at=row.get("created_at") or "",
+            updated_at=row.get("updated_at") or "",
+            error=row.get("error"),
+            model_name=row.get("model_name"),
+            store_only=True,
+        )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
@@ -110,61 +143,77 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    def get(self, run_id: str) -> RunRecord | None:
-        """Return an in-memory run record by ID, or ``None``."""
-        return self._runs.get(run_id)
+    async def get(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+        """Return a run record by ID, or ``None``.
 
-    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
-        """Return a run record by ID, checking the persistent store as fallback."""
-        record = self._runs.get(run_id)
+        Args:
+            run_id: The run ID to look up.
+            user_id: Optional user ID for permission filtering when hydrating from store.
+        """
+        async with self._lock:
+            record = self._runs.get(run_id)
         if record is not None:
             return record
-        if self._store is not None:
-            try:
-                d = await self._store.get(run_id, user_id=user_id)
-                if d is not None:
-                    return self._store_dict_to_record(d)
-            except Exception:
-                logger.warning("Failed to query store for run %s", run_id, exc_info=True)
-        return None
-
-    def _store_dict_to_record(self, d: dict) -> RunRecord:
-        """Convert a store dict back to a RunRecord for read-only use."""
-        return RunRecord(
-            run_id=d["run_id"],
-            thread_id=d["thread_id"],
-            assistant_id=d.get("assistant_id"),
-            status=RunStatus(d.get("status", RunStatus.error.value)),
-            on_disconnect=DisconnectMode.cancel,
-            multitask_strategy=d.get("multitask_strategy", "reject"),
-            metadata=d.get("metadata", {}),
-            kwargs=d.get("kwargs", {}),
-            created_at=d.get("created_at", ""),
-            updated_at=d.get("updated_at", ""),
-            model_name=d.get("model_name"),
-            error=d.get("error"),
-        )
-
-    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None) -> list[RunRecord]:
-        """Return all runs for a given thread, oldest first."""
+        if self._store is None:
+            return None
+        try:
+            row = await self._store.get(run_id, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
+            return None
+        # Re-check after store await: a concurrent create() may have inserted the
+        # in-memory record while the store call was in flight.
         async with self._lock:
-            in_memory = [r for r in self._runs.values() if r.thread_id == thread_id]
-            in_memory_ids = {r.run_id for r in in_memory}
+            record = self._runs.get(run_id)
+        if record is not None:
+            return record
+        if row is None:
+            return None
+        try:
+            return self._record_from_store(row)
+        except Exception:
+            logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+            return None
 
-        store_records: list[RunRecord] = []
-        if self._store is not None:
-            try:
-                store_dicts = await self._store.list_by_thread(thread_id, user_id=user_id)
-                for d in store_dicts:
-                    if d["run_id"] not in in_memory_ids:
-                        store_records.append(self._store_dict_to_record(d))
-            except Exception:
-                logger.warning("Failed to query store for thread %s runs", thread_id, exc_info=True)
+    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+        """Return a run record by ID, checking the persistent store as fallback.
 
-        return sorted(
-            in_memory + store_records,
-            key=lambda record: record.created_at or "",
-        )
+        Alias for :meth:`get` for backward compatibility.
+        """
+        return await self.get(run_id, user_id=user_id)
+
+    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
+        """Return runs for a given thread, newest first, at most ``limit`` records.
+
+        In-memory runs take precedence only when the same ``run_id`` exists in both
+        memory and the backing store. The merged result is then sorted newest-first
+        by ``created_at`` and trimmed to ``limit`` (default 100).
+
+        Args:
+            thread_id: The thread ID to filter by.
+            user_id: Optional user ID for permission filtering when hydrating from store.
+            limit: Maximum number of runs to return.
+        """
+        async with self._lock:
+            # Dict insertion order gives deterministic results when timestamps tie.
+            memory_records = [r for r in self._runs.values() if r.thread_id == thread_id]
+        if self._store is None:
+            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+        records_by_id = {record.run_id: record for record in memory_records}
+        store_limit = max(0, limit - len(memory_records))
+        try:
+            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
+        except Exception:
+            logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
+            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+        for row in rows:
+            run_id = row.get("run_id")
+            if run_id and run_id not in records_by_id:
+                try:
+                    records_by_id[run_id] = self._record_from_store(row)
+                except Exception:
+                    logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+        return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
@@ -177,12 +226,17 @@ class RunManager:
             record.updated_at = _now_iso()
             if error is not None:
                 record.error = error
-        if self._store is not None:
-            try:
-                await self._store.update_status(run_id, status.value, error=error)
-            except Exception:
-                logger.warning("Failed to persist status update for run %s", run_id, exc_info=True)
+        await self._persist_status(run_id, status, error=error)
         logger.info("Run %s -> %s", run_id, status.value)
+
+    async def _persist_model_name(self, run_id: str, model_name: str | None) -> None:
+        """Best-effort persist model_name update to the backing store."""
+        if self._store is None:
+            return
+        try:
+            await self._store.update_model_name(run_id, model_name)
+        except Exception:
+            logger.warning("Failed to persist model_name update for run %s", run_id, exc_info=True)
 
     async def update_model_name(self, run_id: str, model_name: str | None) -> None:
         """Update the model name for a run."""
@@ -193,7 +247,7 @@ class RunManager:
                 return
             record.model_name = model_name
             record.updated_at = _now_iso()
-        await self._persist_to_store(record)
+        await self._persist_model_name(run_id, model_name)
         logger.info("Run %s model_name=%s", run_id, model_name)
 
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> bool:
@@ -218,6 +272,7 @@ class RunManager:
                 record.task.cancel()
             record.status = RunStatus.interrupted
             record.updated_at = _now_iso()
+        await self._persist_status(run_id, RunStatus.interrupted)
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True
 
@@ -245,6 +300,7 @@ class RunManager:
         now = _now_iso()
 
         _supported_strategies = ("reject", "interrupt", "rollback")
+        interrupted_run_ids: list[str] = []
 
         async with self._lock:
             if multitask_strategy not in _supported_strategies:
@@ -263,6 +319,7 @@ class RunManager:
                         r.task.cancel()
                     r.status = RunStatus.interrupted
                     r.updated_at = now
+                    interrupted_run_ids.append(r.run_id)
                 logger.info(
                     "Cancelled %d inflight run(s) on thread %s (strategy=%s)",
                     len(inflight),
@@ -285,6 +342,8 @@ class RunManager:
             )
             self._runs[run_id] = record
 
+        for interrupted_run_id in interrupted_run_ids:
+            await self._persist_status(interrupted_run_id, RunStatus.interrupted)
         await self._persist_to_store(record)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
