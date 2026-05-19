@@ -27,8 +27,9 @@ export function CostChart({ data }: CostChartProps) {
             <Area
               type="monotone"
               dataKey="cost"
-              stroke="hsl(var(--primary))"
-              fill="hsl(var(--primary)/.2)"
+              stroke="var(--primary)"
+              fill="var(--primary)"
+              fillOpacity={0.2}
             />
           </AreaChart>
         </ResponsiveContainer>

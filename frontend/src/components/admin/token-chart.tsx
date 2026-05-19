@@ -24,7 +24,7 @@ export function TokenChart({ data }: TokenChartProps) {
             <XAxis dataKey="date" className="text-xs" />
             <YAxis className="text-xs" />
             <Tooltip />
-            <Bar dataKey="tokens" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="tokens" fill="var(--primary)" radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </CardContent>
