@@ -31,8 +31,9 @@ function base64UrlDecode(str: string): string {
 function decodeJwtPayload(token: string): EhmTokenPayload | null {
   try {
     const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const payload = JSON.parse(base64UrlDecode(parts[1]));
+    const encodedPayload = parts[1];
+    if (parts.length !== 3 || !encodedPayload) return null;
+    const payload = JSON.parse(base64UrlDecode(encodedPayload));
     if (typeof payload.id !== "number") return null;
     return payload as EhmTokenPayload;
   } catch {

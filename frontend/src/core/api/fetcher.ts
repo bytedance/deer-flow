@@ -85,25 +85,7 @@ export async function fetch(
         ? input.toString()
         : input.url;
 
-  const merged = new Headers(init?.headers);
-
-  // Inject EHM token as Bearer if using EHM auto-login
-  if (!merged.has("Authorization")) {
-    const ehmToken = readEhmTokenCookie();
-    if (ehmToken) {
-      console.log("[EHM fetcher] injecting Authorization Bearer header for:", url);
-      merged.set("Authorization", `Bearer ${ehmToken}`);
-    }
-  }
-
-  // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
-  // it to mirror the gateway's ``should_check_csrf`` logic exactly.
-  if (isStateChangingMethod(init?.method ?? "GET")) {
-    const token = readCsrfCookie();
-    if (token && !merged.has("X-CSRF-Token")) {
-      merged.set("X-CSRF-Token", token);
-    }
-  }
+  const merged = buildAuthHeaders(init?.headers, init?.method ?? "GET", url);
 
   const res = await globalThis.fetch(url, {
     ...init,
@@ -124,6 +106,7 @@ export async function fetch(
       try {
         const refreshRes = await globalThis.fetch("/api/v1/auth/refresh", {
           method: "POST",
+          headers: buildAuthHeaders(undefined, "POST", "/api/v1/auth/refresh"),
           credentials: "include",
         });
         if (refreshRes.ok) {
@@ -140,6 +123,34 @@ export async function fetch(
   }
 
   return res;
+}
+
+function buildAuthHeaders(
+  headers: HeadersInit | undefined,
+  method: string,
+  url: string,
+): Headers {
+  const merged = new Headers(headers);
+
+  // Inject EHM token as Bearer if using EHM auto-login
+  if (!merged.has("Authorization")) {
+    const ehmToken = readEhmTokenCookie();
+    if (ehmToken) {
+      console.log("[EHM fetcher] injecting Authorization Bearer header for:", url);
+      merged.set("Authorization", `Bearer ${ehmToken}`);
+    }
+  }
+
+  // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
+  // it to mirror the gateway's ``should_check_csrf`` logic exactly.
+  if (isStateChangingMethod(method)) {
+    const token = readCsrfCookie();
+    if (token && !merged.has("X-CSRF-Token")) {
+      merged.set("X-CSRF-Token", token);
+    }
+  }
+
+  return merged;
 }
 
 /**
