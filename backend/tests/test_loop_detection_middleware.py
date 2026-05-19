@@ -5,6 +5,7 @@ from collections import OrderedDict
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -607,6 +608,52 @@ class TestLoopDetectionAgentGraphIntegration:
         persisted_loop_warnings = [message for message in result["messages"] if isinstance(message, HumanMessage) and message.name == "loop_warning"]
         assert persisted_loop_warnings == []
         assert result["messages"][-1].content == "final answer"
+        assert mw._pending_warnings == {}
+        assert mw._pending_warning_touch_order == OrderedDict()
+
+    @pytest.mark.asyncio
+    async def test_loop_warning_is_transient_in_async_agent_graph(self):
+        """awrap_model_call injects loop_warning request-only in async graph runs."""
+
+        @as_tool
+        async def bash(command: str) -> str:
+            """Run a fake shell command."""
+            return f"ran: {command}"
+
+        repeated_calls = [[{"name": "bash", "id": f"call_async_ls_{i}", "args": {"command": "ls"}}] for i in range(3)]
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(content="", tool_calls=repeated_calls[0]),
+                AIMessage(content="", tool_calls=repeated_calls[1]),
+                AIMessage(content="", tool_calls=repeated_calls[2]),
+                AIMessage(content="async final answer"),
+            ],
+        )
+        graph = create_agent(model=model, tools=[bash], middleware=[mw])
+
+        result = await graph.ainvoke(
+            {"messages": [("user", "inspect the directory asynchronously")]},
+            context={"thread_id": "async-integration-thread", "run_id": "async-integration-run"},
+            config={"recursion_limit": 20},
+        )
+
+        assert len(model.seen_messages) == 4
+        loop_warnings_by_call = [[message for message in messages if isinstance(message, HumanMessage) and message.name == "loop_warning"] for messages in model.seen_messages]
+        assert loop_warnings_by_call[0] == []
+        assert loop_warnings_by_call[1] == []
+        assert loop_warnings_by_call[2] == []
+        assert len(loop_warnings_by_call[3]) == 1
+        assert "LOOP DETECTED" in loop_warnings_by_call[3][0].content
+
+        fourth_request = model.seen_messages[3]
+        assert isinstance(fourth_request[-2], ToolMessage)
+        assert fourth_request[-2].tool_call_id == "call_async_ls_2"
+        assert fourth_request[-1] is loop_warnings_by_call[3][0]
+
+        persisted_loop_warnings = [message for message in result["messages"] if isinstance(message, HumanMessage) and message.name == "loop_warning"]
+        assert persisted_loop_warnings == []
+        assert result["messages"][-1].content == "async final answer"
         assert mw._pending_warnings == {}
         assert mw._pending_warning_touch_order == OrderedDict()
 
