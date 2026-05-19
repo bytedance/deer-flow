@@ -1,8 +1,8 @@
 """Tests for RagMiddleware decision-event injection (Sprint A.2 + B.2.1).
 
-After Sprint B.2.1 the middleware is async-native: ``before_agent`` is a
+After Sprint B.2.1 the middleware is async-native: ``abefore_agent`` is a
 coroutine and we call ``resolve_runtime_kb_selection`` directly without a
-thread pool. The test surface adapts: each ``before_agent`` invocation
+thread pool. The test surface adapts: each ``abefore_agent`` invocation
 must be awaited, and patches target the imported name in the middleware
 module rather than a private static helper.
 """
@@ -60,7 +60,7 @@ class TestRagMiddlewareDecisionEvents:
         mw = RagMiddleware()
         state = {"messages": [HumanMessage(content="hello")]}
 
-        result = await mw.before_agent(state, _make_runtime())
+        result = await mw.abefore_agent(state, _make_runtime())
 
         assert result is None
         decision = _rag_decision_context.get()
@@ -79,7 +79,7 @@ class TestRagMiddlewareDecisionEvents:
         mw = RagMiddleware()
         state = {"messages": [HumanMessage(content="hello")]}
 
-        await mw.before_agent(state, _make_runtime())
+        await mw.abefore_agent(state, _make_runtime())
         decision = _rag_decision_context.get()
         assert decision is not None
         assert decision.outcome == "disabled"
@@ -91,7 +91,7 @@ class TestRagMiddlewareDecisionEvents:
         mw = RagMiddleware()
         state = {"messages": [HumanMessage(content="   ")]}
 
-        await mw.before_agent(state, _make_runtime())
+        await mw.abefore_agent(state, _make_runtime())
         decision = _rag_decision_context.get()
         assert decision is not None
         assert decision.outcome == "skipped"
@@ -113,7 +113,7 @@ class TestRagMiddlewareDecisionEvents:
             "deerflow.agents.middlewares.rag_middleware.resolve_runtime_kb_selection",
             side_effect=_no_selection,
         ):
-            await mw.before_agent(state, runtime)
+            await mw.abefore_agent(state, runtime)
 
         decision = _rag_decision_context.get()
         assert decision is not None
@@ -133,7 +133,7 @@ class TestRagMiddlewareDecisionEvents:
             "deerflow.agents.middlewares.rag_middleware.resolve_runtime_kb_selection",
             side_effect=_boom,
         ):
-            result = await mw.before_agent(state, _make_runtime())
+            result = await mw.abefore_agent(state, _make_runtime())
 
         assert result is None
         decision = _rag_decision_context.get()
@@ -163,7 +163,7 @@ class TestRagMiddlewareDecisionEvents:
             "deerflow.agents.middlewares.rag_middleware.get_current_tenant_id",
             return_value="",
         ):
-            await mw.before_agent(state, runtime)
+            await mw.abefore_agent(state, runtime)
 
         decision = _rag_decision_context.get()
         assert decision is not None

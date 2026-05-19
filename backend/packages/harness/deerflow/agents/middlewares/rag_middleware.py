@@ -65,7 +65,7 @@ class RagMiddleware(AgentMiddleware[RagMiddlewareState]):
         return self._retriever
 
     @override
-    async def before_agent(self, state: RagMiddlewareState, runtime: Runtime) -> dict | None:
+    async def abefore_agent(self, state: RagMiddlewareState, runtime: Runtime) -> dict | None:
         _rag_retrieval_context.set(None)
         _rag_decision_context.set(None)
 
