@@ -5,7 +5,7 @@
 ## 核心原则
 
 - **数据优先**：所有诊断结论必须来自脚本输出、规则匹配或 InS 工具链返回的数据，不凭空编造。
-- **先收参后诊断**：首次进入或缺少参数时必须先渲染子设备选择器，然后停止等待用户提交。
+- **先收参后诊断**：首次进入或缺少参数时必须先渲染子设备选择器和诊断时间表单（同一轮），然后停止等待用户提交。
 - **严格读取 `ui_interaction.payload`**：表单字段位于 `payload` 顶层，不在 `values` 中。
 - **同一线程可能多次诊断**：回溯 `ui_interaction` 历史时只能使用**当前消息之前最近一次**匹配的回调消息，绝不能复用更早轮次参数。
 - **输出路径固定**：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
@@ -14,11 +14,13 @@
 - **严禁对中间产物调用 `present_files`**：仅对 `diagnosis_report.md` / `diagnosis_report.pdf` 调用 `present_files`，不要暴露 `query_diagnosis.json` / `diagnosis_features.json` / `spectrum_*.json` / `orbit_*.json`。
 - **`runout` 命名注意**：本组 12 项 code 中的 `runout` 来自 `vibration-fault-diagnosis/references/diagnosis-rules.md` 的"晃度"章节，**语义为测量探头表面跳动 / measurement effect**，不是 shaft runout。
 - **回调超时**：所有表单使用 `callback_timeout_ms: 600000`。
-- **校验先行**：`payload` 中的设备 ID 必须匹配 `[A-Za-z0-9_-]+`；`start_date` / `end_date` 必须满足 `^\d{4}-\d{2}-\d{2}$`；`start_hour` / `end_hour` 必须为 `0`-`23` 整数；任一校验失败时渲染 `markdown` 提示用户重新提交，禁止直接拼接命令。
+- **校验先行**：`payload` 中的设备 ID 必须匹配 `[A-Za-z0-9_-]+`；`diagnosis_date` 必须满足 `^\d{4}-\d{2}-\d{2}$`；`diagnosis_hour` 必须为 `"0"`-`"23"` 字符串；任一校验失败时渲染 `markdown` 提示用户重新提交，禁止直接拼接命令。
 
-## 首次进入：渲染子设备选择器并停止
+## 首次进入：同时渲染子设备选择器 + 诊断时间表单
 
-当用户要求诊断旋转机组但当前消息不是 `ui_interaction`，或缺少诊断参数时，必须调用 `render_ui` 创建子设备选择器：
+当用户要求诊断旋转机组但当前消息不是 `ui_interaction`，或缺少诊断参数时，必须在**同一轮**调用两次 `render_ui` 渲染以下两个 Block，然后停止等待用户操作：
+
+**Block 1 — 子设备选择器**（`sequence=1`）：
 
 ```json
 {
@@ -28,17 +30,60 @@
   "callback_id": "fd-rotating-device",
   "callback_timeout_ms": 600000,
   "props": {
-    "title": "旋转机组故障诊断 · 第 1 步：选择设备与子设备",
+    "title": "旋转机组故障诊断 · 选择设备与子设备",
     "queryParams": {"orgId": 0, "treeType": 1, "typeId": 1}
   }
 }
 ```
 
-> **参数说明**：`typeId=1` 过滤组织树只展示旋转机组类型设备。`sub-device-selector` 选中设备后自动拉取其子设备列表（测点 / 部件），用户再点击子设备完成选择。
+**Block 2 — 诊断时间表单**（`sequence=2`）：
 
-调用后只回复一句"请选择设备与子设备后提交。"并立即停止。**严禁在此轮渲染后续表单或调用任何脚本**。
+```json
+{
+  "component": "form",
+  "action": "create",
+  "interactive": true,
+  "callback_id": "fd-rotating-time",
+  "callback_timeout_ms": 600000,
+  "props": {
+    "title": "诊断时间",
+    "description": "请在左侧选择设备与子设备后，设置诊断时间并提交。",
+    "fields": [
+      {"name": "diagnosis_date", "label": "诊断日期", "type": "date", "required": true},
+      {
+        "name": "diagnosis_hour",
+        "label": "诊断小时",
+        "type": "select",
+        "required": true,
+        "options": [
+          {"label": "00:00", "value": "0"}, {"label": "01:00", "value": "1"},
+          {"label": "02:00", "value": "2"}, {"label": "03:00", "value": "3"},
+          {"label": "04:00", "value": "4"}, {"label": "05:00", "value": "5"},
+          {"label": "06:00", "value": "6"}, {"label": "07:00", "value": "7"},
+          {"label": "08:00", "value": "8"}, {"label": "09:00", "value": "9"},
+          {"label": "10:00", "value": "10"}, {"label": "11:00", "value": "11"},
+          {"label": "12:00", "value": "12"}, {"label": "13:00", "value": "13"},
+          {"label": "14:00", "value": "14"}, {"label": "15:00", "value": "15"},
+          {"label": "16:00", "value": "16"}, {"label": "17:00", "value": "17"},
+          {"label": "18:00", "value": "18"}, {"label": "19:00", "value": "19"},
+          {"label": "20:00", "value": "20"}, {"label": "21:00", "value": "21"},
+          {"label": "22:00", "value": "22"}, {"label": "23:00", "value": "23"}
+        ]
+      }
+    ],
+    "default_values": {
+      "diagnosis_hour": "8"
+    },
+    "submit_label": "开始诊断"
+  }
+}
+```
 
-## 子设备选择器回调：渲染时间选择器
+> **参数说明**：`typeId=1` 过滤组织树只展示旋转机组类型设备。`sub-device-selector` 选中设备后自动拉取其子设备列表（测点 / 部件），用户再点击子设备完成选择。诊断时间表单以单个时间点（日期 + 小时）替代原来的时间段选择。
+
+调用后只回复一句"请在左侧选择设备与子设备，在右侧设置诊断时间，完成后点击"开始诊断"。"并立即停止。**严禁在此轮调用任何脚本**。
+
+## 子设备选择器回调：确认选择，不渲染新 UI
 
 当收到 `ui_interaction` 且 `callback_id` 为 `fd-rotating-device` 时：
 
@@ -51,52 +96,13 @@
 2. 校验：
    - `macId` 和 `componentId` 必须存在且匹配 `[A-Za-z0-9_-]+`。
    - `componentId` 不能与 `macId` 相同（必须是子设备，不是父设备本身）。
-   校验失败时渲染 `markdown` 提示用户重新选择，并停止后续步骤。
+   校验失败时渲染 `markdown` 提示用户重新选择，并停止。
 
-3. 将 `macId`、`componentId`、子设备名称记入内存，后续步骤使用。
+3. 将 `macId`、`componentId`、子设备名称记入内存。
 
-4. 渲染时间选择器表单：
+4. **只回复**一句"已选择设备 {macId} / 子设备 {name}。请设置诊断时间后点击"开始诊断"。"并立即停止。**严禁调用 `render_ui`**（子设备选择器和时间表单均已在上轮渲染，前端保持展示）。**严禁调用任何脚本**。
 
-```json
-{
-  "component": "form",
-  "action": "create",
-  "interactive": true,
-  "callback_id": "fd-rotating-time",
-  "callback_timeout_ms": 600000,
-  "props": {
-    "title": "旋转机组故障诊断 · 第 2 步：选择诊断时间",
-    "description": "已选设备 {macId}、子设备 {componentName}。请选择诊断时间范围。",
-    "fields": [
-      {"name": "start_date", "label": "起始日期", "type": "date", "required": true},
-      {
-        "name": "start_hour",
-        "label": "起始小时",
-        "type": "select",
-        "required": true,
-        "options": [{"label": "00", "value": "0"}, {"label": "06", "value": "6"}, {"label": "12", "value": "12"}, {"label": "18", "value": "18"}]
-      },
-      {"name": "end_date", "label": "结束日期", "type": "date", "required": true},
-      {
-        "name": "end_hour",
-        "label": "结束小时",
-        "type": "select",
-        "required": true,
-        "options": [{"label": "00", "value": "0"}, {"label": "06", "value": "6"}, {"label": "12", "value": "12"}, {"label": "18", "value": "18"}]
-      }
-    ],
-    "default_values": {
-      "start_hour": "0",
-      "end_hour": "0"
-    },
-    "submit_label": "开始诊断"
-  }
-}
-```
-
-渲染后只回复一句"请选择诊断时间后提交。"并立即停止。**严禁在此轮调用任何脚本**。
-
-## 时间选择器回调：执行诊断
+## 时间表单回调：执行诊断
 
 当收到 `ui_interaction` 且 `callback_id` 为 `fd-rotating-time` 时：
 
@@ -108,18 +114,20 @@
 - `name`（子设备名称）
 
 从当前 `payload` 中提取：
-- `start_date`、`start_hour`、`end_date`、`end_hour`
+- `diagnosis_date`、`diagnosis_hour`
 
 校验：
-- `start_date` / `end_date` 必须匹配 `^\d{4}-\d{2}-\d{2}$`。
-- `start_hour` / `end_hour` 必须为 `"0"`-`"23"` 之间的字符串。
-- 拼装后的 `start_iso = f"{start_date}T{int(start_hour):02d}:00:00"`、`end_iso = f"{end_date}T{int(end_hour):02d}:00:00"` 必须满足 `end_iso > start_iso`，且跨度不超过 30 天。
+- `diagnosis_date` 必须匹配 `^\d{4}-\d{2}-\d{2}$`。
+- `diagnosis_hour` 必须为 `"0"`-`"23"` 之间的字符串。
+- 若 `macId` 或 `componentId` 不存在（用户直接提交了时间表单但未选择子设备），渲染 `markdown` 提示"请先在左侧选择设备与子设备"，并停止。
 
 校验失败时渲染 `markdown` 提示用户重提，并停止后续步骤。
 
-### 步骤 2：确定设备类型 → 第一阶段聚合特征拉取（脚本承担）
+拼装诊断时间窗口（脚本需要起止时间，以所选小时为起点取 1 小时窗口）：
+- `start_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"`
+- `end_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:59:59"`
 
-将 `start_date + start_hour`、`end_date + end_hour` 拼成 ISO 字符串：`{start_iso} = "{start_date}T{int(start_hour):02d}:00:00"`，end 同理。
+### 步骤 2：确定设备类型 → 第一阶段聚合特征拉取（脚本承担）
 
 **确定 `--kind`**：调用 `machine_service.get_machine_info_by_ids([int(macId)])` 获取设备详情，从返回的 `typeId` / `typeName` 推断设备种类（如汽轮机 → `steam_turbine`、离心压缩机 → `centrifugal_compressor`、轴流压缩机 → `axial_compressor`、齿轮箱 → `gearbox` 等）；若无法确定则默认使用 `centrifugal_compressor`。
 
