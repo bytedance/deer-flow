@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
-from deerflow.runtime import RunRecord, serialize_channel_values
+from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -218,6 +218,11 @@ async def cancel_run(
 
     cancelled = await run_mgr.cancel(run_id, action=action)
     if not cancelled:
+        # Re-fetch to get the authoritative status under the manager's lock.
+        current = run_mgr.get(run_id)
+        if current is None or current.status == RunStatus.interrupted:
+            # Already cancelled — treat as idempotent success.
+            return Response(status_code=202)
         raise HTTPException(
             status_code=409,
             detail=f"Run {run_id} is not cancellable (status: {record.status.value})",
