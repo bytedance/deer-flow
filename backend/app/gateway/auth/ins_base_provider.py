@@ -94,7 +94,9 @@ class InsBaseAuthProvider(AuthProvider):
           get-or-create tenant in database.
         - RPC failure or no factory found → raise RuntimeError
         """
+        logger.info("_resolve_tenant_id: org_id=%s", org_id)
         if org_id == "0":
+            logger.info("_resolve_tenant_id: org_id=0, using default tenant")
             return "default"
 
         from deerflow.rpc.ins_base_org_service import InsBaseOrgServiceClient
@@ -102,6 +104,7 @@ class InsBaseAuthProvider(AuthProvider):
         try:
             org_client = InsBaseOrgServiceClient(rpc_client=self._rpc_client)
             parent_orgs = await org_client.get_all_parent_org(int(org_id))
+            logger.info("_resolve_tenant_id: got %d parent orgs for orgId=%s", len(parent_orgs), org_id)
         except Exception as e:
             logger.exception("getAllParentOrg RPC call failed for orgId=%s", org_id)
             raise RuntimeError(f"获取组织信息失败，无法完成登录") from e
@@ -112,9 +115,11 @@ class InsBaseAuthProvider(AuthProvider):
             if org.get("orgType") == 13:
                 factory_org_id = str(org.get("orgId", ""))
                 factory_org_name = org.get("orgName") or None
+                logger.info("_resolve_tenant_id: found factory orgId=%s orgName=%s", factory_org_id, factory_org_name)
                 break
 
         if not factory_org_id:
+            logger.warning("_resolve_tenant_id: no factory (orgType=13) found in %d parent orgs", len(parent_orgs))
             raise RuntimeError(
                 f"未找到所属工厂（orgType=13），无法确定租户，请联系管理员"
             )
@@ -125,6 +130,7 @@ class InsBaseAuthProvider(AuthProvider):
                 from deerflow.persistence.tenant import TenantRepository
 
                 self._tenant_repo = TenantRepository(sf)
+                logger.info("_resolve_tenant_id: lazily created TenantRepository from session_factory")
 
         if self._tenant_repo is None:
             logger.warning("Tenant repository not available, using factory orgId as tenant_id=%s", factory_org_id)
