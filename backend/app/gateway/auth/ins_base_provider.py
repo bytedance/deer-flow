@@ -4,8 +4,10 @@ Integrates with the Java ins-base-rpc microservice for user login,
 token authentication, and token refresh.
 """
 
+from __future__ import annotations
+
 import logging
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from app.gateway.auth.providers import AuthProvider
 from app.gateway.auth.rsa_utils import rsa_encrypt
@@ -41,19 +43,21 @@ class InsBaseAuthProvider(AuthProvider):
     Login flow:
       1. RSA-encrypt username and password using configured public key
       2. Call ins-base-rpc /auth/login with encrypted credentials
-      3. Map the response to a local User model with tenant "default"
+      3. Call ins-base-rpc /auth/authentication to get user info with orgId
+      4. Resolve tenant_id from orgId via parent org chain lookup
 
     Authentication flow:
       1. Call ins-base-rpc /auth/authentication with the token
-      2. Return user info and permissions
+      2. Resolve tenant_id from orgId in the user info
 
     Refresh flow:
       1. Call ins-base-rpc /auth/refresh with the refresh token
       2. Return new token
     """
 
-    def __init__(self, rpc_client: RpcClient | None = None):
+    def __init__(self, rpc_client: RpcClient | None = None, tenant_repo=None):
         self._rpc_client = rpc_client
+        self._tenant_repo = tenant_repo
 
     @property
     def _auth_service(self) -> InsBaseAuthServiceClient:
@@ -70,8 +74,88 @@ class InsBaseAuthProvider(AuthProvider):
             )
         return config.rsa_public_key
 
+    def _extract_org_id(self, user_data: dict) -> str:
+        """Extract orgId from ins-base user data.
+
+        Tries user.org.orgId first, then user.orgId.
+        """
+        org = user_data.get("org") or {}
+        org_id = org.get("orgId") if isinstance(org, dict) else None
+        if org_id is not None:
+            return str(org_id)
+        return str(user_data.get("orgId", "0"))
+
+    async def _resolve_tenant_id(self, org_id: str) -> str:
+        """Resolve tenant_id from org_id.
+
+        - orgId == "0" → "default"
+        - orgId != "0" → call getAllParentOrg, find orgType==13 node,
+          get-or-create tenant in database.
+        - RPC failure or no factory found → raise RuntimeError
+        """
+        if org_id == "0":
+            return "default"
+
+        from deerflow.rpc.ins_base_org_service import InsBaseOrgServiceClient
+
+        try:
+            org_client = InsBaseOrgServiceClient(rpc_client=self._rpc_client)
+            parent_orgs = await org_client.get_all_parent_org(int(org_id))
+        except Exception as e:
+            logger.exception("getAllParentOrg RPC call failed for orgId=%s", org_id)
+            raise RuntimeError(f"获取组织信息失败，无法完成登录") from e
+
+        factory_org_id = None
+        for org in parent_orgs:
+            if org.get("orgType") == 13:
+                factory_org_id = str(org.get("orgId", ""))
+                break
+
+        if not factory_org_id:
+            raise RuntimeError(
+                f"未找到所属工厂（orgType=13），无法确定租户，请联系管理员"
+            )
+
+        if self._tenant_repo is None:
+            logger.warning("Tenant repository not available, using factory orgId as tenant_id=%s", factory_org_id)
+            return factory_org_id
+
+        return await self._get_or_create_tenant(factory_org_id)
+
+    async def _get_or_create_tenant(self, tenant_id: str) -> str:
+        """Get existing tenant or create a new one with zero limits."""
+        existing = await self._tenant_repo.get(tenant_id)
+        if existing is not None:
+            return tenant_id
+
+        from datetime import UTC, datetime
+
+        from deerflow.config.tenant_storage import TenantConfig
+
+        config = TenantConfig(
+            tenant_id=tenant_id,
+            name=f"工厂-{tenant_id}",
+            created_at=datetime.now(UTC).isoformat(),
+            is_active=True,
+            daily_quota_usd=0,
+            monthly_quota_usd=0,
+        )
+        try:
+            await self._tenant_repo.create(config)
+            logger.info("Auto-created tenant %s from factory org", tenant_id)
+        except ValueError:
+            existing = await self._tenant_repo.get(tenant_id)
+            if existing is not None:
+                return tenant_id
+            raise
+
+        return tenant_id
+
     async def authenticate(self, credentials: dict):
         """Authenticate with RSA-encrypted username and password via ins-base-rpc.
+
+        After login, calls /auth/authentication to get user info with orgId,
+        then resolves tenant_id from the organization chain.
 
         Args:
             credentials: dict with keys "username" and "password".
@@ -110,19 +194,26 @@ class InsBaseAuthProvider(AuthProvider):
         token = data.get("token") or response.get("token")
         refresh_token = data.get("refresh") or response.get("refresh")
 
-        # Map to local User model with default tenant
-        user_id = uuid4()
+        # Resolve tenant_id from user's orgId by calling authentication endpoint
+        tenant_id = "default"
+        if token:
+            auth_response = await self._auth_service.authenticate(token)
+            if auth_response.get("code") == 200:
+                user_data = auth_response.get("user") or auth_response.get("data", {}).get("user") or {}
+                org_id = self._extract_org_id(user_data)
+                tenant_id = await self._resolve_tenant_id(org_id)
+
         user = type(
             "InsBaseUser",
             (),
             {
-                "id": user_id,
+                "id": uuid4(),
                 "email": f"{username}@ins-base",
                 "password_hash": None,
                 "system_role": _map_system_role(username),
                 "needs_setup": False,
                 "token_version": 0,
-                "tenant_id": "default",
+                "tenant_id": tenant_id,
                 "ins_base_token": token or "",
                 "ins_base_refresh": refresh_token or "",
             },
@@ -189,6 +280,10 @@ class InsBaseAuthProvider(AuthProvider):
             or token_user_id
         )
 
+        # Resolve tenant_id from orgId
+        org_id = self._extract_org_id(user_data)
+        tenant_id = await self._resolve_tenant_id(org_id)
+
         user = type(
             "InsBaseUser",
             (),
@@ -199,7 +294,7 @@ class InsBaseAuthProvider(AuthProvider):
                 "system_role": _map_system_role(user_data.get("userName", "")),
                 "needs_setup": False,
                 "token_version": 0,
-                "tenant_id": "default",
+                "tenant_id": tenant_id,
                 "ins_base_permissions": permissions,
                 "ins_base_user_data": user_data,
             },

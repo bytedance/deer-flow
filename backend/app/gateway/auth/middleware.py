@@ -126,7 +126,7 @@ def create_auth_middleware():
                     if ins_provider is not None:
                         user = await ins_provider.get_user(access_token)
                         if user is not None:
-                            tenant_id = "default"
+                            tenant_id = getattr(user, "tenant_id", "default")
                             try:
                                 validate_tenant_id(tenant_id)
                             except ValueError as e:

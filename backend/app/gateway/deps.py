@@ -313,7 +313,13 @@ def get_ins_base_provider():
         logger.warning("RPC client is not configured — InsBaseAuthProvider not available")
         return None
 
-    _cached_ins_base_provider = InsBaseAuthProvider(rpc_client=rpc_client)
+    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.tenant import TenantRepository
+
+    sf = get_session_factory()
+    tenant_repo = TenantRepository(sf) if sf else None
+
+    _cached_ins_base_provider = InsBaseAuthProvider(rpc_client=rpc_client, tenant_repo=tenant_repo)
     return _cached_ins_base_provider
 
 
