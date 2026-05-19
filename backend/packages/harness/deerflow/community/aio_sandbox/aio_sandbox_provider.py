@@ -627,14 +627,19 @@ class AioSandboxProvider(SandboxProvider):
         thread on its next turn without a cold-start.  The container will only be
         stopped when the replicas limit forces eviction or during shutdown.
 
+        The host-side AioSandbox client is closed to free socket/connection
+        resources; a fresh client will be created if the sandbox is reclaimed
+        from the warm pool later.
+
         Args:
             sandbox_id: The ID of the sandbox to release.
         """
+        sandbox = None
         info = None
         thread_ids_to_remove: list[str] = []
 
         with self._lock:
-            self._sandboxes.pop(sandbox_id, None)
+            sandbox = self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
             thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
             for tid in thread_ids_to_remove:
@@ -644,6 +649,10 @@ class AioSandboxProvider(SandboxProvider):
             if info and sandbox_id not in self._warm_pool:
                 self._warm_pool[sandbox_id] = (info, time.time())
 
+        # Close host-side client outside the lock to avoid holding it during I/O.
+        if sandbox is not None:
+            sandbox.close()
+
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
 
     def destroy(self, sandbox_id: str) -> None:
@@ -652,14 +661,18 @@ class AioSandboxProvider(SandboxProvider):
         Unlike release(), this actually stops the container.  Use this for
         explicit cleanup, capacity-driven eviction, or shutdown.
 
+        The host-side AioSandbox client is closed before the backend tears
+        down the container.
+
         Args:
             sandbox_id: The ID of the sandbox to destroy.
         """
+        sandbox = None
         info = None
         thread_ids_to_remove: list[str] = []
 
         with self._lock:
-            self._sandboxes.pop(sandbox_id, None)
+            sandbox = self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
             thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
             for tid in thread_ids_to_remove:
@@ -670,6 +683,10 @@ class AioSandboxProvider(SandboxProvider):
                 info, _ = self._warm_pool.pop(sandbox_id)
             else:
                 self._warm_pool.pop(sandbox_id, None)
+
+        # Close host-side client outside the lock to avoid holding it during I/O.
+        if sandbox is not None:
+            sandbox.close()
 
         if info:
             self._backend.destroy(info)
@@ -690,6 +707,19 @@ class AioSandboxProvider(SandboxProvider):
         if self._idle_checker_thread is not None and self._idle_checker_thread.is_alive():
             self._idle_checker_thread.join(timeout=5)
             logger.info("Stopped idle checker thread")
+
+        # Close all cached sandbox clients first to release host-side resources.
+        cached_sandboxes: list[AioSandbox] = []
+        with self._lock:
+            for sid in sandbox_ids:
+                sb = self._sandboxes.pop(sid, None)
+                if sb is not None:
+                    cached_sandboxes.append(sb)
+        for sb in cached_sandboxes:
+            try:
+                sb.close()
+            except Exception as e:
+                logger.error(f"Failed to close sandbox client during shutdown: {e}")
 
         logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
 
