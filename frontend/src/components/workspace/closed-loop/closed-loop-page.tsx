@@ -7,6 +7,7 @@ import { useClosureRefresh, useClosureSummary } from "@/core/closed-loop";
 import { ClosureDetailDrawer } from "./closure-detail-drawer";
 import { ClosureKanban } from "./closure-kanban";
 import { ClosureList } from "./closure-list";
+import { CreateClosureTicketDialog } from "./create-closure-ticket-dialog";
 
 type ViewMode = "list" | "kanban";
 
@@ -49,6 +50,7 @@ export function ClosedLoopPage() {
             </div>
           )}
           <ViewToggle view={view} onChange={setView} />
+          <CreateClosureTicketDialog onCreated={setActiveTicketId} />
         </div>
       </header>
 
