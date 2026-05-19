@@ -108,14 +108,20 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         return [e.tolist() for e in embeddings]
 
 
-def get_embedding_provider() -> EmbeddingProvider:
-    """Create an embedding provider from the current RAG configuration.
+def get_embedding_provider(model_spec: str | None = None) -> EmbeddingProvider:
+    """Create an embedding provider.
 
-    Parses the ``embedding_model`` field in ``provider:model`` format.
-    Supported providers: ``openai``, ``local``.
+    By default reads ``rag_config.embedding_model``. Pass ``model_spec``
+    (``"provider:model"``) to bind a provider to a specific KB's
+    embedding model — required for B.3 KB-bound embeddings so a tenant
+    that switches the global default doesn't poison existing KBs.
+
+    Supported providers: ``openai``, ``local``. ``api_key`` and
+    ``base_url`` always come from the global config — we don't carry
+    per-KB credentials.
     """
     config = get_rag_config()
-    raw = config.embedding_model
+    raw = model_spec if model_spec else config.embedding_model
     if ":" not in raw:
         raise ValueError(f"Invalid embedding_model format: {raw!r}. Expected 'provider:model'.")
 

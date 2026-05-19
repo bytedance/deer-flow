@@ -1499,10 +1499,12 @@ class TestUploads:
             created_executors = []
             real_executor_cls = concurrent.futures.ThreadPoolExecutor
 
-            async def fake_convert(path: Path) -> Path:
+            async def fake_convert(path: Path):
+                from deerflow.utils.file_conversion import ConversionResult
+
                 md_path = path.with_suffix(".md")
                 md_path.write_text(f"converted {path.name}")
-                return md_path
+                return ConversionResult.success(md_path)
 
             class FakeExecutor:
                 def __init__(self, max_workers: int):

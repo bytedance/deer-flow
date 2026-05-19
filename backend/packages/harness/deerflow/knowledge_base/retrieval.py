@@ -10,10 +10,26 @@ from typing import Any
 from deerflow.config.rag_config import get_rag_config
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.thread_meta import make_thread_store
+from deerflow.rag.embeddings import get_embedding_provider
 from deerflow.rag.retrieval import DocumentRetriever, normalize_scores, rerank
 from deerflow.rag.vector_store import SearchResult
 
 logger = logging.getLogger(__name__)
+
+
+_VISIBILITY_PRIORITY: dict[str, int] = {"private": 3, "tenant": 2, "public": 1}
+
+
+def _kb_priority(kb: dict[str, Any]) -> int:
+    """Visibility-derived KB priority used to break score ties.
+
+    Why: when two chunks land on the same vector score (common after
+    cosine clipping or rerank score quantisation), we want the user's
+    own private library to outrank a shared/public one — never the
+    reverse — so a high-confidence private hit can't be silently
+    pre-empted by a noisier tenant or public KB.
+    """
+    return _VISIBILITY_PRIORITY.get(str(kb.get("visibility", "")).lower(), 0)
 
 
 def normalize_kb_selection(selection: Any) -> dict[str, Any] | None:
@@ -147,6 +163,10 @@ def multi_kb_retrieve(
     Each KB retrieval is subject to a per-KB timeout. Results are normalized
     per-KB, merged, deduplicated, and limited by per-document chunk cap.
 
+    B.3.4: each KB is queried with its own embedding model — providers
+    are deduped by ``embedding_model`` so 5 KBs across 3 models result
+    in 3 embedding calls, not 5.
+
     Args:
         knowledge_bases: List of KB dicts (must contain ``collection_name`` and ``name``).
         query: The user query to search for.
@@ -162,42 +182,146 @@ def multi_kb_retrieve(
     timeout_s = config.per_kb_timeout_ms / 1000.0
     max_chunks_per_doc = config.max_chunks_per_document
 
-    retriever = DocumentRetriever()
     per_kb_k = max(top_k, 5)
 
     per_kb_results: list[list[SearchResult]] = []
+    per_kb_stats: list[dict[str, Any]] = []
+
+    # Filter KBs flagged stale by the startup consistency check; we surface
+    # them in per_kb_stats so operators can see *why* they were skipped
+    # rather than silently dropping results.
+    eligible_kbs: list[dict[str, Any]] = []
+    for kb in knowledge_bases:
+        if kb.get("vector_metric_stale"):
+            per_kb_stats.append(
+                {
+                    "kb_id": str(kb.get("id", "")),
+                    "kb_name": kb.get("name", ""),
+                    "raw_max": None,
+                    "raw_min": None,
+                    "returned": 0,
+                    "skipped_reason": "vector_metric_stale",
+                }
+            )
+            continue
+        eligible_kbs.append(kb)
+
+    # Build / cache embedders per unique embedding_model so 5 KBs
+    # across 3 models = 3 embed calls. Falls back to global default
+    # for legacy KBs that haven't been backfilled yet (embedding_model is None).
+    embedder_cache: dict[str, Any] = {}
+
+    def _embedder_for(spec: str | None) -> Any:
+        key = spec or "__global__"
+        if key not in embedder_cache:
+            embedder_cache[key] = get_embedding_provider(spec)
+        return embedder_cache[key]
 
     def _retrieve_one(kb: dict[str, Any]) -> list[SearchResult]:
         collection = kb["collection_name"]
+        priority = _kb_priority(kb)
+        spec = kb.get("embedding_model")
+        embedder = _embedder_for(spec)
+        retriever = DocumentRetriever(embedder=embedder)
         result = retriever.retrieve(query=query, collection=collection, top_k=per_kb_k)
         for r in result.results:
             if "kb_name" not in r.metadata:
                 r.metadata["kb_name"] = kb.get("name", "")
             if "knowledge_base_id" not in r.metadata:
                 r.metadata["knowledge_base_id"] = kb.get("id", "")
+            r.metadata.setdefault("kb_priority", priority)
+            r.metadata.setdefault("embedding_model", spec or "")
         return result.results
 
-    with ThreadPoolExecutor(max_workers=min(len(knowledge_bases), 4)) as executor:
-        futures = {executor.submit(_retrieve_one, kb): kb["id"] for kb in knowledge_bases}
+    kb_by_id: dict[str, dict[str, Any]] = {str(kb["id"]): kb for kb in eligible_kbs}
+    embedding_models_used = sorted(
+        {kb.get("embedding_model") or "__global__" for kb in eligible_kbs}
+    )
+
+    if not eligible_kbs:
+        logger.info(
+            "multi_kb_retrieve: per_kb=%s strategy=%s threshold=%s total=0 top_k=%d "
+            "embedding_models_used=%s",
+            per_kb_stats,
+            (getattr(config, "cross_kb_score_strategy", "absolute") or "absolute").lower(),
+            getattr(config, "score_threshold", 0.0),
+            top_k,
+            embedding_models_used,
+        )
+        return []
+
+    with ThreadPoolExecutor(max_workers=min(len(eligible_kbs), 4)) as executor:
+        futures = {executor.submit(_retrieve_one, kb): kb["id"] for kb in eligible_kbs}
         try:
-            for future in as_completed(futures, timeout=timeout_s * len(knowledge_bases)):
+            for future in as_completed(futures, timeout=timeout_s * len(eligible_kbs)):
                 kb_id = futures[future]
+                kb_meta = kb_by_id.get(str(kb_id), {})
                 try:
                     results = future.result(timeout=timeout_s)
                     per_kb_results.append(results)
+                    if results:
+                        scores = [r.score for r in results]
+                        raw_max = max(scores)
+                        raw_min = min(scores)
+                    else:
+                        raw_max = None
+                        raw_min = None
+                    per_kb_stats.append(
+                        {
+                            "kb_id": str(kb_id),
+                            "kb_name": kb_meta.get("name", ""),
+                            "raw_max": raw_max,
+                            "raw_min": raw_min,
+                            "returned": len(results),
+                            "embedding_model": kb_meta.get("embedding_model") or "",
+                        }
+                    )
                 except TimeoutError:
                     logger.warning("Retrieval timed out for KB %s (limit: %dms)", kb_id, config.per_kb_timeout_ms)
+                    per_kb_stats.append(
+                        {
+                            "kb_id": str(kb_id),
+                            "kb_name": kb_meta.get("name", ""),
+                            "raw_max": None,
+                            "raw_min": None,
+                            "returned": 0,
+                            "error": "timeout",
+                            "embedding_model": kb_meta.get("embedding_model") or "",
+                        }
+                    )
                 except Exception as e:
                     logger.warning("Retrieval failed for KB %s: %s", kb_id, e)
+                    per_kb_stats.append(
+                        {
+                            "kb_id": str(kb_id),
+                            "kb_name": kb_meta.get("name", ""),
+                            "raw_max": None,
+                            "raw_min": None,
+                            "returned": 0,
+                            "error": type(e).__name__,
+                            "embedding_model": kb_meta.get("embedding_model") or "",
+                        }
+                    )
         except TimeoutError:
-            logger.warning("Overall multi-KB retrieval timed out after %dms", int(timeout_s * len(knowledge_bases) * 1000))
+            logger.warning("Overall multi-KB retrieval timed out after %dms", int(timeout_s * len(eligible_kbs) * 1000))
 
     all_results: list[SearchResult] = []
+    score_strategy = (getattr(config, "cross_kb_score_strategy", "absolute") or "absolute").lower()
     for kb_results in per_kb_results:
-        normalized = normalize_scores(kb_results)
-        all_results.extend(normalized)
+        if score_strategy == "per_kb_minmax":
+            all_results.extend(normalize_scores(kb_results))
+        else:
+            all_results.extend(kb_results)
 
-    all_results.sort(key=lambda r: r.score, reverse=True)
+    all_results.sort(
+        key=lambda r: (
+            r.score,
+            r.metadata.get("kb_priority", 0),
+            str(r.metadata.get("document_id", "")),
+            r.chunk_id or "",
+        ),
+        reverse=True,
+    )
 
     seen_content: set[str] = set()
     doc_chunk_counts: defaultdict[str, int] = defaultdict(int)
@@ -218,5 +342,16 @@ def multi_kb_retrieve(
 
     if config.reranker_enabled and deduped:
         deduped = rerank(query, deduped)
+
+    logger.info(
+        "multi_kb_retrieve: per_kb=%s strategy=%s threshold=%s total=%d top_k=%d "
+        "embedding_models_used=%s",
+        per_kb_stats,
+        score_strategy,
+        getattr(config, "score_threshold", 0.0),
+        len(deduped),
+        top_k,
+        embedding_models_used,
+    )
 
     return deduped

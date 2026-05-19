@@ -1201,18 +1201,33 @@ class DeerFlowClient:
                     info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+                    md_path: Path | None = None
                     try:
                         if conversion_pool is not None:
-                            md_path = conversion_pool.submit(_convert_in_thread, dest).result()
+                            conv_result = conversion_pool.submit(_convert_in_thread, dest).result()
                         else:
-                            md_path = asyncio.run(convert_file_to_markdown(dest))
+                            conv_result = asyncio.run(convert_file_to_markdown(dest))
                     except Exception:
                         logger.warning(
                             "Failed to convert %s to markdown",
                             src_path.name,
                             exc_info=True,
                         )
-                        md_path = None
+                        conv_result = None
+
+                    if conv_result is not None:
+                        if conv_result.failed:
+                            # Embedded callers don't get HTTP responses; log
+                            # the structured code and skip the md attachment
+                            # rather than failing the whole upload.
+                            logger.warning(
+                                "Conversion failed for %s: code=%s detail=%s",
+                                src_path.name,
+                                conv_result.error.value if conv_result.error else "UNKNOWN",
+                                conv_result.error_detail,
+                            )
+                        else:
+                            md_path = conv_result.md_path
 
                     if md_path is not None:
                         info["markdown_file"] = md_path.name

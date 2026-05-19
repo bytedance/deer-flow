@@ -97,3 +97,28 @@ class TestRagConfigSingleton:
             assert config.chunk_size == 500
         finally:
             set_rag_config(original)
+
+
+class TestRagConfigStartupLog:
+    """Sprint A.4 — operator-facing INFO log on config load."""
+
+    def test_load_emits_startup_summary(self, caplog):
+        original = get_rag_config()
+        try:
+            with caplog.at_level("INFO", logger="deerflow.config.rag_config"):
+                load_rag_config_from_dict(
+                    {
+                        "enabled": True,
+                        "injection_enabled": True,
+                        "tool_enabled": True,
+                        "allow_no_auth_kb": False,
+                        "vector_store_backend": "chroma",
+                    }
+                )
+            messages = [rec.getMessage() for rec in caplog.records]
+            assert any("RAG config loaded:" in m for m in messages)
+            assert any("enabled=True" in m for m in messages)
+            assert any("vector_store=chroma" in m for m in messages)
+            assert any("allow_no_auth_kb=False" in m for m in messages)
+        finally:
+            set_rag_config(original)

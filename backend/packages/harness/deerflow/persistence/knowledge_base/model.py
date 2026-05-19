@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Index, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -28,6 +28,9 @@ class KnowledgeBaseRow(Base):
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_search_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    embedding_dim: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    vector_metric_stale: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -51,6 +54,7 @@ class KnowledgeBaseDocumentRow(Base):
     index_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     index_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     index_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    index_queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     content_length: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

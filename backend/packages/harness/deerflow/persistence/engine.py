@@ -54,6 +54,59 @@ async def _auto_create_postgres_db(url: str) -> None:
         await maint_engine.dispose()
 
 
+async def _run_alembic_upgrade(url: str, backend: str) -> None:
+    """Stamp / upgrade Alembic to ``head``.
+
+    Stamps a fresh DB (where ``create_all`` already produced the latest
+    schema) so future ``alembic upgrade`` cycles know where they are. On
+    an existing DB with an alembic_version row, runs pending migrations.
+    Handled out of band so failures do not block startup — the create_all
+    path remains the source of truth for fresh installs.
+    """
+    if backend == "memory":
+        return
+
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    here = Path(__file__).resolve().parent / "migrations"
+    cfg = Config(str(here / "alembic.ini"))
+    cfg.set_main_option("script_location", str(here))
+    sync_url = url.replace("+aiosqlite", "").replace("+asyncpg", "")
+    cfg.set_main_option("sqlalchemy.url", sync_url)
+
+    script = ScriptDirectory.from_config(cfg)
+    head_rev = script.get_current_head()
+
+    def _check_and_run() -> None:
+        from sqlalchemy import create_engine
+
+        sync_engine = create_engine(sync_url, future=True)
+        try:
+            with sync_engine.connect() as conn:
+                ctx = MigrationContext.configure(conn)
+                current = ctx.get_current_revision()
+
+            if current is None:
+                command.stamp(cfg, head_rev)
+                logger.info("Alembic: stamped fresh database at revision %s", head_rev)
+            elif current != head_rev:
+                command.upgrade(cfg, "head")
+                logger.info("Alembic: upgraded database from %s to %s", current, head_rev)
+            else:
+                logger.debug("Alembic: database already at head %s", head_rev)
+        finally:
+            sync_engine.dispose()
+
+    import asyncio
+
+    await asyncio.to_thread(_check_and_run)
+
+
 async def init_engine(
     backend: str,
     *,
@@ -152,6 +205,15 @@ async def init_engine(
                 await conn.run_sync(Base.metadata.create_all)
         else:
             raise
+
+    # Stamp / upgrade Alembic revisions so additive migrations apply to
+    # already-deployed databases (where ``create_all`` is a no-op for
+    # missing columns). On a fresh DB the tables already match ``head``,
+    # so we stamp; on an upgraded DB we run pending migrations.
+    try:
+        await _run_alembic_upgrade(url, backend)
+    except Exception:
+        logger.exception("Alembic upgrade failed (non-fatal — continuing with create_all schema)")
 
     logger.info("Persistence engine initialized: backend=%s", backend)
 

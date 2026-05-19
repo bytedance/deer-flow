@@ -138,20 +138,59 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
 
         # Knowledge base service
         if sf is not None:
+            from deerflow.config.rag_config import get_rag_config
+            from deerflow.knowledge_base.dispatcher import IndexingDispatcher
             from deerflow.knowledge_base.service import KnowledgeBaseService
             from deerflow.persistence.knowledge_base.document_repository import DocumentRepository
             from deerflow.persistence.knowledge_base.index_job_repository import IndexJobRepository
             from deerflow.persistence.knowledge_base.permission_repository import KbPermissionRepository
             from deerflow.persistence.knowledge_base.repository import KnowledgeBaseRepository
 
-            app.state.kb_service = KnowledgeBaseService(
-                kb_repo=KnowledgeBaseRepository(sf),
-                doc_repo=DocumentRepository(sf),
-                job_repo=IndexJobRepository(sf),
+            kb_repo = KnowledgeBaseRepository(sf)
+            doc_repo = DocumentRepository(sf)
+            job_repo = IndexJobRepository(sf)
+            kb_service = KnowledgeBaseService(
+                kb_repo=kb_repo,
+                doc_repo=doc_repo,
+                job_repo=job_repo,
                 permission_repo=KbPermissionRepository(sf),
             )
+
+            rag_cfg = get_rag_config()
+            index_dispatcher = IndexingDispatcher(
+                indexing_service=kb_service._indexing,
+                kb_repo=kb_repo,
+                doc_repo=doc_repo,
+                workers=rag_cfg.indexing_workers,
+                queue_max=rag_cfg.indexing_queue_max,
+            )
+            await index_dispatcher.start()
+            kb_service.attach_dispatcher(index_dispatcher)
+            stack.push_async_callback(index_dispatcher.aclose)
+            try:
+                recovered = await index_dispatcher.recover()
+                if recovered:
+                    logger.info("IndexingDispatcher recovered %d orphan job(s)", recovered)
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning("IndexingDispatcher recover() failed at startup: %s", exc)
+
+            app.state.kb_service = kb_service
+            app.state.index_dispatcher = index_dispatcher
+            try:
+                report = await kb_service.startup_consistency_check()
+                logger.info(
+                    "kb_service.startup_consistency_check: checked=%d marked_stale=%d errors=%d",
+                    report.get("checked", 0),
+                    report.get("marked_stale", 0),
+                    report.get("errors", 0),
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(
+                    "kb_service.startup_consistency_check failed: %s — startup continues", exc
+                )
         else:
             app.state.kb_service = None
+            app.state.index_dispatcher = None
 
         # Run event store (has its own factory with config-driven backend selection)
         run_events_config = getattr(config, "run_events", None)

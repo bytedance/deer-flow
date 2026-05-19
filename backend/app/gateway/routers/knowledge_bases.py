@@ -356,6 +356,34 @@ async def reindex_document(
     return doc
 
 
+@router.post("/{kb_id}/reindex-all", status_code=202)
+async def reindex_all(
+    kb_id: str,
+    request: Request,
+):
+    """Tear down the KB's vector collection and re-queue every doc.
+
+    Admin-only (superadmin / tenant_admin). Repairs KBs flagged
+    ``vector_metric_stale`` after Sprint A.10 — Chroma cosine metadata
+    is immutable per collection so a fresh collection is the only fix.
+    Returns 202 because per-doc indexing happens asynchronously through
+    the dispatcher.
+    """
+    user = await get_current_user_from_request(request)
+    svc = _get_kb_service(request)
+    try:
+        report = await svc.reindex_all_for_kb(
+            kb_id,
+            tenant_id=user.tenant_id,
+            role=user.system_role,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Permission Management
 # ---------------------------------------------------------------------------
@@ -530,23 +558,48 @@ async def upload_document(
 
 
 async def _convert_binary_file(content_bytes: bytes, filename: str) -> str:
-    """Convert a binary document (PDF/DOCX) to Markdown text."""
-    import asyncio
+    """Convert a binary document (PDF/DOCX) to Markdown text.
 
-    from deerflow.utils.file_conversion import convert_file_to_markdown
+    Failures from :func:`convert_file_to_markdown` are mapped to a 422 with a
+    structured detail body ``{code, message, filename}`` so the frontend can
+    show a code-keyed toast instead of generic "failed to convert". The
+    EMPTY_RESULT guard is enforced inside ``convert_file_to_markdown`` itself
+    (Sprint C.3.2) — short outputs (< 200 non-whitespace chars) come back as
+    failures, not as a successful md_path with empty content.
+    """
+    from deerflow.utils.file_conversion import (
+        ConversionErrorCode,
+        convert_file_to_markdown,
+    )
 
     with tempfile.NamedTemporaryFile(suffix=Path(filename).suffix, delete=False) as tmp:
         tmp.write(content_bytes)
         tmp_path = Path(tmp.name)
 
     try:
-        loop = asyncio.get_running_loop()
-        md_path = await loop.run_in_executor(None, convert_file_to_markdown, tmp_path)
-        if md_path is None:
-            raise HTTPException(status_code=422, detail="Failed to convert file to text")
-        content = md_path.read_text(encoding="utf-8")
+        result = await convert_file_to_markdown(tmp_path)
+        if result.failed:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": result.error.value,
+                    "message": result.error_detail or "Failed to convert file",
+                    "filename": filename,
+                },
+            )
+        content = result.md_path.read_text(encoding="utf-8")
         if not content.strip():
-            raise HTTPException(status_code=422, detail="Converted file produced no text content")
+            # Belt-and-braces: convert_file_to_markdown already enforces
+            # EMPTY_RESULT, but a downstream caller could pass in a path
+            # whose .md file got truncated between the write and the read.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": ConversionErrorCode.EMPTY_RESULT.value,
+                    "message": "Converted file produced no text content",
+                    "filename": filename,
+                },
+            )
         return content
     finally:
         tmp_path.unlink(missing_ok=True)

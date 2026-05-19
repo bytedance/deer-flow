@@ -1,5 +1,9 @@
 import { fetchGateway } from "../api";
 import { getBackendBaseURL } from "../config";
+import {
+  ConversionError,
+  type ConversionErrorBody,
+} from "../uploads/conversion-errors";
 
 import type {
   CreateDocumentRequest,
@@ -221,9 +225,18 @@ export async function uploadDocument(
     },
   );
   if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    const body = (await res.json().catch(() => ({}))) as {
+      detail?: ConversionErrorBody | string;
+    };
+    const detail = body.detail;
+    if (detail && typeof detail === "object" && "code" in detail) {
+      // Conversion failed inside _convert_binary_file (Sprint C.1.2 / C.3.2).
+      // Surface the stable code so the UI shows a localised toast.
+      throw new ConversionError(detail);
+    }
     throw new Error(
-      err.detail ?? `Failed to upload document: ${res.statusText}`,
+      (typeof detail === "string" ? detail : undefined) ??
+        `Failed to upload document: ${res.statusText}`,
     );
   }
   return res.json() as Promise<KnowledgeBaseDocument>;

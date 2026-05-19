@@ -25,6 +25,45 @@ interface KnowledgeBaseSelectorProps {
   onSelectionChange: (selection: KnowledgeBaseSelection) => void;
 }
 
+/**
+ * Build a stable signature from the KB IDs.
+ *
+ * Why a signature instead of the array itself: TanStack Query returns a
+ * fresh `knowledgeBases` array reference on every poll even when the
+ * contents are identical, so depending on the array directly turns the
+ * cleanup effect into a hot loop. Sorting + joining the IDs gives us a
+ * primitive that only changes when the underlying KB set actually does.
+ */
+function knowledgeBaseIdSignature(kbs: { id: string }[]): string {
+  return kbs
+    .map((kb) => kb.id)
+    .sort()
+    .join("|");
+}
+
+/**
+ * Strip selected_ids that no longer correspond to any visible KB.
+ *
+ * Returns either the original selection (when no change is needed — the
+ * caller compares by reference to avoid pointless setState calls) or a
+ * cleaned copy. When *all* selected IDs are gone, `enabled` is forced
+ * to false so the next chat turn doesn't try to retrieve from an empty
+ * set and silently produce zero results.
+ */
+function cleanSelection(
+  selection: KnowledgeBaseSelection,
+  validIds: Set<string>,
+): KnowledgeBaseSelection {
+  const filtered = selection.selected_ids.filter((id) => validIds.has(id));
+  if (filtered.length === selection.selected_ids.length) {
+    return selection;
+  }
+  return {
+    enabled: filtered.length > 0,
+    selected_ids: filtered,
+  };
+}
+
 export function KnowledgeBaseSelector({
   selection,
   onSelectionChange,
@@ -38,21 +77,42 @@ export function KnowledgeBaseSelector({
     [selection?.selected_ids],
   );
 
-  const hasCleaned = useRef(false);
+  // Hold the latest callback in a ref so the cleanup effect doesn't fire
+  // every time the parent re-renders with a fresh inline `onSelectionChange`.
+  // The parent's recommended shape is a `useCallback`-stable function, but
+  // we don't trust it — the ref keeps us correct either way.
+  const onSelectionChangeRef = useRef(onSelectionChange);
   useEffect(() => {
-    if (isLoading || hasCleaned.current || !selection?.enabled) return;
+    onSelectionChangeRef.current = onSelectionChange;
+  }, [onSelectionChange]);
+
+  // Re-run cleanup whenever the visible KB set changes. The signature is a
+  // primitive so React compares it by value — a fresh KB array with the
+  // same IDs is a no-op. Compared with the previous `hasCleaned` ref:
+  //   - this still re-runs when the user adds a new KB and an old stale
+  //     selection becomes valid (or vice-versa) later in the session;
+  //   - it can never live-lock because cleanSelection returns the same
+  //     reference when no change is needed.
+  const idSignature = useMemo(
+    () => knowledgeBaseIdSignature(knowledgeBases),
+    [knowledgeBases],
+  );
+
+  useEffect(() => {
+    if (isLoading || !selection?.enabled) return;
     if (knowledgeBases.length === 0) return;
 
     const validIds = new Set(knowledgeBases.map((kb) => kb.id));
-    const filtered = selection.selected_ids.filter((id) => validIds.has(id));
-    if (filtered.length < selection.selected_ids.length) {
-      hasCleaned.current = true;
-      onSelectionChange({
-        enabled: filtered.length > 0,
-        selected_ids: filtered,
-      });
+    const next = cleanSelection(selection, validIds);
+    if (next !== selection) {
+      onSelectionChangeRef.current(next);
     }
-  }, [isLoading, knowledgeBases, selection, onSelectionChange]);
+    // We deliberately omit `selection` from the deps so a fresh callback
+    // identity from the parent doesn't refire cleanup. The `idSignature`
+    // and `selection.selected_ids` are the only inputs cleanSelection
+    // actually reads, plus the loading flag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idSignature, selection?.selected_ids, selection?.enabled, isLoading]);
 
   const handleToggleKB = useCallback(
     (id: string) => {
@@ -63,12 +123,12 @@ export function KnowledgeBaseSelector({
         next.add(id);
       }
       const ids = Array.from(next);
-      onSelectionChange({
+      onSelectionChangeRef.current({
         enabled: ids.length > 0,
         selected_ids: ids,
       });
     },
-    [selectedIds, onSelectionChange],
+    [selectedIds],
   );
   const selectedCount = selectedIds.size;
 
@@ -151,3 +211,9 @@ export function KnowledgeBaseSelector({
     </DropdownMenu>
   );
 }
+
+// Exposed for testing (Sprint C.2.2). Production code should not import these.
+export const __test_only = {
+  knowledgeBaseIdSignature,
+  cleanSelection,
+};

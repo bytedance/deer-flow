@@ -192,6 +192,7 @@ class DocumentRepository:
         chunk_ids: list | None = None,
         chunk_count: int | None = None,
         last_indexed_at: datetime | None = None,
+        index_queued_at: datetime | None = None,
     ) -> None:
         updates: dict[str, Any] = {"index_status": index_status, "updated_at": datetime.now(UTC)}
         if index_error is not None:
@@ -204,10 +205,29 @@ class DocumentRepository:
             updates["chunk_count"] = chunk_count
         if last_indexed_at is not None:
             updates["last_indexed_at"] = last_indexed_at
+        if index_queued_at is not None:
+            updates["index_queued_at"] = index_queued_at
         async with self._sf() as session:
             stmt = update(KnowledgeBaseDocumentRow).where(KnowledgeBaseDocumentRow.id == doc_id).values(**updates)
             await session.execute(stmt)
             await session.commit()
+
+    async def list_pending_or_running(self) -> list[dict[str, Any]]:
+        """Return active docs whose index_status is queued or running.
+
+        Why: dispatcher startup needs to scan for orphaned jobs left behind
+        by a crashed process and re-enqueue them. We treat ``pending`` as
+        "queued but worker hadn't picked it up" and ``indexing`` as
+        "worker started but didn't finish" — both are safe to retry given
+        ``execute_index_job`` is idempotent (cleans old chunks, writes new).
+        """
+        async with self._sf() as session:
+            stmt = select(KnowledgeBaseDocumentRow).where(
+                KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                KnowledgeBaseDocumentRow.index_status.in_(["pending", "indexing"]),
+            )
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
 
     async def get_by_id_internal(self, doc_id: str) -> dict[str, Any] | None:
         """Get document without owner filter — for internal service use."""

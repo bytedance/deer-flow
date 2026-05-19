@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated
 
 from langchain_core.runnables import RunnableConfig
@@ -14,15 +13,20 @@ from langchain_core.tools import InjectedToolArg, tool
 from deerflow.config.rag_config import get_rag_config
 from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id
 from deerflow.knowledge_base.retrieval import resolve_runtime_kb_selection
+from deerflow.rag.decisions import RagDecisionEvent
+from deerflow.rag.errors import KbResolutionError, RagError, VectorStoreError
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
-_resolve_pool = ThreadPoolExecutor(max_workers=2)
+
+def _emit(payload: dict, decision: RagDecisionEvent) -> str:
+    """Attach the decision dict to the tool payload and JSON-encode."""
+    return json.dumps({**payload, "decision": decision.to_dict()}, ensure_ascii=False)
 
 
 @tool
-def search_knowledge_base(
+async def search_knowledge_base(
     query: str,
     collection: str = "default",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,
@@ -42,41 +46,77 @@ def search_knowledge_base(
     """
     rag_config = get_rag_config()
     if not rag_config.enabled:
-        return json.dumps({"error": "RAG subsystem is not enabled", "results": []})
+        return _emit(
+            {"error": "RAG subsystem is not enabled", "results": []},
+            RagDecisionEvent(
+                outcome="disabled",
+                reason="rag.enabled=false",
+                source="tool",
+                query=query[:200],
+            ),
+        )
 
     try:
-        kb_selection = _extract_kb_selection(config)
+        kb_selection = await _extract_kb_selection(config)
         if kb_selection and collection == "default":
-            return _search_selected_kbs(query, kb_selection, rag_config, config)
-        return _search_single_collection(query, collection, rag_config, config)
-    except Exception:
+            return await _search_selected_kbs(query, kb_selection, rag_config, config)
+        return await _search_single_collection(query, collection, rag_config, config)
+    except KbResolutionError as exc:
+        logger.warning("search_knowledge_base: KB resolution failed: %s", exc)
+        return _emit(
+            {"error": "Knowledge base resolution failed", "results": []},
+            RagDecisionEvent(
+                outcome="blocked",
+                reason=f"KbResolutionError: {exc!s}"[:200],
+                source="tool",
+                query=query[:200],
+            ),
+        )
+    except VectorStoreError as exc:
+        logger.warning("search_knowledge_base: vector store rejected: %s", exc)
+        return _emit(
+            {"error": "Vector store unavailable", "results": []},
+            RagDecisionEvent(
+                outcome="failed",
+                reason=f"VectorStoreError: {exc!s}"[:200],
+                source="tool",
+                query=query[:200],
+            ),
+        )
+    except RagError as exc:
+        logger.warning("search_knowledge_base: RAG error: %s", exc)
+        return _emit(
+            {"error": "Knowledge base search failed", "results": []},
+            RagDecisionEvent(
+                outcome="failed",
+                reason=f"{type(exc).__name__}: {exc!s}"[:200],
+                source="tool",
+                query=query[:200],
+            ),
+        )
+    except Exception as exc:
         logger.exception("search_knowledge_base failed")
-        return json.dumps({"error": "Knowledge base search failed", "results": []})
+        return _emit(
+            {"error": "Knowledge base search failed", "results": []},
+            RagDecisionEvent(
+                outcome="failed",
+                reason=f"{type(exc).__name__}: {exc!s}"[:200],
+                source="tool",
+                query=query[:200],
+            ),
+        )
 
 
-def _extract_kb_selection(config: RunnableConfig | None) -> dict | None:
+async def _extract_kb_selection(config: RunnableConfig | None) -> dict | None:
     """Extract knowledge_base_selection from runtime context in RunnableConfig."""
-    resolved_selection, _ = _resolve_kb_selection(config)
-    return resolved_selection
-
-
-def _resolve_kb_selection(config: RunnableConfig | None) -> tuple[dict | None, str | None]:
     if not config:
-        return None, None
-
+        return None
     configurable = config.get("configurable") or {}
     runtime = configurable.get("__pregel_runtime")
     if runtime is None:
-        return None, None
-
-    def _run_async() -> tuple[dict | None, str | None]:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(resolve_runtime_kb_selection(runtime))
-        finally:
-            loop.close()
-
-    return _resolve_pool.submit(_run_async).result(timeout=10)
+        return None
+    selection, _ = await resolve_runtime_kb_selection(runtime)
+    return selection
 
 
 def _extract_runtime_context(config: RunnableConfig | None) -> dict:
@@ -85,7 +125,7 @@ def _extract_runtime_context(config: RunnableConfig | None) -> dict:
     return getattr(runtime, "context", None) or {}
 
 
-def _search_selected_kbs(
+async def _search_selected_kbs(
     query: str, selection: dict, rag_config, config: RunnableConfig | None
 ) -> str:
     """Search across user's selected knowledge bases."""
@@ -96,41 +136,69 @@ def _search_selected_kbs(
     context = _extract_runtime_context(config)
     tenant_id = context.get("tenant_id") or get_current_tenant_id()
     user_id = context.get("user_id") or get_effective_user_id()
+    selected_ids_capped = list(selection.get("selected_ids") or [])[: rag_config.max_selected_kbs]
 
     if not tenant_id or tenant_id == _DEFAULT_TENANT_ID or not user_id:
-        return json.dumps({"error": "Missing tenant or user context", "results": []})
+        return _emit(
+            {"error": "Missing tenant or user context", "results": []},
+            RagDecisionEvent(
+                outcome="blocked",
+                reason="missing tenant or user context",
+                source="tool",
+                query=query[:200],
+                selected_kb_ids=selected_ids_capped,
+            ),
+        )
 
     if user_id == DEFAULT_USER_ID and not rag_config.allow_no_auth_kb:
-        return json.dumps({"error": "Knowledge base access requires authentication", "results": []})
+        return _emit(
+            {"error": "Knowledge base access requires authentication", "results": []},
+            RagDecisionEvent(
+                outcome="blocked",
+                reason="no-auth user and rag.allow_no_auth_kb=false",
+                source="tool",
+                query=query[:200],
+                selected_kb_ids=selected_ids_capped,
+            ),
+        )
 
     sf = get_session_factory()
     if sf is None:
-        return json.dumps({"error": "Database not configured", "results": []})
-
-    selected_ids = selection["selected_ids"][: rag_config.max_selected_kbs]
-    repo = KnowledgeBaseRepository(sf)
-
-    async def _resolve():
-        return await repo.resolve_accessible_by_ids(
-            selected_ids, tenant_id=tenant_id, user_id=user_id
+        return _emit(
+            {"error": "Database not configured", "results": []},
+            RagDecisionEvent(
+                outcome="failed",
+                reason="session factory unavailable",
+                source="tool",
+                query=query[:200],
+                selected_kb_ids=selected_ids_capped,
+            ),
         )
 
-    def _run_async():
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(_resolve())
-        finally:
-            loop.close()
-
-    knowledge_bases = _resolve_pool.submit(_run_async).result(timeout=10)
+    repo = KnowledgeBaseRepository(sf)
+    knowledge_bases = await repo.resolve_accessible_by_ids(
+        selected_ids_capped, tenant_id=tenant_id, user_id=user_id
+    )
+    accessible_ids = [str(kb.get("id", "")) for kb in (knowledge_bases or [])]
 
     if not knowledge_bases:
-        return json.dumps({"query": query, "results": [], "note": "No active knowledge bases found"})
+        return _emit(
+            {"query": query, "results": [], "note": "No active knowledge bases found"},
+            RagDecisionEvent(
+                outcome="blocked",
+                reason="no accessible KB after permission filter",
+                source="tool",
+                query=query[:200],
+                selected_kb_ids=selected_ids_capped,
+                accessible_kb_ids=[],
+            ),
+        )
 
-    results = multi_kb_retrieve(
-        knowledge_bases=knowledge_bases,
-        query=query,
-        top_k=rag_config.retrieval_top_k,
+    results = await asyncio.to_thread(
+        multi_kb_retrieve,
+        knowledge_bases,
+        query,
+        rag_config.retrieval_top_k,
     )
 
     formatted = [
@@ -145,10 +213,33 @@ def _search_selected_kbs(
         for i, r in enumerate(results)
     ]
 
-    return json.dumps({"query": query, "results": formatted}, ensure_ascii=False)
+    if not results:
+        decision = RagDecisionEvent(
+            outcome="skipped",
+            reason="no chunks returned from selected KBs",
+            source="tool",
+            query=query[:200],
+            selected_kb_ids=selected_ids_capped,
+            accessible_kb_ids=accessible_ids,
+            score_strategy=getattr(rag_config, "cross_kb_score_strategy", None),
+        )
+    else:
+        decision = RagDecisionEvent(
+            outcome="injected",
+            reason=f"returned {len(results)} chunks from {len(knowledge_bases)} KB",
+            source="tool",
+            query=query[:200],
+            selected_kb_ids=selected_ids_capped,
+            accessible_kb_ids=accessible_ids,
+            chunks_returned=len(results),
+            chunks_injected=len(results),
+            score_strategy=getattr(rag_config, "cross_kb_score_strategy", None),
+        )
+
+    return _emit({"query": query, "results": formatted}, decision)
 
 
-def _search_single_collection(query: str, collection: str, rag_config, config: RunnableConfig | None) -> str:
+async def _search_single_collection(query: str, collection: str, rag_config, config: RunnableConfig | None) -> str:
     """Search a single named collection through owner-scoped KB resolution."""
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.knowledge_base.repository import KnowledgeBaseRepository
@@ -158,39 +249,63 @@ def _search_single_collection(query: str, collection: str, rag_config, config: R
     user_id = context.get("user_id") or get_effective_user_id()
 
     if not tenant_id or tenant_id == _DEFAULT_TENANT_ID or not user_id:
-        return json.dumps({"error": "Missing tenant or user context", "results": []})
+        return _emit(
+            {"error": "Missing tenant or user context", "results": []},
+            RagDecisionEvent(
+                outcome="blocked",
+                reason="missing tenant or user context",
+                source="tool",
+                query=query[:200],
+            ),
+        )
 
     if user_id == DEFAULT_USER_ID and not rag_config.allow_no_auth_kb:
-        return json.dumps({"error": "Knowledge base access requires authentication", "results": []})
+        return _emit(
+            {"error": "Knowledge base access requires authentication", "results": []},
+            RagDecisionEvent(
+                outcome="blocked",
+                reason="no-auth user and rag.allow_no_auth_kb=false",
+                source="tool",
+                query=query[:200],
+            ),
+        )
 
     sf = get_session_factory()
     if sf is None:
-        return json.dumps({"error": "Database not configured", "results": []})
-
-    repo = KnowledgeBaseRepository(sf)
-
-    async def _resolve():
-        return await repo.resolve_accessible_by_collections(
-            [collection], tenant_id=tenant_id, user_id=user_id
+        return _emit(
+            {"error": "Database not configured", "results": []},
+            RagDecisionEvent(
+                outcome="failed",
+                reason="session factory unavailable",
+                source="tool",
+                query=query[:200],
+            ),
         )
 
-    def _run_async():
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(_resolve())
-        finally:
-            loop.close()
-
-    knowledge_bases = _resolve_pool.submit(_run_async).result(timeout=10)
+    repo = KnowledgeBaseRepository(sf)
+    knowledge_bases = await repo.resolve_accessible_by_collections(
+        [collection], tenant_id=tenant_id, user_id=user_id
+    )
+    accessible_ids = [str(kb.get("id", "")) for kb in (knowledge_bases or [])]
     if not knowledge_bases:
-        return json.dumps({"error": "Knowledge base not available", "results": []})
+        return _emit(
+            {"error": "Knowledge base not available", "results": []},
+            RagDecisionEvent(
+                outcome="blocked",
+                reason=f"collection {collection!r} not in accessible KBs",
+                source="tool",
+                query=query[:200],
+                accessible_kb_ids=[],
+            ),
+        )
 
     from deerflow.knowledge_base.retrieval import multi_kb_retrieve
 
-    results = multi_kb_retrieve(
-        knowledge_bases=knowledge_bases,
-        query=query,
-        top_k=rag_config.retrieval_top_k,
+    results = await asyncio.to_thread(
+        multi_kb_retrieve,
+        knowledge_bases,
+        query,
+        rag_config.retrieval_top_k,
     )
 
     formatted = [
@@ -205,4 +320,23 @@ def _search_single_collection(query: str, collection: str, rag_config, config: R
         for i, r in enumerate(results)
     ]
 
-    return json.dumps({"query": query, "collection": collection, "results": formatted}, ensure_ascii=False)
+    if not results:
+        decision = RagDecisionEvent(
+            outcome="skipped",
+            reason=f"no chunks returned from collection {collection!r}",
+            source="tool",
+            query=query[:200],
+            accessible_kb_ids=accessible_ids,
+        )
+    else:
+        decision = RagDecisionEvent(
+            outcome="injected",
+            reason=f"returned {len(results)} chunks from collection {collection!r}",
+            source="tool",
+            query=query[:200],
+            accessible_kb_ids=accessible_ids,
+            chunks_returned=len(results),
+            chunks_injected=len(results),
+        )
+
+    return _emit({"query": query, "collection": collection, "results": formatted}, decision)

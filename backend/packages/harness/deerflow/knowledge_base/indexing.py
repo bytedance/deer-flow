@@ -30,7 +30,21 @@ class IndexingService:
         document: dict[str, Any],
         knowledge_base: dict[str, Any],
     ) -> dict[str, Any]:
-        """Run ingestion for a document and update status accordingly."""
+        """Run ingestion for a document and update status accordingly.
+
+        B.3.2: resolves the embedding provider from ``knowledge_base["embedding_model"]``
+        rather than the global config, so a KB created against
+        ``text-embedding-3-small`` keeps writing 1536-dim vectors even
+        after the global default flips to ``text-embedding-3-large``.
+
+        B.3.3: when the KB row already has ``embedding_dim != 0``,
+        passes that as ``expected_dim`` so a mid-flight model swap
+        raises ``EmbeddingDimensionMismatchError`` *before* the vector
+        store mixes dims. First-time runs (``embedding_dim == 0``)
+        backfill the dim into the KB row after a successful write.
+        """
+        from deerflow.rag.embeddings import get_embedding_provider
+        from deerflow.rag.errors import EmbeddingDimensionMismatchError
         from deerflow.rag.ingestion import DocumentIngestor
         from deerflow.rag.vector_store import get_vector_store
 
@@ -39,6 +53,8 @@ class IndexingService:
         collection_name = knowledge_base["collection_name"]
         version = document["version"]
         old_chunk_ids = document.get("chunk_ids") or []
+        kb_embedding_model = knowledge_base.get("embedding_model")
+        existing_dim = int(knowledge_base.get("embedding_dim") or 0)
 
         job = await self._job_repo.create(
             document_id=doc_id,
@@ -55,7 +71,11 @@ class IndexingService:
         await self._doc_repo.update_index_status(doc_id, index_status="indexing", index_job_id=job_id)
 
         try:
-            ingestor = DocumentIngestor()
+            embedder = get_embedding_provider(kb_embedding_model)
+            ingestor = DocumentIngestor(
+                embedder=embedder,
+                expected_dim=existing_dim or None,
+            )
             chunk_metadata = {
                 "document_id": doc_id,
                 "knowledge_base_id": kb_id,
@@ -85,6 +105,17 @@ class IndexingService:
                     store.delete(collection_name, result.chunk_ids)
                 await self._job_repo.update_status(job_id, status="cancelled", finished_at=datetime.now(UTC))
                 return job
+
+            # B.3.2 lazy backfill: first index job confirms the dim.
+            if existing_dim == 0 and result.embedding_dim:
+                try:
+                    await self._kb_repo.update_embedding_binding(
+                        kb_id, embedding_dim=result.embedding_dim
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to backfill embedding_dim for KB %s: %s", kb_id, e
+                    )
 
             finished = datetime.now(UTC)
             await self._doc_repo.update_index_status(
@@ -116,6 +147,18 @@ class IndexingService:
 
             return await self._job_repo.get(job_id) or job
 
+        except EmbeddingDimensionMismatchError as e:
+            logger.error(
+                "Index job %s rejected: dim mismatch (expected=%d actual=%d)",
+                job_id, e.expected, e.actual,
+            )
+            await self._doc_repo.update_index_status(
+                doc_id, index_status="failed", index_error=str(e), index_job_id=job_id
+            )
+            await self._job_repo.update_status(
+                job_id, status="failed", error=str(e), finished_at=datetime.now(UTC)
+            )
+            return await self._job_repo.get(job_id) or job
         except Exception as e:
             logger.error("Index job %s failed: %s", job_id, e)
             await self._doc_repo.update_index_status(doc_id, index_status="failed", index_error=str(e), index_job_id=job_id)

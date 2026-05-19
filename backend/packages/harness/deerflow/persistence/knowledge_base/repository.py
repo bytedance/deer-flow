@@ -33,10 +33,15 @@ class KnowledgeBaseRepository:
         name: str,
         description: str | None = None,
         visibility: str = "private",
+        embedding_model: str | None = None,
     ) -> dict[str, Any]:
         kb_id = uuid4().hex
         collection_name = f"kb_{uuid4().hex}"
         now = datetime.now(UTC)
+        if embedding_model is None:
+            from deerflow.config.rag_config import get_rag_config
+
+            embedding_model = get_rag_config().embedding_model
         row = KnowledgeBaseRow(
             id=kb_id,
             tenant_id=tenant_id,
@@ -45,6 +50,8 @@ class KnowledgeBaseRepository:
             description=description,
             visibility=visibility,
             collection_name=collection_name,
+            embedding_model=embedding_model,
+            embedding_dim=0,
             created_at=now,
             updated_at=now,
         )
@@ -53,6 +60,35 @@ class KnowledgeBaseRepository:
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
+
+    async def update_embedding_binding(
+        self,
+        kb_id: str,
+        *,
+        embedding_model: str | None = None,
+        embedding_dim: int | None = None,
+    ) -> bool:
+        """Lazy-backfill the KB's embedding binding after the first index job
+        has confirmed the model + dimension. Existing non-zero bindings are
+        not overwritten silently — callers asserting a mismatch must raise
+        before calling this.
+        """
+        updates: dict[str, Any] = {"updated_at": datetime.now(UTC)}
+        if embedding_model is not None:
+            updates["embedding_model"] = embedding_model
+        if embedding_dim is not None:
+            updates["embedding_dim"] = embedding_dim
+        if len(updates) == 1:
+            return False
+        async with self._sf() as session:
+            stmt = (
+                update(KnowledgeBaseRow)
+                .where(KnowledgeBaseRow.id == kb_id)
+                .values(**updates)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount > 0
 
     async def get(
         self,
@@ -176,6 +212,39 @@ class KnowledgeBaseRepository:
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             return self._row_to_dict(row) if row else None
+
+    async def list_all_active_internal(self) -> list[dict[str, Any]]:
+        """List every active KB across all tenants — for startup consistency
+        scans. Bypasses visibility filtering, must only be called from
+        process-internal admin paths.
+        """
+        async with self._sf() as session:
+            stmt = (
+                select(KnowledgeBaseRow)
+                .where(
+                    KnowledgeBaseRow.deleted_at.is_(None),
+                    KnowledgeBaseRow.status == "active",
+                )
+            )
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def set_vector_metric_stale(
+        self, kb_id: str, *, stale: bool
+    ) -> bool:
+        """Mark a KB's underlying vector collection as stale (or fresh)."""
+        async with self._sf() as session:
+            stmt = (
+                update(KnowledgeBaseRow)
+                .where(KnowledgeBaseRow.id == kb_id)
+                .values(
+                    vector_metric_stale=stale,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount > 0
 
     def _build_access_conditions(self, *, tenant_id: str, user_id: str):
         """Build OR conditions for three-level visibility access control."""
